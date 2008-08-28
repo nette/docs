@@ -1,0 +1,115 @@
+Ajax & snippety
+***************
+
+AJAXový požadavek lze detekovat metodou třídy (resp. služby) zapouzdřující HTTP požadavek: `Environment::getHttpRequest()->isAjax()` (detekuje podle HTTP hlavičky `X-Requested-With`). Uvnitř presenteru je k dispozici "zkratka" v podobě metody `$presenter->isAjax()`.
+
+AJAXový požadavek se nijak neliší od klasického požadavku - je zavolán presenter s určitým view a parametry. Je také věcí presenteru, jak bude na něj reagovat: může použít vlastní rutinu, která vrátí nějaký fragment HTML kódu (HTML snippet), XML dokument, JSON objekt nebo kód v JavaScriptu. K tomu lze využít i předpřipravený objekt šablony - například tak, že při detekci AJAXu zvolí speciální šablonu:
+
+/--php
+	public function handleClick($param)
+	{
+		if ($this->isAjax()) {
+			$this->template->setFile('...ajax.phtml');
+		}
+		...
+	}
+\--
+
+Nicméně daleko silnější nástroj představuje vestavěná podpora AJAXu. Díky ní lze udělat z obyčejné aplikace AJAXovou prakticky několika řádky kódu.
+
+Myšlenka vychází z toho, že při prvotním (tedy neAJAXovém) požadavku se přenese celá stránka a poté se při každém již AJAXovém subrequestu (= požadavku na stejný presenter a view) přenášet pouze kód změněných částí. K tomu slouží dva mechanismy: invalidace a renderování snippetů.
+
+Invalidace
+----------
+
+Každý objekt třídy Control (což je i samotný Presenter) si umí zapamatovat, jestli při subrequestu došlo ke změnám, které si vyžadují jej překreslit. K tomu slouží triptych metod `invalidateControl()`, `validateControl()` a  `isControlInvalid()`. Příklad:
+
+/--php
+	public function handleLogin($user)
+	{
+		// po přihlášení uživatele se musí objekt překreslit
+		$this->invalidateControl();
+		...
+	}
+\--
+
+Nette však nabízí ještě jemnější rozlišení, než na úrovni komponent. Uvedené metody mohou totiž jako parametr nabývat název tzv. "snippetu", nebo-li ústřižku. Lze tedy invalidovat/validovat na úrovni těchto snippetů (každý objekt může mít libovolné množství snippetů). Pokud se invaliduje celá komponenta, tak je i každý snippet považován za invalidní. Komponenta je invalidní i tehdy, pokud je invalidní některá její subkomponenta.
+
+/--php
+echo $this->isControlInvalid(); // -> FALSE
+
+$this->invalidateControl('header'); // invaliduje snippet 'header'
+echo $this->isControlInvalid('header'); // -> TRUE
+echo $this->isControlInvalid('footer'); // -> FALSE
+echo $this->isControlInvalid(); // -> TRUE, alespoň jeden snippet je invalid
+
+$this->invalidateControl(); // invaliduje celou komponentu, každý snippet
+echo $this->isControlInvalid('footer'); // -> TRUE
+\--
+
+Komponenta, která přijímá signál, je automaticky označena za invalidní.
+
+Díky invalidaci snippetů přesně víme, které části kterých prvků bude potřeba překreslit.
+
+
+Renderování snippetů
+----------
+
+Nette je založeno na myšlence **logických**, nikoliv **grafických prvků**, tj. objekt třídy Control nepředstavuje pravoúhlou oblast ve stránce, ale logickou komponentu, která se může renderovat i do více podob (např. DataGrid může mít jednu metodu pro vykreslení mřížky a druhou pro vykreslení "stránkovadla" apod). Každý prvek může být navíc na stránce vykreslen vícekrát, nebo podmíněně, nebo  pokaždé s jinou šablonou atd.
+
+Není tedy možné jednoduše zavolat metodu `render` na každém invalidním objektu, vlastně ani žádný interface metodu `render` nedefinuje. K vykreslování je nutné přistupovat tak, jako když se kreslí celá stránka. (Přesněji řečeno, je možné jít touto cestou a vykreslit pouze invalidní snippety invalidních objektů, ale vaše aplikace musí být k tomu účelu vhodně navržena, kdežto vestavěná podpora AJAXu musí fungovat obecně).
+
+Vykreslování stránky probíhá velmi podobně, jako u neAJAXového požadavku,  načtou se tytéž šablony atd. Klíčovým úkolem však je vypustit ty části, které se na výstup vůbec dostat nemají, a ty, které se vykreslit mají, přidružit s identifikátorem a poslat klientovi ve formátu, kterému bude obslužný JavaScript rozumět.
+
+V dřívější experimentální implementaci se k vynechání validních částí používal [output buffering | http://php.net/manual/en/book.outcontrol.php], což znamenalo, že stránka se vykreslila celá a nepotřebné části se zahodily. Tento způsob je nyní nahrazen mnohem efektivnějším bratříčkem. Validní části se uzavřou do velké podmínky `if`, takže PHP procesor je kompletně přeskočí. Pro server to představuje značnou úlevu, pro programátora nutnost respektovat určité zásady.
+
+(Poznámka: i když následující ukázky mohou vypadat komplikovaně, nakonec nabídnu mnohem jednodušší alternativu)
+
+Jestli je aktuální vykreslování ve fázi "zahazovat" nebo "kreslit" prozradí  statická metoda `Control::isOutputAllowed()`. Tedy například šablona layoutu by měla být celá obalená podmínkou:
+
+/--php
+<?php if ($control->isOutputAllowed()) { ?>
+<html>
+   ...
+</html>
+<?php } ?>
+\--
+
+Pokud se uvnitř šablony nachází control nebo snippet, musíme tuto podmínku ukončit a obalit snippet novou podmíkou zjišťující, zda se má překreslit. Místo volání `$control->isControlInvalid()` však použijeme párové metody `$control->beginSnippet()` a `$control->endSnippet()` - ty totiž navíc zajistí, že se vykreslený snippet vystřihne a předá AJAXovému ovladači. Také jej obalí pomocnou značkou `<div>` (lze použít i jinou značku).
+
+/--php
+<?php if ($control->isOutputAllowed()) { ?>
+<html>
+  <body>
+  ...
+  <?php } ?><?php if ($control->beginSnippet('header'): ?>
+  <h1>Hello .... </h1>
+  <?php $control->endSnippet(); endif; if ($this->isOutputAllowed()) { ?>
+
+  </body>
+</html>
+<?php } ?>
+\--
+
+Jak vidíte, tento způsob je poměrně dost ukecaný. Naštěstí existují filtry šablon a ty dokáží situaci značně zjednodušit. `TemplateFilter::curlyBrackets` jednak automaticky obalí celou šablonu podmínkou `if ($this->isOutputAllowed())`, především však disponuje značkami pro vyznačení snippetů. Předchozí ukázku lze zapsat takto:
+
+/--code html
+<html>
+  <body>
+  ...
+  {snippet header}
+  <h1>Hello .... </h1>
+  {/snippet}
+
+  </body>
+</html>
+\--
+
+A to už je jiné kafé, není-liž pravda? :-)
+
+Komunikace s prohlížečem
+--------------------
+
+Jednotlivé snippets společně s dalšími (i uživatelskými daty) se předají AJAXovému ovladači, který je dostupný přes `$presenter->ajaxDriver`. Pokud vám vestavěny driver nevyhovuje, můžete použít svůj (pohledem do [zdrojového kódu | http://code.google.com/p/nette/source/browse/trunk/Nette/Application/AjaxDriver.php] zjistíte, že jde o velmi jednoduchou třídu). Výchozí driver předává data ve formátu JSON, předělat jej na XML je celkem triviální. (poznámka: v dřívější implementaci se posílaly rovnou příkazy JavaScriptu).
+
+Jak to celé funguje pohromadě demostruje [příklad Fifteen | http://nette.org/examples/fifteen], jehož kód najdete v distribuci.

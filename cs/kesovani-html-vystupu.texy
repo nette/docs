@@ -1,0 +1,71 @@
+Kešování html výstupu
+*********************
+
+Aneb jak ušetřit trafic serveru, uživatelům a snížit vytížení serveru.
+
+Cache na straně klienta
+-----------------------
+
+Nejprve si nastudujte výborný [Kešovací návod pro autory webu a webmastery | http://www.jakpsatweb.cz/clanky/caching-tutorial-czech-translation.html].
+
+Jak vidíte, kešování na straně klienta je závislé především na HTTP hlavičkách `Cache-Control`, `Expires`, `Last-Modified` a `ETag`. Nette má zabudovanou podporu pro tyto hlavičky. Stačí zavolat metodu `$presenter->lastModified($modified, [$etag, [, $expire]])`, kde `$modified` nese čas poslední změny stránky (jako UNIX timestamp) a `$etag` libovolný validační řetězec. Metoda jednak nastaví hlavičky `Last-Modified` nebo `ETag`, ale především zkontroluje, zda se klient neptá hlavičkou `If-Modified-Since`, jestli se stránka od určitého času nezměnila, nebo nekontroluje hlavičkou `If-None-Match` hodnotu validačního identifikátoru. Pokud se nezměnila, je presenter ukončen metodou `terminate()`. Ušetří se čas generování stránky a přenesený objem dat na straně serveru i klienta.
+
+Volitelný třetí parametr `$expire` nastaví HTTP hlavičky Cache-Control a Expires (hodnotou `expire` je buď UNIX timestamp, nebo počet sekund od "včil", nebo FALSE, což znamená: nekešuj!).
+
+Metoda lastModified pracuje jen na produkčním serveru, tedy když `Environment::isLive() vrátí FALSE`. To lze ovlivnit přes `Environment::setMode('live', TRUE)`.
+
+
+Cache na straně serveru
+-----------------------
+
+Na straně serveru máme daleko víc možností, co a jak kešovat. Můžeme kešovat  výstup jednotlivých komponent, dílčí procesy, nebo celé HTML stránky. Jako doporučenou literaturu bych uvedl zdejší návod na [Nette\Caching].
+
+Jak kešovat třeba HTML výstup z celého presenteru? Přepíšeme si například metodu `startup()` presenteru, aby zjistila, jestli stránka už není v cache a pokud ne, zapne output buffering:
+
+/--php
+	private $cacheKey;
+
+	/**
+	 * @return void
+	 */
+	protected function startup()
+	{
+		// vytvoříme cache ve jmenném prostoru 'application/output'
+		// (jméno prostoru je libovolný řetezec)
+		$cache = Environment::getCache('application/output');
+
+		// klíčem bude třeba jméno presenteru a view + obsah parametru id
+		$key = $this->getName() . ':' . $this->getView() . '#' . $this->params['id'];
+		// ověření, zda je položka v keši
+		if (isset($cache[$key])) {
+			echo $cache[$key]; // vypsat a finíto
+			$this->terminate();
+		} else {
+			ob_start();
+			$this->cacheKey = $key;
+		}
+	}
+
+
+
+	/**
+	 * @return void
+	 */
+	protected function shutdown()
+	{
+		if ($this->cacheKey) {
+			$content = ob_get_flush();
+			if ($content) {
+				// byl vůbec nějaký výstup? To je nutné zkontrolovat, co když byl
+				// presenter ukončen třeba metodou lastModified()
+				$cache = Environment::getCache('application/output');
+				$cache->save($this->cacheKey, $content, array(
+					'expire' => 300, // 300 s = 5 minut
+				));
+			}
+		}
+	}
+\--
+
+
+Při ukládání do keše metodou save() můžeme nastavit další parametry, viz zmíněný návod [Nette\Caching]. Šikovné jsou zejména tagy. Například stránky blogu můžeme do cache uložit s dlouhou (cca nekonečnou) expirací a otagovat je tagem např. 'item/123', kde 123 je ID článku. Když pak někdo napíše na blog komentář, nebo když uživatel zedituje článek, tak se invaliduje příslušný tag 'item/xyz' a stránka se smaže s cache.

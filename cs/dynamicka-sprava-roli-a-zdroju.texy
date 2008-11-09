@@ -1,0 +1,97 @@
+Dynamická správa rolí a zdrojů
+******************************
+
+[* http://romansklenar.cz/files/dynamic_acl.png >] *** *Ukázková struktura databáze pro <br /> dynamickou správu rolí a zdrojů* .<>
+
+V praxi u složitějších aplikací (v aplikacích kde chceme umožňovat právě dynamickou úpravu rolí, zdrojů) si nejspíše nevystačíme se základním objektem [Nette\Security\Permission]. V malých aplikacích můžeme bez problémů "natvrdo" nadefinovat seznam rolí, zdrojů a pravidel někde v aplikaci, ale dojde-li na nějaké úpravy nebo rozšíření rolí, budeme muset ručně do aplikace zasahovat.
+
+Nyní si ukážeme implementaci dynamické správy rolí.
+
+U jednoduchých případů lze zaregistrovat jako autorizační handler přímo třídu [Nette\Security\Permission]. Pro naši potřebu si ale vytvoříme jejího potomka, třídu *Acl*, kterou obohatíme o konstruktor, který sestaví všechna pravidla, zdroje a role.
+
+U příkladu budeme používat databázový layer [dibi | http://dibiphp.com/].
+
+
+Uvažujeme se strukturou databáze stejnou jako na obrázku. Poté by metoda pro sestavení vypadala nějak takto:
+;
+class Acl extends Permission
+{
+    /**
+     * Acces Controll List constructor
+     */
+    public function __construct()
+    {
+        $this->setup();
+    }
+
+
+    /**
+     * Builds ACL rules list from database
+     */
+    private function setup()
+    {
+        $roles = dibi::query("
+            SELECT r.name AS role_name, rp.name AS parent_role
+            FROM roles AS r LEFT JOIN roles AS rp ON r.parent_id = rp.id
+            ORDER BY r.parent_id ASC;");
+        $roles = $roles->fetchAll();
+
+        foreach ($roles as $r) {
+            if ($r['parent_role'] !== NULL) {
+                $parents = $this->getRoleParents($r['parent_role']);
+                $parents[] = $r['parent_role'];
+            } else {
+                $parents = $r['parent_role']; // or $parents = NULL
+            }
+
+            $this->addRole($r['role_name'], $parents);
+        }
+
+        $resources = dibi::query("SELECT name AS resource FROM resources ORDER BY id ASC;");
+        $resources = $resources->fetchAll();
+
+        foreach ($resources as $r) {
+            $this->addResource($r['resource']);
+        }
+
+        $rules = dibi::query("
+            SELECT  ro.name AS role,
+                    pr.name AS privilege,
+                    re.name AS resource,
+                    a.allowed AS allowed
+            FROM acl AS a
+                JOIN roles AS ro ON a.role_id = ro.id
+                JOIN privileges AS pr ON a.privilege_id = pr.id
+                JOIN resources AS re ON a.resource_id = re.id
+            ORDER BY ro.id ASC;"
+        );
+        $rules = $rules->fetchAll();
+
+        foreach ($rules as $r) {
+            // NOTE: allowed column can be nullable, because NULL means 'all'
+            if ($r['allowed'] == 'Y') { $this->allow($r['role'], $r['resource'], $r['privilege']); }
+            elseif ($r['allowed'] == 'N') { $this->deny($r['role'], $r['resource'], $r['privilege']); }
+            // administrator has allowed all privileges to all resources
+            elseif ($r['privilege'] === NULL && $r['resource'] === NULL) { $this->allow($r['role']); }
+        }
+    }
+\--
+
+
+Nakonec nesmíme zapomenout zaregistrovat autorizační handler:
+/--php
+Environment::getServiceLocator()->addService(new Acl, 'Nette\Security\IAuthorizator');
+\--
+
+nebo v config.ini
+/--code
+service.Nette-Security-IAuthorizator  = Acl
+\--
+
+
+Tím jsme si z tabulky vygenerovali objekt, který je potomkem `Nette\Security\Permission` a umožňuje nám v aplikaci používat dynamickou správu rolí, a zaregistrovali potřebnou službu. Poslední věc, která nám chybí i ideálnosti je tento objekt kešovat pomocí [Nette\Caching | http://nette.org/cs/nette-caching]
+
+.[see]
+Viz také:
+- [Nette\Security\Permission]
+- [Nette\Security\Permission API reference | api:Nette\Security\Permission]

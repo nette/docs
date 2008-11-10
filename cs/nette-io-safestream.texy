@@ -1,0 +1,88 @@
+Nette\IO\SafeStream
+*********************
+
+Co se vlastně myslí pod atomickými operacemi nebo rozumí pod pojmem "thread-safe"? Začněme jednoduchým příkladem:
+
+/--php
+$original = str_repeat('LaTrine', 10000);
+$counter = 1000;
+
+while ($counter--) {
+  // write
+  file_put_contents('soubor', $original);
+
+  // read
+  $content = file_get_contents('soubor');
+
+  // compare
+  if ($original !== $content)
+    die('ERROR');
+}
+\--
+
+Dokola zapisujeme a následně čteme stále tentýž řetězec. Může se zdát, že volání `die('ERROR')` nemůže nikdy nastat. Opak je pravdou. Schválně si zkuste tento skript spustit ve dvou oknech zároveň. **Error se dostaví prakticky okamžitě.**
+
+Proč tomu tak je, nedávno [vysvětloval | http://php.vrana.cz/atomicita-operaci.php] Jakub Vrána. Uvedený kód není bezpečný (safe), pokud se v jednu chvíli provádí vícekrát (tedy ve více vláknech = threads). Což na internetu není nic neobvyklého, často se v tentýž okamžik pokusí více lidí připojit k jednomu webu. Takže psaní **thread-safe** aplikací je velmi důležité. Obecně totiž platí, že pokud váš PHP skript vytváří nebo píše do souborů, je **nutné toto řešit!** Už pouhý jeden zápis je kritický! V opačném případě musíte počítat se ztrátou dat a vznikem těžko odhalitelných chyb.
+
+
+Je třeba zajistit, aby se funkce `file_get_contents` & spol. vykonávaly atomicky. Pro Nette jsem napsal třídu Nette\IO\SafeStream, která právě toto zajistí.
+
+Nette\IO\SafeStream registruje "bezpečný stream", pomocí něhož můžeme atomicky manipulovat se soubory **prostřednictvím standardních funkcí**. Stačí jen uvést protokol *"safe://"*. Příklad:
+
+/--php
+// před jméno souboru přidáme safe://
+$handle = fopen('safe://test.txt', 'x');
+// ve skutečnosti se vytvořil dočasný soubor
+
+fwrite($handle, 'La Trine');
+
+fclose($handle);
+// a teprve teď se přejmenoval na test.txt
+
+// můžeme soubor smazat
+unlink('safe://test.txt');
+
+// a vůbec používat všechny známé funkce
+file_put_contents('safe://test.txt', $content);
+
+$ini = parse_ini_file('safe://autoload.ini');
+\--
+
+
+Jak to funguje?
+==========
+
+Čtení
+-----
+
+Otevřu soubor v módu `r` a pokusím se získat zámek pro čtení (neboli shared lock, `LOCK_SH`). Poté je možné soubor volně číst. Zámek se uvolní automaticky s uzavřením souboru - `fclose()` nebo při ukončení skriptu.
+
+Zápis
+-----
+
+Otevřu soubor v módu `r+`. Tím zjistím, zda existuje (budeme přepisovat) nebo je ho třeba vytvořit.
+
+Zápis do existujícího souboru
+-----
+
+Soubor je tedy otevřen v módu `r+`. Získáme zámek pro zápis (neboli exclusive lock, `LOCK_EX`). Obsah vymažeme funkcí `ftruncate()` a pak můžeme do souboru volně psát, až do uzavření a uvolnění zámku.
+
+Zápis do neexistujícího souboru
+-----
+
+Není možné vytvořit nový soubor, protože než bych získal zámek, mohl by s ním pracovat jiný thread. Proto vytvoříme dočasný (temporary) soubor v módu `x` a získáme exkluzivní zámek. Poté do něj volně zapisujeme. V okamžiku uzavření souboru jej zkusíme přejmenovat na požadovaný název. Pokud se přejmenování nezdaří (jiný thread mezitím tento soubor vytvořil), dočasný soubor smažeme.
+
+Zápis v módu append
+-----
+
+Protože není možné soubory otevírat v režimech `a` nebo `w`, neboť vytvoření nového souboru je nežádoucí akce, otevřeme jej v módu `r+` a posuneme ukazatel na konec via `fseek()`.
+
+Mazání souboru
+-----
+
+Soubor prostě smažeme funkcí `unlink()`. Že má soubor otevřený jiný thread, ať už pro čtení nebo zápis, nám nemusí vadit. Ve Windows totiž otevřený soubor vůbec smazat nelze a `unlink` selže. Naopak v Unixu se smaže, jakožto položka adresáře, ale s jeho obsahem je možné nadále bezpečně pracovat.
+
+
+.[see]
+Viz také:
+- [Nette\IO\SafeStream API reference | api:Nette\IO\SafeStream]

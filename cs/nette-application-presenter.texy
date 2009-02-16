@@ -225,13 +225,80 @@ V query-stringu funguje i přetypování `bool` a `float` hodnot na `int`:
 
 Presenter a komponenty
 =========
-Co jsou to komponenty je popsáno [jinde | Nette\Component]. Zde se zaměříme na výhody a úskalí používání komponent pod hlavičkou presenteru. První z takovýchto výhod je propojení komponenty s presenterem, který ji vytvořil.
+Jelikož je třída Presenter potomkem [ComponentContainer | Nette\Application\Presenter], může manipulovat s komponentama a uchovávat je. K tomu slouží metody `getComponent()`, která vrátí požadovanou komponentu podle názvu nebo cesty, a `createComponent()`, což je továrnička na komponenty. Výhoda továrničky je v tom, že `signal handler` může komponentu (nebo subkomponentu) od presenteru získat, aniž by se musela dopředu inicializovat v metodách `action` nebo `prepare`. Odpadá tak potřeba komponenty ukládat do proměnných objektů.
+
+Ukládání vnitřních stavů komponenty má na staroti předek presenteru [PresenterComponent | Nette\Application\PresenterComponent]. Díky tomu i jednotlivé komponenty (např. `PresenterComponent`) mohou používat továrničky. Vnitřní stavy komponent se ukládají po vykreslovací fázi.
+
+Také komponenty mohou být persistentní. Persistentní komponenty musí být správně [anotované | Nette\Annotations] (subkomponenty uvnitř komponent není třeba nijak značit, jsou persistentní samy o sobě):
+
+
+/--code php
+/**
+ * @persistent(game, abc, xyz)
+ */
+class DefaultPresenter extends Presenter
+{
+    public function prepareDefault()
+    {
+        $fifteen = new FifteenControl($this, 'game');
+        $fifteen->onGameOver[] = array($this, 'GameOver');
+
+        $this->template->fifteen = $fifteen;
+    }
+
+    ...
+}
+\--
+
+
+Stav persistentních komponent se přenáší při přechodu na jiný [Presenter | Nette\Applica­tion\Presenter] podobně, jako v případě [persistentních parametrů | Nette\Applica­tion\Presenter#toc-obycejne-a-persistentni-parametry].
+
+Proč je to nutné? V podstatě z technického důvodu. Mezi presentery se předávají jen data, která jsou jim společná, tedy která jsou deklarována na úrovni společných předků. Ale jak zjistit, že komponentu `game` deklarovala právě metoda třídy `DefaultPresenter` a ne nějaký její předek nebo potomek? To zjistit nelze. Lze ale zjistit, která třída deklarovala proměnnou `fifteen` a toho se právě využívá.
+
+Tedy při subrequestu, při zavolání signálu jsou komponenty persistentní samy o sobě. Je ale nutné, aby na vstupním a cílovém presenteru byla tatáž komponenta zařazená ve stromu pod stejným jménem. Tudíž nemá smysl, aby to fungovalo pro předem neznámé komponenty, ale jen pro komponenty s presenterem nějak pevně svázané.
+
+.[note]
+Subrequest přenáší všechny komponenty, request přenáší označené komponenty.
+
+Metody `prepare` vznikly čistě kvůli přípravě objektů na signál. V případě, že aktuální pohled presenteru (view) zpracovává signály, kód v `prepare` se vykoná před jejich zpracováním, kdežto kód v `render` se pak vykoná po jejich zpracování.
+
+Situace se komplikuje v případě, že jsou ve hře komponenty, které mají zpracovat signály. Příkladem této komponenty může být třída [AppForm|Nette\Application\AppForm]. Je totiž nutné zajistit, aby komponeta přijímající signál existovala předtím, než se zpracovávají signály komponent, což znamená nejpozději v metodách `prepare`. V případě že příjemce signálu v tomto místě neexistuje, skončí aplikace výjimkou o neexistujícím příjemci signálu. Příkladem této chyby je vytvoření komponenty až metodách `render` jiným způsobem než továrničkou.
+
+**Příklad správné registrace komponenty v metodách `prepare`:**
+/--code php
+class DefaultPresenter extends Nette\Application\Presenter
+{
+    public function prepareDefault()
+    {
+        $fifteen = new FifteenControl;
+        $fifteen->onGameOver[] = array($this, 'GameOver');
+        $fifteen->useAjax = TRUE;
+
+        $this->addComponent($fifteen, 'game'); // zaregistrování komponenty
+        // nyní je komponenta schopna správně přijímat signály
+
+        $this->template->registerFilter('Nette\Templates\CurlyBracketsFilter::invoke');
+        $this->template->fifteen = $fifteen;
+
+        $this->invalidateControl('round');
+    }
+
+    ...
+}
+\--
+
+.[note]
+Osud metod `prepare` je nejistý a mohou být pro svou nejasnost a častou chybovost začínajících programátoru zrušeny. Pro vytváření komponent se již teď doporučuje jiný a podstatně elegantnější, níže popsaný způsob - továrnička na komponenty.
+
+
 
 Svázání komponenty s presenterem
 ---------------
 /--comment
 http://forum.nette.org/cs/viewtopic.php?pid=3418#p3418
 \--
+
+Zde se zaměříme na výhody a úskalí používání komponent pod hlavičkou presenteru. První z takovýchto výhod je propojení komponenty s presenterem, který ji vytvořil.
 
 Svázání komponenty s presenterem umožňuje:
 - používat v komponentě persistentní parametry
@@ -259,35 +326,49 @@ public function renderSomeview($someParametr)
 	$this->template->someControl = $this->someControl;
 	// ... nejaky kod metody
 }
-\---
+\--
 
 
-Persistentní komponenty
------------------------
-Stav komponent se přenáší při přechodu na jiný [Presenter | Nette\Applica­tion\Presenter] podobně, jako v případě [persistentních parametrů | Nette\Applica­tion\Presenter#toc-obycejne-a-persistentni-parametry].
+Továrničky na komponenty
+---------------------
+Továrna na komponenty je elegantní způsob jak komponenty vytvářet způsobem, až je jich doopravdy potřeba. Celé kouzlo spočívá v implementaci metody [createComponent() | api:Nette\ComponentContainer#methodcreateComponent], která umožňujě vytvoření komponenty právě lazy loading / on-demand způsobem.
 
-Komponenty je nutné označit jako persistentní jen uvnitř presenteru (subkomponenty uvnitř komponent není třeba nijak značit).
+**Registrace komponenty továrničkou:**
 
 /--code php
-class DefaultPresenter extends /*Nette\Application\*/Presenter
+class DefaultPresenter extends Nette\Application\Presenter
 {
-        /** @persistent */
-        public $fifteen; // musí být public
+    public function renderDefault()
+    {
+        $this->template->registerFilter('Nette\Templates\CurlyBracketsFilter::invoke');
+        $this->template->fifteen = $this->getComponent('game');
 
-        public function prepareDefault()
-        {
-                $this->fifteen = new FifteenControl($this, 'game');
-                ...
+        $this->invalidateControl('round');
+    }
+
+   ...
+
+
+    protected function createComponent($name)
+    {
+        switch ($name) {
+        case 'game':
+            $fifteen = new FifteenControl;
+            $fifteen->onGameOver[] = array($this, 'GameOver');
+            $fifteen->useAjax = TRUE;
+            $this->addComponent($fifteen, $name);
+            return;
+
+        default:
+            parent::createComponent($name);
+            return;
         }
+    }
 }
 \--
 
-Proč je to nutné? V podstatě z technického důvodu. Mezi presentery se předávají jen data, která jsou jim společná, tedy která jsou deklarována na úrovni společných předků. Ale jak zjistit, že komponentu `game` deklarovala právě metoda třídy `DefaultPresenter` a ne nějaký její předek nebo potomek? To zjistit nelze. Lze ale zjistit, která třída deklarovala proměnnou `fifteen` a toho se právě využívá.
+Výhody použití továrničky nemusí být na první pohled patrné, projeví se hlavně při použití více komponent. Díky tomu, že jsou všechny komponenty definovány na jednom místě dochází k lepší přehlednosti. Komponenty z továrničky se také stávají lépe znovupoužitelnými, stačí si je jen kdekoliv přičarovat metodou [getComponent | api:Nette\ComponentContainer#methodgetComponents] a případné jemnější nastavení komponenty je pak možno udělat až při jejím předání šabloně. Nic také nebrání použít jednu komponentu na stránce vícekrát, rozliší se názvem, který také pomáhá určovat správnou komponentu jako příjemce signálu.
 
-.[note]
-Subrequest přenáší všechny komponenty, request přenáší označené komponenty.
-
-Tedy při subrequestu, při zavolání signálu jsou komponenty persistentní samy o sobě. Je ale nutné, aby na vstupním a cílovém presenteru byla tatáž komponenta zařazená ve stromu pod stejným jménem. Tudíž nemá smysl, aby to fungovalo pro předem neznámé komponenty, ale jen pro komponenty s presenterem nějak pevně svázané.
 
 
 .[see]
@@ -305,20 +386,9 @@ Viz také:
 
 
 /--comment
-
-Scéna (Scene)
---------------
-- http://forum.nette.org/cs/viewtopic.php?pid=3828#p3828
-
-
-Routování
----------
-- http://forum.nette.org/cs/viewtopic.php?pid=3782#p3782
-- http://forum.nette.org/cs/viewtopic.php?pid=3857#p3857  - viz inkludování rout dole
-
-
 Subrequest vs. request
 ----------------------
 Rozdíly mezi signálem a požadavkem:
 - subrequest přenáší všechny komponenty
 - request přenáší označené (persistentní) komponenty
+\--

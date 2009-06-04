@@ -1,0 +1,137 @@
+Autentizace - Přihlašování uživatelů
+***********************
+
+*Autentizací se rozumí přihlašování uživatelů, tedy proces, při kterém se ověřuje, zda je uživatel opravdu tím, za koho se vydává. V drtivé většině aplikací se ověřuje uživatelské jméno a heslo. Naopak při [autorizaci|autorizace] se zjišťuje, zda má již autentizovaný uživatel dostatečná oprávnění pro přístup k určitému souboru či pro provedené nějaké akce. Autorizaci si necháme do příštího pokračování. *
+
+
+Přihlašování uživatelů je oblast velmi úzce související s ochranou osobních údajů a zabezpečením aplikace. Jelikož PHP nenabízí žádnou standardní implementatici, jde také bohužel o oblast bezbřehé programátorské "kreativity". Lze se setkat s odstrašujícími případy, kdy programátoři například ukládají hesla do cookies a nebo vytvářejí jiné sofistikované bezpečnostní díry.
+
+
+Nette Framework se snaží tuto díru zacelit. A zároveň přihašování zjednodušit až na naprosté minimum. Tím jsou dvě metody `authenticate()` (přihlásit) a `signOut()` (odhlásit), plus dotazovací metoda `isAuthenticated()` sdělující, zda je uživatel nyní přihlášen.
+
+
+O realizační stránku se stará třída `Nette\Web\User`. Ta je, stejně jako v případě [Nette\Web\Session], singleton, proto nevytváříme její instanci přímo, ale vrátí ji metoda `Environment::getUser()`. Používá se zhruba tímto způsobem:
+
+
+/--php
+require 'Nette/loader.php';
+
+$user = Environment::getUser();
+
+// přihlášení uživatele
+$username = ...
+$password = ...
+$user->authenticate($username, $password);
+
+// je přihlášen?
+echo $user->isAuthenticated() ? 'ano' : 'ne';
+
+// odhlášení
+$user->signOut();
+\--
+
+
+
+Aby příklad fungoval, je potřeba napsat rutinu, která provede ověření uživatelského jména a hesla. Této rutině se říká **autentizační handler** a jde o objekt implementující rozhraní [Nette\Security\IAuthenticator | api:]. To má jedinou metodu `authenticate()`. Implementace, která ověřuje přihlašovací údaje oproti databázové tabulce, může vypadat třeba takto:
+
+
+/--php
+require 'Nette/loader.php';
+
+// pokud používáte verzi pro PHP 5.3, odkomentujte následující řádek:
+// use Nette\Object, Nette\Security\IAuthenticator, Nette\Security\AuthenticationException, Nette\Security\Identity;
+
+class MyAuthenticator extends Object implements IAuthenticator
+{
+
+	public function authenticate(array $credentials)
+	{
+		$username = $credentials[self::USERNAME];
+		$password = sha1($credentials[self::PASSWORD] . $credentials[self::USERNAME]);
+
+		// přečteme záznam o uživateli z databáze
+		$row = dibi::fetch('SELECT realname, password FROM users WHERE login=%s', $username);
+
+		if (!$row) { // uživatel nenalezen?
+			throw new AuthenticationException("User '$username' not found.", self::IDENTITY_NOT_FOUND);
+		}
+
+		if ($row->password !== $password) { // hesla se neshodují?
+			throw new AuthenticationException("Invalid password.", self::INVALID_CREDENTIAL);
+		}
+
+		return new Identity($row->realname); // vrátíme identitu
+	}
+
+}
+\--
+
+
+Autentizační handler si zaslouží hlubší rozbor. Z pohledu návrhu aplikace podle vzoru MVP jde o součást modelu, přičemž samotnou autentizaci zpravidla iniciuje presenter. Nette Framework vás tak vede k oddělení ověření údajů od prezentační vrstvy.
+
+Úkolem handleru je buď vrátit tzv. identitu v případě úspěchu, nebo vyhodit výjimku. Nette definuje výjimku [Nette\Security\AuthenticationException | api:] a několik chybových kódu, které můžete využít k formálnímu popisu  vzniklé chyby. (Nicméně na to, jakou výjimku vyhodíte, se žádná omezení nekladou, nakonec bude je zachytávat a ošetřovat opět váš kód.)
+
+V případě úspěšné autentizace vrácí handler **identitu,** což je objekt implementující rozhraní [Nette\Security\IIdentity | api:] a popisující aktuálního uživatele. Popis může obsahovat libovolné údaje, povinné je uživatelské jméno (což nemusí být nutně totéž, jako přihlašovací jméno) a role (o těch si povíme více v příštím dílu). K identitě se dostaneme přes getter `getIdentity()`:
+
+/--php
+$user = Environment::getUser();
+if ($user->isAuthenticated()) {
+	echo 'Prihlášen uživatel: ', $user->getIdentity()->getName();
+} else {
+	echo 'Uživatel není přihlášen';
+}
+\--
+
+
+Odhlášení
+-----------
+
+Jak už jsem zmínil, uživatele odhlásí metoda `signOut()`. Při odhlášení se však nesmaže uživatelská identita, kterou máme i nadále k dispozici. Pokud bychom chtěli identitu explicitně smazat, odhlásíme uživatele voláním `signOut(TRUE)`.
+
+Kromě manuálního odhlášení nabízí Nette Framework i automatické odhlášení po uplynutí časového intervalu nebo zavření okna prohlížeče. K tomu slouží metoda `setExpiration()`, kterou volejte vždy před samotnou autentizací. Metoda `setExpiration()` jako parametr akceptuje relativní čas v sekundách nebo UNIX timestamp, v aktuální verzi frameworku je možné použít i velmi srozumitelný textový zápis. Druhý parametr stanoví, zda se má uživatel odhlásit při zavření okna prohlížeče:
+
+/--php
+// přihlášení vyprší po 30 minutách neaktivity nebo zavření okna prohlížeče
+$user->setExpiration('+ 30 minutes');
+
+// přihlášení vyprší po 2 dnech
+$user->setExpiration('+ 2 days', FALSE);
+\--
+
+Dokonce je možné zjistit, z jakého důvodu k poslednímu odhlášení došlo (viz. metoda `getSignOutReason`).
+
+Shrnutí
+---------------
+
+Kompletní postup přihlašování uživatele pak vypadá asi takto:
+
+/--php
+require 'Nette/loader.php';
+
+require 'MyAuthenticator.php';
+
+// pokud používáte verzi pro PHP 5.3, odkomentujte následující řádek:
+// use Nette\Environment, Nette\Security\AuthenticationException;
+
+// přihlašovací údaje
+$username = ...
+$password = ...
+
+$user = Environment::getUser();
+
+// zaregistrujeme autentizační handler
+$user->setAuthenticationHandler(new MyAuthenticator);
+
+// nastavíme expiraci
+$user->setExpiration('+ 30 minutes');
+
+try {
+	// pokusíme se přihlásit uživatele...
+	$user->authenticate($username, $password);
+	// ...a v případě úspěchu presměrujeme na další stránku
+	Environment::getHttpResponse()->redirect('index.php');
+
+} catch (AuthenticationException $e) {
+	echo 'Chyba: ', $e->getMessage();
+}
+\--

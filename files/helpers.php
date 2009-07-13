@@ -1,21 +1,36 @@
-Helper timeAgoInWords
-*********************
+<?php
 
-Převede čas na slovní vyjádření v češtině. .[perex]
+/**
+ * Nette Framework Extras
+ *
+ * This source file is subject to the New BSD License.
+ *
+ * For more information please see http://extras.nettephp.com
+ *
+ * @copyright  Copyright (c) 2008, 2009 David Grudl
+ * @license    New BSD License
+ * @link       http://extras.nettephp.com
+ * @package    Nette Extras
+ * @version    $Id: Helpers.php 2 2009-07-13 20:58:52Z david@grudl.com $
+ */
 
-|Verze | 1
-|Autor | David Grudl
-|Licence | New BSD License
 
-Instalace
----------
 
-Následující třídu si zkopírujte do své aplikace:
-
-/--php
+/**
+ * My helpers collection.
+ *
+ * @author     David Grudl
+ * @copyright  Copyright (c) 2008, 2009 David Grudl
+ * @package    Nette Extras
+ */
 class Helpers
 {
 
+	/**
+	 * Czech helper time ago in words.
+	 * @param  int
+	 * @return string
+	 */
 	public static function timeAgoInWords($time)
 	{
 		if (!$time) {
@@ -74,27 +89,3 @@ class Helpers
 	}
 
 }
-\--
-
-
-Příklad použití
----------------
-
-Funkci zaregistrujete do šablony příkazem:
-
-/--php
-$template->registerHelper('timeAgoInWords', 'Helpers::timeAgoInWords');
-\--
-
-Poté stačí v šabloně použít:
-
-/--code html
-Odesláno {$time|timeAgoInWords}
-\--
-
-
-
-
-{{attachment: helpers.php}}
-
-{{author: David Grudl|2}}

@@ -1,0 +1,192 @@
+#####Webpay
+
+Komponenta pro snadnou platbu kartou přes bránu 3-D Secure (GP webpay). Zapouzdřuje odchozí a příchozí požadavek. Ovládá se pomocí událostí. Snadná napojitelnost na Nette\Forms. .[perex]
+
+|Verze|0.3
+|Download|"WebPay-0.3.zip":http://petrp.cz/WebPay/WebPay-0.3.zip
+|Autor|Petr Procházka (petr@petrp.cz)
+|Licence|"New" BSD License
+|Homepage|http://addons.nette.org/cs/webpay
+
+####Instalace
+Stáhněte si archiv `WebPay.zip` a obsah složky `/Components` vložte do adresáře `%appDir%/Components` ve vašem projektu.
+
+Komponenta byla vyvíjena a testována v `Nette 0.9.3-dev` a `PHP 5.2`, ale není žádný důvod aby nefungovala i ve starších verzích Nette (může se ale změnit použití; např. před verzí 0.9 nebyli super továrničky).
+
+Když nepoužíváte `Nette\RobotLoader` musíte komponentu načíst.
+/-- php
+require_once APP_DIR . '/Components/WebPay/WebPay.php';
+\--
+
+Knihovna vyžaduje dostupné rozšíření `OpenSSL`.
+/--
+;; php.ini
+extension=php_openssl.dll
+\--
+
+####Co je potřeba
+Nejprve musíte uzavřít smlouvu z bankou, která vám dodá následující údaje.
+
+- Vaše **číslo obchodníka**, které se používá k identifikaci.
+- **Veřejný klíč (certifikát) banky**. Používá se k ověření elektronického podpisu odpovědi od brány. Ve formátu `*.pem`.
+- Mechanizmus na **vygenerování vašeho privátního a veřejného klíče** na podepisování požadavků bance. Veřejný klíč je potřeba do banky zaslat.
+- Url adresu platební brány na kterou se zasílají požadavky.
+
+Banky poskytují testovací prostředí kde je možné si vše zkoušet. .[note]
+
+####Příklad použití
+###Vytvoření komponenty
+
+Vytvoříte si komponentu s název `webPay` a nastavíte požadované hodnoty.
+
+/-- php
+protected function createComponentWebPay()
+{
+    $wp = new WebPay;
+
+    $wp->setRequestUrl('https://3dsecure.exemple.com/order.do'); // Url adresu platební brány.
+
+    $wp->setMerchantNumber(123456); // Přidělené číslo obchodníka.
+
+    $wp->setPublicKey(dirname(__FILE__) . '/signing.pem'); // Veřejný certifikát platební brány pro oveření odpovědi.
+
+    $wp->setPrivateKey(dirname(__FILE__) . '/my.pem', 'heslo'); // Váš privátní klíč na podepisování požadavku.
+
+    $wp->onCreate[] = array($this, 'onCreate');
+
+    $wp->onResponse[] = array($this, 'onResponse');
+
+    return $wp;
+}
+\--
+
+###Události
+
+Celý životní cyklus platby je řízen událostmi ("Nette\Object events":http://wiki.nette.org/cs/nette-object#toc-udalosti) .
+
+##Událost na vytvoření
+
+Během vytváření požadavku na bránu se volá událost `WebPay::$onCreate`, kterou musíte určit při vytváření komponenty (viz výše).
+
+/-- php
+public function onCreate(WebPay $webPay, WebPayRequest $request)
+{
+    $model = new Model; // Tento model je jen příklad.
+
+    $request->setOrderNumber($model->getNextOrderNumber()); // Pořadové číslo objednávky. Je potřeba při každém i nepovedeném požadavku změnit.
+
+    $request->setAmount(100, 'CZK', true); // Znamená: zaplatit 1,- Kč (částka se zapisuje v nejmenších jednotkách dané měny)
+}
+\--
+
+Toto je minimální povinné nastavení (OrderNumber, Amount, Currency, DepositFlag). Další povinné nastavuje WebPay control. Ostatní volitelné nastavení viz `WebPayRequest API`.
+
+Částky zadávejte v nejmenších jednotkách dané měny. .[caution]
+
+##Událost při odpovědi od banky
+
+Událost `WebPay::$onResponse` (kterou je také potřeba určit při vytváření komponenty) se zavolá při kladné odpovědi od banky, tedy když je váš požadavek **zaplacen**.
+
+Implementace záleží jen na vás dle potřeby, zde v příkladu si vše ukládám do modelu:
+
+/-- php
+public function onResponse(WebPay $webPay, WebPayResponse $response)
+{
+    $model = new Model; // Tento model je jen příklad.
+
+    $model->save($response, $webPay->getParam());
+
+    $this->flashMessage('Platba proběhla v pořádku, děkujeme.'); // $this instanceof Presenter
+}
+\--
+
+##Chybová odpověď od banky
+
+Může nastat situace, kdy budete potřebovat reagovat na chybovou zprávu od banky (například špatná autorizace, přečerpané limity karty apod.) K tomu nám slouží události `WebPay::$onError`.
+
+Ve výchozím stavu se chybové zprávy předavají jako flashMessage na presenter. .[caution]
+
+/-- php
+// Během vytváření komponenty si musíte definovat akci pro událost.
+protected function createComponentWebPay()
+{
+    //...
+
+    $wp->onError= array(); // Když nechcete provést výchozí akci (flashMessage na presenter)
+
+    $wp->onError[] = array($this, 'onError');
+
+    //...
+}
+
+public function onError(WebPay $webPay, WebPayException $exception)
+{
+    //...
+}
+\--
+
+###Interakce s uživatelem
+
+Máte vše připravené, teď už jenom musíte návštěvníkovi webu dát možnost kliknout a poslat peníze. WebPay control to umožňuje dvěma způsoby:
+
+##Odkaz
+
+Nejednodušší způsob je vytvoření odkazu, kde po kliknutí dojde k platbě. Použijete ho v případě kdy od uživatele nepotřebujete žádné vstupy.
+
+/-- html
+<a href="{$presenter['webPay']->payLink()"> Podpořte nás </a>
+\--
+
+##Napojení na formulář
+
+Druhý způsob je napojení na formulář ("Nette\Forms":http://wiki.nette.org/cs/nette-forms) a to jako událost na `Form::$onSubmit`:
+
+/-- php
+protected function createComponentForm()
+{
+    $form = new AppForm;
+
+    $form->addText('name', 'Vaše jméno')
+        ->addRule(Form::FILLED, 'Prosím vyplňte vaše jméno.')
+    ;
+
+    $form->addText('mail', 'E-mail')
+        ->addRule(Form::FILLED, 'Prosím vyplňte e-mail.')
+        ->addRule(Form::EMAIL, 'Prosím vyplňte platný e-mail.')
+    ;
+
+    $form->addSubmit('pay', 'zaplatit');
+
+    $form->onSubmit[] = array($this['webPay'], 'pay');
+
+    return $form;
+}
+\--
+
+###Pomocné parametry
+
+Ve všech událostech (`WebPay::$onCreate, WebPay::$onResponse, WebPay::$onError`) jsou k dispozici parametry, které si definujete při vytváření odkazu nebo hodnot formuláře.
+
+##Parametry u linku
+/-- html
+<a href="{$presenter['webPay']->payLink(array('kolik' => '1000'))"> Podpořte nás </a>
+\--
+/-- php
+public function onResponse(WebPay $webPay, WebPayResponse $response)
+{
+    $webPay->getParam('kolik'); // 1000
+    $webPay->getParam(); // array('kolik' => 1000)
+}
+\--
+
+##Parametry z Form
+/-- php
+// $presenter['form'] máme definovaný výše (createComponentForm)
+public function onCreate(WebPay $webPay, WebPayRequest $request)
+{
+    $webPay->getParam('name');
+    $webPay->getParam('mail');
+}
+\--
+
+{{author: PetrP|1726}}

@@ -339,6 +339,182 @@ zistí, či je užívateľ oprávnený zobraziť (vykresliť) aktuálny Presente
 
 Presenter okrem toho ešte obsahuje akciu na odhlásenie užívateľa z admin modulu. Nikdy **nezabudnite všetkým užívateľom, ktorí sa prihlasujú do AdminModule dať oprávnenie na túto akciu**, inak sa nebudú môcť odhlásiť! Naše ACL toto splňuje nakoľko rola *registered* má oprávnenia na všetky *operácie* v *Admin_DefaultPresenter*-i.
 
+Ako ste si mohli všimnúť z popisu a kódu, neprihlásení užívatelia sú presmerovaní na *AuthPresenter:login*, kde sa im zobrazí prihlasovací formulár. Vytvorte nový súbor **app/AdminModule/presenters/AuthPresenter.php** a zapíšte do neho tento kód
+
+/--php
+<?php
+
+final class Admin_AuthPresenter extends Admin_BasePresenter
+{
+
+    /** @persistent */
+    public $backlink = '';
+
+    protected function createComponentLoginForm($name)
+    {
+        $form = new AppForm($this, $name);
+
+        $form->addText('login', 'Email:')
+             ->addRule(Form::EMAIL, 'Prosím zadajte registračný email.');
+
+        $form->addPassword('password', 'Password:')
+             ->addRule(Form::FILLED, 'Prosím zadajte heslo.');
+
+        $form->addProtection('Prosím odošlite prihlasovacie údaje znova (vypršala platnosť tzv. bezpečnostného tokenu).');
+        $form->addSubmit('send', 'Log in!');
+
+        $form->onSubmit[] = array($this, 'loginFormSubmitted');
+    }
+
+    public function loginFormSubmitted($form)
+    {
+        try {
+            $user = Environment::getUser();
+            $user->authenticate($form['login']->value, $form['password']->value);
+            $this->getApplication()->restoreRequest($this->backlink);
+            $this->redirect('Default:default');
+
+        } catch (AuthenticationException $e) {
+            $form->addError($e->getMessage());
+        }
+    }
+
+}
+\--
+
+Presenter obsahuje jednu továrničku na vytvorenie login formulára. Formulár má polia pre email (s patričným validátorom), pre heslo, odosielacie tlačidlo. Okrem toho sme formulár obohatili o ochranu pred CSRF a nakoniec sme pridali *callback* na metódu, ktorá spracuje údaje z formulára.
+
+Aj tá je súčasťou kódu presentera. Dôležité je upozorniť, že tá sa dostane k slovu iba ak je odoslaný formulár valídny (prejde validačnými pravidlami definovanými v továrničke formulára). Úlohou callback funkcie je predať údaje z formulára do nášho *Authenticatora* a jeho metódy *authenticate()* (viď. vyššie). V prípade, že je autentifikácia úspešná, je z Authenticatora získaná *identita* a užívateľ je presmerovaný späť.
+
+Všimnite, si že volanie **Authenticator::authenticate()** je obalené try/catch blokom. Ak teda metóda *authenticate()* vyhodí nejakú výnimku (a že ich vyhadzuje sa presvedčte vyššie v definícii triedy **Proj_Security_Authenticator**), je message výnimky vložená do formulára a ten je nanovo vykreslený užívateľovi (samozrejme užívateľa neprihlásime), kde je o svojej chybe informovaný.
+
+Ostáva doplniť kód šablóny AuthPresentera, kde sa nachádza vykreslenie prihlasovacieho formulára. Vytvorte súbor **app/AdminModule/templates/Auth.login.phtml**
+
+/--
+{assign robots => noindex}
+
+{block #title}Login :: {include #parent}{/block}
+
+{block #content}
+  {widget loginForm}
+{/block}
+\--
+
+Keďže na prihlásenie sa zvyčajne používa iné rozloženie stránky ako v samotnej admin sekcii, budeme pri vykresľovaní *AuthPresenter:login* používať iný layout. Vytvorte súbor **app/AdminModule/templates/Auth.@layout.phtml** a dajte do neho dajte "tento kód":www.srigi.sk/stuff/nette_acl/auth-layout-phtml.phps.
+
+Teraz sa už môžete vyskúšať prihlásiť do admin sekcie
+- zadajte do browsra URL **http://nette-acl/admin**
+- ak sa chcete prihlásiť ako admin zadajte email **admin@example.com** a heslo **admin**.
+
+[* 729fli.png *]:[* f556oo.png *]
+[* 2z86ec3.png *]:[* 2i97bd2.png *]
+
+Aby ste mohli vyskúšať funkciu ACL, je nutné do AdminModule pridať ďalšie dva Presentery. Tie dodatočné dva, ktoré sú definované v ACL. Aby sme ich rovnako ochránili pred neoprávneným prístupom, je treba preťažiť ich metódy *startup()*. Takýto prístup je ale veľmi neefektívny - písať stále sa opakujúci kód do každého Presentera AdminModulu, to si žiada nejaký refactoring.
+
+Prvé čo vás asi napadne je "ochranný" kód z **Admin_DefaultPresenter::startup()** presunúť do **Admin_BasePresenter**. Keď sa však na kód dobre pozriete, zistíte že prvá vec čo vykonáva je, že overí či je užívateľ prihlásený. Ak nie je, bude presmerovaný na **Admin_AuthPresenter::login()**. Lenže aj on dedí od **Admin_BasePresenter**. Po presmerovaní by sa znova overovala "prihlásenosť" a zase by sa presmerovávalo. Aplikácia sa dostane do slučky a zhavaruje. **Admin_AuthPresenter** musíme teda z overovania vylúčiť. Overovací kód je treba umiestniť inam.
+
+Ideálne je vytvoriť nového predka pre všetky Presentery, ktoré budú chránené ACL. Tu vás však upozorníme, že od tohto predka nebude dediť **Admin_DefaultPresenter**. Je to z toho dôvodu, prihlásený užívateľ ktorý sa snaží dostať na Presenter:View na ktorý nemá oprávnenia nesmie byť presmerovaný na **Admin_AuthPresenter::login()** aby sa prihlásil (toto robí kód v **Admin_DefaultPresenter::startup()** viď vyššie) - je predsa prihlásený, ale presmerujeme ho späť na úvodnú stránku admin sekcie - **Admin_DefaultPresenter::default()**.
+
+Tento rozbor nás dovedie k nasledujúcemu stromu presenterov:
+
+[* kalnqv.png *]:[* 6eonjp.png *]
+
+Všetky chránené Presentery s výnimkou **Admin_DefaultPresenter** budú teda dediť od **Admin_SecuredPresenter**. Ten preťažuje metódu **startup()** takže všetci jeho potomkovia budú pomocou kódu v nej overovaný cez ACL. Ostáva teda napísať kód zostávajúcich Presenterov
+
+**app/AdminModule/presenters/SecuredPresenter.php**
+/--php
+<?php
+
+abstract class Admin_SecuredPresenter extends Admin_BasePresenter
+{
+    public function startup()
+    {
+        $user = Environment::getUser()->setAuthorizationHandler(new Proj_Security_Acl());
+
+        if (!$user->isAuthenticated()) {
+            if ($user->getSignOutReason() === User::INACTIVITY) {
+                $this->flashMessage('Uplynula doba neaktivity! Systém vás z bezpečnostných dôvodov odhlásil.', 'warning');
+            }
+
+            $this->flashMessage('Na vstup do ADMIN sekcie sa musíte prihlásiť!', 'warning');
+            $backlink = $this->getApplication()->storeRequest();
+            $this->redirect('Auth:login', array('backlink' => $backlink));
+
+        } else {
+            if (!$user->isAllowed($this->reflection->name, $this->getAction())) {
+                $this->flashMessage('Pokúsili ste sa vstúpiť do sekcie, na ktorú nemáte dostatočné oprávnenia! Vstup vám bol odopretý.', 'warning');
+                $this->redirect('Default:');
+            }
+
+        }
+
+        parent::startup();
+    }
+}
+\--
+
+Všimnite si, že metóda presmeruje pri nepovolenom prístupe na **Default:** a nie na **Auth:login** ako v **Admin_DefaultPresenter**i.
+
+Pridajte dva nové chránené Presenteri...
+
+**app/AdminModule/presenters/PagePresenter.php**
+/--php
+<?php
+
+final class Admin_PagePresenter extends Admin_SecuredPresenter
+{
+
+}
+\--
+
+**app/AdminModule/presenters/UserPresenter.php**
+/--php
+<?php
+
+final class Admin_UserPresenter extends Admin_SecuredPresenter
+{
+
+}
+\--
+
+...a ich šablóny.
+
+**app/AdminModule/templates/Page.default.phtml**
+/--
+{block #title}Správa stránok :: {include #parent}{/block}
+
+
+{block #content}
+
+  <h1>Správa stránok</h1>
+
+  <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Fusce luctus tellus at odio fringilla in venenatis dolor aliquam. Aenean ante orci, pellentesque facilisis ultricies nec, imperdiet sit amet arcu
+. Maecenas eu lacus dapibus sem condimentum blandit. Sed aliquam, leo non vestibulum rutrum</p>
+
+{/block}
+\--
+
+**app/AdminModule/templates/User.default.phtml**
+/--
+{block #title}Správa užívateľov :: {include #parent}{/block}
+
+
+{block #content}
+
+  <h1>Správa užívateľov</h1>
+
+  <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Fusce luctus tellus at odio fringilla in venenatis dolor aliquam. Aenean ante orci, pellentesque facilisis ultricies nec, imperdiet sit amet arcu
+. Maecenas eu lacus dapibus sem condimentum blandit. Sed aliquam, leo non vestibulum rutrum</p>
+
+{/block}
+\--
+
+Gratulujeme, vaša modulárna aplikácia s využitím ACL je hotová. Skúste sa teraz odhlásiť a prihláste sa ako užívateľ s nižšími opráveniami
+
+[* 24lonxj.png *]:[* 2rnhgzn.png *]
+
+Celú aplikáciu si môžete stiahnuť ako archív .zip (neobsahuje knižnice Nette Framework a Dibi)
+
 {{tags: tutorial}}
 
 {{author: srigi|1860}}

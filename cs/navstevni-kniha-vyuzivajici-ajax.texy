@@ -445,6 +445,18 @@ $("form.ajax :submit").live("click", function () {
 });
 \---
 
+První část scriptu přidá všem odkazům s třídou `ajax` událost,
+která po kliknutí na ně vykoná AJAXový požadavek a zruší přechod
+na další stránku. Druhá část, která se týká formulářů, má obdobný efekt:
+po odeslání formuláře se data odešlou pomocí AJAXu a odeslání
+normální cestou se přeruší. Použití funkce `live` zajišťuje,
+že se událost přidá jak všem současným prvkům, tak i těm, které
+do stránky budou přidány - například AJAXem.
+
+.[note]
+Volání funkce `live` pro událost `submit` je možné až od jQuery verze
+1.4. Pro nižší verze použijte plugin [Live Query | http://plugins.jquery.com/project/livequery].
+
 Opět nalinkujeme do stránky v `@layout.phtml`. A nyní již hurá na přidání AJAXu!
 
 Snippety
@@ -563,6 +575,214 @@ A to je vše. Nyní už by se měl formulář odeslat AJAXem a seznam příspěv
 by se měl automaticky aktualizovat.
 
 
+Stránkování
+===========
+
+Máme již sice před sebou plně funkční knihu návštěv, která navíc používá
+AJAX, něco tomu ale stále chybí - stránkování. Po čase by se naše kniha
+návštěv značně zaplnila a znepřehlednila samými pozitivními komentáři,
+takže je moudré je rozdělit do stránek.
+
+K tomu si vypůjčíme již hotovou komponentu [VisualPaginator | addons:visualpaginator].
+Nette již sice obsahuje třídu [Paginator | api:], ta ale obsahuje jen základní
+logiku potřebnou ke stránkování a neumí vykreslit žádný pro uživatele přívětivý
+výstup. Komponenta VisualPaginator je jen jakousi obálkou, která se stará o
+vykreslování zmíněné třídy.
+
+.[tip]
+Při používání komponent třetích stran věnujte prosím pozornost její licenci.
+Některé licence Vám neumožňují použít danou komponentu, pokud nesplňujete
+určité podmínky. Například komponenty šířené pod licencí [GNU GPL | http://www.gnu.org/copyleft/gpl.html]
+můžete použít jen v projektech, které jsou samy šířené pod touto licencí.
+VisualPaginator je šířen pod licencí New BSD, která povoluje prakticky jakékoliv
+použití za předpokladu, že budou v komponentě ponechány copyrighty a prohlášení
+o zodpovědnosti za škodu.
+
+Vytvoříme si složku `app/components` a do ní rozbalíme složku `VisualPaginator`
+z distribučního archivu s komponentou. Stylopis `example.css` můžeme přesunout
+do složky `document_root/css` a nalinkovat do stránky. Nyní máme vše připravené
+a můžeme se pustit do samotné implementace stránkování.
+
+Začneme od modelu. Náš současný model umožňuje jen získání celého
+seznamu v databázi. Pokud budeme stránkovat, bude praktičtější,
+když už samotný dotaz bude obsahovat klauzule `LIMIT` a `OFFSET`,
+které nám rozsah výsledků patřičně omezí. Můžeme si tedy upravit
+metodu `fetchAll()` třídy `EntriesModel` tak, aby toto omezení
+zohledňovala. O něco praktičtější však bude použít třídu `DibiDataSource`,
+která je pro tento účel přímo stvořená.
+
+Do třídy `BaseModel` tedy přidáme novou metodu: `getDataSource`,
+která vrátí novou instanci `DibiDataSource`:
+
+/---php
+	/**
+	 * Creates a new DataSource
+	 * @return DibiDataSource
+	 */
+	public function getDataSource()
+	{
+		return new DibiDataSource($this->name, $this->connection);
+	}
+\---
+
+Třídě `DibiDataSource` se jako první argument konstruktoru zadává zdroj,
+ze kterého se mají data vybírat. To může být buď název tabulky, jako
+v našem případě, nebo SQL dotaz. V případě použití SQL dotazu se
+použije jako poddotaz.
+
+.[note]
+Použití SQL dotazu se nedoporučuje v případě MySQL databáze.
+Ta totiž neumí použít indexy v tabulkách z poddotazu, takže
+je poté `DibiDataSource` silně neefektivní.
+
+Nyní se přesuneme do třídy `HomepagePresenter`, která bude
+hlavním dějištěm našeho stránkování. Nejdříve upravíme metodu
+`renderDefault()` tak, aby prozatím používala novou metodu modelu,
+ale zatím nestránkovala:
+
+/---php
+	public function renderDefault()
+	{
+		$dataSource = $this->entries->getDataSource();
+		$dataSource->orderBy('posted', dibi::DESC);
+		$this->template->entries = $dataSource;
+	}
+\---
+
+Voláním metody `orderBy()` nad objektem `$dataSource` nastavujeme totéž,
+co jsme dřív předávali jako parametr metodě `fetchAll` - sestupné řazení
+podle sloupce `posted`.
+
+Použití `DibiDataSource` v šabloně bude stejné, jako by šlo již o hotový
+výsledek. Při pokusu procházet přes jeho prvky se totiž automaticky vykoná
+výsledný dotaz a pro procházení se použije jeho výsledek. To nám umožňuje
+libovolně upravovat parametry `DibiDataSource` až do jeho použití při vykreslování.
+
+Nyní se pustíme do samotného stránkování. Vytvoříme si továrničku na komponentu
+VisualPaginator:
+
+/---php
+	protected function createComponentPaginator()
+	{
+		$visualPaginator = new VisualPaginator();
+		$visualPaginator->paginator->itemsPerPage = 10;
+		return $visualPaginator;
+	}
+\---
+
+Povšimněte si řádku `$visualPaginator->paginator->itemsPerPage = 10;`. Jak již
+bylo dříve zmíněno, slouží třída `VisualPaginator` jako obálka nad třídou
+`Paginator`. Právě ta řídí veškerou stránkovací logiku a parametry
+stránkování musíme přiřazovat právě jí. Tu třída `VisualPaginator`
+obsahuje v [property | doc:nette-object#toc-gettery-a-settery] `paginator`.
+Zmíněný řádek tedy třídě `Paginator` říká, že si přejeme na stránce zobrazit
+10 záznamů.
+
+Dále musíme zohlednit stránkování při sestavování `DibiDataSource`.
+Je potřeba předat třídě `Paginator` informace o celkovém počtu objektů
+v databázi a objektu `DibiDataSource` naopak nastavit pomocí metody
+`applyLimit()` limit a offset. Oba parametry získáme ze třídy `Paginator`.
+Celá metoda `renderDefault()` bude nyní vypadat takto:
+
+/---php
+	public function renderDefault()
+	{
+		$dataSource = $this->entries->getDataSource();
+		$dataSource->orderBy('posted', dibi::DESC);
+
+		$paginator = $this['paginator']->getPaginator();
+		$paginator->itemCount = $dataSource->getTotalCount();
+		$dataSource->applyLimit($paginator->itemsPerPage, $paginator->offset);
+
+		$this->template->entries = $dataSource;
+	}
+\---
+
+Nyní už nám zbývá jen naší novou komponentu ve stránce vykreslit. Opět použijeme
+makro `{control}` a umístíme jí do snippetu `list`:
+
+/---html
+{snippet list}
+<div class="list">
+{if count($entries) > 0}
+	{control paginator}
+
+	{foreach $entries as $entry}
+	<div class="entry">
+		<div class="author">{$entry->author}</div>
+		<div class="text">{!$entry->text|escape|nl2br}</div>
+		<div class="posted">{$entry->posted|date}</div>
+	</div>
+	{/foreach}
+
+	{control paginator}
+{else}
+	<div class="notice">Kniha návštěv zatím neobsahuje žádné příspěvky.</div>
+{/if}
+</div>
+{/snippet}
+\---
+
+Nyní se už stránkování nejen zobrazí, ale také je plně funkční.
+
+[* screen-3.png *]
+
+Ale pozor! Při změně stránky se nepoužívá AJAX. Po kliknutí na odkaz vůbec
+nedojde k AJAXovému volání, navíc by zatím ani nedošlo k překreslení žádného
+snippetu. Pojďme to tedy napravit...
+
+Pro přidání AJAXového volání po kliknutí na odkaz v máme 2 možnosti:
+
+- přidáme odkazům v šabloně paginatoru třídu `ajax`
+- upravíme `ajax.js` tak, aby AJAXová volání přiřadil automaticky i odkazům stránkovače
+
+Zvolíme druhé řešení, protože je méně pracné - stačí jen přidat selektor `.paginator a`
+do `ajax.js`:
+
+/---js
+$("a.ajax, .paginator a").live("click", function (event) {
+	event.preventDefault();
+	$.get(this.href);
+});
+\---
+
+Překreslení snippetu je jednoduché, nicméně mírně neelegantní - komponenta
+VisualPaginator neobsahuje žádný mechanismus, kterým by bylo možné zajistit
+vyvolání vlastního kódu v případě změny stránky. V podstatě ani není možné takový
+mechanismus elegantně zajistit - komponenta neví, jakou stránku měl uživatel,
+od kterého AJAXový požadavek přišel, právě zobrazenou. Vše by se muselo řešit
+přes dodatečný parametr.
+
+Dovolíme si tedy použít jednodušší řešení - snippet se seznamem příspěvků nebudeme
+zneplatňovat pouze v případě, že uživatel odeslal formulář, ale při každém požadavku.
+
+Volání `invalidate()` se nám tedy přesune do metody `renderDefault()`:
+
+/---php
+	public function renderDefault()
+	{
+		// ...
+
+		$this->template->entries = $dataSource;
+		if ($this->isAjax())
+			$this->invalidateControl('list');
+	}
+\---
+
+Také by bylo vhodné uživateli po odeslání formuláře zobrazit první stránku s jeho příspěvkem.
+Přidáme tedy do metody `postForm_onSubmit` následující řádek:
+
+/---php
+		$this['paginator']->page = $this['paginator']->paginator->page = 1;
+\---
+
+Řádek obsahuje dvě přiřazení - bohužel je nutné současnou stránku zvlášť nastavit
+komponentě VisualPaginator a zvlášť třídě `Paginator`, kterou komponenta obsahuje.
+
+V tento okamžik by i stránkování mělo fungovat AJAXově a naše návštěvní
+kniha je zase o kousek lepší.
+
+
 Závěr
 =====
 
@@ -571,8 +791,9 @@ Trochu paradoxně jsme naprostou většinu času strávili psaním základního
 kódu, který s AJAXem nesouvisel, a změny při přidávání AJAXu nad celou
 aplikaci byly minimální.
 
-Nabízí se další rozšíření návštěvní knihy - stránkování, administrační
-rozhraní pro moderování diskuse...
+Nabízí se další rozšíření návštěvní knihy - ochrana proti spamu,
+moderování příspěvků... Některá rozšíření mohou postupně přibýt
+do tohoto tutoriálu, záleží na Vašem zájmu.
 
 Celou aplikaci si můžete [vyzkoušet | http://jan.smitka.org/ajax-guestbook/demo/]
 i [stáhnout | http://jan.smitka.org/ajax-guestbook/files/ajax-guestbook.zip].

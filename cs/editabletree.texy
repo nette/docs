@@ -1,0 +1,413 @@
+EditableTree
+************
+
+Nadstavba TreeView pre vykresľovanie editovateľnej stromovej štruktúry
+
+|Verzia | 0.1.0
+|Download |
+|Forum thread | http://forum.nette.org/cs/3880-editabletree-dalsia-nadstavba-pre-treeview
+|Autor | Lopo (Pavol Hluchy)
+
+Vzniklo to ako priamy nasledovník "CBTree":http://addons.nette.org/cs/cbtree.
+
+Umožňuje presúvanie položiek stromu, pridávanie, mazanie, editáciu názvov, checkbox.
+
+Oproti CBTree to však nie je FormControl ale samostatný komponent.
+Celé je to riešené ako renderer pre "TreeView":http://addons.nette.org/cs/treeview.
+
+
+Pre spávnu funkčnosť je potrebné mať príslušné handlery v presenteri a následne aj v DB modeli.
+
+Využíva to jQuery/Interface modul "NestedSortable":http://code.google.com/p/nestedsortables/ a "Jeditable":http://www.appelsiini.net/projects/jeditable.
+
+Použitie:
+
+**prezenter**
+/--php
+public function renderTypes()
+{
+	$tree=new TreeView($this, 'fTTree');
+	$tree->addLink(null, 'name', 'id', true, $this->presenter);
+	$tree->dataSource=$this->model->findAllTTree(TRUE);
+	$rnd=new EditableTree;
+	$tree->setRenderer($rnd);
+	$this->template->fTTree=$tree;
+}
+
+public function handleTChange($fTTree)
+{
+	$this->model->setTypesTree($this->parseTTree($fTTree));
+}
+
+private function parseTTree($ttree)
+{
+	$tree=array();
+	foreach ($ttree as $node)
+		$tree[$node['id']]=isset($node['children'])? $this->parseTTree($node['children']) : null;
+	return $tree;
+}
+
+public function handleTVis($tid, $vis)
+{
+	$vis=$vis=='true';
+	$this->model->setTypeVis($tid, $vis);
+	$this->flashMessage('Viditeľnosť upravená', 'info');
+}
+
+public function handleRemType($id)
+{
+	$this->model->remType($id);
+	$this->flashMessage('Typ (vrátane podpoložiek) zmazaný', 'info');
+}
+
+public function handleAddType($id)
+{
+	$this->model->addType($id);
+	$this->flashMessage('Typ pridaný', 'info');
+}
+
+public function handleEditTypeName($id, $value)
+{
+	if (!strlen($value))
+		$value='bezmena';
+	$this->model->setTypeName($id, $value);
+	$this->invalidateControl($id);
+	echo $value;
+	$this->terminate();
+}
+\--
+
+**model**
+/--php
+
+public function findAllTTree($src=FALSE)
+{
+	$sql="SELECT *"
+		." FROM ".self::$db.".types kt"
+		." ORDER BY kt.position";
+	if ($src)
+		return $this->msc->dataSource($sql);
+	return $this->msc->query($sql);
+}
+
+public function setTypeVis($id=NULL, $vis=TRUE)
+{
+	if ($id===NULL) return;
+	$sql="UPDATE ".self::$db.".types"
+		." SET visible=".($vis? 1 : 0)
+		." WHERE id=$id";
+	return $this->msc->query($sql);
+}
+
+public function setTypesTree($tree)
+{
+	if (!is_array($tree))
+		throw new Exception(__CLASS__.__FUNCTION__.' vyzaduje ako parameter pole');
+	$i=1;
+	return $this->setTypeTree($tree);
+	foreach ($tree as $node) {
+		$this->setTypeTree($node, $i);
+		$i++;
+		}
+}
+
+private function setTypeTree($type, $position=1, $parent=NULL)
+{
+	$i=1;
+	foreach ($type as $id => $val) {
+		if ($val!==NULL) {
+			$this->setTypesNode($id, $i, $parent);
+			$this->setTypeTree($val, $i, $id);
+			}
+		else $this->setTypesNode($id, $i, $parent);
+		$i++;
+		}
+}
+
+private function setTypesNode($id, $position=1, $parent=NULL)
+{
+	$sql="UPDATE ".self::$db.".types"
+		." SET"
+			." parentId=".($parent!==NULL? $parent : "NULL").","
+			." position=$position"
+		." WHERE id=$id";
+	return $this->msc->query($sql);
+}
+
+public function remType($id=NULL)
+{
+	if ($id===NULL)
+		throw new Exception('id musi byt zadane');
+	if (!is_numeric($id))
+		throw new Exception('id musi byt cislo');
+	if (!is_int((int)$id))
+		throw new Exception('id musi byt int');
+	$sql="DELETE FROM ".self::$db.".types"
+		." WHERE id=$id";
+	$this->msc->query($sql);
+	$sql="SELECT id FROM ".self::$db.".types"
+		." WHERE parentId=$id";
+	$res=$this->msc->query($sql);
+	foreach ($res as $row) {
+		$this->remType($row['id']);
+		}
+}
+
+public function addType($parent=NULL)
+{
+	$sql="SELECT MAX(position)"
+		." FROM ".self::$db.".types"
+		." WHERE parentId".(($parent!==NULL && $parent!='NULL')? '='.$parent : ' IS NULL');
+	$pos=$this->msc->fetchSingle($sql)+1;
+	$sql="INSERT INTO ".self::$db.".types"
+			." (`position`, `name`, `parentId`, `visible`)"
+		." VALUES"
+			." ($pos, 'Nová položka', ".($parent!==NULL? $parent : 'NULL').", 1)";
+	$this->msc->query($sql);
+}
+
+public function setTypeName($id, $name)
+{
+	$sql="UPDATE ".self::$db.".types"
+		." SET name='$name'"
+		." WHERE id=$id";
+	$this->msc->query($sql);
+}
+\--
+
+**SQL**
+/--code sql
+CREATE TABLE `x` (
+`id` int( 10 ) unsigned NOT NULL AUTO_INCREMENT ,
+`position` int( 10 ) unsigned NOT NULL ,
+`name` varchar( 255 ) NOT NULL ,
+`parentId` int( 10 ) unsigned default NULL ,
+`visible` tinyint( 1 ) unsigned NOT NULL default '0',
+PRIMARY KEY ( `id` ) ,
+KEY `parent` ( `parentId` ) ,
+KEY `position` ( `position` )
+);
+\--
+
+**template**
+/--code html
+<script type="text/javascript" src="{$baseUri}js/jquery.nette.js"></script>
+<script type="text/javascript" src="{$baseUri}js/jquery/interface/interface.js"></script>
+<script type="text/javascript" src="{$baseUri}js/jquery/inestedsortable.js"></script>
+<script src="{$baseUri}js/jquery.ajaxform.js" type="text/javascript"></script>
+<script src="{$baseUri}js/jquery/jquery.jeditable.js" type="text/javascript"></script>
+<style type="text/css">
+div.wrap {
+	border:1px solid #BBBBBB;
+	padding: 1em 1em 1em 1em;
+	}
+.page-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+	display: block;
+	}
+.clear-element {
+	clear: both;
+	}
+.left {
+	text-align: left;
+}
+.right {
+	text-align: right;
+}
+.sort-handle {
+	cursor:move;
+}
+.helper {
+	border:2px dashed #777777;
+	}
+.current-nesting {
+	background-color: yellow;
+	}
+.bold {
+	color: red;
+	font-weight: bold;
+	}
+</style>
+{$fTTree->render()}
+\--
+
+mno a nakoniec samotný **renderer**
+/--php
+<?php
+/**
+ * EditTree renderer.
+ *
+ * @author     Lopo
+ * @version    0.1.0
+ */
+class EditableTree
+extends Object
+implements ITreeViewRenderer
+{
+	/** @var TreeView */
+	protected $tree;
+	/** @var string nazov stlpca riadiaceho checkboxy */
+	public $checkColumn='visible';
+	/** @var string JS spojenia jQuery modulu s kontajnerom */
+	public $linkingJS="$('#%s').NestedSortable(
+	{
+		handle: '.handler',
+		onChange: function(serialized) {
+			var ajaxOptions={
+				url: '%s',
+				data: serialized[0].hash,
+				};
+			return jQuery.ajax(ajaxOptions);
+			},
+		accept: '%s-item',
+		opacity: 0.8,
+		helperclass: 'helper',
+		nestingPxSpace: 20,
+		currentNestingClass: 'current-nesting',
+		fx:400,
+		revert: true,
+		autoScroll: false
+		}
+	);";
+	/** @var string handler zmeny struktury */
+	public $onChange='TChange';
+	/** @var string JS spojenia jQuery modulu editacie nazvu */
+	public $editJS="$(function() {
+	$('.%s_click').editable('%s', {
+	      indicator : \"<img src='/images/spinner.gif'>\",
+	      tooltip   : 'Klikni pre upravenie ...',
+	      placeholder: 'žiadny',
+	      submit: 'nastav',
+	      type: 'text',
+	      style  : 'inherit'
+	  });
+	});";
+	/** @var string handler zmeny nazvu */
+	public $onEdit='EditTypeName';
+	/** @var string img pridania node */
+	public $img_add='/images/icons/page_add.png';
+	/** @var string img zrusenia node */
+	public $img_cancel='/images/cancel.png';
+	/** @var string img posuvneho bodu */
+	public $img_move='/images/icons/1268227056_arrow_move.png';
+	/** @var string styl pre node */
+	public $styleItem=".%s-item > div {background: #f8f8f8; margin: 0.25em 0 0 0;}";
+
+	/**
+	 * @param TreeView
+	 * @return Nette\Web\Html
+	 */
+	public function render(TreeView $tree)
+	{
+		if ($this->tree!==$tree)
+			$this->tree=$tree;
+		$snippetId=$this->tree->getName();
+		$prez=$this->tree->getPresenter();
+		$html=$this->renderNodes($this->tree->getNodes(), Html::el('ul', array('id'=>$snippetId, 'class'=>'page-list')));
+
+		$treeContainer=Html::el('div', array('class'=>'wrap'));
+		$style=Html::el('style', array('type'=>'text/css'))->add(sprintf($this->styleItem, $snippetId));
+		$treeContainer->add($style);
+		$ejs=Html::el('script', array('type'=>'text/javascript', 'charset'=>'utf-8'))->add(sprintf($this->editJS, $snippetId, $prez->link($this->onEdit.'!')));
+		$treeContainer->add($ejs);
+		$treeContainer->add($html);
+		$add=Html::el('input', array(
+									'type'=>'button',
+									'style'=>"background-image: url('".$this->img_add."'); background-color: transparent; border: none; width: 16px; height: 16px;",
+									'onClick'=>"jQuery.ajax({url: '".$prez->link('addType!')."', type: 'post'}); history.go(0); window.location.reload();"
+									));
+		$treeContainer->add($add);
+		$ljs=Html::el('script', array('type'=>'text/javascript', 'charset'=>'utf-8'))->add(sprintf($this->linkingJS, $snippetId, $prez->link($this->onChange.'!'), $snippetId));
+		$treeContainer->add($ljs);
+		return $treeContainer;
+	}
+
+	/**
+	 * @param TreeViewNode $nodes
+	 * @param Nette\Web\Html $wrapper
+	 */
+	public function renderNodes($nodes, $wrapper=NULL)
+	{
+		if ($wrapper===NULL)
+			$nodesContainer=Html::el('ul', array('class'=>'page-list'));
+		else
+			$nodesContainer=$wrapper;
+		foreach ($nodes as $n) {
+			$child=$this->renderNode($n);
+			if (null!==$child)
+				$nodesContainer->add($child);
+			}
+		return $nodesContainer;
+	}
+
+	/**
+	 * @param $node
+	 * @return Nette\Web\Html
+	 */
+	public function renderNode(TreeViewNode $node)
+	{
+		$nodes=$node->getNodes();
+		$snippetId=$node->getSnippetId();
+		$nodeContainer=Html::el('li', array('class'=>'clear-element '.$this->tree->getName().'-item sort-handle left', 'id'=>$node->getDataRow()->id));
+		$link=$this->renderLink($node, 'nodeLink');
+		if (null!==$link)
+			$nodeContainer->add($link);
+		$this->tree->onNodeRender($this->tree, $node, $nodeContainer);
+		if (count($nodes)>0) {
+			$nodesContainer=$this->renderNodes($nodes);
+			if (null!==$nodesContainer)
+				$nodeContainer->add($nodesContainer);
+			}
+		$html=isset($nodeContainer)? $nodeContainer : $nodesContainer;
+		if ($node->isInvalid())
+			$this->tree->getPresenter()->getPayload()->snippets[$snippetId]=(string)$html;
+		return $html;
+	}
+
+	/**
+	 * @param $node
+	 * @param $name
+	 * @return Nette\Web\Html
+	 */
+	public function renderLink(TreeViewNode $node, $name)
+	{
+		$pres=$this->tree->getPresenter();
+		$id=$node->getDataRow()->id;
+		$nname=$this->tree->getName();
+		$el=Html::el('div');
+		$link=$node[$name];
+		$g=Html::el('img', array('src'=>$this->img_move, 'height'=>'16', 'class'=>'handler', 'id'=>'handler'));
+		$el->add($g);
+		$cbx=Html::el('input', array('type'=>'checkbox', 'name'=>$nname.'[]', 'id'=>'cbx-'.$id));
+		$ck=$this->checkColumn;
+		if ($node->getDataRow()->$ck) $cbx->checked='checked';
+		$url=$pres->link('TVis!');
+		$cbx->onChange="jQuery.ajax({url: '$url&tid=$id&vis='+this.checked})";
+		$el->add($cbx);
+		$div=Html::el('span', array('class'=>$nname.'_click', 'id'=>$id));
+		$el->add($div->add($link->getLabel()));
+		$rem=Html::el('input', array(
+									'type'=>'button',
+									'style'=>"background-image: url('".$this->img_cancel."'); background-color: transparent; border: none; width: 16px; height: 16px;",
+									'onClick'=>"jQuery.ajax({url: '".$pres->link('remType!', array('id'=>$id))."', type: 'post'}); history.go(0); window.location.reload();"
+									));
+		$el->add($rem);
+		$add=Html::el('input', array(
+									'type'=>'button',
+									'style'=>"background-image: url('".$this->img_add."'); background-color: transparent; border: none; width: 16px; height: 16px;",
+									'onClick'=>"jQuery.ajax({url: '".$pres->link('addType!', array('id'=>$id))."', type: 'post'}); history.go(0); window.location.reload();"
+									));
+		$el->add($add);
+		return $el;
+	}
+}
+\--
+
+mnou použité ikony: [* 1268227056-arrow-move.png *][* cancel.png *][* page-add.png *]
+
+a takto nejako to nakoniec vyzerá
+[* editable-tree.png *]
+
+{{author: Lopo|2108}}

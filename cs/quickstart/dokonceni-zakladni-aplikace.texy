@@ -1,3 +1,157 @@
 Dokončení základní aplikace
 ***************************
-.. Coming soon..
+.[perex]
+Dnes se opět koukneme na zoubky presenteru a šablonám, zatímco v modelu nic měnit nebudeme - v něm jsme psali metody stylem "dopředně-kompatibilním", ukážeme si signály a **formuláře**, vytvoříme novou akci a základní funkčnost aplikace budeme mít hotovou (resp. jednu funkčnost ještě doplníme, v díle o stránkování). V dalších dílech budou následovat již jen samé zábavné hrátky s jejím UI (klientská část) - v tom máte naprostou volnost.
+
+Signály
+=======
+Velmi zjednodušeně řečeno, signál je metoda presenteru/vykreslitelné komponenty s názvem ve tvaru handle{Signál}, která **něco mění**. Typicky tedy například odeslání formuláře, mazání čehosi, naopak zobrazování formuláře signálem není. V naší aplikaci budeme mít signály dva (nepočítaje zpracování formuláře, o tento signál se totiž nemusíme starat, více později), jeden pro změnu stavu úkolu, druhý pro smazání úkolu. Pamatujte si, že po provedení signálu **vždy musí následovat redirect** (pravidla se učí, aby se později porušovala, více viz díl o AJAXu) - přece byste nechtěli, aby Vám uživatel odeslal dvakrát stejný formulář.
+
+Začneme signálem delete, který bude úkol mazat:
+/--code php
+public function handleDelete($id)
+{
+	$this->flashMessage('Úkol smazán.');
+	$todo = $this->model->findTodo($id);
+	if($todo) {
+		$todo->delete();
+	}
+	$this->redirect('this'); // this vyjadřuje aktuální presenter i view, ale bez signálu
+}
+\--
+
+Nic složitého, vybereme úkol a pak mu skrze ORM vrstvu řekneme "smaž sám sebe". Jediné co zbývá dovysvětlit je první řádka - tedy flashMessages. Pomocí flash messages můžeme uživateli oznámit nějakou zprávu, např. že se něco nepovedlo (obligátní "Something went wrong"), funkce flashMessage má druhý parametr který určuje CSS třídu, zprávy se přenáší v session pod klíčem, který se prozměnu přenáší v URL. Snad jsem Vás moc nezamotal.
+
+Signál pro změnu stavu bude téměř identický (pouze zprostředkujeme komunikaci uživatel -> model):
+/--code php
+public function handleChangeState($id)
+{
+	$this->flashMessage('Stav byl změněn.');
+
+	$todo = $this->model->findTodo($id);
+	if($todo) {
+		$todo->changeState();
+	}
+
+	$this->redirect('this', $todo->done === 'yes' ? TRUE : FALSE);
+}
+\--
+
+Jediné, v čem se oba signály liší (samozřejmě kromě metody na modelu), je předání parametru showDoneTasks, je to z důvodu, že když si klikneme na změnu stavu v tabulce (zatím ne), tabulka se překlopí tak, abychom úkol neztratili z dohledu.
+
+
+Tvorba formuláře
+=============
+Na scénku přijíždí dáma pomyslné frameworkové šachovnice - formuláře. Všude, ať už ve webových aplikacích či na úřadě, se vyplňují právě formuláře. Nás úřad, pokud pro něj zrovna neděláme web, nezajímá, daleko zajímavější je totiž tvorba formulářů v Nette Frameworku. Jak to funguje? Obecně - nejprve v jedné metodě presenteru (nikoliv v akci či view!!) definujeme **políčka, tlačítka a pravidla** formuláře. Po stisknutí tlačítka se při korektně vyplněném formuláři zavolá callback (jinak ne!), ve kterém se úkolu přidá. Musím vyzdvihnout další killer-feature Nette - formuláře jsou naprosto neprůstřelné. Jdeme na to, nejprve **definice formuláře**:
+
+/--code php
+public function createComponentTodoForm()
+{
+	$form = new AppForm;
+	$form->addText('text', 'Úkol', 60, 100)
+	     ->addRule(Form::FILLED, 'Musíte vyplnit text!');
+	$form->addSubmit('save', 'Uložit');
+	$form->addSubmit('back', 'Zpět')->setValidationScope(NULL);
+
+	$form->onSubmit[] = callback($this, 'processTodoForm');
+
+	return $form;
+}
+\--
+
+Tento kód si probereme řádek po řádku. Dlouho zatajovaným názvem metody, ve které **vytváříme** formuláře (a vůbec veškeré komponenty) jest createComponent{NázevKomponenty}, důležité je, aby počáteční písmeno z části `NázevKomponenty` bylo **velké**. Dále vytvoříme klasický textový input s formulářovým id text a popiskem Úkol a nastavíme mu pravidlo, že **musí být** vyplněné. Dále přidáme dvě odesílací tlačítka - save a back, jedno pro ukládání, druhé pro navrácení se zpět na přehled úkolů (pro něj vypneme validaci). Navážeme callback na událost "při odeslání formuláře" - zde se zavolá metoda processTodoForm. Poslední řádek je **extrémně důležitý**, umožní presenteru s formulářem pracovat, bez čehož náš formulář prostě **nebude fungovat**.
+
+Nyní si napíšeme zpracování formuláře - onu metodu processTodoForm:
+
+/--code php
+public function processTodoForm(AppForm $form)
+{
+	if($form['save']->isSubmittedBy()) {
+		$this->flashMessage('Úkol vložen.');
+		$values = $form->getValues();
+
+		$todo = new Todo;
+		$todo->text = $values['text'];
+		$todo->added = new DateTime;
+		$this->model->createTodo($todo);
+	}
+	$this->redirect('Todolist:show');
+}
+\--
+
+Callbacky volané z pole onSubmit dostávají v parametru instanci AppForm, zatímco callbacky přivěšené na tlačítka (onClick; neplést s onClick z JS/HTML) dostávají instanci SubmitButton (z něho se lze dostat na formulář příkazem `$button->getForm()`). Nejprve zkontrolujeme, zda byl formulář odeslán "ukládávajícím tlačítkem". Pokud nikoliv, pak jen redirectujeme na přehled úkolů (což je situace u tlačítka zpět). Pokud ano, do $values si načteme pole ve tvaru id_prvku => jeho_hodnota, takže například hodnota textového inputu 'text' je uchována pod indexem text (viz další řádky). Do added zapíšeme současný čas reprezentovaný objektem datetime a celý úkol předáme modelu ke zpracování. Poté **opět přesměrujeme**.
+
+Formulář je hotov. Aby ale k něčemu sloužil, je třeba ho někde vykreslit - pro tyto účely vytvoříme další akci a view, tedy do presenteru vložíme prázdné (nemusíme) metody actionAdd a renderAdd a založíme novou šablonu s názvem add.phtml ve složce templates/Todolist/. Její obsah je velmi triviální:
+/--code html
+{block content}
+{widget todoForm}
+\--
+**Důležité je první malé písmenko za widget** - pamatujte si - továrnička, jak se také metodám createComponentXXX říká, = velké první písmeno, widget = malé první písmeno. Makro widget nedělá nic jiného, než že v presenteru najde metodu createComponentTodoForm (pokud se již jednou nevyhledávala) a poté komponentu/formulář vykreslí.
+
+Upravujeme šablonu
+==================
+Nyní již můžeme přidávat úkoly, aby se nám ale nehromadily (ještě nemáme stránkovadlo), musíme mít možnost je mazat, jinak řečeno, pojďme rychle upravit šablonu tak, aby využila signály, které jsme si hned na začátku napsali.
+
+.[tip]
+Pokud chcete mít aplikaci pěknou, stáhněte si tyto soubory a vložte je do odpovídajících složek ve Vašem projektu:
+- http://nette-quickstart.hys.cz/css/screen.css
+- http://nette-quickstart.hys.cz/images/th-big.gif
+- http://nette-quickstart.hys.cz/images/checked.png
+- http://nette-quickstart.hys.cz/images/unchecked.png
+- http://nette-quickstart.hys.cz/images/full.png
+- http://nette-quickstart.hys.cz/images/empty.png
+Poslední dva soubory můžete přeskočit, využijeme je až v části o AJAXu.
+Šablona bude vypadat takto:
+/--code html
+{block content}
+<p>
+	Zobrazuji {if !$showDone}ne{/if}dokončené úkoly,
+	<a href="{link this, 'showDoneTasks' => !$showDone}" class="ajax">
+		přepnout na {if $showDone}ne{/if}dokončené úkoly</a>.
+		<a href="{link add}" class="ajax">Přidej nový úkol</a>. {** NOVĚ: zde odkazujeme na view add *}
+</p>
+
+{if count($todos) > 0}
+<table>
+    <tr><th>&nbsp;</th><th>Úkol</th><th>Přidáno</th></tr>
+    <tr n:foreach="$todos as $todo" class="todo-row" rel="{$todo->id}">
+	<td>
+		<a href="{link changeState! $todo->id}"
+		   class="ajax checkbox {if !$showDone}un{/if}checked"></a> {** zde se při stažení css souboru zobrazí klikatelný obrázek označující stav - hotovo / nehotovo **}
+	</td>
+	<td>{$todo->text} (<a href="{link delete!}">smazat</a>)</td><td>{$todo->added|date:'H:i @ d.m.Y'}</td>
+    </tr>
+</table>
+{else}
+<p>Nic tu není.</p>
+{/if}
+\--
+
+Jak jste si asi všimli, rozdíl při likování na view / signál v presenteru je jediný - vykřičník na konci.
+
+.[note]
+Pozor, u komponent se vykřičník neuvádí, view u nich neexistují, o tom ale jindy.
+
+Well done!
+=========
+Gratuluji, pokud jste došli až sem, máte svou první menší aplikaci napsanou v Nette (leč trochu nedodělanou)! Má ale pár nevýhod, ty nyní začneme opravovat.
+
+.[note]
+Smažte presentery Login a Homepage, nebudeme je potřebovat, zároveň upravte v bootstrap.php řádky od $application->getRouter() následovně:
+/--code php
+$router[] = new Route('index.php', array(
+	'presenter' => 'Todolist',
+	'action' => 'default',
+), Route::ONE_WAY);
+
+$router[] = new Route('<presenter>/<action>', array(
+	'presenter' => 'Todolist',
+	'action' => 'show',
+));
+\--
+Příště si routy v aplikaci vysvětlíme podrobněji, zavedeme si také hezčí tvar URL adres a přidáme si stránkovadlo.
+
+Zapamatujte si
+=============
+- Po odeslání formuláře resp. po obsluze signálu přesměrujte!
+- Komponenty se vytváří metodou createComponentNazevKomponenty (velké N), ale vykreslují makrem widget s malým n!

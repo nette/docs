@@ -1,0 +1,234 @@
+"MultipleFileUpload":[/multiplefileupload]: Jak na vlastní interface
+********************************************
+
+.[perex]
+V tomto článku se ukrývá praktický návod, jak vytvořit svůj vlastní interface, tedy jak zapojit svoje vlastní klientské řešení odesílání souborů na server do MultipleFileUploaderu.
+
+Co to je interface, jste se dozvěděli už v základním popisu MFU, tedy tuto kapitolu přeskočím. Jak už jsem se zmiňoval, interface je jedna třída a má dvě části. Jedna část má za úkol vygenerovat viditelný výstup a druhá má za úkol zpracovat vstup od uživatele, tedy soubory, které poslal.
+
+Teorie
+====
+
+Každá interface musí implementovat interface. Nebojte vysvětlím. Interface, který používá MFU říkejme UI a interface v PHP říkejme dále interface. Tedy každé UI musí implementovat interface. Interface je poměrně jednoduchý, ale i přes to, si ho popíšeme.
+
+/--- code php
+interface MFUUIInterface {
+
+	/**
+	 * Is this upload your upload? (upload from this interface)
+	 */
+	public function isThisYourUpload();
+
+	/**
+	 * Handles uploaded files
+	 * forwards it to model
+	 */
+	public function handleUploads();
+
+	/**
+	 * Renders interface to <div>
+	 */
+	public function render(MultipleFileUpload $upload);
+
+	/**
+	 * Renders JavaScript body of function.
+	 */
+	public function renderInitJavaScript(MultipleFileUpload $upload);
+
+	/**
+	 * Renders JavaScript body of function.
+	 */
+	public function renderDestructJavaScript(MultipleFileUpload $upload);
+
+}
+\--
+
+První dvě metody se starají o ukládání. Další tři metody se starají o renderování.
+
+Renderování
+-----------
+
+Začneme renederováním protože i přes to, že má tři metody, je mnohem jednoduší. Funkce render snad ani nepotřebje popis. Jako návratovou hodnotu vrátí html kód interface.
+
+A před tím, než se podíváme na další dvě renderovací metody dozvíte se něco o FallbackControlleru. FallbackController je JavaScriptová třída, která má za úkol spravovat jednotlivé interface na straně klienta. Jinými slovy stará se o fallbacky. Vás jako uživatele této třídy nejspíš budou zajímat nejspíš jen dvě věci a to `MFUFallbackController.prototype.fallbackLinkText`, díky kterému můžete přepsat text v odkazu, kterým uživatel spustí ruční fallback a dále vás bude zajímat metoda fallback, která přepne na interface o jeden nižší v seznamu registrovaných UI. Fallback controller je instancovaná třída (není statická). A její instanci můžete ručně najít pomcí příkazu
+/--code js
+document.getElementById(/*sem přijde ID prvku ve formuláři, strojně ho můžete získat pomocí FormControl::getHtmlId();*/).fallbackCntrl`
+\--
+
+Ale naštěstí takto do podrobna FallbackController znát nemusíte. Jdeme se podívat co tedy dělají metody rednerInitJavaScript a renderDestructJavaScript. Předem upozorňuji, že tyto metody generují text a to JavaScriptový kód! InitJavaScript se spustí při inicializaci interface. Naopak destructJavaScript se spustí při odchodu z interface. JavaScriptový kód je volán pomocí metody eval() a je sledována návratová hodnota. Pokud má fallback (změna inteface) proběhnou úspěšně (tedy, že se interface opravdu přepne), je potřeba aby JavaScritový kód vrátil true.
+
+Zpracování vstupů
+------------------
+
+Na zpracování vstupů máme dvě metody. První dotazovací metoda, isThisYourUpload(), vrací true nebo false, podle toho, zda interface umí tento upload zpracovat či nikoli. Druhá metoda handleUploads má za úkol zpracovat odeslané soubory, tedy předat je modelu. To je vše co vám k ní mohu říci, protože u každého klientského rozhraní se bude tato metoda hodně lišit.
+
+
+Praxe
+====
+
+Jdeme naimplemetovat Uploadify. Vezmeme to od shora až dolů.
+IsThisYourUpload()
+/---code php
+	public function isThisYourUpload() {
+		return (
+			Environment::getHttpRequest()->getHeader('user-agent') === 'Shockwave Flash'
+			AND isSet($_POST["sender"])
+			AND $_POST["sender"] == "MFU-Uploadify"
+		);
+	}
+\---
+Pokud je odesílatel flash (obecné pravidlo) a dále proměnná sender je MFU-Uploadify. Tuto hodnotu předáme v konfiguraci Uploadify. Uploadify bude potom tuto hodnotu posílat v každém požadavku na server a my podle ní jednoznačně identifikujeme interface.
+
+handleUploads
+/---code php
+	public function handleUploads() {
+		if(!isset($_POST["token"])) {
+			return;
+		}
+
+		/* @var $token string */
+		$token = $_POST["token"];
+
+		/* @var $file HttpUploadedFile */
+		foreach(Environment::getHttpRequest()->getFiles() AS $file) {
+
+			/* @var $validateCallback Callback */
+			$validateCallback = MultipleFileUpload::$validateFileCallback;
+
+			/* @var $isValid bool */
+			$isValid = $validateCallback->invoke($file);
+
+			if (!$file instanceof HttpUploadedFile || !$isValid) {
+				continue;
+			}
+
+			MultipleFileUpload::getQueuesModel() // returns: IMFUQueuesModel
+				->getQueue($token) // returns: IMFUQueueModel
+				->addFile($file);
+		}
+
+		// Response to client
+		echo "1";
+
+		// End the script
+		exit;
+	}
+\---
+
+Token je identifikátor fronty souborů. Pokud chcete vědět více prostudujte si zdrojáky. Zatím nám stačí vědět, že token musíme získat při generování HTML kódu, či při inicializačním skriptu a musíme ho poslat na server, na serveru ho musíme předat modelu, ten už se o další zpracování postará.
+
+handleUploads může končit buť exitem, return null nebo return true, poté bude vynecháno zpracování dalších interfaců.
+
+Dostáváme se k renderovacím metodám. Začneme generováním HTML kódu. K tomu jak už víme, slouží metoda render. Protože HTML kód nepatří nikam do obsahu tříd, použijeme šablonu. K její reprezentaci třídou můžeme použít MFUUIBase od kterého naše vytvořená třída může dědit, pokud se jí to k něčemu hodí. MFUUIBase je takový balíček funkcí, které se mohou hodit při tvoření interface.
+
+Takže tedy:
+/--code php
+	public function render(MultipleFileUpload $upload) {
+		$template = $this->createTemplate(dirname(__FILE__)."/html.phtml");
+		$template->uploadifyId = $upload->getHtmlId() . "-uploadifyBox";
+		return $template->__toString(TRUE);
+	}
+\---
+a šablona samotná:
+/--code html
+<table cellpadding="0" cellspacing="0">
+	<tr>
+		<td>
+			<div id="{$uploadifyId}" class="uploadify"></div>
+		</td>
+		<td>
+			<span id="{$uploadifyId}ClearQueue" style="display: none;margin-left: 5px;" class="button" onclick="$('#'+{$uploadifyId}).uploadifyClearQueue();">Vymazat frontu</span>
+		</td>
+		<td id="{$uploadifyId}Count">
+
+		</td>
+	</tr>
+</table>
+<div id="{$uploadifyId}-queue" class="ui-widget-content ui-corner-all" style="max-height: 300px;overflow:auto;display: none;margin-top: 5px;margin-bottom: 10px;"></div>
+\--
+
+Tak a máme html-markup. Ovšem to samotné je nám téměř k ničemu, protože uživatel uvidí jen „prázdnou“ stránku, tedy pár průhledných `<div>`ů.
+
+Tedy potřebujeme inicializovat Uploadify. A právě teď přišla chvilka na pro renderInitJavaScript().
+/--code php
+	/**
+	 * Renders JavaScript body of function.
+	 */
+	public function renderInitJavaScript(MultipleFileUpload $upload) {
+		$tpl = $this->createTemplate(dirname(__FILE__)."/initJS.js");
+		$tpl->sizeLimit = $upload->maxFileSize;
+		$tpl->token = $upload->getToken();
+		$tpl->maxFiles = $upload->maxFiles;
+		$tpl->backLink = (string) $upload->form->action;
+		$tpl->uploadifyId = $upload->getHtmlId() . "-uploadifyBox";
+		$tpl->simUploadFiles = $upload->simUploadThreads;
+		return $tpl->__toString(TRUE);
+	}
+\--
+a teď ta javascriptová šablona:
+/--code js
+(function($,fallbackController){
+
+	var queue = $("#{!$uploadifyId}-queue");
+	var uploadify = $("#{!$uploadifyId}");
+	var box = uploadify.parents("div.withJS");
+
+	/* ... */
+
+	uploadify.uploadify({
+		width: 70,
+		height: 22,
+		wmode: "transparent",
+		auto: false,
+		multi: true,
+		queueID: {!$uploadifyId|escapeJS}+"-queue",
+		buttonImg: {!=Environment::expand("%baseUri%images/uploadifyButton.png")|escapeJS},
+		uploader: {!=Environment::expand("%baseUri%swf/uploadify.allglyphs.swf")|escapeJS},
+		cancelImg: {!=Environment::expand("%baseUri%images/cancel.png")|escapeJS},
+		queueSizeLimit: {!$maxFiles|escapeJS},
+		sizeLimit: {!$sizeLimit|escapeJS},
+		script: {!$backLink|escapeJS},
+		simUploadLimit: {!$simUploadFiles|escapeJS},
+		scriptData: { // Toto je nejdůležitější část, předáváme token, tedy ID fronty douborů a říkáme, kým byly soubory odeslány
+			token: {!$token|escapeJS},
+			sender: "MFU-Uploadify"
+		},
+
+		/* ... */
+
+	});
+
+	return true; // OK
+
+})(jQuery,this);
+\--
+(celý soubor najdete v distribuci, tedy na SVN, ve složce app/controls/MultipleFileUpload/UserInterface/Interfaces/Uploadify/initJS.js)
+
+V této chvíli už uživatel vidí, políčko pro odeslání, může soubory odeslat, ale po kliknutí na odkaz, že mu nejdou soubory nahrát, se nic nestane. To proto, že při vykonání funkce destruct se vrátí null, žádnou fci, jsme tam zatím nedali tedy to ještě napravíme:
+/--code php
+	/**
+	 * Renders JavaScript body of function.
+	 */
+	public function renderDestructJavaScript(MultipleFileUpload $upload) {
+		return $this->createTemplate(dirname(__FILE__)."/destructJS.js")->__toString(TRUE);
+	}
+\--
+a šablona:
+/--code js
+(function(){
+	return true;
+})();
+\--
+
+A teď si jiště říkáte a nebylo by lepší, aby pokud není k dispozici flash, či se prostě nezdaří inicializace, automaticky fallback provést? Ano máte pravdu. V příkladu initJS jako druhý parametr volané fce, je fallbackController. V případě neúspěchu, stačí zavolat `fallbackController.fallback();`. Ještě aby vám v tom bylo úplně jasno, kde jsem tu instanci fallbackControlleru vazal, vysvětlím vám to.
+
+V JavaScriptu můžu volat kód s tzv. scope. Tj. určím, v jakém kontextu je volán. Konrétněji, určím co se bude skrývat za proměnnou `this`. A fallbackController, volá náš kód se scope fallbackControlleru. Tedy kdyby náš kód nebyl obalen tou obalovací funkcí, stačilo by volat this.fallback();
+
+Doufám, že je vám alespoň trošku jasnější, jak vytvořit vlastní interface pro MFU, ale musím říct, vlastně napsat, že je to obsáhlejší a složitejší téma, než jsem si myslel a vyžaduje dobrou znalost JavaScriptu i PHP.
+
+Kam dále?
+=======
+
+- "fórum":http://forum.nette.org/cs/2386-addon-multiplefileupload-multiplefileupload-form-control?pid=36757#p36757
+
+{{author: Honza Kuchař|1018}}

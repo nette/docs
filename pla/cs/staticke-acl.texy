@@ -142,13 +142,15 @@ security.salt = zb1g7IHt1I
 Následne je treba zabezpečiť pripojenie k databáze pomocou týchto parametrov. Použijeme k tomu tzv. `HOOK` startup na ktorý navesíme callback, ktorý pripojenie zabezpečí. V súbore **app/bootstrap.php** pridajte za krok 3 (na riadok 30) tento kód
 /--php
 // Connect to database
-$application->onStartup[] = 'BaseModel::initialize';
+$application->onStartup[] = 'Model\BaseModel::initialize';
 \--
 
 Vytvorte súbor `app/models/BaseModel.php` a zapíšte do neho tento obsah:
 
 /--php
 <?php
+
+namespace Model;
 
 use Nette\Object,
     Nette\Environment,
@@ -189,8 +191,9 @@ Ako sme už spomenuli, ACL je v tomto tutoriáli zapísaný staticky v `.php` s�
 
 namespace AclProj\Security;
 
+use Nette\Security\Permission;
 
-class Acl extends Nette\Security\Permission
+class Acl extends Permission
 {
     public function __construct()
     {
@@ -201,20 +204,20 @@ class Acl extends Nette\Security\Permission
         $this->addRole('admin');
 
         // resources
-        $this->addResource('Admin\\DefaultPresenter');
-        $this->addResource('Admin\\PagePresenter');
-        $this->addResource('Admin\\UserPresenter');
+        $this->addResource('Admin:Default');
+        $this->addResource('Admin:Page');
+        $this->addResource('Admin:User');
 
         // privileges
-        $this->allow('registered', 'Admin\\DefaultPresenter', Permission::ALL);
-        $this->allow('editor',     'Admin\\PagePresenter',    Permission::ALL);
-        $this->allow('admin',      Permission::ALL,           Permission::ALL);
+        $this->allow('member', 'Admin:Default', Permission::ALL);
+        $this->allow('editor', 'Admin:Page', Permission::ALL);
+        $this->allow('admin', Permission::ALL, Permission::ALL);
     }
 }
 \--
 
 .[note]
-*Všimnite si ako je názov (a namespace) triedy odvodený od cesty, kde je súbor uložený. Ak zmeníte ktorúkoľvek časť cesty k súboru, je vhodné tieto zmeny reflektovať aj vo vašich `.php` súboroch v zložke **libs** (viď. tip o mene projektu vyššie).*
+*Všimnite si ako je názov (a namespace) triedy odvodený od cesty, kde je súbor uložený. Ak zmeníte ktorúkoľvek časť cesty k súboru, je vhodné tieto zmeny reflektovať aj vo vašich `.php` súboroch v zložke **libs** a naopak, ak zmeníte názov triedy (alebo namespace) súbor adekvátne premiestniť (viď. tip o mene projektu vyššie).*
 
 Trieda *AclProj\Security\Acl* dedí od *Nette\Security\Permission*. V jej konštruktore definujeme celý ACL. Oprávnenia role je možné podediť od inej role. V hore uvedenom kóde napr. rola *editor* dedí od role *member*. V praxi to znamená, že *editor* získa všetky oprávnenia, ktoré definujeme nad rolou *member*. ACL obsahuje aj rolu *guest*. Nette Framework túto rolu priradí každému návštevníkovi, ktorý nebol autorizovaný. Rolu *guest* tak automaticky nadobudne každý neprihlásený užívateľ.
 
@@ -243,88 +246,110 @@ use Nette\Object,
     Nette\Environment,
     Nette\Security\Identity,
     Nette\Security\IAuthenticator,
-    Nette\AuthenticationException;
-
+    Nette\Security\AuthenticationException,
+    Model\User;
 
 class Authenticator extends Object implements IAuthenticator
 {
     public function authenticate(array $credentials)
     {
-        $login = $credentials[self::USERNAME];
-        $row = UserModel::findByEmail($login);
+        $email = $credentials[self::USERNAME];
+        $row = User::findByEmail($email);
 
         if (!$row) {
-            throw new AuthenticationException("Užívateľ s registračným emailom '$login' sa nenašiel!", self::IDENTITY_NOT_FOUND);
+            throw new AuthenticationException("Užívateľ s registračným emailom '$email' sa nenašiel!", self::IDENTITY_NOT_FOUND);
         }
 
         $config = Environment::getConfig('security');
         $password =  sha1($credentials[self::PASSWORD] . $config->salt);
 
         if ($row->password !== $password) {
-            throw new AuthenticationException("Zadali ste nesprávne heslo!", self::INVALID_CREDENTIAL);
+            throw new AuthenticationException('Zadali ste nesprávne heslo!', self::INVALID_CREDENTIAL);
         }
 
-        return new Identity($row->name, $row->role);
+        $identity = new Identity($row->id, $row->role);
+        $identity->name = $row->name;
+        $identity->email = $row->email;
+
+        return $identity;
     }
 }
 \--
 
-Trieda *Proj_Security_Authenticator* implementuje rozhranie *IAuthenticator*, preto musí obsahovať definíciu verejnej metódy *authenticate()*, ktorá obstará samotné overenie prihlasovacích údajov. Na získanie údajov z databázy sa využíva Model *UserModel*. Jeho úlohou je v tomto prípade nájsť v DB tabuľke záznam o užívateľovi s daným emailom. V prípade, že sa užívateľ v tabuľke nájde, je overené heslo, ktoré zadal do formulára. Ak sú všetky údaje v poriadku, metóda vráti *identitu* užívateľa. V prípade neúspechu metóda vyhadzuje výnimky, ktoré obsahujú správu pre prihlasujúceho sa užívateľa. Všimnite si ako je porovnávané heslo z formulára s tým z databáze.
+Trieda *AclProj\Security\Authenticator* implementuje rozhranie *Nette\Security\IAuthenticator*, preto musí obsahovať definíciu verejnej metódy *authenticate()*, ktorá obstará samotné overenie prihlasovacích údajov. Na získanie údajov z databázy sa využíva trieda *User* z namespace *Model*. Jeho úlohou je v tomto prípade nájsť v DB tabuľke záznam o užívateľovi s daným emailom. V prípade, že sa užívateľ v tabuľke nájde, je overené heslo, ktoré zadal do formulára. Ak sú všetky údaje v poriadku, metóda vráti *identitu* užívateľa. V prípade neúspechu metóda vyhadzuje výnimky, ktoré obsahujú správu pre prihlasujúceho sa užívateľa. Všimnite si ako do procesu overenia hesla zapracované *solenie* (zreťazenie so soľou).
 
-Ako sme už spomenuli, na získanie užívateľských údajov z databázy sa využíva Model **UserModel**. Ten by mal vrátiť objekt, ktorý reprezentuje riadok s údajmi užívateľa. Vytvorte nový súbor **app/models/UserModel.php**
+Ako sme už spomenuli, na získanie užívateľských údajov z databázy sa využíva Model **User**. Ten by mal vrátiť objekt, ktorý reprezentuje riadok s údajmi užívateľa. Vytvorte nový súbor **app/models/User.php**
 
 /--php
 <?php
 
-class UserModel extends BaseModel
+namespace Model;
+
+class User extends BaseModel
 {
-    public static function getByEmail($email)
+    public static function findByEmail($email)
     {
-        $row = dibi::select('*')
-          ->from('users')
-          ->where('email=%s', $email)
-          ->fetch();
+        $row = self::$connection->table('users')
+            ->where('email', $email)
+            ->fetch();
 
         return ($row) ? $row : NULL;
     }
 }
 \--
 
-Kód je dostatočne samovysvetľujúci. Statická metóda *getByEmail()* sa pomocou dibi::select() pokúsi z databázy získať riadok s údajmi o užívateľovi. V prípade úspechu vráti *DibiRow* objekt, inak vráti NULL.
+Na komunikáciu s databázou sa využíva objekt *$connection*, ktorý sme inicialozovali v *BaseModel* cez HOOK startup. Takto elegantne (pomocou dedičnosti) je možné tento inicializovaný objekt využívať v samotných modeloch. Statická metóda *findByEmail()* sa pokúsi z databázy získať riadok s údajmi o užívateľovi. V prípade úspechu vráti *Nette\Database\Selector\TableRow* objekt, inak vráti NULL.
 
-[* 2j3ftom.png *]
-
-Teraz vám predvedieme ako *Authenticator* a *ACL* využiť na prihlásenie do admin sekcie aplikácie. Triedy *Proj_Security_Authenticator* a *Proj_Security_Acl* je potrebné zaregistrovať ako služby, ktoré obstarajú autentifikáciu a autorizáciu užívateľov. Otvorte **app/config.ini** a v sekcii **common**, hneď za konfiguráciu RobotLoadera pridajte tieto konfiguračné direktívy
+Teraz sa už konečne dostávame k samotnému jadru tutoriálu. Triedy *AclProj\Security\Acl* a *AclProj\Security\Authenticator* použijeme k prihláseniu do administrácie. Obe je potrebné zaregistrovať ako služby, ktoré obstarajú autentifikáciu a autorizáciu užívateľov. Otvorte **app/config.ini** a v sekcii **common**, hneď za konfiguráciu RobotLoadera pridajte tieto konfiguračné direktívy
 
 /--
-service.Nette-Security-IAuthenticator = Proj_Security_Authenticator
-service.Nette-Security-IAuthorizator = Proj_Security_Acl
+service.Nette-Security-IAuthorizator  = AclProj\Security\Acl
+service.Nette-Security-IAuthenticator = AclProj\Security\Authenticator
 \--
 
-Logika aplikácie v AdminModule bude taká, že ak sa užívateľ pokúsi otvoriť View/Action chráneného Presentera, overí sa, či je užívateľ prihlásený. Ak nie je, bude presmerovaný na Presenter:View, ktorý mu zobrazí prihlasovací formulár. Ak je užívateľ už prihlásený, aplikácia v súčinnosti s ACL overí, či má užívateľ oprávnenie otvoriť žiadaný Presenter:View (Presenter:Action).
+Logika aplikácie v AdminModule bude taká, že ak sa užívateľ pokúsi spustiť akciu z chráneného Presentera, overí sa, či je užívateľ prihlásený. Ak nie je, bude presmerovaný na *AdminModule\AuthPresenter:login*, ktorý mu zobrazí prihlasovací formulár. Ak je užívateľ už prihlásený, aplikácia v súčinnosti s ACL overí, či má užívateľ oprávnenie spustiť žiadanú `Presenter:action`.
 
-Otvorte súbor **app/AdminModule/presenters/DefaultPresenter.php**, zmažte jeho obsah a vložte nasledujúci kód
+Vytvorte najskôr *AdminModule\BasePresenter*, od ktorého budú dediť všetky Presentre v AdminModule:
+
+**app/AdminModule/presenters/BasePresenter.php**
+/--php
+<?php
+
+namespace AdminModule;
+
+abstract class BasePresenter extends \BasePresenter
+{
+
+}
+\--
+
+Ďalej otvorte súbor **app/AdminModule/presenters/DefaultPresenter.php**, zmažte jeho obsah a vložte nasledujúci kód
 
 /--php
 <?php
 
-final class Admin_DefaultPresenter extends Admin_BasePresenter
+namespace AdminModule;
+
+use Nette\Web\User;
+
+final class DefaultPresenter extends BasePresenter
 {
     public function startup()
     {
         parent::startup();
-        $user = Environment::getUser();
 
-        if (!$user->isAuthenticated()) {
-            if ($user->getSignOutReason() === User::INACTIVITY) {
+        $user = $this->getUser();
+
+        if (!$user->isLoggedIn()) {
+            if ($user->getLogoutReason() === User::INACTIVITY) {
                 $this->flashMessage('Uplynula doba neaktivity! Systém vás z bezpečnostných dôvodov odhlásil.', 'warning');
             }
 
             $backlink = $this->getApplication()->storeRequest();
             $this->redirect('Auth:login', array('backlink' => $backlink));
-        }
-        else {
-            if (!$user->isAllowed($this->reflection->name, $this->getAction())) {
+
+        } else {
+            if (!$user->isAllowed($this->name, $this->action)) {
                 $this->flashMessage('Na vstup do tejto sekcie nemáte dostatočné oprávnenia!', 'warning');
                 $this->redirect('Auth:login');
             }
@@ -333,132 +358,159 @@ final class Admin_DefaultPresenter extends Admin_BasePresenter
 
     public function actionLogout()
     {
-        Environment::getUser()->signOut();
+        $this->getUser()->logOut();
         $this->flashMessage('Práve ste sa odlásili z administrácie.');
         $this->redirect('Auth:login');
     }
 }
 \--
 
-.[note]
-*Všimnite si ako sú názvy tried presenterov v AdminModule prefixované **Admin_**. Vďaka tomu je Možné triedu presentera natiahnuť pomocou niektorého z autoloaderov, ktoré poskytuje Nette Framework*.
-
-V Presenteri sme prepísali metódu *stratup()*. Ak sa pozorne pozriete na [životný cyklus|doc:nette-application-presenter] Presentera, zistíte, že metóda *startup()* je volaná na úplnom začiatku *behu* Presentera. Ak teda chcete zabrániť vykonaniu akcie/view Presentera, musíte to urobiť práve tu.
+V Presenteri sme prepísali metódu *stratup()*. Ak sa pozorne pozrieme na [životný cyklus|doc:nette-application-presenter] Presentera, zistíme, že metóda *startup()* sa volá na úplnom začiatku behu Presentera. Ak teda chcete zabrániť vykonaniu akcie Presentera, musíme to urobiť práve tu.
 
 Kód presne implementuje logiku, ktorú sme spomínali o pár odstavcov vyššie - overí sa, či je užívateľ prihlásený
-- ak nie, overí sa či už neuplynul *logout interval*, v tomto prípade nastavíme flashMessage s informáciou. Každý neprihlásený užívateľ je potom presmerovaný na taký *Presenter:View*, ktorý zabezpečí vykreslenie prihlasovacieho formulára. Predtým je ešte do Session uložený aktuálny request, vďaka čomu bude užívateľ po prihlásení hneď presmerovaný na požadovanú *destination*.
-- ak áno, je s pomocou ACL rozhodnuté či má užívateľ prístup k *zdroju* a *operácii*.
+- ak nie, overí sa či už neuplynul *logout interval*, v tomto prípade nastavíme flashMessage s informáciou. Každý neprihlásený užívateľ je potom presmerovaný na *AdminModule\AuthPresenter:login*, ktorý zabezpečí vykreslenie prihlasovacieho formulára. Predtým je ešte do Session uložený aktuálny request, vďaka čomu bude užívateľ po prihlásení hneď presmerovaný na *destination*, z ktorej sme ho v tomto kroku *vyhodili*.
+- ak áno, je s pomocou ACL rozhodnuté či má užívateľ *privilégium* k *zdroju*.
 
-Presenter okrem toho ešte obsahuje akciu na odhlásenie užívateľa z admin modulu. Nikdy **nezabudnite všetkým užívateľom, ktorí sa prihlasujú do AdminModule dať oprávnenie na túto akciu**, inak sa nebudú môcť odhlásiť! Naše ACL toto splňuje nakoľko rola *registered* má oprávnenia na všetky *operácie* v *Admin_DefaultPresenter*-i.
+Presenter okrem toho ešte obsahuje akciu na odhlásenie užívateľa z admin modulu. Nikdy **nezabudnite všetkým užívateľom, ktorí sa prihlasujú do AdminModule dať oprávnenie na túto akciu**, inak sa nebudú môcť odhlásiť! Naše ACL toto splňuje nakoľko rola *registered* má oprávnenia na všetky *privilégia* v *AdminModule\DefaultPresenter*.
 
-Ako ste si mohli všimnúť z popisu a kódu, neprihlásení užívatelia sú presmerovaní na *AuthPresenter:login*, kde sa im zobrazí prihlasovací formulár. Vytvorte nový súbor **app/AdminModule/presenters/AuthPresenter.php** a zapíšte do neho tento kód
+Ako ste si mohli všimnúť z popisu a kódu, neprihlásení užívatelia sú presmerovaní na *AdminModule\AuthPresenter:login*, kde sa im zobrazí prihlasovací formulár. Vytvorte nový súbor pre Presenter **app/AdminModule/presenters/AuthPresenter.php** a zapíšte do neho tento kód
 
 /--php
 <?php
 
-final class Admin_AuthPresenter extends Admin_BasePresenter
-{
+namespace AdminModule;
 
+use AdminModule\Forms\LoginForm;
+
+final class AuthPresenter extends BasePresenter
+{
     /** @persistent */
     public $backlink = '';
 
     protected function createComponentLoginForm($name)
     {
-        $form = new AppForm($this, $name);
+        $form = new LoginForm($this, $name);
+    }
+}
+\--
 
-        $form->addText('login', 'Email:')
-             ->addRule(Form::EMAIL, 'Prosím zadajte registračný email.');
+Presenter obsahuje iba jednu továrničku na vytvorenie login formulára. Samotný formulár je uložený v samostatnej triede *AdminModule\Forms\LoginForm*. Veľmi vám doporučujeme aby ste si v rámci projektu organizovali Formuláre/Komponenty do samostatných tried do súborov, ktorých umiestnenie kopíruje ich namespace.
 
-        $form->addPassword('password', 'Password:')
-             ->addRule(Form::FILLED, 'Prosím zadajte heslo.');
+Vytvorte nový súbor **app/AdminModule/forms/LoginForm.php** a zapíšte do neho definíciu formulára:
 
-        $form->addProtection('Prosím odošlite prihlasovacie údaje znova (vypršala platnosť tzv. bezpečnostného tokenu).');
-        $form->addSubmit('send', 'Log in!');
+/--php
+<?php
 
-        $form->onSubmit[] = array($this, 'loginFormSubmitted');
+namespace AdminModule\Forms;
+
+use Nette\Application\AppForm,
+    Nette\Forms\Form,
+    Nette\Environment,
+    Nette\Security\AuthenticationException;
+
+class LoginForm extends AppForm
+{
+    public function __construct($parent, $name)
+    {
+        parent::__construct($parent, $name);
+
+        $this->addProtection('Prosím odošlite prihlasovacie údaje znova (vypršala platnosť bezpečnostného tokenu).');
+
+        $this->addText('login', 'Email:')
+            ->addRule(Form::FILLED, 'Prosím zadajte registračný email.')
+            ->addRule(Form::EMAIL, 'Zadaný login nie je platná emailová adresa');
+
+        $this->addPassword('password', 'Password:')
+            ->addRule(Form::FILLED, 'Prosím zadajte heslo.');
+
+        $this->addSubmit('send', 'Log in!');
+        $this->onSubmit[] = array($this, 'formSubmited');
     }
 
-    public function loginFormSubmitted($form)
+    public function formSubmited($form)
     {
         try {
-            $user = Environment::getUser();
-            $user->authenticate($form['login']->value, $form['password']->value);
-            $this->getApplication()->restoreRequest($this->backlink);
-            $this->redirect('Default:default');
+            $user = $this->getPresenter()->getUser();
+            $user->login($form['login']->value, $form['password']->value);
+
+            $this->getPresenter()->getApplication()->restoreRequest($this->getPresenter()->backlink);
+            $this->getPresenter()->redirect('Default:default');
         }
         catch (AuthenticationException $e) {
             $form->addError($e->getMessage());
         }
     }
-
 }
 \--
 
-Presenter obsahuje jednu továrničku na vytvorenie login formulára. Formulár má polia pre email (s patričným validátorom), pre heslo, odosielacie tlačidlo. Okrem toho sme formulár obohatili o ochranu pred CSRF a nakoniec sme pridali *callback* na metódu, ktorá spracuje údaje z formulára.
+Formulár obsahuje polia pre email (s patričným validátorom), pre heslo, odosielacie tlačidlo. Okrem toho sme formulár obohatili o ochranu pred CSRF a nakoniec sme pridali *callback* na metódu, ktorá spracuje údaje z formulára.
 
-Aj tá je súčasťou kódu presentera. Dôležité je upozorniť, že tá sa dostane k slovu iba ak je odoslaný formulár valídny (prejde validačnými pravidlami definovanými v továrničke formulára). Úlohou callback funkcie je predať údaje z formulára do nášho *Authenticatora* a jeho metódy *authenticate()* (viď. vyššie). V prípade, že je autentifikácia úspešná, je z Authenticatora získaná *identita* a užívateľ je presmerovaný späť.
+Tá sa vykoná iba ak je odoslaný formulár valídny (prejde validačnými pravidlami definovanými v konštruktore formulára). V tele callback funkcie sa pokúsime užívateľa prihlásiť (na pozadí sa zavolá metóda *authenticate()* z nášho *Authenticatora* viď. vyššie). V prípade, že je prihlásenie úspešné, užívateľ je presmerovaný späť.
 
-Všimnite, si že volanie **Authenticator::authenticate()** je obalené try/catch blokom. Ak teda metóda *authenticate()* vyhodí nejakú výnimku (a že ich vyhadzuje sa presvedčte vyššie v definícii triedy **Proj_Security_Authenticator**), je message výnimky vložená do formulára a ten je nanovo vykreslený užívateľovi (samozrejme užívateľa neprihlásime), kde je o svojej chybe informovaný.
+Všimnite, si že volanie **$user->login()** je obalené try/catch blokom. Ak teda metóda *authenticate()* vyhodí nejakú výnimku (a že ich vyhadzuje sa presvedčte vyššie v definícii triedy **AclProj\Security\Authenticator**), je message výnimky vložená do formulára a ten je nanovo vykreslený užívateľovi (samozrejme užívateľa neprihlásime), kde je o svojej chybe informovaný.
 
-Ostáva doplniť kód šablóny AuthPresentera, kde sa nachádza vykreslenie prihlasovacieho formulára. Vytvorte súbor **app/AdminModule/templates/Auth.login.phtml**
+Ostáva doplniť kód šablóny AuthPresentera, kde sa nachádza vykreslenie prihlasovacieho formulára. Vytvorte súbor **app/AdminModule/templates/Auth.login.latte**
 
-/--
-{assign robots => noindex}
+/--php
+{var robots = noindex}
 
 {block #title}Login :: {include #parent}{/block}
 
 {block #content}
-  {widget loginForm}
-{/block}
+    <div id="loginForm">
+        {control loginForm}
+    </div>
 \--
 
-Keďže na prihlásenie sa zvyčajne používa iné rozloženie stránky ako v samotnej admin sekcii, budeme pri vykresľovaní *AuthPresenter:login* používať iný layout. Vytvorte súbor **app/AdminModule/templates/Auth.@layout.phtml** a dajte do neho dajte "tento kód":www.srigi.sk/stuff/nette_acl/auth-layout-phtml.phps.
+Keďže na prihlásenie sa zvyčajne používa iné rozloženie stránky ako v samotnej admin sekcii, budeme pri vykresľovaní *AdminModule\AuthPresenter:login* používať iný layout. Vytvorte súbor **app/AdminModule/templates/Auth.@layout.latte** a dajte do neho dajte [tento kód|http://files.nette.org/1262/auth.-layout.latte].
 
 Teraz sa už môžete vyskúšať prihlásiť do admin sekcie
 - zadajte do browsra URL **http://nette-acl/admin**
 - ak sa chcete prihlásiť ako admin zadajte email **admin@example.com** a heslo **admin**.
 
-[* 729fli.png *]:[* f556oo.png *]
-[* 2z86ec3.png *]:[* 2i97bd2.png *]
+[* login-small.png *]:[* login.png *]
+[* logged-in-small.png *]:[* logged-in.png *]
 
 .[tip]
-Ak aplikácia nechce pracovať a neustále vykakuje Laděnka, nezabudnite premazať zložku **app/temp**.
+Ak aplikácia nechce pracovať a neustále vyskakuje Laděnka, nezabudnite premazať zložku **temp/cache**.
 
 Aby ste mohli vyskúšať funkciu ACL, je treba do AdminModulu pridať ďalšie dva Presentery. Tie dodatočné dva, ktoré sú definované v ACL. Aby sme ich rovnako ochránili pred neoprávneným prístupom pomocou ACL, je treba preťažiť ich metódy **startup()**. Takýto prístup ale nie je veľmi efektívny - písať stále sa opakujúci kód do každého Presentera AdminModulu - to si žiada nejaký refactoring.
 
-Prvé čo vás asi napadne je "ochranný" kód z **DefaultPresenter**a presunúť do **Admin_BasePresenter**. Keď sa však na kód dobre pozriete, zistíte že kód v prvom kroku overí či je užívateľ prihlásený. Ak nie je, bude presmerovaný na **AuthPresenter:login**. Lenže aj on dedí od **Admin_BasePresenter**. Po presmerovaní by sa znova overovala "prihlásenosť" a zase by sa presmerovávalo. Aplikácia sa dostane do slučky a zhavaruje. **AuthPresenter** musíme teda z overovania vylúčiť. Overovací kód je treba umiestniť inam.
+Prvé čo vás asi napadne je "ochranný" kód z **DefaultPresenter**a presunúť do **BasePresenter**. Keď sa však na kód dobre pozriete, zistíte že kód v prvom kroku overí či je užívateľ prihlásený. Ak nie je, bude presmerovaný na **AuthPresenter:login**. Lenže aj on dedí od **Admin_BasePresenter**. Po presmerovaní by sa znova overovala "prihlásenosť" a zase by sa presmerovávalo. Aplikácia sa dostane do slučky a zhavaruje. **AuthPresenter** musíme teda z overovania vylúčiť. Overovací kód je treba umiestniť inam.
 
-Ideálne je vytvoriť nového predka pre všetky Presentery, ktoré budú chránené ACL. Tu vás však upozorníme, že od tohto predka nebude dediť **DefaultPresenter**. Je to z toho dôvodu, prihlásený užívateľ ktorý sa snaží dostať do Presenter:View na ktorý nemá oprávnenia nesmie byť presmerovaný na **AuthPresenter:login** (kde sa vykresľuje prihlasovací formulár). Je už predsa prihlásený. Kód v **DefaultPresenter::startup()** však robí práve to (viď. vyššie). Prihlásených užívateľov po neúspešnom vstupe do sekcií kde nemajú na prístup oprávenia presmerujeme späť na úvodnú stránku admin sekcie **DefaultPresenter:default**.
+Ideálne je vytvoriť nového predka pre všetky Presentery, ktoré budú chránené ACL. Tu vás však upozorníme, že od tohto predka nebude dediť **DefaultPresenter**. Je to z toho dôvodu, prihlásený užívateľ ktorý sa snaží spustiť Presenter:action na ktorý nemá oprávnenia by nemal byť presmerovaný na **AuthPresenter:login** (kde sa vykresľuje prihlasovací formulár). **Je už predsa prihlásený!** Kód v **DefaultPresenter::startup()** však robí práve to (viď. vyššie). Prihlásených užívateľov po neúspešnom vstupe do sekcií kde nemajú na prístup oprávenia presmerujeme späť na úvodnú stránku admin sekcie **DefaultPresenter:default**.
 
 Takýto rozbor nás dovedie k nasledujúcemu stromu presenterov:
 
-[* kalnqv.png *]:[* 6eonjp.png *]
+[* uml-small.png *]:[* uml.png *]
 
-Všetky chránené Presentery s výnimkou **DefaultPresenter** budú teda dediť od **SecuredPresenter**. Ten preťažuje metódu **startup()** takže všetci jeho potomkovia budú pomocou kódu v nej overovaní cez ACL. Ostáva teda napísať kód zostávajúcich Presenterov
+Všetky chránené Presentery s výnimkou **DefaultPresenter** budú teda dediť od **SecuredPresenter**. Ten prepisuje metódu **startup()** takže všetci jeho potomkovia budú pomocou kódu v nej overovaní cez ACL. Ostáva teda napísať kód zostávajúcich Presenterov
 
 **app/AdminModule/presenters/SecuredPresenter.php**
 /--php
 <?php
 
-abstract class Admin_SecuredPresenter extends Admin_BasePresenter
+namespace AdminModule;
+
+abstract class SecuredPresenter extends BasePresenter
 {
     public function startup()
     {
         parent::startup();
-        $user = Environment::getUser();
 
-        if (!$user->isAuthenticated()) {
-            if ($user->getSignOutReason() === User::INACTIVITY) {
+        $user = $this->getUser();
+
+        if (!$user->isLoggedIn()) {
+            if ($user->getLogoutReason() === User::INACTIVITY) {
                 $this->flashMessage('Uplynula doba neaktivity! Systém vás z bezpečnostných dôvodov odhlásil.', 'warning');
             }
 
-            $this->flashMessage('Na vstup do ADMIN sekcie sa musíte prihlásiť!', 'warning');
             $backlink = $this->getApplication()->storeRequest();
             $this->redirect('Auth:login', array('backlink' => $backlink));
-        }
-        else {
-            if (!$user->isAllowed($this->reflection->name, $this->getAction())) {
-                $this->flashMessage('Pokúsili ste sa vstúpiť do sekcie, na ktorú nemáte dostatočné oprávnenia! Vstup vám bol odopretý.', 'warning');
+
+        } else {
+            if (!$user->isAllowed($this->name, $this->action)) {
+                $this->flashMessage('Na vstup do tejto sekcie nemáte dostatočné oprávnenia!', 'warning');
                 $this->redirect('Default:');
             }
         }
@@ -474,7 +526,9 @@ Pridajte aj dva nové chránené Presentery...
 /--php
 <?php
 
-final class Admin_PagePresenter extends Admin_SecuredPresenter
+namespace AdminModule;
+
+final class PagePresenter extends SecuredPresenter
 {
 
 }
@@ -484,7 +538,9 @@ final class Admin_PagePresenter extends Admin_SecuredPresenter
 /--php
 <?php
 
-final class Admin_UserPresenter extends Admin_SecuredPresenter
+namespace AdminModule;
+
+final class UserPresenter extends SecuredPresenter
 {
 
 }
@@ -498,12 +554,9 @@ final class Admin_UserPresenter extends Admin_SecuredPresenter
 
 
 {block #content}
-
   <h1>Správa stránok</h1>
 
   <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Fusce luctus tellus at odio fringilla in venenatis dolor aliquam.</p>
-
-{/block}
 \--
 
 **app/AdminModule/templates/User.default.phtml**
@@ -512,21 +565,18 @@ final class Admin_UserPresenter extends Admin_SecuredPresenter
 
 
 {block #content}
-
   <h1>Správa užívateľov</h1>
 
   <p>Lorem ipsum dolor sit amet, consectetur adipiscing elit. Fusce luctus tellus at odio fringilla in venenatis dolor aliquam.</p>
-
-{/block}
 \--
 
-Premažte zložku **app/temp** a otestuje prístup na nové Presentery pomocou všetkých užívateľov. Odhláste administratora a prihláste sa napr. ako Betty
+Premažte zložku **temp/cache** a otestuje prístup na nové Presentery pomocou všetkých užívateľov. Odhláste administratora a prihláste sa napr. ako Betty
 - email **betty@example.com**, heslo **pokus**
 Bety má podľa ACL povolenie na pohyb po **DefaultPresenter**i a **PagePresenter**i. Nemá oprávnenie na vstup do **UserPresenter**a. Skúste klepnúť na jeho odkaz a uvidíte čo sa stane
 
 [* 24lonxj.png *]:[* 2rnhgzn.png *]
 
-Zapracoval ACL a Presenter ochránil pred nepovoleným vstupom neoprávenej role. Aplikácia je v tomto momente hotová, môžete si ju celú stiahnuť ako "archív .zip":http://s000.tinyupload.com/?file_id=88540687722145713752 (neobsahuje knižnice Nette Framework a Dibi)
+Zapracoval ACL a Presenter ochránil pred nepovoleným vstupom neoprávenej role. Aplikácia je v tomto momente hotová, môžete si ju celú stiahnuť ako "archív .zip":http://s000.tinyupload.com/?file_id=88540687722145713752 (neobsahuje knižnice Nette Framework).
 
 {{tags: tutorial}}
 

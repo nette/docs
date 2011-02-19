@@ -242,7 +242,159 @@ $item = $repository->find(2);
 
 
 .[note]
-Tenhle přístup používá i Doctrine2 mimochodem :)
+Tenhle přístup používá i Doctrine 2 a o všechny repozitáře a mappery se postará za Vás :)
+
+
+Někde na půl cesty
+==================
+
+Uvedené příklady vůbec neřeší nějaké stránkování, řazení a pokročilejší filtrování. To je funkcionalita, která proti původnímu MVC návrhu vytváří "paradox":http://phpfashion.com/mvc-paradox-a-jak-jej-resit, uvedené řešení, ale není **ultimátní**.
+
+Takové věci, ale není problém implementovat někde napůl v repozitáři a mapperu. Mapper může poskytovat nějaké interface, kterým si přes repozitář (né však přímo) může programátor takové věci konfigurovat.
+
+/--- code php
+public function findBy(array $values, array $orderBy = array(), $limit = 0, $offset = 0)
+{
+	// ...
+}
+\---
+
+Podle mých zkušeností, většinou nic takového ani není potřeba, prostě se napíše metoda do mapperu, která trošku ohne výsledek jiné `Mapper::findByNecoOrderByTamto()`, samozřejmě se tím stěžuje vyměnitelnost takového mapperu.
+
+Částečným řešením je, spojit funkcionalitu repozitáře a mapperu do jednoho složitějšího modelu. Odpadá pak potřeba psát metody jako
+
+/--- code php
+public function findByNecoOrderByNeco(array $values)
+{
+	return $this->mapper->findByNecoOrderByNeco($values);
+}
+\---
+
+
+Řešení pro dibi s vlastním DataSource
+=====================================
+
+Další, lepší, možností je, udělat si vlastní implementaci pro "IDataSource":http://api.dibiphp.com/1.5/IDataSource.html, která nebude obalovat dotazy do subqueries (ach ta MySQL) ale bude pracovat s "DibiFluent":http://phpfashion.com/dibifluent-tekute-sql-prikazy a zvýší tím výkon v MySQL databázi.
+
+Na získávání více záznamů, by se pak z repozitáře volalo něco jako:
+
+/--- code php
+// metoda v repozitáři
+public function getDataSource()
+{
+	// konkrétní implementace je nepodstatná, ale mohlo by to být něco jako:
+
+	return new LazyCollection($this->mapper, $this->mapper->allDataSource());
+
+	// předám mu mapper, aby mohl pro všechny záznamy volat metodu load z mapperu
+	// a taky dataSource, který ovšem nebude tak docela datasource, ale jenom fluent
+}
+\---
+
+ShoppingCartDibiMapper
+/--- code php
+public function allDataSource()
+{
+	return $this->conn->select('*')->from('shopping_cart');
+}
+\---
+
+LazyCollection pak může vypadat jednoduše takto
+
+/--- code php
+class LazyCollection implements IDataSource // z dibi
+{
+
+	private $mapper;
+	private $query;
+
+	private $limit;
+	private $offset;
+
+
+	public function __construct(IMapper $mapper, DibiFluent $query)
+	{
+		$this->mapper = $mapper;
+		$this->query = $query;
+	}
+
+
+	/**
+	 * vyžadováno interfacem IteratorAggregate
+	 * je možné pak procházet jako foreach ($datasource as $row) { ...
+	 */
+	public function getIterator()
+	{
+		$result = $this->query->getIterator($this->limit, $this->offset);
+
+		$data = array();
+		foreach ($result as $row) {
+			// vyžaduje load jako veřejnou metodu
+			$data[$row->id] = $this->mapper->load($row);
+		}
+
+		return \ArrayIterator($data);
+	}
+
+
+	public function where($cond)
+	{
+		if (func_num_args() > 1) {
+			$cond = func_get_args();
+		}
+
+		$this->query->where('%ex', (array)$cond);
+
+		return $this;
+	}
+
+
+	public function applyLimit($limit, $offset)
+	{
+		$this->limit = $limit;
+		$this->offset = $offset;
+
+		return $this;
+	}
+
+
+	public function orderBy(array $order)
+	{
+		$this->query->orderBy($order);
+	}
+}
+\---
+
+Takový datasource se pak nemusím stydět vrátit z repozitáře "Presenteru":http://doc.nette.org/cs/nette-application-presenter, ten si může vyfiltrovat výsledky pomocí metody `where`, na základě nějakých filtrů z parametrů, může si seřadit výsledky jak je potřeba a předá pak `LazyCollection` (DataSource) šabloně.
+
+/--- code php
+public function renderDefault()
+{
+	// $this->shoppingCart instanceof ShoppingCartRepository
+
+	$collection = $this->shoppingCart->getDataSource();
+
+	$collection->where('user_id = %i', $this->getUser()->identity->id);
+	$collection->orderBy(array('poradi_pridani_do_kosiku' => dibi::ASC));
+
+	$this->template->shoppingCartItems = $collection;
+}
+\---
+
+V šabloně už je možné s výsledkem pracovat jako obvykle.
+
+/--- code html
+{forech $shoppingCartItems as $item}
+	{$item->name}
+{/forech}
+\---
+
+
+
+Závěrem
+=======
+
+Pamatujte, že nikdy neexistuje jedné správné řešení. Je třeba se správně rozhodnou co se nejvíce hodí na konkrétní problém :)
 
 {{tags: cookbook}}
 

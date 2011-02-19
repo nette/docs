@@ -1,0 +1,234 @@
+Model: Entity-Repository-Mapper
+*******************************
+
+.[perex]
+Co je to vlastně ten Model? To je přeci nějaká třída, která pracuje s databází. Nebo ne? Cest, jak si napsat model, je hodně. Ale jak to napsat, abych mohl snadno měnit databáze (to je tak blbý argument, kdo z Vás každý týden mění databázi?), abych mohl snadno přidávat funkčnost a abych tím, pokud možno, nic nebořil a nemusel přepisovat už napsaný kód, když chci přidat funkci, která se klientovi zdá jako "detail".
+
+Předem bych chtěl upozornit na článek "Pět vrstev modelu":http://www.phpguru.cz/clanky/pet-vrstev-modelu, aby jste mi věřili, že si to nevymýšlím :)
+
+
+
+Entity
+======
+
+Je třeba si napsat entitu, třeba nějakou jednoduchou.
+
+/---code php
+class ShoppingCartItem
+
+{
+	private $id; // nastavovat v mapperu reflexí, aby "nešlo" změnit
+
+	public $name; // jméno položky
+
+	public $cost; // kolik stojí
+
+	// .. další vlastnosti
+
+	public function getId()
+	{
+		return $this->id;
+	}
+}
+\---
+
+*) "reflexe - ClassReflection":http://api.nette.org/2.0/Nette.Reflection.ClassReflection.html#_getProperty
+
+Entita by měla být vyloženě hloupoučká, je to jenom obálka na data, načtená z úložiště (databáze, session), jediné feature, které může mít, je že kontroluje typy hodnot, které jí vnucujeme. Třeba pomocí "properties":http://doc.nette.org/cs/nette-object#toc-gettery-a-settery.
+
+Víceméně je to něco jako "DibiRow":http://api.dibiphp.com/1.5/source-libs.DibiRow.php.html#16 (což je chytřejší "ValueObject":http://en.wikipedia.org/wiki/Domain-driven_design#Building_Blocks_of_DDD), ale má properties nadefinované tak, aby odrážely strukturu z databáze (né nezbytně, protože entita může být složená i z více tabulek v DB).
+
+Repository
+==========
+
+Repozitář by měl umět pracovat s daným interface mapperu.
+
+/---code php
+class ShoppingCartRepository extends Nette\Object
+{
+	private $mapper;
+
+
+	// interface IShoppingCartMapper extends IMapper
+	public function __construct(IShoppingCartMapper $mapper)
+	{
+		$this->mapper = $mapper
+	}
+
+
+	public function save(ShoppingCartItem $item)
+	{
+		// pokud ukládám novou, může mapper automaticky nastavovat ID
+		$this->mapper->save($item);
+
+		return $item;
+
+		// a pak můžu s ID pracovat
+		// $item = $repository->save($item);
+		// echo $item->getId();
+	}
+
+
+	public function find($id)
+	{
+		return $this->mapper->find($id);
+	}
+
+
+	// metody jako findByName patří spíše sem
+	public function findByName($name)
+	{
+		return $this->mapper->findBy(array(
+			'name' => $name
+		));
+	}
+
+	// další metody
+}
+\---
+
+Žádná metoda v repozitáři, by neměla šahat na úložiště, to má dělat mapper
+
+
+Mapper
+======
+
+Je vhodné si nadefinovat základní interface, který by by měly mít všechny mappery.
+
+/---code php
+interface IMapper
+{
+	/** uložit entitu, sám si rozhodne, jestli aktualizuje, nebo ukládá novou */
+	function save($entity);
+
+	/** najít entitu s ID */
+	function find($id);
+
+	/** předáš tomu pole hodnot, podle kterých má hledat. Vrátí entity co odpovídají */
+	function findBy(array $values);
+
+	/** předáš tomu pole hodnot, podle kterých má hledat. Vrátí jednu entitu */
+	function findOneBy(array $values);
+
+	/** vrátí všechno */
+	function findAll();
+
+	// popř. si můžeš napsat další funkce, které budou umět nějaké velice specifické funkce
+	// ale to spíše až v tom konkrétnějším mapperu
+}
+\---
+
+Potom takový mapper (třeba `ShoppingCartDibiMapper`) implementuje tohle interface. Repozitář už pak jenom pracuje s tímhle mapperem a je mu jedno, jestli to ukládá do databáze (`ShoppingCartDibiMapper`) nebo někam do session (`ShoppingCartSessionMapper`).
+
+
+jednoduchý mapper by pak mohl vypadat
+
+/---code php
+class ShoppingCartDibiMapper extends Nette\Object implements IShoppingCartMapper
+{
+	private $conn;
+
+	public function __construct(DibiConnection $conn)
+	{
+		$this->conn = $conn;
+	}
+
+	public function save(ShoppingCartItem $item)
+	{
+		if ($item->getId() === NULL) { // insert
+			$data = $this->itemToData($item); // vytáhne data z entity a vrátí jako pole
+			$id = $this->conn->insert('shopping_cart', $data)->execute();
+			$this->setIdentity($item, $id);
+
+		} else { // update
+			$data = $this->itemToData($item); // vytáhne data z entity a vrátí jako pole
+			// tady se velice hodí logika, která porovná v jakém stavu byla entita při načtení
+			// a v jakém je teď, aby se nemuselo posílat všechno, ale to jsou hodně pokročílé funkce
+			// a optimalizace se má dělat až když je potřeba, že :)
+
+			$this->conn->update('shopping_cart', $data)
+				->where('id = %i', $item->getId())->execute();
+		}
+	}
+
+	public function find($id)
+	{
+		$data = $this->conn->select('*')->from('shopping_cart')->where('id = %i', $id)->fetch();
+		return $this->load($data);
+	}
+
+
+	public function findAll()
+	{
+		$data = $this->conn->select('*')->from('shopping_cart')->where('id = %i', $id)->fetchAll();
+
+		$result = array();
+		foreach ($data as $row) {
+			$result[$row->id] = $this->load($row);
+		}
+
+		return $result;
+	}
+
+	private function load($data)
+	{
+Takže máš entitu
+
+Máš repozitář
+
+		$item = new ShoppingCartItem;
+		$this->setIdentity($item, $data->id);
+
+		unset($data['id']);
+		foreach ($data as $prop => $val) {
+			$item->$prop = $val;
+		}
+
+		return $item;
+	}
+
+	private function setIdentity($item, $id)
+	{
+		$ref = Nette\Reflection\ClassReflection($item);
+		$idProp = $ref->getProperty('id');
+		$idProp->setAccessible(TRUE);
+		$idProp->setValue($item, $id);
+
+		return $item;
+	}
+
+}
+\---
+
+Tento mapper je opravu hodně jednoduchý, neumí řadit, limity, složitější věci, atd. A tohle je právě docela otrava dělat pro každou entitu, ale je to nejlepší možné řešení, protože je to pak krásné oddělené a moc hezky se s tím pracuje.
+
+Použití
+=======
+
+/---code php
+$repository = new ShoppingCartRepository(new ShoppingCartDibiMapper(dibi::getConnection()));
+
+$item = new ShoppingCartItem();
+$item->name = "Ponožky";
+$item->cost = 20;
+
+$item = $repository->save($item);
+
+echo $item->getId();
+
+$item = $repository->find(1);
+echo $item->name;
+\---
+
+Je možné si pak trochu usnadnit práci a repozitář si nadefinovat jako službu, udělat si na něj nějakou továrničku a pracovat s tím zase o něco jednodušeji.
+
+/---code php
+// $this === $presenter
+$repository = $this->getApplication()->getService('JmenoEshopu\ShoppingCart');
+\---
+
+Tenhle přístup používá i Doctrine2 mimochodem :)
+
+{{tags: cookbook}}
+
+{{author: Filip Procházka|2118}}

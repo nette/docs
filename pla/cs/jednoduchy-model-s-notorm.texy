@@ -11,6 +11,9 @@ Tento krátky tutoriál si kladie za cieľ naznačiť riešenie Modelovej vrstvy
 - veľmi tenká Modelová vrstva s jednoduchou možnosťou rozširovania
 - zachovanie *lazy* pripojenia k databáze (vylúčenie volania pripojenia v `bootstrap.php`)
 
+ModelLoader
+===========
+
 Hneď na začiatok uveďme príklad práce s Modelom, ktoré nevnáša povinnosť statického volania, ale ani nenúti explicitne inštancovať triedu s Modelom.
 
 /--code php
@@ -18,12 +21,12 @@ final class FooPresenter extends BasePresenter
 {
     public function renderDefault()
     {
-        $this->template->user = $this->getModel('users')->findByEmail('john.doe@example.com');
+        $this->template->applications = $this->getModel('applications')->findByName('Nette');
     }
 }
 \---
 
-Prvé takéto volanie iniciuje pripojenie k databáze. Nejedná sa teda o skutočne lazy pripojenie iniciované prvým DB požiadavkom, ale takáto funkcionalita zväčša postačuje. Aby takéto volanie bolo dostupné vo všetkých Presenteroch, treba logicky umiestniť do `BasePresenter` definíciu metódy `getModel()`.
+Prvé takéto volanie iniciuje pripojenie k databáze. Nejedná sa o skutočne lazy pripojenie iniciované prvým DB požiadavkom, ale takáto funkcionalita zväčša postačuje. Aby takéto volanie bolo dostupné vo všetkých Presenteroch, treba logicky umiestniť do `BasePresenter` definíciu metódy **`getModel()`**.
 
 /--php
 abstract class BasePresenter extends Nette\Application\Presenter
@@ -35,9 +38,9 @@ abstract class BasePresenter extends Nette\Application\Presenter
 }
 \--
 
-Zavolanie `getModel()` v konkrétnom Presenteri v skutočnosti znamená získanie tzv. služby, ktorá nám obstaráva *naťahovanie* Modelov. Vďaka logike Nette služieb a konfigurácii v `app/config.neon` je v tomto konkrétnom prípade, pri prvom požiadavku na získanie `ModelLoader` inštancovaná a vrátená jeho trieda. Pri každom ďalšom požiadavku na `ModelLoader` je už používaná (vracaná) takto vytvorená inštancia.
+Zavolanie `getModel()` v konkrétnom Presenteri v skutočnosti znamená získanie tzv. služby, ktorá nám obstaráva *naťahovanie* Modelov. Vďaka logike Nette služieb a konfigurácii v **`app/config.neon`** je v tomto konkrétnom prípade, pri prvom požiadavku na získanie **`ModelLoader`** inštancovaná a vrátená jeho trieda. Pri každom ďalšom požiadavku na `ModelLoader` je už používaná (vracaná) takto vytvorená inštancia.
 
-To ktorá trieda sa má inštancovať pri zavolaní `$application()->getService('ModelLoader')` je nastavené, ako sme už spomenuli v hlavnom konfiguračnom súbore **`app/config.neon`**.
+To, ktorá trieda sa má inštancovať pri zavolaní `$application()->getService('ModelLoader')` je nastavené, ako sme už spomenuli v hlavnom konfiguračnom súbore **`app/config.neon`**.
 
 /--
 common:
@@ -48,12 +51,171 @@ common:
             run: true
 
         ModelLoader: Proj\ModelLoader
+
+development < common:
+    database:
+        driver:   mysql
+        host:     localhost
+        database: notorm_demo
+        username: php
+        password: php
+        profiler: true
 \--
 
 .[note]
 Viac informácií o službách a ich konfigurácii nájdete "tu":http://forum.nette.org/cs/6506-jak-zaregistrovat-sluzbu-v-config-ini.
 
-V tomto momente už teda Nette vie, ktorú triedu má inštancovať. Táto triedu bude samozrejme obsahovať metódu `getModel()`, ktorá bude vracať inštancie konkrétnych Modelov. Triedu `Proj\ModelLoader` doporučujeme umiestniť do **`libs\Proj\ModelLoader.php`**
+V tomto momente už teda Nette vie, ktorú triedu má inštancovať. Táto trieda bude samozrejme obsahovať metódu **`getModel()`**, ktorá bude vracať inštancie konkrétnych Modelov. Triedu **`Proj\ModelLoader`** doporučujeme umiestniť do **`libs\Proj\ModelLoader.php`**.
+
+/--php
+<?php
+
+namespace Proj;
+
+use Nette\Debug,
+    Nette\Environment,
+    PDO,
+    NotORM,
+    NotOrmPanel,
+    NotORM_Structure_Convention;
+
+class ModelLoader extends \Nette\Object
+{
+    private $dbConnection = null;
+    private $models = array();
+
+    public function getModel($model)
+    {
+        if (!isset($this->models[$model])) {
+            $class = 'Model\\' . ucfirst($model);
+            $this->models[$model] = new $class($this->dbConnection);
+        }
+
+        return $this->models[$model];
+    }
+}
+\--
+
+Najskôr si popíšme hore uvedenú metódu. Po jej zavolaní hľadáme vo veľmi jednoduchom *zásobníku* (reprezentovaným obyčajným poľom) inštanciu žiadaného Modelu. Ak sa Model nenájde, inštanciu vytvoríme, uložíme ju do zásobníku a z neho ju potom vrátime. Ide tu teda o jednoduché (dalo by sa povedať) kešovanie, pri mnohých požiadavkách na ten istý Model (počas jedného requestu samozrejme) sa nová inštancia nevytvára stále dookola. Všimnite si, že sme zaviedli konvenciu, že všetky Modely *sídlia* v namespace **Model**. Za zmienku ešte stojí, že do konštruktora Modelu predávame databázové pripojenie.
+
+Jeho vytvorenie obstaráva koštruktor **`ModelLoader`**. Zároveň `ModelLoader` obsahuje užitočnú metódu na vrátenie samotného DB spojenia.
+
+/--php
+    public function __construct()
+    {
+        $this->dbConnect();
+    }
+
+    public function getConnection()
+    {
+        return (null === $this->dbConnection) ? $this->dbConnect() : $this->dbConnection;
+    }
+
+    private function dbConnect()
+    {
+        $cfg = Environment::getConfig('database');
+
+        $pdo = new PDO("{$cfg->driver}:host={$cfg->host};dbname={$cfg->database}", $cfg->username, $cfg->password);
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $pdo->query('SET NAMES utf8');
+
+        $conn = new NotORM($pdo, new NotORM_Structure_Convention('id', '%s_id', '%ss'));
+
+        if ($cfg->profiler) {
+            $panel = NotOrmPanel::getInstance();
+            $panel->setPlatform($cfg->driver);
+            Debug::addPanel($panel);
+
+            $conn->debug = function($query, $parameters) {
+                NotOrmPanel::getInstance()->logQuery($query, $parameters);
+            };
+        }
+
+        return $this->dbConnection = $conn;
+    }
+\--
+
+V metóde **`dbConnect()`** sa nachádza jediné statické volanie (a okrem toho aj volanie singletonu, ktorý zabezpečuje profilovanie). Pri vytváraní objektu NotORM nastavujeme vlastnú konvenciu, ktorá zabezpečí podporu pluralizovaných názvov DB tabuliek. Jednotlivé parametre konštruktora **`NotORM_Structure_Convention`** znamenajú:
+
+- konvencia pre nazývanie PK
+- konvencia pre nazývanie FK
+- konvencia pre nazývanie tabuliek
+
+Modifikátor **`%s`** zastupuje názov samotnej tabuľky.
+
+.[note]
+Profiler pre NotORM je možné nájsť na "tomto":http://forum.nette.org/cs/5943-notorm-panel-profiler-panel-pre-nette-debug mieste.
+
+Modely
+======
+ V úvode uvedený Model by zjavne mal obsahovať definíciu metódy **`findByName`**. Jeho kód však prezrádza niečo iné.
+
+/--php
+<?php
+
+namespace Model;
+
+class Applications extends Base
+{
+
+}
+\--
+
+Metódy typu **`findBy*`** sa veľmi často opakujú, mení sa len *stĺpec*, podľa ktorého chceme vyhľadávať. Zapojme preto trocha "mágie":http://php.net/manual/en/language.oop5.magic.php.
+
+/--php
+<?php
+
+namespace Model;
+
+class Base extends \Nette\Object
+{
+    protected $connection = null;
+    protected $tableName = '';
+
+    public function __construct($dbConnection)
+    {
+        $this->connection = $dbConnection;
+        $classNameParts = explode('\\', get_class($this));
+        $this->tableName = strtolower(array_pop($classNameParts));
+    }
+
+    public function getAll()
+    {
+        return $this->connection->{$this->tableName}();
+    }
+
+    public function __call($name, $args)
+    {
+        if (false !== strpos($name, 'findBy')) {
+            $cammelCaseSplit = preg_split('~(?<=\\w)(?=[A-Z])~', str_replace('findBy', '', $name));
+            $loweredCammels = array_map(function($in) {
+                return strtolower($in);
+            }, $cammelCaseSplit);
+            $findCondition = implode('.', $loweredCammels);
+
+            if (isset($args[1]) && true === $args[1]) {
+                // M:N relation
+                $relationTableName = $loweredCammels[0] . 's_' . $this->tableName;
+                $mn = $this->connection->{$relationTableName}($findCondition, $args[0])
+                    ->select(substr($this->tableName, 0, -1) . '_id');
+
+                return $this->connection->{$this->tableName}('id', $mn);
+
+            } else {
+                // no or 1:N relation
+                return $this->connection->{$this->tableName}()
+                    ->where($findCondition, $args[0]);
+            }
+        }
+    }
+}
+\--
+
+
+
+Known issues
+============
 
 {{tags: cookbook}}
 

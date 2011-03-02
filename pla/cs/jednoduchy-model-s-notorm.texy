@@ -1,10 +1,12 @@
-Jednoduchý model s NotORM
+Jednoduchý Model s NotORM
 *************************
 
 .[perex]
 "NotORM":http://www.notorm.com/, knižnica na jednoduchú prácu s relačnými databázovými údajmi, je u mnohých Nette vývojárov preferovanou voľbou. Na rozdiel od "Nette\Database":http://doc10.nette.org/cs/database je vývoj NotORM vedený samostatne, autor môže flexibilnejšie reagovať na požiadavky developerov. Takisto podporuje pokročilé nastavenie menných konvencií, ktoré umožňuje používať názvy tabuliek vo forme "plurálu":http://cs.wikipedia.org/wiki/Mno%C5%BEn%C3%A9_%C4%8D%C3%ADslo.
 
 Tento krátky tutoriál si kladie za cieľ naznačiť riešenie Modelovej vrstvy v Nette aplikáciách so zameraním na tieto požiadavky:
+
+[* schema.png >]
 
 - *pluralizovanie* názvov tabuliek
 - vylúčenie (alebo minimalizovanie) akýchkoľvek statických volaní pri práci s Modelom
@@ -14,7 +16,7 @@ Tento krátky tutoriál si kladie za cieľ naznačiť riešenie Modelovej vrstvy
 ModelLoader
 ===========
 
-Hneď na začiatok uveďme príklad práce s Modelom, ktoré nevnáša povinnosť statického volania, ale ani nenúti explicitne inštancovať triedu s Modelom.
+Hneď na začiatok uveďme príklad práce s Modelom, ktoré nevnáša povinnosť statického volania, ani nenúti explicitne inštancovať triedu s Modelom.
 
 /--code php
 final class FooPresenter extends BasePresenter
@@ -98,7 +100,7 @@ class ModelLoader extends \Nette\Object
 
 Najskôr si popíšme hore uvedenú metódu. Po jej zavolaní hľadáme vo veľmi jednoduchom *zásobníku* (reprezentovaným obyčajným poľom) inštanciu žiadaného Modelu. Ak sa Model nenájde, inštanciu vytvoríme, uložíme ju do zásobníku a z neho ju potom vrátime. Ide tu teda o jednoduché (dalo by sa povedať) kešovanie, pri mnohých požiadavkách na ten istý Model (počas jedného requestu samozrejme) sa nová inštancia nevytvára stále dookola. Všimnite si, že sme zaviedli konvenciu, že všetky Modely *sídlia* v namespace **Model**. Za zmienku ešte stojí, že do konštruktora Modelu predávame databázové pripojenie.
 
-Jeho vytvorenie obstaráva koštruktor **`ModelLoader`**. Zároveň `ModelLoader` obsahuje užitočnú metódu na vrátenie samotného DB spojenia.
+Vytvorenie databázového spojenia obstaráva koštruktor **`ModelLoader`**. Zároveň `ModelLoader` obsahuje užitočnú metódu na vrátenie samotného DB spojenia.
 
 /--php
     public function __construct()
@@ -200,7 +202,24 @@ class Base extends \Nette\Object
                 $mn = $this->connection->{$relationTableName}($findCondition, $args[0])
                     ->select(substr($this->tableName, 0, -1) . '_id');
 
-                return $this->connection->{$this->tableName}('id', $mn);
+                try {
+                    $result = $this->connection->{$this->tableName}('id', $mn);
+
+                } catch (\PDOException $e) {
+                    if (false !== strpos($e->getMessage(), 'Table') && false !== strpos($e->getMessage(), 'doesn\'t exist')) {
+                        // switch table name elements
+                        $relationTableName = $this->tableName . '_' . $loweredCammels[0] . 's';
+                        $mn = $this->connection->{$relationTableName}($findCondition, $args[0])
+                            ->select(substr($this->tableName, 0, -1) . '_id');
+
+                        $result = $this->connection->{$this->tableName}('id', $mn);
+
+                    } else {
+                        throw $e;
+                    }
+                }
+
+                return $result;
 
             } else {
                 // no or 1:N relation
@@ -212,10 +231,79 @@ class Base extends \Nette\Object
 }
 \--
 
+Toto už vypadá trocha krypticky, poďme sa na kód metódy **`__call()`** pozrieť bližšie. Po zavolaní **`$model->findByName('Nette')`** metóda obdrží v parametroch tieto údaje
 
+/--
+findByName
+
+Array
+(
+    [0] => Nette
+)
+\--
+
+V prvom kroku hľadáme v názve volanej metódy reťazec **findBy**. Ak sa nájde, rozsekáme si názov metódy podľa veľkých písmen pomocou regulárneho reťazca (predtým ešte odstránime už nepotrebný reťazec **findBy**).
+
+.[note]
+Prečo je názov rozsekaný na jednotlivé slová aj pri odstránenom **findBy** si vysvetlíme o chvíľu. Magická metóda **`__call()`** umožňuje vyhľadávať aj podľa stĺpcov v pridružených tabuľkách.
+
+/--
+Array
+(
+    [0] => Name
+)
+\--
+
+Každé získane slovo je následne prehnané cez funkciu **`strtolower()`**. Slová sú potom *zlepené* znakom **.** (bodka). Pri jednoduchom volaní **`findByName('Nette')`** dostaneme (v premennej **`$findCondition`**) obyčajný string '`name`'.
+
+V nasledujúcom kroku overujeme počet argumentov ktoré sme do **`findByName()`** predali. V našom príklade prvok **`$args[1]`** nebude nastavený a pokračuje sa vetvou `else`. Dynamicky dôjde k zostaveniu kódu, ktorého výsledok vrátime do zdroja volania
+
+/--php
+$this->connection->applications()->where('name', 'Nette');
+\--
+
+relácie 1:N
+-----------
+
+Ako sme už spomenuli v poznamke vyššie, táto Modelová vrstva umožňuje *WHERE* aj podľa stĺpca v pridruženej tabuľke
+
+/--php
+$this->template->applications = $this->getModel('applications')->findByAuthorName('David Grudl');
+\--
+
+Výsledkom bude, že vo **`$findCondition`** sa objaví 'author.name', čo NotORM (aj vďaka nastavenej mennej konvencii) donúti hľadať všetky záznamy v tabuľke **aplications**, ktoré majú reláciu do tabuľky **authors** a stĺpec **name** obsahuje žiadanú hodnotu.
+
+relácie M:N
+-----------
+
+Magická metóda **`__call()`** nakoniec umožňuje špecifikovať podmienku WHERE aj v tabuľkách spojených reláciou M:N.
+
+/--php
+$this->template->applications = $this->getModel('applications')->findByTagName('dabases', $mnRelation = true);
+\--
+
+Do metódy si však vtedy posielame ďalší parameter, pretože takéto vyhľadávanie vyžaduje dva SELECTy a metóda musí tento prípad *rozvetviť* (viď vyššie **`$args[1]`**). Väzobná tabuľka môže byť pomenovaná dvojako:
+
+- `applications_tags`
+- `tags_applications`
+
+V metóde pomocou konštrukcie *try/chatch* zachytávame prípadný hazard, ak metóda najskôr skúša reláciu podľa nesprávnej možnosti.
+
+Download
+========
+
+Kompletnú Nette aplikaciu s SQL skriptami si stiahnite z "archívu":http://files.nette.org/1474/notorm-model-v2.zip (neobsahuje knižnice Nette a NotORM, obsahuje NotORM panel profiler).
 
 Known issues
 ============
+
+Pluralizovanie tabuliek funguje iba pri konvenčnom anglickom tvorení množného čísla. Bohužial momentálne neexistuje riešenie pre tieto príklady
+
+- Category => Categories
+- Octopus => Octopi
+- Matrix => Matrixes
+
+Jedinou možnosťou bude nastavenie nejakého prekladového slovníka v mennej konvencii.
 
 {{tags: cookbook}}
 

@@ -1,0 +1,424 @@
+Dependency Injection
+********************
+
+/--div .[perex]
+Podstatou Dependency Injection (DI) je odebrat třídám zodpovědnost za získávání konkrétních objektů (tzv. služeb), které potřebují ke své činnosti a místo toho služby dostávají už při svém vytváření. Řekneme si:
+
+- co je principem Dependency Injection?
+- jak vytvářet dynamické a statické DI kontejnery
+- jak na lazy loading služeb
+\--
+
+
+Co je to Dependency Injection?
+------------------------------
+
+Narovinu: Dependency Injection (DI) není nic tajemného nebo nepochopitelného. Celé se dá shrnout do jedné sobecké věty: **„nic nesháněj, ať se postará někdo jiný.“** Nic víc, nic míň. Ukažme si to na třídě `Article` reprezentující článek na blogu:
+
+/--php
+class Article
+{
+	public $id;
+	public $title;
+	public $content;
+
+	function save()
+	{
+		... uložíme do databáze ...
+	}
+
+}
+\--
+
+a použití bude následující:
+
+/--php
+$article = new Article;
+$article->title = '10 Things You Need to Know About Losing Weight';
+$article->content = 'Every year millions of people in ...';
+$article->save();
+\--
+
+Metoda `save()` nám uloží článek do databázové tabulky `articles`. Implementovat ji za pomoci [Nette\Database |database] bude hračka, nebýt jedno zádrhelu: kde vzít připojení k databázi, tj. objekt Connection?
+
+Nejspíš bychom si poradili, můžeme jej uložit někde do globální proměnné `$GLOBALS['connection']`. Říkali vám, že používání globálních proměnných je špatné a že máte raději používat statické proměnné tříd? No měli pravdu, globální proměnné jsou zlo, jenže statické proměnné tříd jsou zcela totéž. To je jako říci: „Nejezte hamburgery, tloustne se po nich, dejte si raději cheeseburger.“
+
+Kde tedy seženeme připojení k databázi? DI má odpověď: „nic nesháněj, ať se postará někdo jiný.“ Jinými slovy, pokud potřebuji databázi, ať mi ji někdo dodá, já to řešit nehodlám. Cha, to je vychytralé, milé DI! Tak do toho:
+
+/--php
+class Article
+{
+	public $id;
+	public $title;
+	public $content;
+	private $connection;
+
+	function __construct(Nette\Database\Connection $connection)
+	{
+		$this->connection = $connection;
+	}
+
+	function save()
+	{
+		$this->connection->table('articles')->insert(array(
+			'title' => $this->title,
+			'content' => $this->content,
+		);
+	}
+
+}
+\--
+
+Použití třídy `Article` se pochopitelně trošku změní:
+
+/--php
+$article = new Article($connection);
+$article->title = ...
+$article->content = ...
+$article->save();
+\--
+
+Ptáte se, kde tento kód vezme `$connection`? DI dává jasnou odpověď: „ať se postará někdo jiný“. Databázové spojení zkrátka dodá ten, kdo volá uvedený kód. A tak dále, a tak dále. Jistě si říkáte, že přece nelze delegovat zodpovědnost do nekonečna. Že musí být nějaký počátek všehomíra. A máte pravdu. Úplně na začátku je *stvořitel*, který už nic nedeleguje a objekty tvoří. Říká se mu **systémový kontejner.** A je mu věnovaná [jedna celá kapitola |configuring].
+
+
+Proč jsou globální proměnné zlo?
+--------------------------------
+
+Dobrá otázka. Zvídavému programátorovi nestačí si přečíst, že to či ono je zlo, chce znát důvod. Třída `Article` tak jako tak databázové připojení potřebuje. Jenže z prvního příkladu užití není vůbec patrné, odkud a jak ho získá. Uživatel takové kódu může být až překvapen, že se vůbec článek uloží, a ptá se „kam se vlastně uložil?“ Naopak v druhém příkladu používajícím DI je kód samovysvětlující.
+
+Představte si, že zkoumáte nějakou knihovnu pro platební brány a napíšete si:
+
+/--php
+$cc = new CreditCard('4461510140804839', 12, 2013);
+$cc->pay(1000, CreditCard::DOLLARS);
+\--
+
+Kód spustíte, s číslem své karty, a po nějaké době zjistíte, že vám to skutečně z účtu strhlo peníze! Šokovaný zíráte na výpis a lamentujete: „kde jsou mé peníze, jak je to mohlo strhnout, vždyť jsem to s žádnou platební bránou nepropojil!“ Třída `CreditCard` se s ní propojila nějak sama, podobně tajemně, jako si `Article` získal připojení k databázi.
+
+
+DI znamená víc psaní
+--------------------
+
+Můžete namítnout, že používání DI znamená víc psaní, že kvůli vytvoření instance `Article` musíte uchovávat a předávat databázové spojení a podobně. To je pravda, nicméně tohle psaní navíc není samoúčelné, nezapomeňte, že minule vás „méně psaní“ připravilo o $1000! Ne, nechceme to zlehčovat. Připomínka je zcela správná a my ještě přidáme jednu závažnější: časem může ve třídě `Article` vzniknout potřeba nějaká data cachovat a v souladu s DI bude požadovat úložiště cache v konstruktoru. To by znamenalo upravit aplikaci na mnoha místech: přinejmenším všude, kde se vytváří instance `Article`.
+
+Co s tím? Věc má řešení. Místo ručního vytváření objektů `Article` si vytvoříme továrničku, tedy funkci, která bude objekty `Article` vyrábět. Když se v `Article` změní konstruktor, upraví se jen továrnička, nic víc. Takové továrničce se říká **DI kontejner** (container). A jak se k ní v našem kódu vlastně dostaneme? Vždyť víte… o to ať se postará někdo jiný :-)
+
+
+
+
+Nette\DI\Container
+------------------
+
+Nette\DI\Container představuje obecnou "továrničku" na služby. Co jsou to služby? Obyčejné objekty. Jen v souvislosti s DI kontejnery jim říkáme služby. Zřejmě to vymysleli konzultanti, kteří chtějí, aby DI vypadalo složitě a oni mohli konzultovat.
+
+V počátku běhu aplikace si vytvoříme [systémový DI kontejner |configuring], který nám bude vytvářet všechny další služby (nebo kontejnery) a vytvoří vlastně celý objektový graf.
+
+`Nette\DI\Container` nabízí ole $params pro uživatelské parametry a také "magické settery/gettery" jakožto zkratky pro addService, getService, hasService a removeService.
+
+
+Dynamický kontejner s definicí služeb pomocí callbacků:
+------------
+
+/--php
+$cont = new Nette\DI\Container;
+
+$cont->addService('mailer', function($cont) {
+	return new Nette\Mail\SmtpMailer(array(
+	    'host' => 'smtp.gmail.com',
+	    'username' => $cont->params['username'], // údaje bereme z parametrů
+	    'password' => $cont->params['password'],
+	    'secure' => 'ssl',
+	));
+});
+
+$cont->addService('message', function($cont) {
+    $message = new $cont->params['message.class'];
+    $message->setMailer($cont->mailer); // zkratka pro $this->getService('mailer')
+	$message->setFrom('John Doe <doe@example.com>');
+    return $message;
+});
+
+// nastavíme parametry
+$cont->params = array(
+	'username' => 'john',
+	'password' => '***',
+	'message.class' => 'Nette\Mail\Message',
+);
+
+// a nyní kontejner použijeme pro vytvoření objektu emailu:
+$message = $cont->message; // zkratka pro $cont->getService('message')
+\--
+
+Jednotlivé services jsou sdílené, tj. vytváří se jen jednou.
+
+Pokud místo callbacku předáme řetězec s názvem třídy, vytvoří se objekt ServiceBuilder, jehož úkolem je později třídu instancovat. Metoda addService onen builder vrací. Pokud bychom tedy vytvořili builder s metodami jako addArgument nebo addMethodCall, bylo by možné uvedený příklad zapsat třeba takto:
+
+/--php
+$cont->addService('mailer', new AnotherBuilder('Nette\Mail\SmtpMailer'))
+	->addArgument(array(
+	    'host' => 'smtp.gmail.com',
+		'username' => '%username%',
+		'password' => '%password%',
+	    'secure' => 'ssl',
+	));
+
+$cont->addService('message', new AnotherBuilder('%message.class%'))
+	->addMethodCall('setMailer', '@mailer')
+	->addMethodCall('setFrom', 'John Doe <doe@example.com>');
+
+$cont->params = array(
+	'username' => 'john',
+	'password' => '***',
+	'message.class' => 'Nette\Mail\Message',
+);
+\--
+
+Zdůrazňuji, že AnotherBuilder v Nette přímo není, protože mi to připadá jako škrabání se přes hlavu. Nevidím moc smysl ve vytváření nového metajazyka, když to jde jednoduše pomocí callbacků. Ale proti gustu… Kód AnotherBuilder by vypadal cca takto:
+
+/--php
+class AnotherBuilder extends Nette\DI\ServiceBuilder
+{
+	private $args = array();
+	private $calls = array();
+
+	public function addArgument($arg)
+	{
+		$this->args[] = $arg;
+		return $this;
+	}
+
+	public function addMethodCall($method)
+	{
+		$this->calls[] = func_get_args();
+		return $this;
+	}
+
+	public function createService(Nette\DI\IContainer $container)
+	{
+		$class = $container->expand($this->class);
+		try {
+			$type = new Nette\Reflection\ClassType($class);
+		} catch (\ReflectionException $e) {
+			throw new Nette\InvalidStateException("Cannot instantiate service, class '$class' not found.");
+		}
+
+		$expander = function(& $val) use ($container) {
+			$val = $val[0] === '@' ? $container->getService(substr($val, 1)) : $container->expand($val);
+		};
+		$args = $this->args;
+		array_walk_recursive($args, $expander);
+		$service = $type->newInstanceArgs($args);
+		foreach ($this->calls as $call) {
+			array_walk_recursive($call, $expander);
+			call_user_func_array(array($service, array_shift($call)), $call);
+		}
+		return $service;
+	}
+
+}
+\--
+
+Statický kontejner
+------------------
+
+Nová je podpora pro statické továrničky. Tj. místo dynamického vkládání callbacků můžeme vytvořit třídu (potomka Container), který bude sadu metod-továrniček rovnou obsahovat. Jejich název musí mít tvar `createServiceXyz`:
+
+/--php
+class MailContainer extends Nette\DI\Container
+{
+
+	protected function createServiceMailer()
+	{
+		return new Nette\Mail\SmtpMailer(array(
+		    'host' => 'smtp.gmail.com',
+		    'username' => $this->params['username'],
+		    'password' => $this->params['password'],
+		    'secure' => 'ssl',
+		));
+	}
+
+	protected function createServiceMessage()
+	{
+	    $message = new $this->params['message.class'];
+	    $message->setMailer($this->mailer);
+		$message->setFrom('John Doe <doe@example.com>');
+	    return $message;
+	}
+
+}
+
+$cont = new MailContainer;
+$cont->params = array(
+	'username' => 'john',
+	'password' => '***',
+	'message.class' => 'Nette\Mail\Message',
+);
+
+$message = $cont->message;
+\--
+
+Všechny služby v rámci kontejneru jsou trvalé, tj. při volání getService() (či získání přes proměnou) se nevytváří služba opakovaně, ale vrací se již dříve vytvořená. Jakékoliv jiné chování by bylo leda matoucí. V uvedeném příkladu by se ale hodilo, kdyby kontejner pokaždé vygeneroval nový objekt `Nette\Mail\Message`. Toho lze dosáhnout snadno: namísto služby `message` vytvoříme obyčejnou metodu `createMessage`:
+
+/--php
+class MailContainer extends Nette\DI\Container
+{
+
+	function createServiceMailer()
+	{
+		return new Nette\Mail\SmtpMailer(array(
+		    'host' => 'smtp.gmail.com',
+		    'username' => $this->params['username'],
+		    'password' => $this->params['password'],
+		    'secure' => 'ssl',
+		));
+	}
+
+	function createMessage()
+	{
+	    $message = new $this->params['message.class'];
+	    $message->setMailer($this->mailer);
+		$message->setFrom('John Doe <doe@example.com>');
+	    return $message;
+	}
+
+}
+
+$cont = new MailContainer;
+$cont->params = array(
+	'username' => 'john',
+	'password' => '***',
+	'message.class' => 'Nette\Mail\Message',
+);
+
+$mailer = $cont->createMessage();
+\--
+
+Z kódu `$xyz = $cont->createXyz()` je zřejmé, že se vytváří pokaždé nový objekt. Jde tedy o konvenci na straně programátora.
+
+Jontejner je možné zmrazit a poté ho již nelze měnit:
+
+/--php
+$container->freeze();
+$container->addService(...); // vyhodí výjimku
+\--
+
+Rozmrazíme jej vytvořením klonu, viz níže.
+
+
+Aliasování
+----------
+
+Vytváření aliasů pro názvy služeb se mi jeví spíš jako chyba návrhu a doporučil bych se mu vyhnout. Pokud by však nebylo zbytí, můžeme službu jednoduše vložit pod jiným názvem:
+
+/--php
+$container->addService('alias', $container->getService('originalName'));
+\--
+
+Pochopitelně tímto způsobem můžeme kopírovat služby mezi jednotlivými kontejnery.
+
+Pokud chceme zachovat lazy-loading, tj. kopírovat služby, které zatím nejsou vytvořené, uděláme to následovně:
+
+/--php
+$container->addService('alias', function($container) {
+	return $container->getService('originalName');
+});
+\--
+
+Nebo mezi dvěma kontejnery:
+
+/--php
+$containerDest->addService('mailer', function() use ($containerSrc) {
+	return $containerSrc->getService('mailer');
+});
+\--
+
+Kontejner je také možné klonovat. Klon obsahuje všechny služby jako vzor a pochopitelně lze do něj přidávat nové.
+
+/--php
+$dolly = clone $container;
+\--
+
+
+
+Auto-wiring
+-----------
+
+Autowire umožňuje při vytváření služby automaticky předávat do konstruktoru další služby dle type hintů. Vytvoříme si k tomu nový ServiceBuilder:
+
+/--php
+class AutowireServiceBuilder extends Nette\DI\ServiceBuilder
+{
+
+	public function createService(Nette\DI\IContainer $container)
+	{
+		try {
+			$type = new Nette\Reflection\ClassType($this->class);
+		} catch (\ReflectionException $e) {
+			throw new Nette\InvalidStateException("Cannot instantiate service, class '$this->class' not found.");
+		}
+		$args = array();
+		if ($type->hasMethod('__construct')) {
+			foreach ($type->getMethod('__construct')->getParameters() as $param) {
+				if ($param->isDefaultValueAvailable()) {
+					$args[] = $param->getDefaultValue();
+				} elseif ($param->getClass()) {
+					$args[] = $container->getServiceByType($param->getClass()->getName());
+				} else {
+					$args[] = $param->isArray() && !$param->allowsNull() ? array() : NULL;
+				}
+			}
+		}
+		return $type->newInstanceArgs($args);
+	}
+
+}
+
+
+// přidáme službu, která se sestaví auto-wiringem
+$cont->addService('message', new AutowireServiceBuilder('Message'));
+
+\--
+
+
+Klíčem je metoda kontejneru `getServiceByType()`, která vrátí službu podle daného typu (třída, interface). Taková služba musí být v kontejneru právě jedna, jinak se vyhodí výjimka.
+
+Pokud přidáváme službu pomocí továrny, není její typ pochopitelně znám. Můžeme ho proto "napovědět" třetím parametrem metody addService:
+
+/--php
+$cont->addService('mailer', function($cont) { ... }, 'Nette\Mail\IMailer');
+\--
+
+K ověření typu služby slouží metoda checkServiceType():
+
+/--php
+if (!$cont->checkServiceType('mailer', 'Nette\Mail\IMailer')) {
+	...
+}
+\--
+
+Tagování
+--------
+
+Při uložení jakéhokoliv objektu můžeme u něj uvést doplňující metainformace, tzv. tagy:
+
+/--php
+$container->addService('mailer', ..., array('tag1', 'tag2'));
+\--
+
+A poté můžeme v kontejneru vyhledat všechny služby (resp. jejich jména), které mají daný tag:
+
+/--php
+$list = $container->getServiceNamesByTag('tag1')
+\--
+
+Tag nemusí být je řetězec, ale může obsahovat další libovolné atributy:
+
+/--php
+$container->addService('mailer', ..., array(
+	'tag1' => array('id' => 'mx', 'priority' => 12),
+	'tag2' => array('...'),
+));
+
+$list = $container->getServiceNamesByTag('tag1')
+// vrací pole array('mailer' => array('id' => 'mx', 'priority' => 12))
+\--

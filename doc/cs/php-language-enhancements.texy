@@ -1,0 +1,304 @@
+Rozšíření jazyka PHP
+********************
+
+/--div .[perex]
+Nette Framework rozšiřuje objektové a vyjadřovací schopnosti PHP o několik syntaktických cukrátek. Máte rádi cukrátka? Čtěte a dozvíte se
+
+- proč je dobré používat `Nette\Object`
+- co jsou to *property*
+- jak vyvolávat události
+- jak třídě přidat novou metodu
+- jak používat @anotace
+\--
+
+V této kapitole se budeme věnovat převážně třídě `Nette\Object`, která rozšiřuje objektové schopnosti PHP. Jde o společného předka takřka všech tříd Nette Framework. Zároveň je natolik transparentní, abyste ji mohli používat jako základ pro vaše třídy. Zkusme si říct, proč byste to měli dělat.
+
+
+Striktní třídy
+==============
+
+PHP je jazyk na sekání chyb jako stvořený, neboť dává vývojáři značnou volnost. Jak tomu udělat přítrž a začít psát programy bez těžko odhalitelných chyb? Stačí si nastavit přísnější laťku a dodržovat určitá pravidla.
+
+Najdete v tomto příkladu chybu?
+
+/--php
+class Circle
+{
+	public $radius;
+
+	public function getArea()
+	{
+		return $this->radius * $this->radius * M_PI;
+	}
+
+}
+
+$circle = new Circle;
+$circle->raduis = 10;
+echo $circle->getArea(); // 10² * π ≈ 314
+\--
+
+Zdá se, že kód by měl vypsat přibližně 314, nicméně vypíše nulu. Jak je to možné? Omylem se místo `$circle->radius` do kódu dostalo `raduis`, drobný překlep. Záludnost chyby tkví hlavně v tom, že na ni PHP nijak neupozorní, nepomůže ani sledování chyb Warning nebo Notice. Z hlediska jazyka to není chyba, ačkoliv stojí hodně námahy ji vypátrat.
+
+Uvedenou chybu bychom ihned odhalili, pokud by třída `Copier` byla potomkem třídy [api:Nette\Object]:
+
+/--php
+class Circle extends Nette\Object
+{
+	...
+\--
+
+Zatímco dosud kód tiše (ale chybně) proběhl, teď už je situace jiná:
+
+[* debugger-circle.png *]
+
+Třída `Nette\Object` učinila `Circle` striktnější a na použití nedeklarované proměnné reagoval vyhozením výjimky, kterou `Nette\Diagnostics\Debugger` zobrazil. Řádek s fatálním překlepem je odhalen a označen, textová zpráva situaci popisuje slovy: *Cannot write to an undeclared property Circle::$raduis* (nelze zapsat do nedeklarované proměnné Circle::$raduis). Programátor zvolá „áhá“ a může promptně zareagovat. Chybu, které by si dlouho nemusel ani všimnout a jen za velkého úsilí by ji odhaloval, dostal srozumitelně naservírovanou na červeném podnose.
+
+První schopnost třídy `Nette\Object`, kterou jsme si ukázali, je vyhazování výjimek při přístupu k nedeklarovanému členu třídy.
+
+/--php
+$circle = new Circle;
+echo $circle->undeclared; // vyhodí Nette\MemberAccessException
+$circle->undeclared = 1; // vyhodí Nette\MemberAccessException
+$circle->unknownMethod(); // také vyhodí Nette\MemberAccessException
+\--
+
+Tím její možnosti zdaleka nekončí.
+
+
+Properties, gettery a settery
+=============================
+
+Termínem *property* (česky vlastnost) se v moderních objektově orientovaných jazycích označují speciální členy tříd, které se tváří jako proměnné, ale ve skutečnosti jsou reprezentovány metodami. Při přiřazení nebo čtení hodnoty této „proměnné“ se zavolá příslušná metoda (tzv. getter nebo setter). Jde o velice šikovnou věc, díky ní máme přístup k proměnným plně pod kontrolou. Můžeme tak validovat vstupy nebo generovat výsledky až v případě potřeby.
+
+Každá třída, která je potomkem `Nette\Object`, umí property imitovat. Není potřeba je nastavovat, stačí dodržet jednoduchou konvenci:
+
+- Getter i setter musí být *public* metoda.
+- Getter má název ve tvaru `getXyz()` nebo `isXyz()`, setter má název ve tvaru `setXyz()`
+- Getter i setter je volitelný,  mohou tedy existovat *read-only* nebo *write-only* property
+- Názvy property jsou citlivé na velikost písmen (case-sensitive), s výjimkou prvního písmene, které může být velké i malé.
+
+Property využijeme u třídy Circle, abychom zajistili, že do proměnné `$radius` se dostanou jen nezáporná čísla:
+
+/--php
+class Circle extends Nette\Object
+{
+	private $radius; // už není public!
+
+	public function getRadius()
+	{
+		return $this->radius;
+	}
+
+	public function setRadius($radius)
+	{
+		// hodnotu před uložením sanitizujeme
+		$this->radius = max(0.0, (float) $radius);
+	}
+
+	public function getArea()
+	{
+		return $this->radius * $this->radius * M_PI;
+	}
+
+	public function isVisible()
+	{
+		return $this->radius > 0;
+	}
+
+}
+
+$circle = new Circle;
+// klasický způsob pomocí volání metod
+$circle->setRadius(10); // nastav poloměr kruhu
+echo $circle->getArea(); // vypiš obsah kruhu
+
+// ekvivalentní řešení s využitím properties
+$circle->radius = 10; // ve skutečnosti volá setRadius()
+echo $circle->area; // volá getArea()
+echo $circle->visible; // volá $circle->isVisible()
+\--
+
+Properties jsou především "syntaktickým cukříkem"((syntactic sugar)), jehož smyslem je zpřehlednit kód a osladit tak programátorovi život. Pokud nechcete, nemusíte je používat.
+
+
+Události
+========
+
+Vytvoříme si frontu funkcí, které se zavolají, když se změní poloměr kruhu. Změně poloměru říkejme událost `change` a jednotlivým funkcím handlery události:
+
+/--php
+class Circle extends Nette\Object
+{
+	/** @var array */
+	public $onChange;
+
+	public function setRadius($radius)
+	{
+		// vyvoláme události přidané do onChange
+		$this->onChange($this, $this->radius, $radius);
+
+		$this->radius = max(0.0, (float) $radius);
+	}
+}
+
+$circle = new Circle;
+
+// přidám handler události
+$circle->onChange[] = function($circle, $oldValue, $newValue) {
+	echo 'došlo ke změně';
+};
+
+$circle->setRadius(10);
+\--
+
+V kódu metody `setRadius` vidíte další syntaktický cukr - místo iterace nad polem `$onChange` a voláním jednotlivých metod pomocí "nespolehlivé .(Neohlásí, že callback je chybný.)" funkce [php:call_user_func] stačí napsat stručné `onChange(...)` a uvedené parametry jsou předány každému jednotlivému handleru.
+
+
+
+Rozšiřující metody
+==================
+
+Potřebujete do existující třídy či objektu přidat za běhu novou metodu? Pak vám pomohou **extension method** (rozšiřující metody):
+
+/--php
+// deklarace budoucí metody Circle::getCircumference()
+Circle::extensionMethod('getCircumference', function (Circle $that) {
+	return $that->radius * 2 * M_PI;
+});
+
+$circle = new Circle;
+$circle->radius = 10;
+echo $circle->getCircumference(); // ≈ 62.8
+\--
+
+
+Rozšiřujícím metodám lze také předávat parametry. Neporušují princip zapouzdření, protože mají přístup pouze k veřejným členům tříd. Mohou být také napojeny na rozhraní (interfaces), takže v každé třídě, která dané rozhraní implementuje, bude metoda k dispozici.
+
+
+
+Reflexe
+=======
+
+Reflexe nám umožňuje zjistit takové informace, jako jaké metody má daná třída, jaké mají parametry atd. `Nette\Object` usnadňuje i přístup k sebereflexi třídy pomocí metody `getReflection()`, která vrací objekt [ClassType | api:Nette\Reflection\ClassType]):
+
+
+/--php
+$circle = new Circle;
+echo $circle->getReflection()->hasMethod('getArea'); // existuje metoda test?
+echo $circle->getReflection()->getName(); // vrací název třídy, tj. 'Circle'
+\--
+
+I v tomto případě můžeme využít konvence pro [property |#Properties, gettery a settery] a zjednodušit poslední řádek na
+
+/--php
+echo $circle->reflection->name; // vrací 'Circle'
+\--
+
+
+Reflexi lze získat i bez návaznosti na `Nette\Object`:
+
+/--php
+// získání reflexe třídy PDO
+$classReflection = new Nette\Reflection\ClassType('PDO');
+
+// získání reflexe metody PDO::query
+$methodReflection = new Nette\Reflection\Method('PDO', 'query');
+\--
+
+
+
+Anotace
+=======
+
+S reflexemi úzce souvisí anotace. Anotace se píší do phpDoc komentářů (důležité jsou dvě otevírací hvězdičky) a začínají znakem `@`. Můžeme anotovat třídy, proměnné nebo metody:
+
+/--php
+/**
+ * @author John Doe
+ * @author Tomas Marny
+ * @secured
+ */
+class FooClass
+{
+	/** @Persistent */
+	public $foo;
+
+	/** @User(loggedIn, role=Admin) */
+	public function bar() {}
+}
+\--
+
+V kódu vidíme mimo jiné tyto anotace:
+
+- `@author John Doe` - typu string, nese textovou hodnotu `'John Doe'`
+- `@Persistent` - typu boolean, její přítomnost znamená hodnotu `TRUE`
+- `@User(loggedIn, role=Admin)` - obsahuje asociativní pole `array('loggedIn', 'role' => 'Admin')`
+
+
+Zda třída obsahuje anotaci, zjistíme metodu `hasAnnotation`:
+
+
+/--php
+$fooReflection = new Nette\Reflection\ClassType('FooClass');
+$fooReflection->hasAnnotation('author'); // vrátí TRUE
+$fooReflection->hasAnnotation('copyright'); //vrátí FALSE
+\--
+
+Hodnoty anotací vrací `getAnnotation`:
+
+/--php
+$fooReflection->getAnnotation('author'); // vrátí řetězec 'Tomas Marny'
+
+$fooReflection->getMethod('bar')->getAnnotation('User');
+// vrátí array('loggedIn', 'role' => 'Admin')
+\--
+
+.[caution]
+Vždy se vypíše pouze poslední definice anotace, předchozí se přepíše.
+
+Data všech anotací vrátí metoda `getAnnotations()`:
+
+/--
+array(3) {
+	"author" => array(2) {
+		0 => string(8) "John Doe"
+		1 => string(11) "Tomas Marny"
+	}
+	"secured" => array(1) {
+		0 => bool(TRUE)
+	}
+}
+\--
+
+
+
+Callback
+========
+
+V *PHP* se callbacky reprezentují pomocí pole (např. `array($this, 'processLoginForm')`) nebo řetězcem (např. `'Helpers::myCallbackMethod'`). Nette Framework zavádí nové pseudo-klíčové slovo `callback`:
+
+/--
+$callback = callback($this, 'processLoginForm');
+$callback = callback('Helpers::myCallbackMethod');
+\--
+
+Jaké to má výhody?
+- přehlednost: je zřejmé, že jde o callback
+- zkontroluje, zda se jedná o validní callback
+- sjednocuje chování s verzemi PHP staršími než 5.2.3, které nepodporují řetězce 'Foo::bar';
+
+Do proměnné `$callback` se ukládá instance třídy [api:Nette\Callback], která umožňuje snadno callback vyvolat:
+
+/--php
+$callback->invoke([arg, ...]);
+
+$callback->invokeArgs($args);
+
+$callback([arg, ...]); // vyžaduje PHP 5.3
+\--
+
+
+{{themeicon: icon-coffee.png}}
+
+{{tags: nette\object, nette\objectmixin, nette\arrayhash}}

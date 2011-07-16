@@ -1,8 +1,6 @@
 HTTP routování v CLI
 ********************
 
-
-
 .[perex]
 Potřebujete spouštět různé úlohy z příkazové řádky, ve kterých je třeba tvořit url adresy nadefinované routami, a nevíte jak na to? Čtěte dále...
 
@@ -10,7 +8,7 @@ Potřebujete spouštět různé úlohy z příkazové řádky, ve kterých je t�
 
 Problém
 =======
-Jak docílím HTTP routování (url adresa) v akcích spouštěných v CLI módu (příkazová řádka), abych nemusel psát url adresy "natvrdo" a těžce vypocené routy tak nepřišly vniveč?
+Jak docílím routování na správné presentery a akce v CLI módu (příkazová řádka) stejně jako u HTTP (url adresa), abych nemusel psát url adresy "natvrdo" a těžce vypocené routy tak nepřišly vniveč?
 
 Nejjednoduší je problém vysvětlit na nějakém příkladě:
 - Řekněme že máme nějaký cron (úloha běžící na pozadí), který odesílá emaily uživatelům s odkazem na stránku přihlášení.
@@ -20,12 +18,9 @@ Nejjednoduší je problém vysvětlit na nějakém příkladě:
 Náš příklad obsahuje tři akce. Dvě pro HTTP požadavek a jednu pro CLI požadavek.
 
 Jednoduchý `Presenter` obsluhující tyto tři akce by mohl vypadat následovně:
-/--- code php
-<?php
-
-use Nette\Application\RenderResponse,
-	Nette\Security\AuthenticationException,
-	Nette\Environment;
+/--php
+use Nette\Application\Responses\TextResponse,
+	Nette\Security\AuthenticationException;
 
 
 class DefaultPresenter extends BasePresenter
@@ -33,8 +28,8 @@ class DefaultPresenter extends BasePresenter
 
 	public function renderDefault()
 	{
-		$source = '<h1>Úvodní stránka</h1><a href="' . $this->link('login') . '">Přihlášení</a>';
-		$this->sendResponse(new RenderResponse($source));
+		$source = '<h1>Úvodní stránka</h1><a href="' . $this->link('login') . '">Přihlášení</a>';$
+		$this->sendResponse(new TextResponse($source));
 	}
 
 
@@ -42,14 +37,14 @@ class DefaultPresenter extends BasePresenter
 	public function renderLogin()
 	{
 		$source = '<h1>Přihlášení</h1>';
-		$this->sendResponse(new RenderResponse($source));
+		$this->sendResponse(new TextResponse($source));
 	}
 
 
 
 	public function actionCron()
 	{
-		if (!Environment::isConsole()) {
+		if (!$this->getContext()->params['consoleMode']) {
 			throw new AuthenticationException;
 		}
 
@@ -62,30 +57,30 @@ class DefaultPresenter extends BasePresenter
 	}
 
 }
-\---
+\--
 
 Routy by pak mohly vypadat takto:
-/--- code php
-use Nette\Application\Route,
-	Nette\Application\CliRouter,
-	Nette\Environment;
+/--php
+use Nette\Application\Routers\Route,
+	Nette\Application\Routers\CliRouter;
 
-if (Environment::isConsole()
-	$router[] = new CliRouter;
+if ($container->params['consoleMode']) {
+	$application->allowedMethods = FALSE;
+	$router[] = new CliRouter('Default:default');
 } else {
 	$router[] = new Route('index.php', 'Default:default', Route::ONE_WAY);
 	$router[] = new Route('prihlaseni', 'Default:login');
 	$router[] = new Route('<presenter>/<action>[/<id>]', 'Default:default');
 }
-\---
+\--
 
 
 Přes webový prohlížeč se dostaneme k akcím:
-- `default` -> `http://test-cli-routing.cz/`
-- `login` -> `http://test-cli-routing.cz/prihlaseni`
+- `default` -> `http://example.com/`
+- `login` -> `http://example.com/prihlaseni`
 
 Přes příkazovou řádku se dostaneme k akci:
-- `cron` -> `C:\test-cli-routing\www>php -f index.php Default:cron`
+- `cron` -> `C:\test-cli-routing\www>php index.php Default:cron`
 
 O routování HTTP požadavků se nám postará Nette, které zjistí na jaké doméně je akce volána, jaký je použit protokol, port, atp.
 Problém ale je, že v režimu příkazové řádky HTTP požadavek neexistuje, tudíž Nette nemá jak zjistit doménu, protokol, apod.
@@ -97,88 +92,77 @@ Problém ale je, že v režimu příkazové řádky HTTP požadavek neexistuje, 
 Řešení je velmi jednoduché. Je potřeba "podstrčit" Nette vlastní nadefinovaný objekt reprezentující HTTP požadavek.
 Nette s ním pak pracuje jako by si ho vytvořil sám ;-).
 
-Díky tomu že Nette používá k získaní objektu `Nette\Web\HttpRequest` službu, k jejiž inicializaci je použita továrna, není nic jednoduššího než říct Nette:
-"Pro vytvoření `Nette\Web\HttpRequest` nevolej svou továrnu, ale volej mou lepší továrnu :-)"
+Díky tomu že Nette používá k získaní objektu [api:Nette\Http\Request] službu, k jejiž inicializaci je použita továrna, není nic jednoduššího než říct Nette:
+"Pro vytvoření `Http\Request` nevolej svou továrnu, ale volej mou lepší továrnu :-)"
 
 A v hledem k tomu, že další text by byl zbytečný, tak zde je upravený `bootstrap.php`, který se o vše postará:
-/--- code php
-<?php
-
-use Nette\Debug,
-	Nette\Environment,
-	Nette\String,
-	Nette\Application\Route,
-	Nette\Application\CliRouter,
-	Nette\Application\SimpleRouter,
-	Nette\Web\Uri,
-	Nette\Web\UriScript,
-	Nette\Web\HttpRequest;
+/--php
+use Nette\Diagnostics\Debugger,
+	Nette\Utils\Strings,
+	Nette\Application\Routers\Route,
+	Nette\Application\Routers\CliRouter,
+	Nette\Application\Routers\SimpleRouter,
+	Nette\Http\Uri,
+	Nette\Http\UriScript,
+	Nette\Http;
 
 
 // Load Nette Framework
-// this allows load Nette Framework classes automatically so that
-// you don't have to litter your code with 'require' statements
-require LIBS_DIR . '/Nette/loader.php';
+$params['libsDir'] = __DIR__ . '/../libs';
+require $params['libsDir'] . '/Nette/loader.php';
 
 
-// Enable Nette\Debug for error visualisation & logging
-Debug::enable();
-
-
-// Registrace vlastni tovarny na vytvareni 'Nette\Web\IHttpRequest'.
-if (Environment::isConsole()) {
-	Environment::getConfigurator()->defaultServices['Nette\\Web\\IHttpRequest'] = function() {
-		// Podle potreby muzeme pouzit nastaveni z configu nebo vzit z parametru prikazove radky, aj.
-		// Pozor: 'Environment::loadConfig()' zpusoby vytvoreni 'Nette\Configurator',
-		// a jiz neni mozne zaregistrovat vlastni tovarnu 'Nette\Web\IHttpRequest'.
-		// Nacitani z configu by se teoreticky dalo vyresit "odregistrovanim"
-		// a znovuregistrovanim vlastni sluzby na vytvareni vlastniho 'Nette\Web\IHttpRequest'
-		// ihned za 'Environment::loadConfig()', pokud Nette\IContext neni "freeznuty".
-		$uri = new UriScript;
-		$uri->scheme = 'http';
-		$uri->port = Uri::$defaultPorts['http'];
-		$uri->host = 'test-cli-routing.cz';
-		$uri->path = '/';
-		$uri->canonicalize();
-		$uri->path = String::fixEncoding($uri->path);
-		$uri->scriptPath = '/';
-		return new HttpRequest($uri, array(), array(), array(), array(), array(), 'GET', null, null);
-    };
-}
+// Enable Nette Debugger for error visualisation & logging
+Debugger::$logDirectory = __DIR__ . '/../log';
+Debugger::$strictMode = TRUE;
+Debugger::enable();
 
 
 // Load configuration from config.neon file
-Environment::loadConfig();
+$configurator = new Nette\Configurator;
+$configurator->container->params += $params;
+$configurator->container->params['tempDir'] = __DIR__ . '/../temp';
+$container = $configurator->loadConfig(__DIR__ . '/config.neon');
 
+// Registrace vlastni tovarny na vytvareni 'Nette\Http\IRequest'.
+if ($container->params['consoleMode']) {
+	$container->removeService('httpRequest');
+	$container->addService('httpRequest', function() {
+		// Podle potreby muzeme pouzit nastaveni z configu nebo vzit z parametru prikazove radky, aj.
+		$uri = new UriScript;
+		$uri->scheme = 'http';
+		$uri->port = Uri::$defaultPorts['http'];
+		$uri->host = 'example.com';
+		$uri->path = '/';
+		$uri->canonicalize();
+		$uri->path = Strings::fixEncoding($uri->path);
+		$uri->scriptPath = '/';
+		return new Http\Request($uri, array(), array(), array(), array(), array(), 'GET', null, null);
+    });
+}
 
-// Configure application
-$application = Environment::getApplication();
-
+// Init application
+$application = $container->application;
 
 // Setup router
-$application->onStartup[] = function() use ($application) {
-	$router = $application->getRouter();
+$router = $container->router;
+if ($container->params['consoleMode']) {
+	$application->allowedMethods = FALSE;
+	$router[] = new CliRouter('Default:default');
+} else {
+	$router[] = new Route('index.php', 'Default:default', Route::ONE_WAY);
+	$router[] = new Route('prihlaseni', 'Default:login');
+	$router[] = new Route('<presenter>/<action>[/<id>]', 'Default:default');
+}
 
-	// mod_rewrite detection
-	// Zde je potreba si uvedomit jestli mod_rewrite bude zapnuty!
-	if (Environment::isConsole() || (function_exists('apache_get_modules') && in_array('mod_rewrite', apache_get_modules()))) {
-		if (Environment::isConsole()) {
-			$router[] = new CliRouter;
-		}
 
-		$router[] = new Route('index.php', 'Default:default', Route::ONE_WAY);
-		$router[] = new Route('prihlaseni', 'Default:login');
-		$router[] = new Route('<presenter>/<action>[/<id>]', 'Default:default');
-	}
-	else {
-		$router[] = new SimpleRouter('Default:default');
-	}
-};
-
-// Run the application!
+// Configure and run the application!
+$application = $container->application;
+//$application->catchExceptions = TRUE;
+$application->errorPresenter = 'Error';
 $application->run();
-\---
+\--
 
-{{tags: cookbook}}
+{{tags: cookbook, cli, 2.0}}
 
 {{author: bene|2835}}

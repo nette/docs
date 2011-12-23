@@ -1,0 +1,238 @@
+Vytvoření databáze a modelu
+###########################
+
+.[perex]
+První část aplikace, kterou budeme vytvářet, je struktura databáze pro uložení dat a pak model, který s nimi bude pracovat.
+Díky Nette\Database bude vytvoření modelu opravdu rychlé a práce s ním velmi snadná.
+
+--------
+
+
+Nejběžnější používanou databází je MySQL. Budeme proto předpokládat použití právě této databáze, nicméně
+vytvořené SQL skripty by měly s drobnými změnami fungovat pod většinou standardních databází.
+
+Databázová struktura
+********************
+
+Nejprve se musíme zamyslet, co vše budeme v aplikaci potřebovat. Základem bude tabulka s jednotlivými úkoly. Vedle ní
+vytvoříme tabulku uživatelů a pak jednoduchou tabulku seznamů úkolů.
+
+K jednotlivým úkolům (tabulka `task`) tedy budeme ukládat následující informace:
+
+- `id`: unikátní ID úkolu. Sloupeček typu `INT` a bude primárním klíčem s `AUTO_INCREMENT`.
+- `text`: popis úkolu. Na uložení budeme potřebovat sloupeček typu `VARCHAR(100)`. V případě potřeby můžeme samozřejmě délku zvolit podle našich potřeb.
+- `created`: čas, kdy byl úkol vytvořen. Sloupec bude typu `DATETIME`.
+- `done`: značka (flag), zda byl úkol splněn. Můžeme využít typ `BOOLEAN`, který je synonynmem pro `TINYINT(1)`.
+- `user_id`: ID uživatele, ke kterému je úkol přiřazen. Sloupec typu `INT`.
+- `tasklist_id`: ID seznamu úkolů, do kterého je úkol zařazen. Sloupec typu `INT`.
+
+Předpokládáme, že z tabulky budeme nejčastěji vybírat úkoly z jediného seznamu ukolů, filtrovat je podle toho,
+zda jsou splněné či nesplněné a řadit podle data jejich přidání. Vytoříme tedy navíc jeden index nad sloupci
+`tasklist_id`, `done`, `created`.
+
+.[note]
+Povšimněte si názvu sloupečků, které se odkazují na jiné tabulky. Jsou vždy ve formátu `<tabulka>_id`. Na základě
+pojmenování pak Nette\Database dokáže obě tabulky spojit. Jedná se o konvenci, kterou Nette\Database přejímá
+od knihovny NotORM.
+
+Již zmíněná tabulka uživatelů bude mít následující strukturu:
+
+- `id`: unikátní ID uživatele. Opět `INT` a primární klíč s `AUTO_INCREMENT`.
+- `username`: uživatelské jméno. `VARCHAR(20)`. Uživatelské jménu musí být navíc unikátní, takže nad sloupcem vytvoříme unikátní klíč.
+- `password`: heslo uživatele. Pro uložení hesla použijeme některou z již existujících hashovacích funkcí. Podle délky hashe zvolíme velikost sloupce. My použiejeme SHA512, její použití je velmi jednoduché. Její délka je 512 bitů, takže 64 bajtů. V databázi jej uložíme hexadecimálně, takže dostáváme výslednou délku 128 znaků. Použijeme `CHAR(128)`.
+- `name`: skutečné jméno uživatele, které budeme zobrazovat v aplikaci. `VARCHAR(30)`.
+
+.[note]
+Proč nepoužívat na uložemí hesla staré známé MD5? Samozřejmě ji použít můžete, nicméně jedná se o poměrně slabý hash,
+na který jsou běžně dostupné "rainbow tabulky":[http://en.wikipedia.org/wiki/Rainbow_table]. Navíc i na běžném dnešním
+hardwaru je možné otestovat metodou hrubé síly miliardy kombinací za sekundu.
+
+Poslední zmíněnou tabulkou je tabulka `tasklist`. Bude mít jen dva sloupečky:
+
+- `id`: unikátní ID. `INT`, primární klíč s `AUTO_INCREMENT`.
+- `title`: nadpis seznamu. `VARCHAR(50)`.
+
+.[tip]
+Pro vytvoření těchto tabulek můžete použít svůj oblíbený nástroj na správu databáze, případně kostra aplikace
+obsahuje rozbalený "Adminer":[http://adminer.org/], který je psaný v PHP. Naleznete jej v podložce složce `www/adminer`,
+kterou stačí otevřít v prohlížeči.
+
+SQL kód pro vytvoření popsaných tabulek je následující:
+
+/---code sql
+CREATE TABLE `task` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `text` varchar(100) NOT NULL,
+  `created` datetime NOT NULL,
+  `done` tinyint(1) unsigned NOT NULL DEFAULT 0,
+  `user_id` int(10) unsigned NOT NULL,
+  `tasklist_id` int(10) unsigned NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `order` (`tasklist_id`,`done`,`created`)
+);
+
+
+CREATE TABLE `tasklist` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `title` varchar(50) NOT NULL,
+  PRIMARY KEY (`id`)
+);
+
+
+CREATE TABLE `user` (
+  `id` int(10) unsigned NOT NULL AUTO_INCREMENT,
+  `username` varchar(20) NOT NULL,
+  `password` char(128) NOT NULL,
+  `name` varchar(30) NOT NULL,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `username` (`username`)
+);
+\---
+
+Můžete si také stáhnout celý skript pro MySQL: [quickstart.mysql.sql |http://files.nette.org/2647/quickstart.mysql.sql]. Také si stáhněte ukázková data
+pro MySQL: [data.mysql.sql|http://files.nette.org/2647/data.mysql.sql]. To je z hlediska struktury databáze vše. Nyní se pustíme do psaní
+samotného modelu.
+
+Struktura databáze vypadá následovně:
+
+[* 03-schema.png *]
+
+
+Model
+*****
+
+Naše kostra aplikace již obsahuje připravenou třídu modelu. Nic nám nebrání ji zneužít a přiohnout k obrazu svému.
+
+Nachází se ve složce `app/models/Model.php`. Její kod vypadá takto:
+
+.[note]
+Kód obsahuje české komentáře, nelekejte se. U tříd ze sandboxu, které budeme modifikovat, jsem komentáře přeložil a případně
+trošku doplnil.
+
+/---php
+/**
+ * Základní třída modelu.
+ */
+class Model extends Nette\Object
+{
+	/** @var Nette\Database\Connection */
+	public $database;
+
+
+	/**
+	 * @param Nette\Database\Connection $database
+	 */
+	public function __construct(Nette\Database\Connection $database)
+	{
+		$this->database = $database;
+	}
+
+
+
+	/** @return Authenticator */
+	public function createAuthenticatorService()
+	{
+		return new Authenticator($this->database->table('user'));
+	}
+
+}
+\---
+
+Třída toho zatím moc neumí. Při vytvoření dostane připojení k databázi ve formě objektu typu `Nette\Database\Connection`.
+Její prozatím jediná metoda vytváří instalci `Authenticator`u, která slouží k ověření identity uživatele. K té se
+vrátíme později, až budeme dělat přihlašování uživatelů.
+
+Základním kamenem našeho modelu bude právě onen magický objekt `Nette\Database\Connection`. Ten obsahuje metodu `table`,
+která nám umožní pohodlně provádět dotazy nad tabulkou. Pokud chceme do modelu přidat informaci o tabulce
+`task`, jen si přidáme metodu:
+
+/---php
+/**
+ * Získá tabulku úkolů.
+ * @return Nette\Database\Table\Selection
+ */
+public function getTasks()
+{
+	return $this->database->table('task');
+}
+\---
+
+Metoda vrací objekt typu `Nette\Database\Table\Selection`. Právě to je objekt, který nám umožní pohodlně provádět
+velmi efektivní dotazy. Více si o něm povíme později, až se dostaneme k použití v praxi, nedočkavci mohou nahlédnout
+do kuchařky na téma "Databáze & ORM":[http://doc.nette.org/cs/database].
+
+Zbývá doplnit metody pro další tabulky:
+
+/---php
+/**
+ * Získá tabulku se seznamy úkolů.
+ * @return Nette\Database\Table\Selection
+ */
+public function getTaskLists()
+{
+	return $this->database->table('tasklist');
+}
+
+/**
+ * Získá tabulku uživatelů.
+ * @return Nette\Database\Table\Selection
+ */
+public function getUsers()
+{
+	return $this->database->table('users');
+}
+\---
+
+A to je pro náš model vše. Jednoduché, že?
+
+
+Nastavení připojení k databázi
+******************************
+
+Zbývá nám ještě poslední krok, a tím je nastavení připojení k databázi. To provedeme v souboru `config.neon`.
+Prozatím nepotřebujeme přesně znát jeho strukturu, zajímá nás jen následující sekce:
+
+/---
+services:
+	database:
+		class: Nette\Database\Connection
+		arguments: ['mysql:host=localhost;dbname=test', 'user', 'password']
+
+	model:
+		class: Model
+		arguments: [@database]
+
+	authenticator:
+		factory: [@model, createAuthenticatorService]
+\---
+
+Tato sekce definuje takzvané služby. Jedná se o objekty, které jsou vytvářeny pouze jednou při jejich prvním použití a
+jsou společné pro celou aplikaci. Jsou zde uvedeny služby pro všechny třídy, o které jsme v této části zavadili.
+
+Služba `database` je samotné připojení k databázi. Jedná se o třídu `Nette\Database\Connection` (uvedeno jako `class`). Při vytváření
+dostane jako argumenty pole z políčka `arguments`, v našem případě se jedná o PDO připojovací řetězec, uživatelské jméno
+a heslo. Řádku tedy upravíme podle našeho nastavení například takto:
+
+/---
+		arguments: ['mysql:host=localhost;dbname=quickstart', 'quickstart', '******']
+\---
+
+.[note]
+Pro dokumentaci připojovacího řetězce (DSN) konzultujte dokumentaci k "PDO driverům":[http://www.php.net/manual/en/pdo.drivers.php].
+Každý driver má trochu odlišný připojovací řětezec, podívejte se například na
+"PDO připojení k MySQL":[http://www.php.net/manual/en/ref.pdo-mysql.connection.php].
+
+Služba `model` vytváří námi upravovanou třidu `Model`. `arguments: [@database]` říká, že třída dostane službu `database`
+(resp. objekt, který slubžu reprezentuje) jako parametr konstruktoru.
+
+Poslední službou je `authenticator`. Jeho definice obsahuje jen řádku
+
+/---
+factory: [@model, createAuthenticatorService]`
+\---
+
+O vytvoření služby se tak stará metoda `createAuthenticatorService` ze služby `model` (= objekt `Model`), kterou jsme již
+zmínili.
+
+A to je prozatím vše. Úspěšně jsme vytvořili strukturu databáze a jednoduchý model, který budeme v dále v aplikaci používat.
+Využijeme jej hned příště, budeme totiž psát náš první presenter.

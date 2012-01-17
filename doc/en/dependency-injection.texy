@@ -1,0 +1,403 @@
+Dependency Injection
+********************
+
+/--div .[perex]
+Purpose of the Dependecy Injection (DI) is to free classes from the responsibility for obtaining objects that they need for its operation (these objects are called **services**). To pass them these services on their instantiation instead. We'll talk over:
+
+- What is the principle of the Dependency Injection.
+- How to create dynamic and static DI containers.
+- How to lazy-load services.
+\--
+
+
+What is Dependency Injection?
+==============================
+Dependency Injection (DI) is nothing mysterious or baffling. It can be comprehended into one selfish sentence: **"Don't seek for anything, let someone else do it."** Now let's translate this into programmers' speech. We have a class `Article` that represents a blog post:
+
+/--php
+class Article
+{
+	public $id;
+	public $title;
+	public $content;
+
+	function save()
+	{
+		// we'll save into the database
+	}
+
+}
+\--
+
+and the usage is this:
+
+/--php
+$article = new Article;
+$article->title = '10 Things You Need to Know About Losing Weight';
+$article->content = 'Every year millions of people in ...';
+$article->save();
+\--
+
+Method `save()` saves the article into the database table `articles`. It's easy to implement using [Nette\Database |database], except one thing: Where is `Article` supposed to get the database connection, ie. an object of the class Connection?
+
+Well, we can place it into some global variable like `$GLOBALS['connection']` or into some static member of a class. But haven't you heard that use of global variables is bad? It's true, global variables are evil and static members are exactly the same.
+
+So where else will we get the database connection? DI has the answer: "Don't seek for anything, let someone else do it." In other words, if I need a database, someone give it to me, it's not my job. Hah, it's devious, dear DI! Let's do it:
+
+/--php
+class Article
+{
+	public $id;
+	public $title;
+	public $content;
+	private $connection;
+
+	function __construct(Nette\Database\Connection $connection)
+	{
+		$this->connection = $connection;
+	}
+
+	function save()
+	{
+		$this->connection->table('articles')->insert(array(
+			'title' => $this->title,
+			'content' => $this->content,
+		));
+	}
+
+}
+\--
+
+Use of the `Article` class will slightly change:
+
+/--php
+$article = new Article($connection);
+$article->title = ...
+$article->content = ...
+$article->save();
+\--
+
+Are you asking, where this code takes the `$connection`? DI gives a straight answer: "Let someone else do it." Database connection will be supplied by he who called the code. And so on, and so on. Sure you say that it's not possible to eternalize the delegation of responsibility. That there must be a zero point. And you're right. There's a *creator* at the beginning, he doesn't delegate anything and he creates objects. We call him **system container**. There's a [separate chapter|configuring] about him.
+
+
+Why are global variables evil?
+--------------------------------
+
+Good question. Class `Article` needs the database connection anyway. But from the first example there's not at all evident, from where and how it gets it. User of such code might be surprised, that the article really saves and he asks: "Where did it save?" With the second example using DI, the code is self-explaining.
+
+Imagine, that you're exploring some payment gateway and you write an example:
+
+/--php
+$cc = new CreditCard('4461510140804839', 12, 2013);
+$cc->pay(1000, CreditCard::DOLLARS);
+\--
+
+You run the code, with your card number, and later you'll find, that it really withdrew the money from your account! Shocked you stare at the list and lament: "Where is my money, how could that happen, I didn't pair it with any payment gateway!" Class `CreditCard` did it by herself, found one in some global variable, as mysterious, as `Article` got the database connection. Such a thing you're not deducating from the code and you don't even know how to change the gateway to another, like testing.
+
+
+DI means more writing
+--------------------
+
+You can object, that use of DI means more writing, that for creating of an instance of `Article` you have to handle the database connection and so. That's true, but don't forget the last time, when "less writing" costed you $1000! No, we don't want to ease that. Objection is correct an we're gonna add one even bigger: When we find a need for `Article` to cache some data, in harmony with DI it will require one more argument with the cache repository. That would mean to adapt the application at many places: At least everywhere, where `Article` is instantiated.
+
+
+What now? The thing has a solution: Instead of manual creating of `Article` object we make a factory, ie. function that creates these `Article` objects. When `Article` changes the constructor, only the factory has to update, nothing more. And where to get the factory in our code? You know... let someone else do it. :-)
+
+
+DI container and services
+---------------------
+
+By the term "DI container" we mean that factory. More precisely it is an object containing any amount of factories, one for each service. What are services? Ordinary objects, like that `Connection` instance, for instance. Just with the DI containers we call them services. Perhaps some consultants invented it to make DI look complicated so they could consult.
+
+Example could be a container, that creates an `Article` object, but also the required database connection::
+
+/--php
+class Container
+{
+	function createConnection()
+	{
+		return new Nette\Database\Connection('mysql:', 'root', '***');
+	}
+
+	function createArticle()
+	{
+	    return new Article($this->createConnection());
+	}
+
+}
+\--
+
+Usage would look as follows:
+
+/--php
+$container = new Container;
+$article = $container->createArticle();
+\--
+
+Advantage is obvious, we don't need to care, how exactly is the `Article` instantiated, that's a job for the factory. Anyway, the solution has still two drawbacks. First, there's entry data wired into the code, so we're gonna detach them into a variable:
+
+/--php
+class Container
+{
+	private $parameters;
+
+	function __construct(array $parameters)
+	{
+		$this->parameters = $parameters;
+	}
+
+	function createConnection()
+	{
+		return new Nette\Database\Connection(
+			$this->parameters['dsn'],
+			$this->parameters['user'],
+			$this->parameters['password']
+		);
+	}
+
+	function createArticle()
+	{
+		return new Article($this->createConnection());
+	}
+
+}
+
+$container = new Container(array(
+	'dsn' => 'mysql:',
+	'user' => 'root',
+	'password' => '***',
+));
+$article = $container->createArticle();
+\--
+
+More important drawback is, that always, when we aks for an `Article` creation, there's gonna start new database connection. This needs to be avoided. We'll add method `getConnection` that will keep once created service for next usage:
+
+/--php
+class Container
+{
+	private $parameters;
+
+	private $services = array();
+
+	function __construct(array $parameters)
+	{
+		$this->parameters = $parameters;
+	}
+
+	function createConnection()
+	{
+		return new Nette\Database\Connection(
+			$this->parameters['dsn'],
+			$this->parameters['user'],
+			$this->parameters['password']
+		);
+	}
+
+	function getConnection()
+	{
+		if (!isset($this->services['connection'])) {
+			$this->services['connection'] = $this->createConnection();
+		}
+		return $this->services['connection'];
+	}
+
+	function createArticle()
+	{
+		return new Article($this->getConnection());
+	}
+
+}
+\--
+
+And now we have fully functional DI container. As you see, it's no complicated to write it. It's notable that services alone don't know, that tey're created by some container, therefor it is possible to create any PHP object that way. Without touching its own source code.
+
+
+
+Nette\DI\Container
+==================
+
+Class [Nette\DI\Container |api:] is a flexible implementation of the universal DI container. It ensures automatically, that instance of services are created only once.
+
+We can make our own containers either statically, ie. inheriting this class, or dynamically, when we add factories as closures or callbacks.
+
+
+Static container
+------------------
+
+Names of factory methods follow an uniform convention, they consist of the prefix `createService` + name of the service starting with first letter upper-cased. If they are not supposed to be accesible from outside, it is possible to lower their visibility to `protected`. Note that the container has already defined the field `$parameters` for user parameters.
+
+/--php
+class MyContainer extends Nette\DI\Container
+{
+
+	protected function createServiceConnection()
+	{
+		return new Nette\Database\Connection(
+			$this->parameters['dsn'],
+			$this->parameters['user'],
+			$this->parameters['password']
+		);
+	}
+
+	protected function createServiceArticle()
+	{
+		return new Article($this->connection);
+	}
+
+}
+\--
+
+Now we create an instance of the container and pass parameters:
+
+/--php
+$container = new MyContainer(array(
+	'dsn' => 'mysql:',
+	'user' => 'root',
+	'password' => '***',
+));
+\--
+
+We get the service by calling the `getService` method or by a shortcut:
+
+/--php
+$article = $container->getService('article');
+// or directly:
+$article = $container->article;
+\--
+
+As have been said, all services are created in one container only once, but it would be more useful, if the container was creating always a new instance of `Article`. It could be achieved easily: Instead of the factory for the service `article` we'll create an ordinary method `createArticle`:
+
+/--php
+class MyContainer extends Nette\DI\Container
+{
+
+	function createServiceConnection()
+	{
+		return new Nette\Database\Connection(
+			$this->parameters['dsn'],
+			$this->parameters['user'],
+			$this->parameters['password']
+		);
+	}
+
+	function createArticle()
+	{
+		return new Article($this->connection);
+	}
+
+}
+
+$container = new MyContainer(...);
+
+$article = $container->createArticle();
+\--
+
+From the call of `$container->createArticle()` is evident, that a new object is always created. It is then a programmer's convention.
+
+
+
+Dynamic container
+-------------------
+
+We can add services into the `Nette\DI\Container` even runtime using the `addService` method. Factories can be written as a PHP callbacks or closures. Note that the container itself is passed to them as a parameter so they could easily access parameters and other services.
+
+/--php
+$container = new Nette\DI\Container;
+
+$container->addService('connection', function($container) {
+	return new Nette\Database\Connection(
+		$container->parameters['dsn'],
+		$container->parameters['user'],
+		$container->parameters['password']
+	);
+});
+\--
+
+When service creation consists just of a simple instantiation, one can pass the class name directly as the second parameter of the `addService` method. And when we have already created the object, we can pass even it.
+
+Besides the `addService` we've got also `hasService` for service existence checking and `removeService` serving for its removal. Again with shortcuts like `isset($container->connection)` or `unset($container->connection`.
+
+
+Freezing
+--------
+
+We can freeze the container and then it can't be changed:
+
+/--php
+$container->freeze();
+$container->addService(...); // throws an exception
+\--
+
+Unfreezing by cloning:
+
+/--php
+$dolly = clone $container;
+\--
+
+
+Aliases
+------
+
+One service can be accessible by more names (aliases):
+
+/--php
+$container->addService('alias', $container->getService('originalName'));
+\--
+
+If we want to preserve lazy-loading, ie. to copy services, that are not yet created without creating them, we're gonna do it as follows:
+
+/--php
+$container->addService('alias', function($container) {
+	return $container->getService('originalName');
+});
+\--
+
+That way we can copy services among more containers:
+
+/--php
+$containerDest->addService('connection', function() use ($containerSrc){
+	return $containerSrc->getService('connection');
+});
+\--
+
+Container can be cloned. The clone contains all the services as original and of course we can add new ones.
+
+
+
+Meta-informations
+--------------
+
+When saving any object we can specify complementary meta-informations. Among others so calld **tags**:
+
+/--php
+$container->addService('name', ..., array(
+	Nette\DI\Container::TAGS => array('debugPanel' => TRUE),
+));
+\--
+
+And then we can search for all services with the particular tag:
+
+/--php
+// returns an array of names of services, ie. strings
+$list = $container->findByTag('tag1')
+\--
+
+Tag doesn't have to be a string, it can contain any other attributes:
+
+/--php
+$container->addService('name', ..., array(
+	Nette\DI\Container::TAGS => array(
+		'tag1' => array('priority' => 12),
+		'tag2' => array('...'),
+	),
+));
+
+$list = $container->findByTag('tag1')
+// returns: array('name' => array('priority' => 12))
+\--
+
+
+Containers generating
+=====================
+
+[TODO | configuring]

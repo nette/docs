@@ -1,10 +1,10 @@
-XDebugTrace Panel
+XDebugTrace panel
 *****************
 
 Panel používá xdebug_start_trace() a xdebug_stop_trace() k vygenerování trace logu funkcí, který následně parsuje, filtruje a zobrazí v tabulce. .[perex]
 
-|* Verze     | 0.3-beta
-|* Repozitář | [https://github.com/mil0/XDebugTracePanel]
+|* Verze     | 0.3-beta3
+|* Repozitář | [https://github.com/milo/XDebugTracePanel]
 |* Autor     | (c) Miloslav Hůla (milo) 2011
 |* Licence   | "LGPL":http://www.gnu.org/licenses/lgpl.html
 |* Požadavky | XDebug 2.1.x, PHP 5.3+, Nette 2.0 beta
@@ -13,7 +13,7 @@ Panel používá xdebug_start_trace() a xdebug_stop_trace() k vygenerování tra
 
 Ukázka
 =========
-[* https://github.com/mil0/XDebugTracePanel/blob/master/screenshot.png?raw=true 600x? *]:https://github.com/mil0/XDebugTracePanel/blob/master/screenshot.png
+[* screenshot.png 600x? *]:https://github.com/milo/XDebugTracePanel/blob/master/screenshot.png
 
 
 Instalace
@@ -21,7 +21,7 @@ Instalace
 - `XDebugTrace.php` a šablony uložte někam, kam má přístup RobotLoader, například `libs/Panels/XDebugTrace/`
 - V `bootstrap.php` zaregistrujte panel
 /--php
-// xdebug_start_trace() vždy přidává příponu .xt
+// xdebug_start_trace() přidává příponu .xt vždy automaticky
 $xdebugTrace = new \Panel\XDebugTrace(TMP_DIR . '/xdebug_trace_file');
 
 // Přidání panelu
@@ -56,16 +56,102 @@ $xdebugTrace->stop();
 
 Filtrování záznamů trace logu
 =============================
-Ne všechny záznamy z trace logu chceme vidět. Log může dosahovat velikosti v megabajtech. Pro odfiltrování nežádoucích záznamů lze přidat vlastní callbacky pomocí `\Panel\XDebugTrace::addFilterCallback()`, viz. zdrojový kód. Výchozí filtr je `\Panel\XDebugTrace::defaultFilterCb()`.
+Pro plné využití panelu je klíčové filtrování. Ne všechny záznamy z trace logu chceme vidět. Log může dosahovat velikosti v megabajtech. Pro odfiltrování nežádoucích záznamů lze přidat vlastní callbacky pomocí `\Panel\XDebugTrace::addFilterCallback()`, viz. zdrojový kód. Výchozí filtr je `\Panel\XDebugTrace::defaultFilterCb()`.
+
+Před psaním filtru je potřeba znát strukturu XDebug trace logu. Ta je zhruba následující.
+/--
+[Entry záznam - vstup do funkce]
+level	id	0	time	memory	functionName	...
+
+[Exit záznam - výstup z funkce]
+level	id	1	time	memory
+
+[Tedy například]
+3    121    0    0.012    401442    mojeFunkce - entry do mojeFunkce()
+4    122    0    0.014    401442    strpos     - entry do strpos()
+4    122    1    0.015    401454               - exit ze strpos()
+4    123    0    0.016    401454    substr     - entry do substr()
+4    123    1    0.018    401505               - exit ze substr()
+3    121    1    0.020    401442               - exit z mojeFunkce()
+\--
+
+Do filtrovacích callbacků se předávají záznamy již naparsované jako objekt stdClass.
+/--
+stdClass Object
+(
+    [level] => 3
+    [id] => 830
+    [exited] => false
+    [time] => 0.035398
+    [exitTime] => NULL
+    [deltaTime] => NULL
+    [memory] => 3749168
+    [exitMemory] => NULL
+    [deltaMemory] => NULL
+    [function] => mySleep
+    [isInternal] => false
+    [includeFile] => NULL
+    [filename] => D:\Web\nette-sandobx-2.0-Beta\app\bootstrap.php
+    [line] => 68
+    [evalInfo] => ''
+)
+\--
+
+s tím, že property `exitTime`, `deltaTime`, `exitMemory` a `deltaMemory` jsou vyplněny pouze při volání `FILTER_EXIT` callbacku (viz. dále).
+
+
+Při přidávání callbacku filtru je výchozí chování takové, že filtr bude volán pouze na vstupní záznamy (entry) a bude volán PŘED ostatními již přidanými filtry. Toto chování lze změni druhým parametrem (bitmaskou).
+- XDebugTrace::FILTER_APPEND - callback se zařadí ZA ostatní filtry
+- XDebugTrace::FILTER_ENTRY - bude volán na vstupní záznamy (entry)
+- XDebugTrace::FILTER_EXIT - bude volán na výstupní (exit)
+- XDebugTrace::FILTER_BOTH - stejné jako FILTER_ENTRY | FILTER_EXIT
+- XDebugTrace::FILTER_REPLACE - nejprve smaže všechny filtry a pak se přidá
+
+
+Příklady filtrů
+===============
 /--php
-// Například chceme logovat pouzuze funkci test()
-$xdebugTrace->addFilterCallback(
-	function($record) {
-		if ($record->function !== 'test') {
-			return \Panel\XDebugTrace::FILTER_SKIP;
-		}
+// Zobrazit pouze funkci count(), ostatní filtry vymažeme
+$xdebugTrace->addFilterCallback(function($record) {
+	if ($record->function !== 'count') {
+		return \Panel\XDebugTrace::SKIP;
 	}
-);
+}, \Panel\XDebugTrace::FILTER_REPLACE);
+\--
+
+Namísto `addFilterCallback($callback, \Panel\XDebugTrace::FILTER_REPLACE)` můžeme používat funkci `setFilterCallback($callback)`.
+
+/--php
+// Chceme detailně prohlédnout každé volání funkce Nette\Utils\LimitedScope::load()
+// Všiměte si druhého parametry $onEntry. Ten je TRUE pro entry, FALSE pro exit volání.
+$xdebugTrace->setFilterCallback(function($record, $onEntry){
+    static $cnt = 0;
+
+    if ($record->function === 'Nette\Utils\LimitedScope::load') {
+    	$cnt += $onEntry ? 1 : -1;
+
+    	return NULL;
+    }
+
+    return $cnt ? NULL : \Panel\XDebugTrace::SKIP;
+}, \Panel\XDebugTrace::FILTER_BOTH);
+\--
+
+/--php
+// Zobrazíme vše mimo interních funkcí
+$xdebugTrace->setFilterCallback(function($record){
+	return $record->isInternal ? \Panel\XDebugTrace::SKIP : NULL;
+});
+\--
+
+/--php
+// Zobrazíme pouze funkce, které běží déle než 1 ms.
+// Musí se registrovat pro FILTER_EXIT, jinak není deltaTime k dispozici.
+$xdebugTrace->setFilterCallback(function($record) {
+	if ($record->deltaTime < 0.001) {
+		return \Panel\XDebugTrace::SKIP;
+	}
+}, \Panel\XDebugTrace::FILTER_EXIT);
 \--
 
 {{author: Milo|2970}}

@@ -1,0 +1,147 @@
+Inject DIC továrničky
+******************
+
+.[perex]
+Jak jistě všichni víme, [Dependency Injection Container | doc:configuring] se stará o služby, které používáme v aplikaci. Jenže občas nám může vadit, že nám vrací vždy stejnou instanci.
+
+Nejčastějším příkladem jsou komponenty.
+
+
+Proč vlastně vytvářet komponenty přes DIC?
+======
+
+V momentě, kdy by komponenta byla složitější a potřebovala nějakou jinou službu, například databázi, tak bychom měli dvě možnosti. Buďto budeme komponentu vytvářet ručně a `Connection` si předáme do presenteru
+
+/--php
+class ArticlePresenter extends BasePresenter
+{
+	/** @var Nette\Database\Connection */
+	private $db;
+
+	public function injectDb(Nette\Database\Connection $db)
+	{
+		$this->db = $db;
+	}
+
+	protected function createComponentArticles()
+	{
+		return new ArticlesControl($this->db);
+	}
+
+}
+\--
+
+Což je přijatelné, dokud bude mít komponenta jednu dvě závislosti. No a nebo si komponentu necháme vytvářet pomocí v DIC
+
+
+Jak to nedělat
+======
+
+Nakonfigurujeme
+
+/--neon
+services:
+	- ArticlesControl(@db)
+\--
+
+a nyní si komponentu můžeme injectnout
+
+/--php
+class ArticlePresenter extends BasePresenter
+{
+	public function injectSlozita(ArticlesControl $articles)
+	{
+		$this->addComponent($articles, 'articles');
+	}
+}
+\--
+
+Proč je to špatně? Protože po celý běh aplikace budeme mít k dispozici pouze jednu jedinou instanci této třídy. Komponenty jsou vzorem znovupoužitelnosti a když ji nebudu moct mít v jednom presenteru připojenou dvakrát, jen pod jiným jménem, tak se připravujeme o mocnou zbraň.
+
+Navíc je instance komponenty vytvořena okamžitě, při vytvoření instance presenteru. To také není žádoucí.
+
+
+Jak je to správně
+======
+
+Napíšeme si interface pro továrničku, kterou budeme vyžadovat v presenteru
+
+/--php
+interface ArticlesControlFactory
+{
+	/** @return ArticlesControl */
+	function create();
+}
+\--
+
+a nakonfigurujeme
+
+/--neon
+factories:
+	articles:
+		create: ArticlesControl
+		implement: ArticlesControlFactory
+\--
+
+.[note]
+Vlastnost `create` se "ještě nedávno":https://github.com/nette/nette/commit/23c3f6ca0df8ffc6da9aad1fb02f0cdb4f9505b0 jmenovala `factory`. Zatím platí pouze pro vývojovou verzi.
+
+Kdybych nenapsal do `create`, že `ArticlesControlFactory` bude vytvářet `ArticlesControl`, tak se Nette Framework koukne na `ArticlesControlFactory::create()`, jestli nemá annotaci `@return` a kdyby ano, tak si z ní sám zjistí, jakou třídu bude vytvářet.
+
+.[note]
+Pokud mu neřekneme co má vytvářet a není ani přítomná annotace @return, Nette nás na to důrazně upozorní výjimkou.
+
+Až Nette tohle všechno zkontroluje, tak samo vygeneruje třídu, která bude tento interface implementovat. Výsledná třída může vypadat takto
+
+/--php
+final class ArticlesControlFactoryImpl_articlesControl implements ArticlesControlFactory
+{
+	private $container;
+
+	public function __construct(Nette\DI\Container $container)
+	{
+		$this->container = $container;
+	}
+
+	public function create()
+	{
+		$service = new ArticlesControl($this->container->getService('nette.database.default'));
+		$this->container->callInjects($service);
+		return $service;
+	}
+}
+\--
+
+Tato třída bude registrována jako služba a můžeme si ji injectnout do presenteru a použít
+
+/--php
+class ArticlesPresenter extends BasePresenter
+{
+
+	/**
+	 * @var ArticlesControlFactory
+	 */
+	private $articlesFactory;
+
+	/**
+	 * @param ArticlesControlFactory $articlesFactory
+	 */
+	public function injectArticlesFactory(ArticlesControlFactory $articlesFactory)
+	{
+		$this->articlesFactory = $articlesFactory;
+	}
+
+	/**
+	 * @return ArticlesControl
+	 */
+	protected function createComponentArticles()
+	{
+		return $this->articlesFactory->create();
+	}
+
+}
+\--
+
+Může to vypadat maličko ukecané, ale je to velice mocné.
+
+{{author: Filip Procházka|2118}}

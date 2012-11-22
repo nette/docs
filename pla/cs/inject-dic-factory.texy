@@ -1,289 +1,230 @@
 Inject a DIC továrničky
 ******************
 
-.[perex]
-Jak jistě všichni víme, [Dependency Injection Container | doc:configuring] se stará o služby, které používáme v aplikaci. Jenže občas nám může vadit, že nám vrací vždy stejnou instanci.
-
-Nejčastějším příkladem jsou komponenty.
-
-
-Proč vlastně vytvářet komponenty přes DIC?
-======
-
-V momentě, kdy by komponenta byla složitější a potřebovala nějakou jinou službu, například databázi, tak bychom měli dvě možnosti. Buďto budeme komponentu vytvářet ručně a `Connection` si předáme do presenteru
+Mějme stránku, která bude obsahovat formulář. Tento formulář uživatel v administraci vyplní a odešle. Když formulář odešle, potřebujeme vytvořit hromadu emailů a rozeslat je všem uživatelům s tím co vyplnil. Takový jednoduchý mailing list.
 
 /--php
-class ArticlePresenter extends BasePresenter
+class MailingPresenter extends BasePresenter
 {
-	/** @var Nette\Database\Connection */
-	private $db;
-
-	public function injectDb(Nette\Database\Connection $db)
+	protected function createComponentForm()
 	{
-		$this->db = $db;
+		$form = new Nette\Application\UI\Form;
+		$form->addTextarea('text');
+		$form->addSubmit('send')
+		$form->onSuccess[] = $this->sendEmails;
+		return $form;
 	}
 
-	protected function createComponentArticles()
+	public function sendEmails($form)
 	{
-		return new ArticlesControl($this->db);
+		$message = $form->values->text; // text zprávy
+		// zpracování
 	}
-
 }
 \--
 
-Což je přijatelné, ale jen dokud bude mít komponenta jednu dvě závislosti. No a nebo si komponentu necháme vytvářet pomocí v DIC
+Nette poskytuje pro práci s emaily třídu `Nette\Mail\Message`, kterou si nastavíme a pro každý email z databáze odešleme jednu zprávu. Zpracování by mohlo vypadat takto
 
+/--php
+	public function sendEmails($form)
+	{
+		$message = $form->values->text; // text zprávy
+		foreach ($this->database->table('users') as $user) {
+			$mail = new Nette\Mail\Message;
+			$mail->setTo($user->email);
+			$mail->setBody($message);
+			$mail->send();
+		}
+	}
+\--
 
-Jak to **ne**dělat
-======
+Všechno funguje, emaily se posílají, vedení firmy je spokojené. Až do momentu, kdy je potřeba začít používat vlastní odesílací server, protože ten výchozí je hloupý a emaily z něj odeslané skončí ve spamu, protože jich posíláme moc.
 
-Nakonfigurujeme
+Vlastní odesílací server nastavíme takto
+
+/--php
+$mailer = new Nette\Mail\SmtpMailer(array('host' => 'localhost', 'username' => 'Rimmer'));
+
+$mail = new Nette\Mail\Message;
+$mail->setMailer($mailer);
+\--
+
+Jenže jeho přístupové údaje budeme chtít mít v konfigu. Co kdyby se změnily, tak ať nemusíme hledat kde všude je v aplikaci odesílání emailů. Doplníme tedy do odpovídajících sekcí v konfigu `app/config/config.neon` následující
 
 /--neon
+parameters:
+	mailer:
+		host: localhost
+		username: Rimmer
+		password: "nachystejte uzenáče"
+
 services:
-	- ArticlesControl(@db)
+	mailer: Nette\Mail\SmtpMailer(%mailer%)
 \--
 
-a nyní si komponentu můžeme injectnout
+Nyní máme nastavený a připravený mailer v "Dependency Injection Containeru":http://doc.nette.org/cs/configuring (dále jen DIC). Teď bychom ho ale potřebovali nějak dostat do presenteru.
+
+Tady se nám docela hodí si vytvořit nějakou továrničku, co nám bude zprávy vytvářet, která by rovnou nastavovala mailer. Takže si ji takovou jednoduchou napíšeme
 
 /--php
-class ArticlePresenter extends BasePresenter
+class MailingMessageFactory extends Nette\Object
 {
-	public function injectSlozita(ArticlesControl $articles)
+	private $mailer;
+
+	public function __construct(Nette\Mail\IMailer $mailer)
 	{
-		$this->addComponent($articles, 'articles');
-	}
-}
-\--
-
-Proč je to špatně? Protože po celý běh aplikace budeme mít k dispozici pouze jednu jedinou instanci této třídy. Komponenty jsou vzorem znovupoužitelnosti a když ji nebudu moct mít v jednom presenteru připojenou dvakrát, jen pod jiným jménem, tak se připravujeme o mocnou zbraň.
-
-Navíc je instance komponenty vytvořena okamžitě, při vytvoření instance presenteru. To také není žádoucí.
-
-
-Trošku lépe
-======
-
-Nette Framework nám dovoluje nakonfigurovat tzv. "factories"((továrničky)). Stačí přesunout definici služby ze `services` do `factories` a máme to
-
-/--neon
-factories:
-	articles:
-		create: ArticlesControl(@db)
-\--
-
-.[note]
-Více o "starých" továrnách [zde v dokumentaci |doc:configuring#toc-tovarny].
-
-S touhle konfigurací se nám do DIC vygeneruje takováto tovární metoda,
-
-/--php
-	public function createArticles()
-	{
-		return new ArticlesControl($this->getService('nette.database.default'));
-	}
-\--
-
-kterou můžeme takto volat nad DI Containerem
-
-/--php
-class ArticlePresenter extends BasePresenter
-{
-
-	protected function createComponentArticles()
-	{
-		return $this->context->createArticles();
-	}
-
-}
-\--
-
-Přináší to ovšem problémy. Jde o to, že bez `$this->context` v presenteru metodu prostě nezavoláme.
-
-To by byl ale ten menší problém, protože `$this->context` (DI Container) je v presenteru automaticky (byť možné né nadlouho). Co když budeme takovou tovární metodu využívat v jiné službě? Nebo budeme chtít takto vytvářet komponentu v komponentě v komponentě? Nesmějte se, to je velice reálný požadavek.
-
-Všude, kde bychom chtěli vytvářet instanci `ArticlesControl` bychom si museli předat DI Container - tudy cesta nevede. [Nebudeme si předávat piáno, když chceme pouze doutník |pla:posobota-38-david-grudl-dependency-injection].
-
-
-Jak je to správně
-======
-
-Napíšeme si interface pro továrničku, kterou budeme vyžadovat v presenteru nebo kdekoli jinde, kde danou komponentu potřebujeme vytvořit.
-
-/--php
-interface IArticlesControlFactory
-{
-	/** @return ArticlesControl */
-	function create();
-}
-\--
-
-a nakonfigurujeme
-
-/--neon
-factories:
-	articles:
-		create: ArticlesControl
-		implement: IArticlesControlFactory
-\--
-
-.[note]
-Vlastnost `create` se "ještě nedávno":https://github.com/nette/nette/commit/23c3f6ca0df8ffc6da9aad1fb02f0cdb4f9505b0 jmenovala `factory`. Zatím platí pouze pro vývojovou verzi.
-
-Kdybych nenapsal do `create`, že `ArticlesControlFactory` bude vytvářet `ArticlesControl`, tak se Nette Framework koukne na `IArticlesControlFactory::create()`, jestli nemá annotaci `@return` a kdyby ano, tak si z ní sám zjistí, jakou třídu bude vytvářet.
-
-.[note]
-Pokud mu neřekneme co má vytvářet a není ani přítomná annotace @return, Nette nás na to důrazně upozorní výjimkou.
-
-Až Nette tohle všechno zkontroluje, tak samo vygeneruje třídu, která bude tento interface implementovat. Vygenerovaná třída může vypadat takto
-
-/--php
-final class ArticlesControlFactoryImpl_articles implements IArticlesControlFactory
-{
-	private $container;
-
-	public function __construct(Nette\DI\Container $container)
-	{
-		$this->container = $container;
+		$this->mailer = $mailer;
 	}
 
 	public function create()
 	{
-		return new ArticlesControl($this->container->getService('nette.database.default'));
+		$message = new Nette\Mail\Message;
+		$message->setMailer($this->mailer);
+		return $message;
 	}
 }
 \--
 
-Tato třída bude registrována jako služba a můžeme si ji injectnout do presenteru a použít
+Tuhle továrničku si zaregistrujeme do DIC
+
+/--neon
+services:
+	- MailingMessageFactory(@mailer)
+\--
+
+Vyžádáme si ji v presenteru
 
 /--php
-class ArticlesPresenter extends BasePresenter
+class MailingPresenter extends BasePresenter
 {
+	/** @var MailingMessageFactory */
+	private $mailingFactory;
 
-	/**
-	 * @var IArticlesControlFactory
-	 */
-	private $articlesFactory;
-
-	/**
-	 * @param IArticlesControlFactory $articlesFactory
-	 */
-	public function injectArticlesFactory(IArticlesControlFactory $articlesFactory)
+	public function injectMailingFactory(MailingMessageFactory $mailingFactory)
 	{
-		$this->articlesFactory = $articlesFactory;
+		$this->mailingFactory = $mailingFactory;
 	}
 
-	/**
-	 * @return ArticlesControl
-	 */
-	protected function createComponentArticles()
-	{
-		return $this->articlesFactory->create();
-	}
-
-}
+	// ...
 \--
 
-.[warning]
-Naše aplikace se musí spoléhat pouze na interface, který jsme sami napsali! Nikdy se nesnažte vyžadovat factory, podle názvu třídy, může se kdykoliv změnit! Implementaci řeší Nette, nás zajímá jenom a pouze interface.
+A upravíme zpracování, aby používalo náši továrničku
 
-Pojďme si to shrnout:
-1) vytvoříme třídu (komponentu, formulář, ...), kterou potřebujeme
-2) vytvoříme interface pro factory, která ji bude vytvářet, a kterou bude generovat DIC
-3) toto všechno nakonfigurujeme
-4) do presenteru přidáme `inject*()` metodu, která bude přijímat vygenerovanou factory
-5) napíšeme si továrničku, která bude používat vygenerovanou factory, volat `->create()` a registrovat komponentu do presenteru
+/--php
+	public function sendEmails($form)
+	{
+		$message = $form->values->text;
+		foreach ($this->database->table('users') as $user) {
+			$mail = $this->mailingFactory->create(); // tento řádek se změnil
+			$mail->setTo($user->email);
+			$mail->setBody($message);
+			$mail->send();
+		}
+	}
+\--
 
-Může to vypadat maličko ukecané, ale je to velice mocné.
+Celé to teď funguje tak, že do presenteru už se dostane jen jakási továrna, která nám vytvoří prázdný objekt `Message`. Nám už je ale jedno, jak se odesílá. To nastaví někdo jiný, v konfigu.
 
 
-A co formuláře?
+Trošku to vylepšíme
 =====
 
-Než jsme měli k dispozici generované továrničky, David "doporučoval psát je ručně":http://forum.nette.org/cs/11883-vicenasobne-pouziti-formulare-dedicnost-nebo-tovarna. A když už jsme je psali ručně, tak jsme do nich mohli rovnou psát třeba i jejich obsluhu.
+Aplikace roste a továrniček máme hromady a hromady - na emaily, na komponenty, na formuláře... A nás už je nebaví psát! Vždyť je to pořád to stejné dokola! Co kdyby to za nás udělal Nette Framework?
 
-To je samozřejmě **stále naprosto validní** přístup. Jenže někomu by se nemuselo líbit, že se factory stará o zpracování formuláře. Třeba mně ;)
-
-.[tip]
-Nerad bych zde rozebíral metodiku vytváření formulářů, [od toho je tu jiný článek |pla:dedicnost-vs-kompozice]. Použijeme tedy nejkratší možný způsob.
-
-Místo vytváření formuláře v továrničce si podědíme `UI\Form` a nakonfigurujeme v konstruktoru
+Co je absolutní minimum, co potřebujeme, abychom si v presenteru mohli vyžádat nějakou továrničku? - Její interface. Napíšeme si tedy interface.
 
 /--php
-class CreateOrEditUserForm extends Nette\Application\UI\Form
+interface IMailingMessageFactory
 {
-	private $db;
-
-	public function __construct(Nette\Database\Connection $db, $userId)
-	{
-		parent::__construct(); // vždy volat parent !!
-		$this->db = $db;
-
-		$this->addHidden('userId', $userId);
-		$this->addSubmit('send', 'Update Account');
-		$this->addSubmit('sendandview', 'Update Account and continue editing')
-			->onClick[] = $this->process;
-	}
-
-	public function process($button)
-	{
-		// ...
-	}
+	/** @return Nette\Mail\Message */
+	function create();
 }
 \--
 
-Dopíšeme si interface pro továčničku,
+Pokud teď vše správně nastavíme, tak Nette dokáže samo vygenerovat třídu, která bude tento interface implementovat a bude vytvářet požadovaný objekt `Nette\Mail\Message` a klidně mu i nastaví mailer!
 
-/--php
-interface ICreateOrEditUserFormFactory
-{
-	/** @return CreateOrEditUserForm */
-	function create($userId);
-}
-\--
-
-nakonfigurujeme
+Slouží na to sekce `factories` v konfigu
 
 /--neon
 factories:
-	userForm:
-		create: CreateOrEditUserForm(..., %userId%)
-		implement: ICreateOrEditUserFormFactory
-		parameters: [userId]
+	mailingMessage:
+		implement: IMailingMessageFactory
+		setup:
+			- setMailer(@mailer)
 \--
 
-a používáme.
+Říkáme tady "vytvořit mi továrničku, která bude mít interface `IMailingMessageFactory` (abychom si ji mohli vyžádat v presenteru) a nastav jí náš `mailer`."
+
+V těchto továrničkách nemůže být bohužel žádná logika, pouze vytvoření objektu, nějaké zavolání metody, nebo předání jiné služby či parametru. Což přesně zde děláme - továrnička vytvoří objekt a nastaví mu jinou službu pomocí jeho metody.
+
+
+Kompletní příklad
+======
+
+Po dokončení nyní máme tuto konfiguraci
+
+/--neon
+parameters:
+	mailer:
+		host: localhost
+		username: Rimmer
+		password: "nachystejte uzenáče"
+
+services:
+	mailer: Nette\Mail\SmtpMailer(%mailer%)
+
+factories:
+	mailingMessage:
+		implement: IMailingMessageFactory
+		setup:
+			- setMailer(@mailer)
+\--
+
+Tento interface
 
 /--php
-class UserPresenter extends BasePresenter
+interface IMailingMessageFactory
 {
+	/** @return Nette\Mail\Message */
+	function create();
+}
+\--
 
-	/**
-	 * @persistent
-	 */
-	public $userId = 0;
+A zjednodušený presenter
 
-	/**
-	 * @var ICreateOrEditUserFormFactory
-	 */
-	private $userFormFactory;
+/--php
+class MailingPresenter extends BasePresenter
+{
+	/** @var IMailingMessageFactory */
+	private $mailingFactory;
 
-	/**
-	 * @param ICreateOrEditUserFormFactory $userFormFactory
-	 */
-	public function injectUserFormFactory(ICreateOrEditUserFormFactory $userFormFactory)
+	public function injectMailingFactory(IMailingMessageFactory $mailingFactory)
 	{
-		$this->userFormFactory = $userFormFactory;
+		$this->mailingFactory = $mailingFactory;
 	}
 
-	/**
-	 * @return CreateOrEditUserForm
-	 */
-	protected function createComponentUserForm()
+	protected function createComponentForm()
 	{
-		return $this->userFormFactory->create($this->userId);
+		$form = new Nette\Application\UI\Form;
+		$form->addTextarea('text');
+		$form->addSubmit('send')
+		$form->onSuccess[] = $this->sendEmails;
+		return $form;
+	}
+
+	public function sendEmails($form)
+	{
+		$message = $form->values->text;
+		foreach ($this->database->table('users') as $user) {
+			$mail = $this->mailingFactory->create(); // tento řádek se změnil
+			$mail->setTo($user->email);
+			$mail->setBody($message);
+			$mail->send();
+		}
 	}
 }
 \--
+
+Nyní můžeme vesele měnit nastavení maileru a projeví se všude, kde bude využita naše továrnička. A to je vše, přátelé.
 
 {{author: Filip Procházka|2118}}

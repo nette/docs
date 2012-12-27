@@ -1,13 +1,12 @@
 Loading models with NotORM and Dependency Injection
 ***************************************************
 
-.[warning]
-Dynamic model loader is in Nette 2.0+ replaced by **Dependency Injection container** (in [configuration file | doc:en:configuring#toc-services-definitions]). Pros of DI container approach is transparency and availability of [autowiring |doc:en:configuring#toc-auto-wiring].
+.[perex]
+Since "Nette 2.0.5":http://forum.nette.org/en/1074-nette-framework-2-0-5-released we can load models via **Dependency Injection container** (in [config files | doc:en:configuring#toc-services-definitions]) and in presenter we can use [autowire |doc:en:configuring#toc-auto-wiring] method **inject**. Pros of DI container approach is transparency.
 
 .[note]
-This tutorial uses **Nette 2.0** and **NotORM**. How to connect to database using *dibi* or *Nette Database* can be found in [this tutorial |pla:cs:nette-database-vs-dibi].
+This tutorial uses **Nette 2.0.5** a **NotORM**. Are you looking for [dibi or Nette Database |pla:cs:nette-database-vs-dibi] (in Czech)?
 
-Text is based on [Dynamic model loader |pla:cs:dynamicke-nacitani-modelu] (by *Majkl578*), where you can go to check theoretic connections.
 
 Configuring environment
 ===
@@ -15,49 +14,33 @@ Configuring environment
 config.neon
 ---
 
-First we set up required parameters and register database service.
+First we set up required parameters and register database service. Then we can add particular models as services.
 
 /--neon
-common:
-	parameters:
-		# parameters to connected to database
-		database:
-			driver: mysql
-			hostn: local
-			username: root
-			password:
-			dbname: database
+parameters:
+	# parameters to connect to database
+	database:
+		driver: mysql
+		hostn: local
+		username: root
+		password:
+		dbname: database
 
-	includes:
-		- models.neon
+nette:
+	# required to activate debug panel for NotORM
+	database:
+		default:
+			dsn: "%database.driver%:host=%database.host%;dbname=%database.dbname%"
+			user: %database.username%
+			password: %database.password%
 
-	nette:
-		database:
-			default:
-				dsn: "%database.driver%:host=%database.host%;dbname=%database.dbname%"
-				user: %database.username%
-				password: %database.password%
-
-	services:
-		dbcache: NotORM_Cache_Include("%tempDir%/notorm.cache")
-		database: NotORM(@\PDO, NULL, @dbcache)
-
-
-production < common:
-
-development < common:
-\--
-
-models.neon
----
-
-For quick and simple overview of all models it's better to create separate file for models. All required parameters are handled by [autowiring |doc:en:configuring#toc-auto-wiring].
-
-/--neon
 services:
-	models: Nette\DI\NestedAccessor(@container, "models")
-	models.user: Models\User
-	models.article: Models\Article
+	dbcache: NotORM_Cache_Include("%tempDir%/notorm.cache")
+	database: NotORM(@\PDO, NULL, @dbcache)
+
+	# our models
+	userModel: Models\User
+	articleModel: Models\Article
 \--
 
 
@@ -74,16 +57,22 @@ BaseModel.php
 
 namespace Models;
 
-class Base extends \Nette\Object
+use Nette;
+use NotORM;
+
+abstract class Base extends Nette\Object
 {
-	/** @var \Notorm */
+	/** @var NotORM */
 	protected $db;
 
 	/** @var string */
 	private $tableName;
 
 
-	public function __construct(\NotORM $notorm) // autowiring
+	/**
+	 * @param NotORM
+	 */
+	public function __construct(NotORM $notorm)
 	{
 		$this->db = $notorm;
 		$this->tableName = $this->tableNameByClass(get_class($this));
@@ -91,9 +80,10 @@ class Base extends \Nette\Object
 
 
 	/**
-	 * Determine table by class name [Pages => pages, ArticleTag => article_tag]
+	 * Determine table by class name
 	 * @param string
 	 * @return string
+	 * @result:Pages => pages, ArticleTag => article_tag
 	 */
 	private function tableNameByClass($className)
 	{
@@ -108,7 +98,8 @@ class Base extends \Nette\Object
 		return strtr($tableName, $replace);
 	}
 
-	// own methods: insert, update, delete etc.
+	// own methods: insert, update, delete, count,
+	// fetchSingle, fetchPairs,  etc.
 
 }
 \--
@@ -116,7 +107,7 @@ class Base extends \Nette\Object
 Particular model
 ---
 
-Every model extending `Models\Base` contains all it's methods.
+Every model extending `Models\Base` contains all it's methods. We may use them and also add some specific for this model only.
 
 /--php
 namespace Models;
@@ -134,42 +125,65 @@ class User extends Base
 }
 \--
 
-
-Using model
+Let's inject
 ===
 
-Now we have all models registered as services and we can immediately use them.
+We have already registered models as services. To avoid `$this->context` we have to [inject|http://pla.nette.org/en/inject-autowire] to presenters.
 
-
-BasePresenter.php
----
-
-To save some writing, we can add a shortcut into `BasePresenter`, so instead of `$this->context->models->requestedModel` only `$this->models->requestedModel`.
+To avaid "inject hell" we will load all frequently used models in `BasePresenter` to properties with `protected` access.
 
 /--php
-/**
- * Models shortcut
- * @return SystemContainer_models
- */
-public function getModels()
+abstract class BasePresenter extends Nette\Application\UI\Presenter
 {
-	return $this->context->models;
+	/** @var Models\User */
+	protected $userModel;
+
+
+ 	/**
+   	 * Inject all models that are expected to be used in most of BasePresenter's ancestors
+   	 * @param Models\User
+	 */
+	public function injectBaseModels(Models\User $userModel)
+	{
+		$this->userModel = $userModel;
+	}
+
 }
 \--
 
-.[note]
-Don't forget to complete **@return** to *getModels* method, automatic prompts from SystemContainer won't work instead.
+Use in practice
+===
 
-
-MyPresenter.php
----
 
 /--php
-$results = $this->models->user->getByName("John Doe");
+class ArticlePresenter extends BasePresenter
+{
+	/** @var Models\Article */
+	private $articleModel;
+
+
+ 	/**
+   	 * @param Models\Article
+	 */
+	public function injectModels(Models\Article $articleModel)
+	{
+		$this->articleModel = $articleModel;
+	}
+
+
+	/**
+	 * @param int
+	 */
+        public function actionDetail($id)
+        {
+		$this->template->article = $article = $this->articleModel->fetch($id)
+		$this->template->articleAuthor = $this->userModel->fetch($article["user_id"]);
+        }
+
+}
 \--
 
-Simple, right?
-
+Easy, right?
 
 {{lang: cs/nacitani-modelu-s-notorm-a-dependency-injection}}
 

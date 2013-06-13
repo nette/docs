@@ -20,7 +20,7 @@ class NCsvResponse extends NObject implements IPresenterResponse {
 
   /** @var bool */
   public $addHeading;
-  
+
   /** @var string */
   public $glue;
 
@@ -72,7 +72,7 @@ class NCsvResponse extends NObject implements IPresenterResponse {
   }
 
 
-  
+
 
   /**
    * Sends response to output.
@@ -81,7 +81,7 @@ class NCsvResponse extends NObject implements IPresenterResponse {
   public function send(IHttpRequest $httpRequest, IHttpResponse $httpResponse) {
     // ----------------------------------------------------
     $httpResponse->setContentType($this->contentType, $this->charset);
-    
+
     if (empty($this->name)) {
       $httpResponse->setHeader('Content-Disposition', 'attachment');
     } else {
@@ -89,39 +89,39 @@ class NCsvResponse extends NObject implements IPresenterResponse {
     }
 
     $data = $this->formatCsv();
-    
+
     $httpResponse->setHeader('Content-Length', strlen($data));
     print $data;
   }
 
-  
-  
-  
+
+
+
   public function formatCsv() {
     // ----------------------------------------------------
     if (empty($this->data)) {
       return '';
     }
-  
+
     $csv = array();
-    
+
     if (!is_array($this->data)) {
       $this->data = iterator_to_array($this->data);
     }
     $firstRow = reset($this->data);
-  
+
     if ($this->addHeading) {
       if (!is_array($firstRow)) {
         $firstRow = iterator_to_array($firstRow);
       }
-      
+
       $labels = array();
       foreach (array_keys($firstRow) as $key) {
         $labels[] = ucwords(str_replace("_", ' ', $key));
-      } 
+      }
       $csv[] = '"'.join('"'.$this->glue.'"', $labels).'"';
     }
-  
+
     foreach ($this->data as $row) {
       if (!is_array($row)) {
         $row = iterator_to_array($row);
@@ -132,7 +132,7 @@ class NCsvResponse extends NObject implements IPresenterResponse {
       }
       $csv[] = '"'.join('"'.$this->glue.'"', $row).'"';
     }
-  
+
     return join(PHP_EOL, $csv);
   }
 }

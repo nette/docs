@@ -33,7 +33,7 @@ class ConnectionPanel extends \Nette\Object implements \Nette\Diagnostics\IBarPa
 	public function startQuery($sql, array $params = NULL, array $types = NULL)
 	{
 		Debugger::timer('doctrine');
-		
+
 		$this->queries[] = array($sql, $params, 0);
 	}
 
@@ -66,7 +66,7 @@ class ConnectionPanel extends \Nette\Object implements \Nette\Diagnostics\IBarPa
 		$s .= '<tr><td>' . sprintf('%0.3f', $time * 1000);
 		$s .= '</td><td class="nette-Doctrine2Panel-sql">' . \Nette\Database\Helpers::dumpSql($sql);
 		$s .= '</td><td>' . \Nette\Diagnostics\Helpers::clickableDump($params, TRUE) . '</tr>';
-		
+
 		return $s;
 	}
 
@@ -112,7 +112,7 @@ class ConnectionPanel extends \Nette\Object implements \Nette\Diagnostics\IBarPa
 			</table>
 			</div>';
 	}
-	
+
 	/**
 	 * @return ConnectionPanel
 	 */

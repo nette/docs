@@ -5,7 +5,7 @@ var NetteAjax = new Class({
 	updateSnippet : function(id, html) {
 		document.id(id).set('html', html);
 	},
-	
+
 	onSuccess: function(payload) {
 		this.parent(payload);
 		//redirect
@@ -20,7 +20,7 @@ var NetteAjax = new Class({
 			}
 		}
 	}
-	
+
 });
 
 window.addEvent('domready', function() {

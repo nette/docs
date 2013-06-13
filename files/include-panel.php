@@ -24,4 +24,3 @@ class IncludePanel implements Nette\Diagnostics\IBarPanel
 	}
 
 }
-

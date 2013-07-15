@@ -213,7 +213,7 @@ class Convertor
 			return 'http://php.net/' . urlencode($matches->name) . ($section ? "#$section" : ''); // not good - language?
 
 		} else {
-			if (substr($section, 0, 5) === '#toc-') {
+			if (substr($section, 0, 4) === 'toc-') {
 				$section = substr($section, 4);
 			}
 			return new Link($book, $lang, $name, $section ? 'toc-' . self::webalize($section) : NULL);

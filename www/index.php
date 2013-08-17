@@ -8,7 +8,7 @@ require __DIR__ . '/../src/Convertor.php';
 
 if (empty($_GET['file'])) {
 	$dir = htmlspecialchars(realpath(__DIR__ . '/..'));
-	$url = htmlspecialchars('http://' . $_SERVER['SERVER_NAME'] . $_SERVER['DOCUMENT_URI'] . '?lang=cs&file=writing');
+	$url = htmlspecialchars('http://' . $_SERVER['SERVER_NAME'] . $_SERVER['SCRIPT_NAME'] . '?lang=cs&file=writing');
 
 	echo <<<HTML
 <meta charset="utf-8">

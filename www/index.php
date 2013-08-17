@@ -6,10 +6,6 @@ require __DIR__ . '/../src/Link.php';
 require __DIR__ . '/../src/Convertor.php';
 
 
-$file = $_GET['file'] . '.texy';
-$book = 'doc-2.0';
-$lang = $_GET['lang'] ?: 'cs';
-
 if (empty($_GET['file'])) {
 	$dir = htmlspecialchars(realpath(__DIR__ . '/..'));
 	$url = htmlspecialchars('http://' . $_SERVER['SERVER_NAME'] . $_SERVER['DOCUMENT_URI'] . '?lang=cs&file=writing');
@@ -24,6 +20,10 @@ and open <a href="$url">$url</a>
 HTML;
 	exit;
 }
+
+$file = $_GET['file'] . '.texy';
+$book = 'doc-2.0';
+$lang = !empty($_GET['lang']) ? $_GET['lang'] : 'cs';
 
 $header = <<<HTML
 <!doctype html>

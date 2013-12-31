@@ -7,11 +7,11 @@ use Nette\Forms\Form;
 $form = new Form;
 
 $form->addText('name', 'Jméno:')
-    ->setRequired('Zadejte prosím jméno');
+	->setRequired('Zadejte prosím jméno');
 
 $form->addText('age', 'Věk:')
 	->setType('number')
-    ->addRule(Form::INTEGER, 'Věk musí být číslo')
+	->addRule(Form::INTEGER, 'Věk musí být číslo')
 	->addRule(Form::RANGE, 'Věk musí být v rozmezí od %d do %d let', array(18, 120));
 
 $form->addPassword('password', 'Heslo:')
@@ -25,17 +25,17 @@ $form->addPassword('passwordVerify', 'Heslo pro kontrolu:')
 $form->addSubmit('send', 'Registrovat');
 
 $form->setDefaults(array(
-    'name' => 'John',
-    'age' => 33,
+	'name' => 'John',
+	'age' => 33,
 ));
 
 
 
 if ($form->isSubmitted() && $form->isValid()) {
-    echo 'Formulář byl správně vyplněn a odeslán';
+	echo 'Formulář byl správně vyplněn a odeslán';
 
-    $values = $form->getValues();
-    dump($values);
+	$values = $form->getValues();
+	dump($values);
 }
 
 echo $form;

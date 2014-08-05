@@ -3,6 +3,7 @@
 namespace Wiki;
 
 use Texy,
+	TexyLink,
 	TexyHtml,
 	FSHL,
 	Nette,
@@ -16,95 +17,71 @@ use Texy,
  */
 class Convertor extends Nette\Object
 {
-	const HOMEPAGE = 'homepage';
-
-	/** @var PageId */
-	private $current;
-
-	/** @var string */
-	public $html;
-
-	/** @var string */
-	public $title;
-
-	/** @var string */
-	public $mainTitle;
-
-	/** @var string */
-	public $theme;
-
-	/** @var string */
-	public $themeIcon;
-
-	/** @var bool */
-	public $sidebar;
-
-	/** @var array */
-	public $toc = array();
+	/** @var Page */
+	private $page;
 
 	/** @var mixed */
 	private $tocMode;
 
 	/** @var array */
-	public $langs = array();
-
-	/** @var array */
-	public $tags = array();
-
-	/** @var array */
-	public $links = array();
-
-	/** @var array */
-	public $attachments = array();
-
-	/** @var array */
-	public $errors = array();
-
-	/** @var array */
-	public $paths = array(
+	public $paths = [
 		'mediaPath' => NULL,
 		'fileMediaPath' => NULL,
 		'apiUrl' => NULL,
 		'downloadDir' => NULL,
 		'domain' => NULL,
 		'profileUrl' => NULL,
-	);
+	];
+
+	/** @var PageId[] */
+	public $links;
+
+	/** @var string[] */
+	public $errors;
 
 
-	public function __construct($book, $lang, $name)
+	public function __construct(array $paths = array())
 	{
-		$this->current = new PageId($book, $lang, $name);
+		$this->paths = $paths + $this->paths;
 	}
 
 
 	/**
-	 * @return void
+	 * @return Page
 	 */
-	public function parse($text)
+	public function parse(PageId $id, $text)
 	{
+		$this->tocMode = $this->errors = $this->links = NULL;
+
+		$this->page = $page = new Page;
+		$page->id = clone $id;
+		$page->sidebar = TRUE;
+
 		$texy = $this->createTexy();
-		$this->html = $texy->process($text);
-		$this->title = $texy->headingModule->title;
+		$page->html = $texy->process($text);
+		$page->title = $texy->headingModule->title;
 
 		if ($this->tocMode === NULL) {
-			$this->tocMode = strlen($this->html) > 4000;
+			$this->tocMode = strlen($page->html) > 4000;
 		}
 		if ($this->tocMode) {
 			foreach ($texy->headingModule->TOC as $item) {
 				if ($item['el']->id && !empty($item['title'])) {
-					$this->toc[] = (object) array(
+					$page->toc[] = (object) [
 						'level' => $item['level'],
 						'title' => $item['title'],
 						'id' => $item['el']->id,
-					);
+					];
 				}
 			}
-			if ($this->toc && $this->tocMode === 'title') {
-				$this->toc[0]->level++;
+			if ($page->toc && $this->tocMode === 'title') {
+				$page->toc[0]->level++;
 			} else {
-				unset($this->toc[0]);
+				unset($page->toc[0]);
 			}
 		}
+
+		return $page;
 	}
 
 
@@ -121,7 +98,7 @@ class Convertor extends Nette\Object
 		$texy->headingModule->top = 1;
 		$texy->headingModule->generateID = TRUE;
 		$texy->tabWidth = 4;
-		$texy->typographyModule->locale = $this->current->lang;
+		$texy->typographyModule->locale = $this->page->id->lang;
 		$texy->tableModule->evenClass = 'alt';
 		$texy->dtd['body'][1]['style'] = TRUE;
 		$texy->allowed['longwords'] = FALSE;
@@ -144,7 +121,7 @@ class Convertor extends Nette\Object
 	/********************* text tools ****************d*g**/
 
 
-	public function resolveLink($link)
+	public function resolveLink($link, & $label = NULL)
 	{
 		if (preg_match('~.+@|https?:|ftp:|mailto:|ftp\.|www\.~Ai', $link)) { // external link
 			return $link;
@@ -172,17 +149,17 @@ class Convertor extends Nette\Object
 		$name = isset($matches->name) ? $matches->name : '';
 		$name = rtrim(strtr($name, ':', '/'), '/');
 
-		if (trim(strtolower($name), '/') === self::HOMEPAGE || $name === '') {
-			$name = self::HOMEPAGE;
+		if (trim(strtolower($name), '/') === Page::HOMEPAGE || $name === '') {
+			$name = Page::HOMEPAGE;
 		}
 
-		if (substr($name, 0, 1) !== '/' && empty($matches->book) && empty($matches->lang) && ($a = strrpos($this->current->name, '/'))) { // absolute name
-			$name = substr($this->current->name, 0, $a + 1) . $name;
+		if (substr($name, 0, 1) !== '/' && empty($matches->book) && empty($matches->lang) && ($a = strrpos($this->page->id->name, '/'))) { // absolute name
+			$name = substr($this->page->id->name, 0, $a + 1) . $name;
 		}
 
 		$name = trim($name, '/');
-		$book = empty($matches->book) ? ($this->current->book === 'meta' ? 'www' : $this->current->book) : $matches->book;
-		$lang = empty($matches->lang) ? $this->current->lang : $matches->lang;
+		$book = empty($matches->book) ? ($this->page->id->book === 'meta' ? 'www' : $this->page->id->book) : $matches->book;
+		$lang = empty($matches->lang) ? $this->page->id->lang : $matches->lang;
 		$section = isset($matches->section) ? $matches->section : '';
 
 
@@ -191,10 +168,10 @@ class Convertor extends Nette\Object
 			return $this->paths['downloadDir'] . '/' . $name;
 
 		} elseif ($book === 'attachment') {
-			if (!is_file($this->paths['fileMediaPath'] . '/' . $this->current->book . '/' . $name)) {
+			if (!is_file($this->paths['fileMediaPath'] . '/' . $this->page->id->book . '/' . $name)) {
 				$this->errors[] = "Missing file $name";
 			}
-			return $this->paths['mediaPath'] . '/' . $this->current->book . '/' . $name;
+			return $this->paths['mediaPath'] . '/' . $this->page->id->book . '/' . $name;
 
 		} elseif ($book === 'api') {
 			$path = strtr($matches->name, '\\', '.');
@@ -229,11 +206,11 @@ class Convertor extends Nette\Object
 	{
 		$parts = explode('-', $link->book, 2);
 		$name = Strings::webalize($link->name, '/');
-		return ($this->current->book === $link->book ? '' : 'http://' . ($parts[0] === 'www' ? '' : "$parts[0].") . $this->paths['domain'])
+		return ($this->page->id->book === $link->book ? '' : 'http://' . ($parts[0] === 'www' ? '' : "$parts[0].") . $this->paths['domain'])
 			. '/'
 			. $link->lang . '/'
 			. (isset($parts[1]) ? "$parts[1]/" : '')
-			. ($name === self::HOMEPAGE ? '' : $name)
+			. ($name === Page::HOMEPAGE ? '' : $name)
 			. ($link->fragment ? "#$link->fragment" : '');
 	}
 
@@ -251,6 +228,7 @@ class Convertor extends Nette\Object
 	public function scriptHandler($invocation, $cmd, $args, $raw)
 	{
 		$texy = $invocation->getTexy();
+		$page = $this->page;
 		switch ($cmd) {
 		case 'nofollow':
 			$texy->linkModule->forceNoFollow = !count($args) || $args[0] !== 'no';
@@ -261,11 +239,9 @@ class Convertor extends Nette\Object
 			break;
 
 		case 'lang':
-			$page = $this->resolveLink($args[0]);
-			if ($page instanceof PageId) {
-				$page->name = Strings::webalize($page->name, '/');
-				$page->fragment = NULL;
-				$this->langs[] = $page;
+			$link = $this->resolveLink($args[0]);
+			if ($link instanceof PageId) {
+				$page->langs[$link->lang] = $link->name;
 			}
 			break;
 
@@ -273,7 +249,7 @@ class Convertor extends Nette\Object
 			foreach ($args as $tag) {
 				$tag = trim($tag);
 				if ($tag !== '') {
-					$this->tags[] = $tag;
+					$page->tags[] = $tag;
 				}
 			}
 			break;
@@ -283,22 +259,18 @@ class Convertor extends Nette\Object
 			break;
 
 		case 'sidebar':
-			$this->sidebar = $raw !== 'no';
-			break;
-
-		case 'themeicon':
-			$this->themeIcon = $raw ? $texy->imageModule->root . '/' . $raw : NULL;
+			$page->sidebar = $raw !== 'no';
 			break;
 
 		case 'theme':
 			if ($raw === 'homepage') {
 				$texy->headingModule->top = 2;
 			}
-			$this->theme = $raw;
+			$page->theme = $raw;
 			break;
 
 		case 'maintitle':
-			$this->mainTitle = $raw;
+			$page->mainTitle = $raw;
 			break;
 
 		default:
@@ -360,7 +332,7 @@ class Convertor extends Nette\Object
 				$label = end($label);
 			}
 			$el = $texy->linkModule->solve(NULL, new \TexyLink($this->createUrl($dest)), $label);
-			if ($dest->lang !== $this->current->lang) $el->lang = $dest->lang;
+			if ($dest->lang !== $this->page->id->lang) $el->lang = $dest->lang;
 
 			$dest->name = Strings::webalize($dest->name, '/');
 			$dest->fragment = NULL;

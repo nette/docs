@@ -34,7 +34,9 @@ $header = <<<HTML
 HTML;
 
 $name = basename($file, '.texy');
-$convertor = new Wiki\Convertor($book, $lang, $name);
-$convertor->parse(file_get_contents(__DIR__ . '/../web-content/' . $lang . '/' . $file));
+$id = new Wiki\PageId($book, $lang, $name);
 
-echo $header . $convertor->html;
+$convertor = new Wiki\Convertor;
+$page = $convertor->parse($id, file_get_contents(__DIR__ . '/../web-content/' . $lang . '/' . $file));
+
+echo $header . $page->html;

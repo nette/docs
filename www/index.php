@@ -34,7 +34,7 @@ $header = <<<HTML
 HTML;
 
 $name = basename($file, '.texy');
-$convertor = new Text\Convertor($book, $lang, $name);
+$convertor = new Wiki\Convertor($book, $lang, $name);
 $convertor->parse(file_get_contents(__DIR__ . '/../web-content/' . $lang . '/' . $file));
 
 echo $header . $convertor->html;

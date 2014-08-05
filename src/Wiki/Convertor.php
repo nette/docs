@@ -134,7 +134,7 @@ class Convertor extends Nette\Object
 		}
 
 		preg_match('~^
-			(?:(?P<book>[a-z]{3,}(?:-\d\.\d)?):)?
+			(?:(?P<book>[a-z]{3,})(?:-(?P<version>\d+\.\d+))?:)?
 			(?:[:/]?(?P<lang>[a-z]{2})(?=[:/#]|$))?
 			(?P<name>[^#]+)?
 			(?:\#(?P<section>.*))?
@@ -145,33 +145,41 @@ class Convertor extends Nette\Object
 		}
 
 		// normalize name
-		$matches = (object) $matches;
-		$name = isset($matches->name) ? $matches->name : '';
-		$name = rtrim(strtr($name, ':', '/'), '/');
+		$matches = (object) ($matches + ['book' => '', 'version' => '', 'lang' => '', 'name' => '', 'section' => '']);
+		$name = rtrim($matches->name, '/');
+		if (substr($name, 0, 1) === ':') {
+			$name[0] = '/';
+		}
 
 		if (trim(strtolower($name), '/') === Page::HOMEPAGE || $name === '') {
 			$name = Page::HOMEPAGE;
 		}
 
-		if (substr($name, 0, 1) !== '/' && empty($matches->book) && empty($matches->lang) && ($a = strrpos($this->page->id->name, '/'))) { // absolute name
+		if (substr($name, 0, 1) !== '/' && !$matches->book && !$matches->lang && ($a = strrpos($this->page->id->name, '/'))) { // absolute name
 			$name = substr($this->page->id->name, 0, $a + 1) . $name;
 		}
 
 		$name = trim($name, '/');
-		$book = empty($matches->book) ? ($this->page->id->book === 'meta' ? 'www' : $this->page->id->book) : $matches->book;
-		$lang = empty($matches->lang) ? $this->page->id->lang : $matches->lang;
-		$section = isset($matches->section) ? $matches->section : '';
+		$book = $matches->book ?: ($this->page->id->book === 'meta' ? 'www' : $this->page->id->book);
+		$version = $matches->version ?: ($book === $this->page->id->book ? $this->page->id->version : '');
+		$lang = $matches->lang ?: $this->page->id->lang;
+		$section = $matches->section;
 
 
 		// generate URL
 		if ($book === 'download') {
 			return $this->paths['downloadDir'] . '/' . $name;
 
+		} elseif ($book === 'addons') {
+			$tmp = explode(':', $link)[1];
+			return 'http://addons.nette.org/' . ($tmp === Page::HOMEPAGE ? '' : $tmp);
+
 		} elseif ($book === 'attachment') {
-			if (!is_file($this->paths['fileMediaPath'] . '/' . $this->page->id->book . '/' . $name)) {
+			$ver = $this->page->id->version ? '-' . $this->page->id->version : '';
+			if (!is_file($this->paths['fileMediaPath'] . '/' . $this->page->id->book . $ver . '/' . $name)) {
 				$this->errors[] = "Missing file $name";
 			}
-			return $this->paths['mediaPath'] . '/' . $this->page->id->book . '/' . $name;
+			return $this->paths['mediaPath'] . '/' . $this->page->id->book . $ver . '/' . $name;
 
 		} elseif ($book === 'api') {
 			$path = strtr($matches->name, '\\', '.');
@@ -197,20 +205,20 @@ class Convertor extends Nette\Object
 			if (Strings::startsWith($section, 'toc-')) {
 				$section = substr($section, 4);
 			}
-			return new PageId($book, $lang, $name, $section ? 'toc-' . Strings::webalize($section) : NULL);
+			$label = explode('/', $name);
+			$label = end($label);
+			return new PageId($book, $lang, Strings::webalize($name, '/'), $version, $section ? 'toc-' . Strings::webalize($section) : NULL);
 		}
 	}
 
 
 	public function createUrl(PageId $link)
 	{
-		$parts = explode('-', $link->book, 2);
-		$name = Strings::webalize($link->name, '/');
-		return ($this->page->id->book === $link->book ? '' : 'http://' . ($parts[0] === 'www' ? '' : "$parts[0].") . $this->paths['domain'])
+		return ($this->page->id->book === $link->book ? '' : 'http://' . ($link->book === 'www' ? '' : "$link->book.") . $this->paths['domain'])
 			. '/'
 			. $link->lang . '/'
-			. (isset($parts[1]) ? "$parts[1]/" : '')
-			. ($name === Page::HOMEPAGE ? '' : $name)
+			. ($link->version ? "$link->version/" : '')
+			. ($link->name === Page::HOMEPAGE ? '' : $link->name)
 			. ($link->fragment ? "#$link->fragment" : '');
 	}
 
@@ -298,14 +306,13 @@ class Convertor extends Nette\Object
 			return $el;
 		}
 
-		if ($link->type === 2 && in_array(rtrim($link->URL, ':'), array('api', 'php'))) { // [api] [php]
-			$link->URL = rtrim($link->URL, ':') . ':' . $content;
+		if (preg_match('#(api|php|attachment):$#A', $link->URL)) {
+			$link->URL .= $content;
 		}
 
 		$dest = $this->resolveLink($link->URL);
 		if ($dest instanceof PageId) {
 			$link->URL = $this->createUrl($dest);
-			$dest->name = Strings::webalize($dest->name, '/');
 			$dest->fragment = NULL;
 			$this->links[] = $dest;
 		} else {
@@ -324,24 +331,16 @@ class Convertor extends Nette\Object
 	public function newReferenceHandler($invocation, $name)
 	{
 		$texy = $invocation->getTexy();
-
-		$dest = $this->resolveLink($dest);
+		$dest = $this->resolveLink($name, $label);
 		if ($dest instanceof PageId) {
-			if (!isset($label)) {
-				$label = explode('/', $dest->name);
-				$label = end($label);
-			}
 			$el = $texy->linkModule->solve(NULL, new \TexyLink($this->createUrl($dest)), $label);
 			if ($dest->lang !== $this->page->id->lang) $el->lang = $dest->lang;
 
-			$dest->name = Strings::webalize($dest->name, '/');
 			$dest->fragment = NULL;
 			$this->links[] = $dest;
 
 		} else {
-			if (!isset($label)) {
-				$label = preg_replace('#(?!http|ftp|mailto)[a-z]+:|\##A', '', $name); // [api:...], [#section]
-			}
+			$label = preg_replace('#(?!http|ftp|mailto)[a-z]+:|\##A', '', $name); // [api:...], [#section]
 			$el = $texy->linkModule->solve(NULL, $texy->linkModule->factoryLink("[$dest]", NULL, $label), $label);
 		}
 		return $el;

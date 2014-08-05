@@ -20,14 +20,18 @@ class PageId extends Nette\Object
 	public $name;
 
 	/** @var string */
+	public $version;
+
+	/** @var string */
 	public $fragment;
 
 
-	public function __construct($book, $lang, $name, $fragment = NULL)
+	public function __construct($book, $lang, $name, $version = NULL, $fragment = NULL)
 	{
 		$this->book = $book;
 		$this->lang = $lang;
 		$this->name = $name;
+		$this->version = $version;
 		$this->fragment = $fragment;
 	}
 

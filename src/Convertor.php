@@ -371,17 +371,6 @@ class Convertor
 	 */
 	public function newReferenceHandler($invocation, $name)
 	{
-		$parts = explode('|', $name);
-		if (isset($parts[1])) {
-			$dest = trim($parts[1]);
-			$label = trim($parts[0]);
-			if (preg_match('#[a-z]+:$#A', $dest)) { // api: download: etc...
-				$dest .= $label;
-			}
-		} else {
-			$dest = $name;
-		}
-
 		$texy = $invocation->getTexy();
 
 		$dest = $this->resolveLink($dest);

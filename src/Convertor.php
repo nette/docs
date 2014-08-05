@@ -2,7 +2,9 @@
 
 namespace Text;
 
-use Texy;
+use Texy,
+	TexyHtml,
+	FSHL;
 
 
 /**
@@ -417,32 +419,40 @@ class Convertor
 	 */
 	public function blockHandler($invocation, $blocktype, $content, $lang, $modifier)
 	{
-		if (!in_array($blocktype, array('block/php', 'block/neon', 'block/javascript', 'block/js', 'block/css', 'block/html', 'block/htmlcb', 'block/code', 'block/default'))) {
-			return $invocation->proceed($blocktype, $content, $lang, $modifier);
-		}
-
-		if (!$lang) {
+		if (preg_match('#^block/(php|neon|javascript|js|css|html|htmlcb|latte)$#', $blocktype)) {
 			list(, $lang) = explode('/', $blocktype);
-		}
-		$lang = strtoupper($lang);
-		if ($lang === 'JAVASCRIPT') {
-			$lang = 'JS';
-		} elseif ($lang === 'HTML') {
-			$lang = 'HTMLCB';
+
+		} elseif ($blocktype !== 'block/code') {
+			return $invocation->proceed();
 		}
 
-		$fshl = new \fshlParser('HTML_UTF8', P_TAB_INDENT);
+		$lang = strtolower($lang);
+		if ($lang === 'htmlcb' || $lang === 'latte') $lang = 'html';
+		elseif ($lang === 'javascript') $lang = 'js';
+
+		if ($lang === 'html') $langClass = 'FSHL\Lexer\LatteHtml';
+		elseif ($lang === 'js') $langClass = 'FSHL\Lexer\LatteJavascript';
+		else $langClass = 'FSHL\Lexer\\' . ucfirst($lang);
+
 		$texy = $invocation->getTexy();
 		$content = Texy::outdent($content);
-		$content = $fshl->isLanguage($lang) ? $fshl->highlightString($lang, $content) : $content;
+
+		if (class_exists($langClass)) {
+			$fshl = new FSHL\Highlighter(new FSHL\Output\Html, FSHL\Highlighter::OPTION_TAB_INDENT);
+			$content = $fshl->highlight($content, new $langClass);
+		} else {
+			$content = htmlSpecialChars($content);
+		}
 		$content = $texy->protect($content, Texy::CONTENT_BLOCK);
 
-		$elPre = \TexyHtml::el('pre');
+		$elPre = TexyHtml::el('pre');
 		if ($modifier) {
 			$modifier->decorate($texy, $elPre);
 		}
-		$elPre->attrs['class'] = $lang ? 'src-' . strtolower($lang) : NULL;
+		$elPre->attrs['class'] = 'src-' . strtolower($lang);
+
 		$elCode = $elPre->create('code', $content);
+
 		return $elPre;
 	}
 

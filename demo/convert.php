@@ -2,7 +2,6 @@
 
 
 require __DIR__ . '/../vendor/autoload.php';
-require __DIR__ . '/../vendor/other/fshl/fshl.php';
 require __DIR__ . '/../src/Link.php';
 require __DIR__ . '/../src/Convertor.php';
 

@@ -8,7 +8,7 @@ use Nette;
 /**
  * Page identificator.
  */
-class Link extends Nette\Object
+class PageId extends Nette\Object
 {
 	/** @var string */
 	public $book;

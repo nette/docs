@@ -18,7 +18,7 @@ class Convertor extends Nette\Object
 {
 	const HOMEPAGE = 'homepage';
 
-	/** @var Link */
+	/** @var PageId */
 	private $current;
 
 	/** @var string */
@@ -73,7 +73,7 @@ class Convertor extends Nette\Object
 
 	public function __construct($book, $lang, $name)
 	{
-		$this->current = new Link($book, $lang, $name);
+		$this->current = new PageId($book, $lang, $name);
 	}
 
 
@@ -220,12 +220,12 @@ class Convertor extends Nette\Object
 			if (Strings::startsWith($section, 'toc-')) {
 				$section = substr($section, 4);
 			}
-			return new Link($book, $lang, $name, $section ? 'toc-' . Strings::webalize($section) : NULL);
+			return new PageId($book, $lang, $name, $section ? 'toc-' . Strings::webalize($section) : NULL);
 		}
 	}
 
 
-	public function createUrl(Link $link)
+	public function createUrl(PageId $link)
 	{
 		$parts = explode('-', $link->book, 2);
 		$name = Strings::webalize($link->name, '/');
@@ -262,7 +262,7 @@ class Convertor extends Nette\Object
 
 		case 'lang':
 			$page = $this->resolveLink($args[0]);
-			if ($page instanceof Link) {
+			if ($page instanceof PageId) {
 				$page->name = Strings::webalize($page->name, '/');
 				$page->fragment = NULL;
 				$this->langs[] = $page;
@@ -331,7 +331,7 @@ class Convertor extends Nette\Object
 		}
 
 		$dest = $this->resolveLink($link->URL);
-		if ($dest instanceof Link) {
+		if ($dest instanceof PageId) {
 			$link->URL = $this->createUrl($dest);
 			$dest->name = Strings::webalize($dest->name, '/');
 			$dest->fragment = NULL;
@@ -354,7 +354,7 @@ class Convertor extends Nette\Object
 		$texy = $invocation->getTexy();
 
 		$dest = $this->resolveLink($dest);
-		if ($dest instanceof Link) {
+		if ($dest instanceof PageId) {
 			if (!isset($label)) {
 				$label = explode('/', $dest->name);
 				$label = end($label);

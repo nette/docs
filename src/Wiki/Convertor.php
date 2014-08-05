@@ -4,7 +4,9 @@ namespace Wiki;
 
 use Texy,
 	TexyHtml,
-	FSHL;
+	FSHL,
+	Nette,
+	Nette\Utils\Strings;
 
 
 /**
@@ -12,7 +14,7 @@ use Texy,
  *
  * @copyright  David Grudl
  */
-class Convertor
+class Convertor extends Nette\Object
 {
 	const HOMEPAGE = 'homepage';
 
@@ -148,10 +150,10 @@ class Convertor
 			return $link;
 
 		} elseif (substr($link, 0, 1) === '#') { // section link
-			if (substr($link, 0, 5) === '#toc-') {
+			if (Strings::startsWith($link, '#toc-')) {
 				$link = substr($link, 5);
 			}
-			return '#toc-' . self::webalize($link);
+			return '#toc-' . Strings::webalize($link);
 		}
 
 		preg_match('~^
@@ -215,10 +217,10 @@ class Convertor
 			return 'http://php.net/' . urlencode($matches->name) . ($section ? "#$section" : ''); // not good - language?
 
 		} else {
-			if (substr($section, 0, 4) === 'toc-') {
+			if (Strings::startsWith($section, 'toc-')) {
 				$section = substr($section, 4);
 			}
-			return new Link($book, $lang, $name, $section ? 'toc-' . self::webalize($section) : NULL);
+			return new Link($book, $lang, $name, $section ? 'toc-' . Strings::webalize($section) : NULL);
 		}
 	}
 
@@ -226,35 +228,13 @@ class Convertor
 	public function createUrl(Link $link)
 	{
 		$parts = explode('-', $link->book, 2);
-		$name = self::webalize($link->name, '/');
+		$name = Strings::webalize($link->name, '/');
 		return ($this->current->book === $link->book ? '' : 'http://' . ($parts[0] === 'www' ? '' : "$parts[0].") . $this->paths['domain'])
 			. '/'
 			. $link->lang . '/'
 			. (isset($parts[1]) ? "$parts[1]/" : '')
 			. ($name === self::HOMEPAGE ? '' : $name)
 			. ($link->fragment ? "#$link->fragment" : '');
-	}
-
-
-	private static function webalize($s, $charlist = NULL)
-	{
-		$s = preg_replace('#[^\x09\x0A\x0D\x20-\x7E\xA0-\x{2FF}\x{370}-\x{10FFFF}]#u', '', $s);
-		$s = strtr($s, '`\'"^~', "\x01\x02\x03\x04\x05");
-		if (ICONV_IMPL === 'glibc') {
-			$s = @iconv('UTF-8', 'WINDOWS-1250//TRANSLIT', $s); // intentionally @
-			$s = strtr($s, "\xa5\xa3\xbc\x8c\xa7\x8a\xaa\x8d\x8f\x8e\xaf\xb9\xb3\xbe\x9c\x9a\xba\x9d\x9f\x9e"
-				. "\xbf\xc0\xc1\xc2\xc3\xc4\xc5\xc6\xc7\xc8\xc9\xca\xcb\xcc\xcd\xce\xcf\xd0\xd1\xd2\xd3"
-				. "\xd4\xd5\xd6\xd7\xd8\xd9\xda\xdb\xdc\xdd\xde\xdf\xe0\xe1\xe2\xe3\xe4\xe5\xe6\xe7\xe8"
-				. "\xe9\xea\xeb\xec\xed\xee\xef\xf0\xf1\xf2\xf3\xf4\xf5\xf6\xf8\xf9\xfa\xfb\xfc\xfd\xfe\x96",
-				"ALLSSSSTZZZallssstzzzRAAAALCCCEEEEIIDDNNOOOOxRUUUUYTsraaaalccceeeeiiddnnooooruuuuyt-");
-		} else {
-			$s = @iconv('UTF-8', 'ASCII//TRANSLIT', $s); // intentionally @
-		}
-		$s = str_replace(array('`', "'", '"', '^', '~'), '', $s);
-		$s = strtr($s, "\x01\x02\x03\x04\x05", '`\'"^~');
-		$s = preg_replace('#[^a-z0-9' . preg_quote($charlist, '#') . ']+#i', '-', $s);
-		$s = trim($s, '-');
-		return $s;
 	}
 
 
@@ -283,7 +263,7 @@ class Convertor
 		case 'lang':
 			$page = $this->resolveLink($args[0]);
 			if ($page instanceof Link) {
-				$page->name = self::webalize($page->name, '/');
+				$page->name = Strings::webalize($page->name, '/');
 				$page->fragment = NULL;
 				$this->langs[] = $page;
 			}
@@ -353,7 +333,7 @@ class Convertor
 		$dest = $this->resolveLink($link->URL);
 		if ($dest instanceof Link) {
 			$link->URL = $this->createUrl($dest);
-			$dest->name = self::webalize($dest->name, '/');
+			$dest->name = Strings::webalize($dest->name, '/');
 			$dest->fragment = NULL;
 			$this->links[] = $dest;
 		} else {
@@ -382,7 +362,7 @@ class Convertor
 			$el = $texy->linkModule->solve(NULL, new \TexyLink($this->createUrl($dest)), $label);
 			if ($dest->lang !== $this->current->lang) $el->lang = $dest->lang;
 
-			$dest->name = self::webalize($dest->name, '/');
+			$dest->name = Strings::webalize($dest->name, '/');
 			$dest->fragment = NULL;
 			$this->links[] = $dest;
 

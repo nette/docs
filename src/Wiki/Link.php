@@ -2,11 +2,13 @@
 
 namespace Wiki;
 
+use Nette;
+
 
 /**
  * Page identificator.
  */
-class Link
+class Link extends Nette\Object
 {
 	/** @var string */
 	public $book;

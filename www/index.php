@@ -1,8 +1,6 @@
 <?php
 
 require __DIR__ . '/../vendor/autoload.php';
-require __DIR__ . '/../src/Link.php';
-require __DIR__ . '/../src/Convertor.php';
 
 
 if (empty($_GET['file'])) {

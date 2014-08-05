@@ -2,8 +2,6 @@
 
 
 require __DIR__ . '/../vendor/autoload.php';
-require __DIR__ . '/../src/Link.php';
-require __DIR__ . '/../src/Convertor.php';
 
 
 $file = 'demo.texy';

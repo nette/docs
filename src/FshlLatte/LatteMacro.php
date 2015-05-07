@@ -53,127 +53,127 @@ class LatteMacro implements FSHL\Lexer
 	 */
 	public function getStates()
 	{
-		return array(
-			'OUT' => array(
-				array(
-					'$' => array('VAR', Generator::NEXT),
-					'\'' => array('QUOTE_SINGLE', Generator::NEXT),
-					'"' => array('QUOTE_DOUBLE', Generator::NEXT),
-					'ALPHA' => array('FUNCTION', Generator::BACK),
-					'_' => array('FUNCTION', Generator::BACK),
-					'NUM' => array('NUMBER', Generator::NEXT),
-					'DOTNUM' => array('NUMBER', Generator::NEXT),
-					'LINE' => array(Generator::STATE_SELF, Generator::NEXT),
-					'TAB' => array(Generator::STATE_SELF, Generator::NEXT),
-					'/*' => array('COMMENT_BLOCK', Generator::NEXT),
-					'}' => array(Generator::STATE_QUIT, Generator::CURRENT),
-				),
+		return [
+			'OUT' => [
+				[
+					'$' => ['VAR', Generator::NEXT],
+					'\'' => ['QUOTE_SINGLE', Generator::NEXT],
+					'"' => ['QUOTE_DOUBLE', Generator::NEXT],
+					'ALPHA' => ['FUNCTION', Generator::BACK],
+					'_' => ['FUNCTION', Generator::BACK],
+					'NUM' => ['NUMBER', Generator::NEXT],
+					'DOTNUM' => ['NUMBER', Generator::NEXT],
+					'LINE' => [Generator::STATE_SELF, Generator::NEXT],
+					'TAB' => [Generator::STATE_SELF, Generator::NEXT],
+					'/*' => ['COMMENT_BLOCK', Generator::NEXT],
+					'}' => [Generator::STATE_QUIT, Generator::CURRENT],
+				],
 				Generator::STATE_FLAG_NONE,
 				null,
 				null
-			),
-			'FUNCTION' => array(
-				array(
-					'!ALNUM_' => array(Generator::STATE_RETURN, Generator::BACK)
-				),
+			],
+			'FUNCTION' => [
+				[
+					'!ALNUM_' => [Generator::STATE_RETURN, Generator::BACK]
+				],
 				Generator::STATE_FLAG_KEYWORD | Generator::STATE_FLAG_RECURSION,
 				null,
 				null
-			),
-			'COMMENT_BLOCK' => array(
-				array(
-					'LINE' => array(Generator::STATE_SELF, Generator::NEXT),
-					'TAB' => array(Generator::STATE_SELF, Generator::NEXT),
-					'*/' => array(Generator::STATE_RETURN, Generator::CURRENT)
-				),
+			],
+			'COMMENT_BLOCK' => [
+				[
+					'LINE' => [Generator::STATE_SELF, Generator::NEXT],
+					'TAB' => [Generator::STATE_SELF, Generator::NEXT],
+					'*/' => [Generator::STATE_RETURN, Generator::CURRENT]
+				],
 				Generator::STATE_FLAG_RECURSION,
 				'php-comment',
 				null
-			),
-			'VAR' => array(
-				array(
-					'!ALNUM_' => array(Generator::STATE_RETURN, Generator::BACK),
-					'$' => array(Generator::STATE_SELF, Generator::NEXT),
-					'{' => array(Generator::STATE_SELF, Generator::NEXT),
-					'}' => array(Generator::STATE_SELF, Generator::NEXT)
-				),
+			],
+			'VAR' => [
+				[
+					'!ALNUM_' => [Generator::STATE_RETURN, Generator::BACK],
+					'$' => [Generator::STATE_SELF, Generator::NEXT],
+					'{' => [Generator::STATE_SELF, Generator::NEXT],
+					'}' => [Generator::STATE_SELF, Generator::NEXT]
+				],
 				Generator::STATE_FLAG_RECURSION,
 				'php-var',
 				null
-			),
-			'VAR_STR' => array(
-				array(
-					'}' => array(Generator::STATE_RETURN, Generator::CURRENT),
-					'SPACE' => array(Generator::STATE_RETURN, Generator::BACK)
-				),
+			],
+			'VAR_STR' => [
+				[
+					'}' => [Generator::STATE_RETURN, Generator::CURRENT],
+					'SPACE' => [Generator::STATE_RETURN, Generator::BACK]
+				],
 				Generator::STATE_FLAG_RECURSION,
 				'php-var',
 				null
-			),
-			'QUOTE_DOUBLE' => array(
-				array(
-					'"' => array(Generator::STATE_RETURN, Generator::CURRENT),
-					'\\\\' => array(Generator::STATE_SELF, Generator::NEXT),
-					'\\"' => array(Generator::STATE_SELF, Generator::NEXT),
-					'$' => array('VAR', Generator::NEXT),
-					'{$' => array('VAR_STR', Generator::NEXT),
-					'LINE' => array(Generator::STATE_SELF, Generator::NEXT),
-					'TAB' => array(Generator::STATE_SELF, Generator::NEXT)
-				),
+			],
+			'QUOTE_DOUBLE' => [
+				[
+					'"' => [Generator::STATE_RETURN, Generator::CURRENT],
+					'\\\\' => [Generator::STATE_SELF, Generator::NEXT],
+					'\\"' => [Generator::STATE_SELF, Generator::NEXT],
+					'$' => ['VAR', Generator::NEXT],
+					'{$' => ['VAR_STR', Generator::NEXT],
+					'LINE' => [Generator::STATE_SELF, Generator::NEXT],
+					'TAB' => [Generator::STATE_SELF, Generator::NEXT]
+				],
 				Generator::STATE_FLAG_RECURSION,
 				'php-quote',
 				null
-			),
-			'QUOTE_SINGLE' => array(
-				array(
-					'\'' => array(Generator::STATE_RETURN, Generator::CURRENT),
-					'\\\\' => array(Generator::STATE_SELF, Generator::NEXT),
-					'\\\'' => array(Generator::STATE_SELF, Generator::NEXT),
-					'LINE' => array(Generator::STATE_SELF, Generator::NEXT),
-					'TAB' => array(Generator::STATE_SELF, Generator::NEXT)
-				),
+			],
+			'QUOTE_SINGLE' => [
+				[
+					'\'' => [Generator::STATE_RETURN, Generator::CURRENT],
+					'\\\\' => [Generator::STATE_SELF, Generator::NEXT],
+					'\\\'' => [Generator::STATE_SELF, Generator::NEXT],
+					'LINE' => [Generator::STATE_SELF, Generator::NEXT],
+					'TAB' => [Generator::STATE_SELF, Generator::NEXT]
+				],
 				Generator::STATE_FLAG_RECURSION,
 				'php-quote',
 				null
-			),
-			'NUMBER' => array(
-				array(
-					'e' => array('EXPONENT', Generator::NEXT),
-					'E' => array('EXPONENT', Generator::NEXT),
-					'x' => array('HEXA', Generator::NEXT),
-					'b' => array(Generator::STATE_SELF, Generator::NEXT),
-					'DOTNUM' => array(Generator::STATE_SELF, Generator::NEXT),
-					'ALL' => array(Generator::STATE_RETURN, Generator::BACK)
-				),
+			],
+			'NUMBER' => [
+				[
+					'e' => ['EXPONENT', Generator::NEXT],
+					'E' => ['EXPONENT', Generator::NEXT],
+					'x' => ['HEXA', Generator::NEXT],
+					'b' => [Generator::STATE_SELF, Generator::NEXT],
+					'DOTNUM' => [Generator::STATE_SELF, Generator::NEXT],
+					'ALL' => [Generator::STATE_RETURN, Generator::BACK]
+				],
 				Generator::STATE_FLAG_RECURSION,
 				'php-num',
 				null
-			),
-			'EXPONENT' => array(
-				array(
-					'+' => array(Generator::STATE_SELF, Generator::CURRENT),
-					'-' => array(Generator::STATE_SELF, Generator::CURRENT),
-					'!NUM' => array(Generator::STATE_RETURN, Generator::BACK)
-				),
+			],
+			'EXPONENT' => [
+				[
+					'+' => [Generator::STATE_SELF, Generator::CURRENT],
+					'-' => [Generator::STATE_SELF, Generator::CURRENT],
+					'!NUM' => [Generator::STATE_RETURN, Generator::BACK]
+				],
 				Generator::STATE_FLAG_NONE,
 				'php-num',
 				null
-			),
-			'HEXA' => array(
-				array(
-					'!HEXNUM' => array(Generator::STATE_RETURN, Generator::BACK)
-				),
+			],
+			'HEXA' => [
+				[
+					'!HEXNUM' => [Generator::STATE_RETURN, Generator::BACK]
+				],
 				Generator::STATE_FLAG_NONE,
 				'php-num',
 				null
-			),
-			Generator::STATE_QUIT => array(
+			],
+			Generator::STATE_QUIT => [
 				null,
 				Generator::STATE_FLAG_NEWLEXER,
 				'xlang',
 				null
-			)
-		);
+			]
+		];
 	}
 
 	/**
@@ -183,8 +183,8 @@ class LatteMacro implements FSHL\Lexer
 	 */
 	public function getDelimiters()
 	{
-		return array(
-		);
+		return [
+		];
 	}
 
 	/**
@@ -194,9 +194,9 @@ class LatteMacro implements FSHL\Lexer
 	 */
 	public function getKeywords()
 	{
-		return array(
+		return [
 			'php-keyword',
-			array(
+			[
 				'include' => 1,
 				'includeblock' => 1,
 				'extends' => 1,
@@ -238,8 +238,8 @@ class LatteMacro implements FSHL\Lexer
 				'true' => 1,
 				'false' => 1,
 				'null' => 1,
-			),
+			],
 			Generator::CASE_INSENSITIVE
-		);
+		];
 	}
 }

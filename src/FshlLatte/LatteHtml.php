@@ -53,151 +53,151 @@ class LatteHtml implements FSHL\Lexer
 	 */
 	public function getStates()
 	{
-		return array(
-			'OUT' => array(
-				array(
-					'<!--' => array('COMMENT', Generator::NEXT),
-					'{*' => array('LATTE_COMMENT', Generator::NEXT),
-					'LATTE' => array('LATTE', Generator::CURRENT),
-					'<' => array('TAG', Generator::NEXT),
-					'&' => array('ENTITY', Generator::NEXT),
-					'LINE' => array(Generator::STATE_SELF, Generator::NEXT),
-					'TAB' => array(Generator::STATE_SELF, Generator::NEXT)
-				),
+		return [
+			'OUT' => [
+				[
+					'<!--' => ['COMMENT', Generator::NEXT],
+					'{*' => ['LATTE_COMMENT', Generator::NEXT],
+					'LATTE' => ['LATTE', Generator::CURRENT],
+					'<' => ['TAG', Generator::NEXT],
+					'&' => ['ENTITY', Generator::NEXT],
+					'LINE' => [Generator::STATE_SELF, Generator::NEXT],
+					'TAB' => [Generator::STATE_SELF, Generator::NEXT]
+				],
 				Generator::STATE_FLAG_NONE,
 				null,
 				null
-			),
-			'ENTITY' => array(
-				array(
-					';' => array('OUT', Generator::CURRENT),
-					'&' => array('OUT', Generator::CURRENT),
-					'SPACE' => array('OUT', Generator::CURRENT)
-				),
+			],
+			'ENTITY' => [
+				[
+					';' => ['OUT', Generator::CURRENT],
+					'&' => ['OUT', Generator::CURRENT],
+					'SPACE' => ['OUT', Generator::CURRENT]
+				],
 				Generator::STATE_FLAG_NONE,
 				'html-entity',
 				null
-			),
-			'TAG' => array(
-				array(
-					'>' => array('OUT', Generator::CURRENT),
-					'LATTE' => array('LATTE', Generator::CURRENT),
-					'SPACE' => array('TAGIN', Generator::NEXT),
-					'style' => array('STYLE', Generator::CURRENT),
-					'STYLE' => array('STYLE', Generator::CURRENT),
-					'script' => array('SCRIPT', Generator::CURRENT),
-					'SCRIPT' => array('SCRIPT', Generator::CURRENT),
-				),
+			],
+			'TAG' => [
+				[
+					'>' => ['OUT', Generator::CURRENT],
+					'LATTE' => ['LATTE', Generator::CURRENT],
+					'SPACE' => ['TAGIN', Generator::NEXT],
+					'style' => ['STYLE', Generator::CURRENT],
+					'STYLE' => ['STYLE', Generator::CURRENT],
+					'script' => ['SCRIPT', Generator::CURRENT],
+					'SCRIPT' => ['SCRIPT', Generator::CURRENT],
+				],
 				Generator::STATE_FLAG_NONE,
 				'html-tag',
 				null
-			),
-			'TAGIN' => array(
-				array(
-					'LATTE' => array('LATTE', Generator::CURRENT),
-					'"' => array('QUOTE_DOUBLE', Generator::NEXT),
-					'\'' => array('QUOTE_SINGLE', Generator::NEXT),
-					'/>' => array('TAG', Generator::BACK),
-					'>' => array('TAG', Generator::BACK),
-					'LINE' => array(Generator::STATE_SELF, Generator::NEXT),
-					'TAB' => array(Generator::STATE_SELF, Generator::NEXT)
-				),
+			],
+			'TAGIN' => [
+				[
+					'LATTE' => ['LATTE', Generator::CURRENT],
+					'"' => ['QUOTE_DOUBLE', Generator::NEXT],
+					'\'' => ['QUOTE_SINGLE', Generator::NEXT],
+					'/>' => ['TAG', Generator::BACK],
+					'>' => ['TAG', Generator::BACK],
+					'LINE' => [Generator::STATE_SELF, Generator::NEXT],
+					'TAB' => [Generator::STATE_SELF, Generator::NEXT]
+				],
 				Generator::STATE_FLAG_NONE,
 				'html-tagin',
 				null
-			),
-			'STYLE' => array(
-				array(
-					'LATTE' => array('LATTE', Generator::CURRENT),
-					'"' => array('QUOTE_DOUBLE', Generator::NEXT),
-					'\'' => array('QUOTE_SINGLE', Generator::NEXT),
-					'>' => array('CSS', Generator::NEXT),
-					'LINE' => array('TAGIN', Generator::NEXT),
-					'TAB' => array('TAGIN', Generator::NEXT)
-				),
+			],
+			'STYLE' => [
+				[
+					'LATTE' => ['LATTE', Generator::CURRENT],
+					'"' => ['QUOTE_DOUBLE', Generator::NEXT],
+					'\'' => ['QUOTE_SINGLE', Generator::NEXT],
+					'>' => ['CSS', Generator::NEXT],
+					'LINE' => ['TAGIN', Generator::NEXT],
+					'TAB' => ['TAGIN', Generator::NEXT]
+				],
 				Generator::STATE_FLAG_NONE,
 				'html-tagin',
 				null
-			),
-			'CSS' => array(
-				array(
-					'LATTE' => array('LATTE', Generator::CURRENT),
-					'>' => array(Generator::STATE_RETURN, Generator::CURRENT)
-				),
+			],
+			'CSS' => [
+				[
+					'LATTE' => ['LATTE', Generator::CURRENT],
+					'>' => [Generator::STATE_RETURN, Generator::CURRENT]
+				],
 				Generator::STATE_FLAG_NEWLEXER,
 				'html-tag',
 				'Css'
-			),
-			'SCRIPT' => array(
-				array(
-					'LATTE' => array('LATTE', Generator::CURRENT),
-					'"' => array('QUOTE_DOUBLE', Generator::NEXT),
-					'\'' => array('QUOTE_SINGLE', Generator::NEXT),
-					'>' => array('JAVASCRIPT', Generator::NEXT),
-					'LINE' => array('TAGIN', Generator::NEXT),
-					'TAB' => array('TAGIN', Generator::NEXT)
-				),
+			],
+			'SCRIPT' => [
+				[
+					'LATTE' => ['LATTE', Generator::CURRENT],
+					'"' => ['QUOTE_DOUBLE', Generator::NEXT],
+					'\'' => ['QUOTE_SINGLE', Generator::NEXT],
+					'>' => ['JAVASCRIPT', Generator::NEXT],
+					'LINE' => ['TAGIN', Generator::NEXT],
+					'TAB' => ['TAGIN', Generator::NEXT]
+				],
 				Generator::STATE_FLAG_NONE,
 				'html-tagin',
 				null
-			),
-			'JAVASCRIPT' => array(
-				array(
-					'LATTE' => array('LATTE', Generator::CURRENT),
-					'>' => array(Generator::STATE_RETURN, Generator::CURRENT)
-				),
+			],
+			'JAVASCRIPT' => [
+				[
+					'LATTE' => ['LATTE', Generator::CURRENT],
+					'>' => [Generator::STATE_RETURN, Generator::CURRENT]
+				],
 				Generator::STATE_FLAG_NEWLEXER,
 				'html-tag',
 				'LatteJavascript'
-			),
-			'QUOTE_DOUBLE' => array(
-				array(
-					'LATTE' => array('LATTE', Generator::CURRENT),
-					'"' => array(Generator::STATE_RETURN, Generator::CURRENT),
-					'LINE' => array(Generator::STATE_SELF, Generator::NEXT),
-					'TAB' => array(Generator::STATE_SELF, Generator::NEXT)
-				),
+			],
+			'QUOTE_DOUBLE' => [
+				[
+					'LATTE' => ['LATTE', Generator::CURRENT],
+					'"' => [Generator::STATE_RETURN, Generator::CURRENT],
+					'LINE' => [Generator::STATE_SELF, Generator::NEXT],
+					'TAB' => [Generator::STATE_SELF, Generator::NEXT]
+				],
 				Generator::STATE_FLAG_RECURSION,
 				'html-quote',
 				null
-			),
-			'QUOTE_SINGLE' => array(
-				array(
-					'LATTE' => array('LATTE', Generator::CURRENT),
-					'\'' => array(Generator::STATE_RETURN, Generator::CURRENT),
-					'LINE' => array(Generator::STATE_SELF, Generator::NEXT),
-					'TAB' => array(Generator::STATE_SELF, Generator::NEXT)
-				),
+			],
+			'QUOTE_SINGLE' => [
+				[
+					'LATTE' => ['LATTE', Generator::CURRENT],
+					'\'' => [Generator::STATE_RETURN, Generator::CURRENT],
+					'LINE' => [Generator::STATE_SELF, Generator::NEXT],
+					'TAB' => [Generator::STATE_SELF, Generator::NEXT]
+				],
 				Generator::STATE_FLAG_RECURSION,
 				'html-quote',
 				null
-			),
-			'COMMENT' => array(
-				array(
-					'LINE' => array(Generator::STATE_SELF, Generator::NEXT),
-					'TAB' => array(Generator::STATE_SELF, Generator::NEXT),
-					'-->' => array('OUT', Generator::CURRENT),
-					'LATTE' => array('LATTE', Generator::NEXT),
-				),
+			],
+			'COMMENT' => [
+				[
+					'LINE' => [Generator::STATE_SELF, Generator::NEXT],
+					'TAB' => [Generator::STATE_SELF, Generator::NEXT],
+					'-->' => ['OUT', Generator::CURRENT],
+					'LATTE' => ['LATTE', Generator::NEXT],
+				],
 				Generator::STATE_FLAG_NONE,
 				'html-comment',
 				null
-			),
-			'LATTE_COMMENT' => array(
-				array(
-					'*}' => array('OUT', Generator::CURRENT),
-				),
+			],
+			'LATTE_COMMENT' => [
+				[
+					'*}' => ['OUT', Generator::CURRENT],
+				],
 				Generator::STATE_FLAG_NONE,
 				'latte-comment',
 				null
-			),
-			'LATTE' => array(
+			],
+			'LATTE' => [
 				null,
 				Generator::STATE_FLAG_NEWLEXER,
 				'xlang',
 				'LatteMacro'
-			)
-		);
+			]
+		];
 	}
 
 	/**
@@ -207,9 +207,9 @@ class LatteHtml implements FSHL\Lexer
 	 */
 	public function getDelimiters()
 	{
-		return array(
+		return [
 			'LATTE' => 'preg_match(\'~\\\\{(?!["\\\'])~A\', $text, $matches, 0, $textPos)',
-		);
+		];
 	}
 
 	/**
@@ -219,6 +219,6 @@ class LatteHtml implements FSHL\Lexer
 	 */
 	public function getKeywords()
 	{
-		return array();
+		return [];
 	}
 }

@@ -57,113 +57,113 @@ class LatteJavascript implements FSHL\Lexer
 	 */
 	public function getStates()
 	{
-		return array(
-			'OUT' => array(
-				array(
-					'LINE' => array(Generator::STATE_SELF, Generator::NEXT),
-					'TAB' => array(Generator::STATE_SELF, Generator::NEXT),
-					'ALPHA' => array('KEYWORD', Generator::BACK),
-					'NUM' => array('NUMBER', Generator::NEXT),
-					'DOTNUM' => array('NUMBER', Generator::NEXT),
-					'.' => array('KEYWORD', Generator::CURRENT),
-					'"' => array('QUOTE_DOUBLE', Generator::NEXT),
-					'\'' => array('QUOTE_SINGLE', Generator::NEXT),
-					'/*' => array('COMMENT_BLOCK', Generator::NEXT),
-					'//' => array('COMMENT_LINE', Generator::NEXT),
-					'REGEXP' => array('REGEXP', Generator::NEXT),
-					'LATTE' => array('LATTE', Generator::NEXT),
-					'</' => array(Generator::STATE_QUIT, Generator::NEXT),
-				),
+		return [
+			'OUT' => [
+				[
+					'LINE' => [Generator::STATE_SELF, Generator::NEXT],
+					'TAB' => [Generator::STATE_SELF, Generator::NEXT],
+					'ALPHA' => ['KEYWORD', Generator::BACK],
+					'NUM' => ['NUMBER', Generator::NEXT],
+					'DOTNUM' => ['NUMBER', Generator::NEXT],
+					'.' => ['KEYWORD', Generator::CURRENT],
+					'"' => ['QUOTE_DOUBLE', Generator::NEXT],
+					'\'' => ['QUOTE_SINGLE', Generator::NEXT],
+					'/*' => ['COMMENT_BLOCK', Generator::NEXT],
+					'//' => ['COMMENT_LINE', Generator::NEXT],
+					'REGEXP' => ['REGEXP', Generator::NEXT],
+					'LATTE' => ['LATTE', Generator::NEXT],
+					'</' => [Generator::STATE_QUIT, Generator::NEXT],
+				],
 				Generator::STATE_FLAG_NONE,
 				'js-out',
 				null
-			),
-			'KEYWORD' => array(
-				array(
-					'!ALNUM_' => array(Generator::STATE_RETURN, Generator::BACK)
-				),
+			],
+			'KEYWORD' => [
+				[
+					'!ALNUM_' => [Generator::STATE_RETURN, Generator::BACK]
+				],
 				Generator::STATE_FLAG_KEYWORD | Generator::STATE_FLAG_RECURSION,
 				'js-out',
 				null
-			),
-			'NUMBER' => array(
-				array(
-					'x' => array('HEXA', Generator::NEXT),
-					'DOTNUM' => array('NUMBER', Generator::NEXT),
-					'ALL' => array(Generator::STATE_RETURN, Generator::BACK),
-				),
+			],
+			'NUMBER' => [
+				[
+					'x' => ['HEXA', Generator::NEXT],
+					'DOTNUM' => ['NUMBER', Generator::NEXT],
+					'ALL' => [Generator::STATE_RETURN, Generator::BACK],
+				],
 				Generator::STATE_FLAG_RECURSION,
 				'js-num',
 				null
-			),
-			'HEXA' => array(
-				array(
-					'!HEXNUM' => array(Generator::STATE_RETURN, Generator::BACK)
-				),
+			],
+			'HEXA' => [
+				[
+					'!HEXNUM' => [Generator::STATE_RETURN, Generator::BACK]
+				],
 				Generator::STATE_FLAG_NONE,
 				'js-num',
 				null
-			),
-			'QUOTE_DOUBLE' => array(
-				array(
-					'"' => array(Generator::STATE_RETURN, Generator::CURRENT),
-					'LATTE' => array('LATTE', Generator::NEXT)
-				),
+			],
+			'QUOTE_DOUBLE' => [
+				[
+					'"' => [Generator::STATE_RETURN, Generator::CURRENT],
+					'LATTE' => ['LATTE', Generator::NEXT]
+				],
 				Generator::STATE_FLAG_RECURSION,
 				'js-quote',
 				null
-			),
-			'QUOTE_SINGLE' => array(
-				array(
-					'\'' => array(Generator::STATE_RETURN, Generator::CURRENT),
-					'LATTE' => array('LATTE', Generator::NEXT)
-				),
+			],
+			'QUOTE_SINGLE' => [
+				[
+					'\'' => [Generator::STATE_RETURN, Generator::CURRENT],
+					'LATTE' => ['LATTE', Generator::NEXT]
+				],
 				Generator::STATE_FLAG_RECURSION,
 				'js-quote',
 				null
-			),
-			'COMMENT_BLOCK' => array(
-				array(
-					'LINE' => array(Generator::STATE_SELF, Generator::NEXT),
-					'TAB' => array(Generator::STATE_SELF, Generator::NEXT),
-					'*/' => array(Generator::STATE_RETURN, Generator::CURRENT),
-					'LATTE' => array('LATTE', Generator::NEXT)
-				),
+			],
+			'COMMENT_BLOCK' => [
+				[
+					'LINE' => [Generator::STATE_SELF, Generator::NEXT],
+					'TAB' => [Generator::STATE_SELF, Generator::NEXT],
+					'*/' => [Generator::STATE_RETURN, Generator::CURRENT],
+					'LATTE' => ['LATTE', Generator::NEXT]
+				],
 				Generator::STATE_FLAG_RECURSION,
 				'js-comment',
 				null
-			),
-			'COMMENT_LINE' => array(
-				array(
-					'LINE' => array(Generator::STATE_RETURN, Generator::BACK),
-					'TAB' => array(Generator::STATE_SELF, Generator::NEXT),
-					'LATTE' => array('LATTE', Generator::NEXT)
-				),
+			],
+			'COMMENT_LINE' => [
+				[
+					'LINE' => [Generator::STATE_RETURN, Generator::BACK],
+					'TAB' => [Generator::STATE_SELF, Generator::NEXT],
+					'LATTE' => ['LATTE', Generator::NEXT]
+				],
 				Generator::STATE_FLAG_RECURSION,
 				'js-comment',
 				null
-			),
-			'REGEXP' => array(
-				array(
-					'ALL' => array(Generator::STATE_RETURN, Generator::BACK)
-				),
+			],
+			'REGEXP' => [
+				[
+					'ALL' => [Generator::STATE_RETURN, Generator::BACK]
+				],
 				Generator::STATE_FLAG_NONE,
 				'js-quote',
 				null
-			),
-			'LATTE' => array(
+			],
+			'LATTE' => [
 				null,
 				Generator::STATE_FLAG_NEWLEXER,
 				'xlang',
 				'LatteMacro'
-			),
-			Generator::STATE_QUIT => array(
+			],
+			Generator::STATE_QUIT => [
 				null,
 				Generator::STATE_FLAG_NEWLEXER,
 				'html-tag',
 				null
-			)
-		);
+			]
+		];
 	}
 
 	/**
@@ -173,10 +173,10 @@ class LatteJavascript implements FSHL\Lexer
 	 */
 	public function getDelimiters()
 	{
-		return array(
+		return [
 			'REGEXP' => 'preg_match(\'~/.*?[^\\\\\\\\]/[gim]*~A\', $text, $matches, 0, $textPos)',
 			'LATTE' => 'preg_match(\'~\\\\{(?!["\\\'])~A\', $text, $matches, 0, $textPos)',
-		);
+		];
 	}
 
 	/**
@@ -186,9 +186,9 @@ class LatteJavascript implements FSHL\Lexer
 	 */
 	public function getKeywords()
 	{
-		return array(
+		return [
 			'js-keywords',
-			array(
+			[
 				'abstract' => 1,
 				'boolean' => 1,
 				'break' => 1,
@@ -253,8 +253,8 @@ class LatteJavascript implements FSHL\Lexer
 				'getAttribute' => 2,
 				'getElementsByTagName' => 2,
 				'getElementById' => 2,
-			),
+			],
 			Generator::CASE_SENSITIVE
-		);
+		];
 	}
 }

@@ -40,7 +40,7 @@ class Convertor extends Nette\Object
 	public $errors;
 
 
-	public function __construct(array $paths = array())
+	public function __construct(array $paths = [])
 	{
 		$this->paths = $paths + $this->paths;
 	}
@@ -111,10 +111,10 @@ class Convertor extends Nette\Object
 		$texy->phraseModule->tags['phrase/acronym'] = 'abbr';
 		$texy->phraseModule->tags['phrase/acronym-alt'] = 'abbr';
 
-		$texy->addHandler('block', array($this, 'blockHandler'));
-		$texy->addHandler('script', array($this, 'scriptHandler'));
-		$texy->addHandler('phrase', array($this, 'phraseHandler'));
-		$texy->addHandler('newReference', array($this, 'newReferenceHandler'));
+		$texy->addHandler('block', [$this, 'blockHandler']);
+		$texy->addHandler('script', [$this, 'scriptHandler']);
+		$texy->addHandler('phrase', [$this, 'phraseHandler']);
+		$texy->addHandler('newReference', [$this, 'newReferenceHandler']);
 		return $texy;
 	}
 

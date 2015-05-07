@@ -99,6 +99,7 @@ class Convertor extends Nette\Object
 		$texy->headingModule->generateID = TRUE;
 		$texy->tabWidth = 4;
 		$texy->typographyModule->locale = $this->page->id->lang;
+		$texy->htmlOutputModule->lineWrap = 130;
 		$texy->tableModule->evenClass = 'alt';
 		$texy->dtd['body'][1]['style'] = TRUE;
 		$texy->allowed['longwords'] = FALSE;
@@ -359,7 +360,8 @@ class Convertor extends Nette\Object
 	 */
 	public function blockHandler($invocation, $blocktype, $content, $lang, $modifier)
 	{
-		if (preg_match('#^block/(php|neon|javascript|js|css|html|htmlcb|latte)$#', $blocktype)) {
+		$blocktype = strtolower($blocktype);
+		if (preg_match('#^block/(php|neon|javascript|js|css|html|htmlcb|latte|sql)$#', $blocktype)) {
 			list(, $lang) = explode('/', $blocktype);
 
 		} elseif ($blocktype !== 'block/code') {

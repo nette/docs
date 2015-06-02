@@ -1,13 +1,14 @@
 Model
 **************
 
-Na začátku jsme modelovou vrstvu přeskočili, abychom se rychle dostali k potřebným datům. To se ale v praxi téměř nedělá. Na ukázku to stačilo, ale u větších projektů bychom brzy zaplakali ;-). Zrefaktorujeme si tedy aplikaci a vytvoříme si modelovou vrstvu. Tedy tu vrstvu, která nás v presenteru oddělí od přímé komunikace s databází a zaštítí to pod pěkné API.
+S tím, jak aplikace roste, brzy zjistíme, že na různých místech, v různých presenterech, potřebujeme provádět podobné operace s databází, například získávat nejnovější publikované články. Když aplikaci vylepšíme třeba tím, že u článků přidáme příznak, zda je rozepsaný, musíme potom projít i všechna místa v aplikaci, kde se články z databáze získávají, a doplnit podmínku where, aby se vybíraly jen články nerozepsané.
+
+V ten moment se přímá práce s databází stává nedostatečnou a bude šikovnější si vypomoci novou funkcí, která nám publikované články bude vracet. A když později přidáme další podmínku, například že se nemají zobrazovat články s budoucím datem, upravíme kód jen na jednom místě.
+
+Funkci umístíme třeba do třídy ArticleManager a nazveme ji getPublicArticles().
 
 
-[* quick-manager.png *]
-
-
-V adresáři `app/model/` vytvoříme naši modelovou třídu, která se nám bude starat o články, a pojmenujeme ji `ArticlesManager.php`.
+V adresáři `app/model/` vytvoříme naši modelovou třídu která se nám bude starat o články, a pojmenujeme ji `ArticlesManager.php`.
 
 
 /---php
@@ -22,14 +23,49 @@ use Nette;
  */
 class ArticleManager extends Nette\Object
 {
+	/**
+	 * @var Nette\Database\Context
+	 */
+	private $database;
 
+	public function __construct(Nette\Database\Context $database)
+	{
+		$this->database = $database;
+	}
 
+	public function getPublicArticles()
+	{
+		return $this->database->table('posts')
+			->where('created_at < ', new \DateTime())
+			->order('created_at DESC');
+	}
 }
 
 \--
 
-Zároveň ji zaregistrujeme v `app/config/config.neon` v sekci services. Takto registrovaná třída se nazývá **služba**. Nepotřebujeme ji pojmenovat, tak na začátek přidáme pouze odrážku. Nezapomeňme na namespace, ve kterém je třída definována.
+Třídu jsme vytvořili s konstruktorem, ve kterém si předáme databázový Context:[api:Nette\Database\Context] do managera.
 
+Pokud bychom nevyužívali frameworku a síly DI kontajneru, museli bychom v našem případě nejprve vytvořit instaci Nette\Database\Connection, Nette\Database\Structure, Nette\Database\Conventions a Nette\Caching\Storages\FileStorage (které pro své instancování také potřebují nějaké závyslosti, třeba jméno a heslo k databázi) pro to, abychom mohli vytvořit instanci Nette\Database\Context, kterou bychom následně použili pro vytvoření instance ArticleManager.
+
+/--php
+	...
+	// vyrobime vse co je treba pro Context
+	$dbConnection = new Nette\Database\Connection(...);
+	$dbStructure = new Nette\Database\Structure(...);
+	$dbConventions = new Nette\Database\Conventions\DiscoveredConventions(...);
+	$dbCache = new Nette\Caching\Storages\FileStorage(...);
+
+	// vyrobime Context
+	$dbContext = new Nette\Database\Context($dbConnection, $dbStructure, $dbConventions, $dbCache);
+
+	// vyrobime ArticleManager
+	$articleManager = new App\Model\ArticleManager($dbContext)
+	...
+\--
+
+Tolik psaní pro to abychom dostali fungujicí ArticleManager? To asi nechceme, proto použijeme DI container, který berme jako skřínku co generuje tyto výrobní kódy a nám vrátí jen požadovaný objekt.
+
+Jediné co potřebujeme, aby nám DI container vrátil námi požadovaný objekt je mu řící, že ho budeme chtít. To se dělá v konfiguraci aplikace. V souboru `app/config/config.neon` v sekci services přidáme řádek s celým názvem služby.
 
 /--neon
 services:
@@ -38,11 +74,11 @@ services:
 	- App\Model\ArticleManager
 \--
 
-Tím Nette a jeho "DI Containeru":dependency-injection sdělujeme, že pokud se někdo ptal na tuhle třídu, tak víš, kde ji hledat, dej ji vše co potřebuje k životu a připrav nám ji pro použití v dalších třídách.
+
+Tím Nette a jeho "DI containeru":[dependency-injection] říkáme, kdyby někdo chtěl instanci této třídy, tak víš kde ji hledat, dej ji vše co potřebuje k životu a připrav nám ji pro použití v dalších třídách. Takto registrovaná třída se nazývá **služba**.
 
 
-
-Přepneme se do HomepagePresenter.php, který upravíme tak, že se zbavíme závislosti na `Nette\Database\Context` a nahradíme za novou závislost na naší nové třídě.
+Přepneme se do HomepagePresenter.php, který upravíme tak, že se zbavíme závislosti na Nette\Database\Context a nahradíme za novou závislost na naší nové třídě.
 
 
 /--php
@@ -51,25 +87,24 @@ Přepneme se do HomepagePresenter.php, který upravíme tak, že se zbavíme zá
 namespace App\Presenters;
 
 use Nette,
-	App\Model;
+	App\Model\ArticleManager;
 
 /**
  * Homepage presenter.
  */
 class HomepagePresenter extends BasePresenter
 {
-	/** @var Model\ArticleManager */
+	/** @var ArticleManager */
 	private $articleManager;
 
-	public function __construct(Model\ArticleManager $articleManager)
+	public function __construct(ArticleManager $articleManager)
 	{
 		$this->articleManager = $articleManager;
 	}
 
-
 	public function renderDefault()
 	{
-		$this->template->posts = $this->articleManager->findAll()->limit(5);
+		$this->template->posts = $this->articleManager->getPublicArticles()->limit(5);
 	}
 
 }
@@ -77,83 +112,10 @@ class HomepagePresenter extends BasePresenter
 
 \--
 .[tip]
-V sekci `use` máme `App/Model`, tak si můžeme zápis v PHP kódu zkrátit na `Model\ArticleManager` (nebojte, i v komentářových anotacích to funguje a vaše chytré IDE by si s tím mělo poradit).
+V sekci use máme App\Model\ArticleManager, tak si můžeme zápis v php kódu zkrátit na Model\ArticleManager (nebojte , i v komentářích to funguje a vaše chytré IDE by si s tím mělo poradit)
 
 
 
-V konstruktoru si požádáme o ArticleManager. Ten nám předá nám už známý DI Container a tento ArticleManager si přiřadíme do private property. V metodě `renderDefault` zavoláme metodu `findAll` (která v tuto chvíli neexistuje) a nad výsledkem, co se nám vrátí, zavoláme ještě metodu `limit(5);`
+V konstrukotu si požádáme o ArticleManager, který si přiřadíme do private property a v metodě renderDefault zavoláme metodu getPublicArticles() a nad výsledkem co se nám vrátí zavoláme ještě metodu limit(5);
 
-
-Doplníme si tedy do našeho managera metodu `findAll`:
-
-
-app/model/ArticleManager.php
-
-/--php
-//...
-public function findAll()
-{
-	return $this->database->table('posts')
-		->order('created_at DESC');
-}
-//...
-\--
-
-Do této metody jsme přesunuli kus kódu, co se dotazoval databáze na články. Zde tedy používáme property `database`, kterou ale nemáme nikde definovanou. Tak si ji definujeme a její obsah naplníme tím, o co si vyžádáme v konstruktoru.
-
-/--php
-//...
-/**
- * @var Nette\Database\Context
- */
-private $database;
-
-
-public function __construct(Nette\Database\Context $database)
-{
-	$this->database = $database;
-}
-//...
-\--
-
-Celý kód pak vypadá následovně:
-
-/--php
-<?php
-
-namespace App\Model;
-
-use Nette;
-
-/**
- * Article management.
- */
-class ArticleManager extends Nette\Object
-{
-
-	/**
-	 * @var Nette\Database\Context
-	 */
-	private $database;
-
-
-	public function __construct(Nette\Database\Context $database)
-	{
-		$this->database = $database;
-	}
-
-
-	public function findAll()
-	{
-		return $this->database->table('posts')
-			->order('created_at DESC');
-
-	}
-
-}
-
-\--
-
-
-
-Třída `ArticleManager` si v konstruktoru řekne o předání `Nette\Database\Context` a jelikož tato třída je v DI containeru zaregistrovaná, vytvoří její instancí a předá. DI za nás takto vytvoří instanci ArticleManagera a předá ho v konstruktoru HomepagePresenter, který si o něj požádal. Taková matroška :) Všichni si jen říkají, co chtějí, a nezajímají se o to, kde se to vytváří. O to se postará Nette DI Container.
+Třída ArticleManager si v konstruktoru řekne o předání Nette\Database\Context a jelikož tato třída je v DÍ containeru zaregistrovaná, vytvoří její instancí a předá. DI za nás takto vytvoří instanci ArticleManagera a předá ho v konstrukotru HomepagePresenter, který si o něj požádal. Taková matroška :) Všichni si jen říkají co chtějí a nezajímají se o to kde se to vytváří. O to se postará Nette DI container:"http://doc.nette.org/cs/dependency-injection"

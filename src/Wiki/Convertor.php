@@ -2,12 +2,12 @@
 
 namespace Wiki;
 
-use Texy,
-	TexyLink,
-	TexyHtml,
-	FSHL,
-	Nette,
-	Nette\Utils\Strings;
+use Texy;
+use TexyLink;
+use TexyHtml;
+use FSHL;
+use Nette;
+use Nette\Utils\Strings;
 
 
 /**

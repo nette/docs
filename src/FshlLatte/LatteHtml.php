@@ -19,7 +19,8 @@
 
 namespace FSHL\Lexer;
 
-use FSHL, FSHL\Generator;
+use FSHL;
+use FSHL\Generator;
 
 /**
  * Latte lexer.

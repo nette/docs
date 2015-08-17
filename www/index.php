@@ -27,7 +27,7 @@ $header = <<<HTML
 <!doctype html>
 <head>
   <meta charset="utf-8">
-  <link rel="stylesheet" href="http://files.nette.org/css/combined.css">
+  <link rel="stylesheet" href="https://files.nette.org/css/combined.css">
   <script> if ($autorefresh) { setTimeout(function () { window.location.reload(); }, parseInt($autorefresh) * 1000); } </script>
 </head>
 <body><div id=page><div id=main class=sidebar><div id=content>

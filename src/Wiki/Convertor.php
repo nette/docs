@@ -173,7 +173,7 @@ class Convertor extends Nette\Object
 
 		} elseif ($book === 'addons') {
 			$tmp = explode(':', $link)[1];
-			return 'http://addons.nette.org/' . ($tmp === Page::HOMEPAGE ? '' : $tmp);
+			return 'https://addons.nette.org/' . ($tmp === Page::HOMEPAGE ? '' : $tmp);
 
 		} elseif ($book === 'attachment') {
 			$ver = $this->page->id->version ? '-' . $this->page->id->version : '';
@@ -215,7 +215,7 @@ class Convertor extends Nette\Object
 
 	public function createUrl(PageId $link)
 	{
-		return ($this->page->id->book === $link->book ? '' : 'http://' . ($link->book === 'www' ? '' : "$link->book.") . $this->paths['domain'])
+		return ($this->page->id->book === $link->book ? '' : '//' . ($link->book === 'www' ? '' : "$link->book.") . $this->paths['domain'])
 			. '/'
 			. $link->lang . '/'
 			. ($link->version ? "$link->version/" : '')

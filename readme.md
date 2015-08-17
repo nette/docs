@@ -1,8 +1,8 @@
 The nette.org Website Content
 =============================
 
-Here is the most of content of http://nette.org website. You are free to make changes
-or translate existing pages. Before contributing, please read [contributing information](http://nette.org/writing)
+Here is the most of content of https://nette.org website. You are free to make changes
+or translate existing pages. Before contributing, please read [contributing information](https://nette.org/writing)
 to make sure everything will be ok.
 
 Thank you for making documentation better!

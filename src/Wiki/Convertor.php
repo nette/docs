@@ -3,8 +3,6 @@
 namespace Wiki;
 
 use Texy;
-use TexyLink;
-use TexyHtml;
 use FSHL;
 use Nette;
 use Nette\Utils\Strings;
@@ -86,11 +84,12 @@ class Convertor extends Nette\Object
 
 
 	/**
-	 * @return Texy
+	 * @return Texy\Texy
 	 */
 	public function createTexy()
 	{
-		$texy = new Texy;
+		$texy = new Texy\Texy;
+		$texy->setOutputMode($texy::HTML5);
 		$texy->linkModule->root = '';
 		$texy->alignClasses['left'] = 'left';
 		$texy->alignClasses['right'] = 'right';
@@ -228,13 +227,9 @@ class Convertor extends Nette\Object
 
 
 	/**
-	 * @param  TexyHandlerInvocation  handler invocation
-	 * @param  string  command
-	 * @param  array   arguments
-	 * @param  string  arguments in raw format
-	 * @return TexyHtml|string|FALSE
+	 * @return Texy\HtmlElement|string|FALSE
 	 */
-	public function scriptHandler($invocation, $cmd, $args, $raw)
+	public function scriptHandler(Texy\HandlerInvocation $invocation, $cmd, array $args, $raw)
 	{
 		$texy = $invocation->getTexy();
 		$page = $this->page;
@@ -290,18 +285,13 @@ class Convertor extends Nette\Object
 
 
 	/**
-	 * @param  TexyHandlerInvocation  handler invocation
-	 * @param  string
-	 * @param  string
-	 * @param  TexyModifier
-	 * @param  TexyLink
-	 * @return TexyHtml|string|FALSE
+	 * @return Texy\HtmlElement|string|FALSE
 	 */
-	public function phraseHandler($invocation, $phrase, $content, $modifier, $link)
+	public function phraseHandler(Texy\HandlerInvocation $invocation, $phrase, $content, Texy\Modifier $modifier, Texy\Link $link = NULL)
 	{
 		if (!$link) {
 			$el = $invocation->proceed();
-			if ($el instanceof TexyHtml && $el->getName() !== 'a' && $el->title !== NULL) {
+			if ($el instanceof Texy\HtmlElement && $el->getName() !== 'a' && $el->title !== NULL) {
 				$el->class[] = 'about';
 			}
 			return $el;
@@ -325,16 +315,14 @@ class Convertor extends Nette\Object
 
 
 	/**
-	 * @param  TexyHandlerInvocation  handler invocation
-	 * @param  string
-	 * @return TexyHtml|string|FALSE
+	 * @return Texy\HtmlElement|string|FALSE
 	 */
-	public function newReferenceHandler($invocation, $name)
+	public function newReferenceHandler(Texy\HandlerInvocation $invocation, $name)
 	{
 		$texy = $invocation->getTexy();
 		$dest = $this->resolveLink($name, $label);
 		if ($dest instanceof PageId) {
-			$el = $texy->linkModule->solve(NULL, new \TexyLink($this->createUrl($dest)), $label);
+			$el = $texy->linkModule->solve(NULL, new Texy\Link($this->createUrl($dest)), $label);
 			if ($dest->lang !== $this->page->id->lang) $el->lang = $dest->lang;
 
 			$dest->fragment = NULL;
@@ -350,15 +338,9 @@ class Convertor extends Nette\Object
 
 	/**
 	 * User handler for code block.
-	 *
-	 * @param  TexyHandlerInvocation  handler invocation
-	 * @param  string  block type
-	 * @param  string  text to highlight
-	 * @param  string  language
-	 * @param  TexyModifier modifier
-	 * @return TexyHtml
+	 * @return Texy\HtmlElement
 	 */
-	public function blockHandler($invocation, $blocktype, $content, $lang, $modifier)
+	public function blockHandler(Texy\HandlerInvocation $invocation, $blocktype, $content, $lang, Texy\Modifier $modifier)
 	{
 		$blocktype = strtolower($blocktype);
 		if (preg_match('#^block/(php|neon|javascript|js|css|html|htmlcb|latte|sql)$#', $blocktype)) {
@@ -377,7 +359,7 @@ class Convertor extends Nette\Object
 		else $langClass = 'FSHL\Lexer\\' . ucfirst($lang);
 
 		$texy = $invocation->getTexy();
-		$content = Texy::outdent($content);
+		$content = Texy\Helpers::outdent($content);
 
 		if (class_exists($langClass)) {
 			$fshl = new FSHL\Highlighter(new FSHL\Output\Html, FSHL\Highlighter::OPTION_TAB_INDENT);
@@ -385,9 +367,9 @@ class Convertor extends Nette\Object
 		} else {
 			$content = htmlSpecialChars($content);
 		}
-		$content = $texy->protect($content, Texy::CONTENT_BLOCK);
+		$content = $texy->protect($content, $texy::CONTENT_BLOCK);
 
-		$elPre = TexyHtml::el('pre');
+		$elPre = Texy\HtmlElement::el('pre');
 		if ($modifier) {
 			$modifier->decorate($texy, $elPre);
 		}

@@ -30,7 +30,16 @@ $header = <<<HTML
   <link rel="stylesheet" href="https://files.nette.org/css/combined.css">
   <script> if ($autorefresh) { setTimeout(function () { window.location.reload(); }, parseInt($autorefresh) * 1000); } </script>
 </head>
-<body><div id=page><div id=main class=sidebar><div id=content>
+<body><div class=page>
+<header class="main"></header>
+<div class=main><div class="content has-sidebar">
+HTML;
+
+$footer =  <<<HTML
+</div> <!-- div.content.has-sidebar -->
+</div> <!-- div.main -->
+<footer class=main></footer>
+</body></html>
 HTML;
 
 $name = basename($file, '.texy');
@@ -39,4 +48,4 @@ $id = new Wiki\PageId($book, $lang, $name);
 $convertor = new Wiki\Convertor;
 $page = $convertor->parse($id, file_get_contents(__DIR__ . '/../web-content/' . $lang . '/' . $file));
 
-echo $header . $page->html;
+echo $header . $page->html . $footer;

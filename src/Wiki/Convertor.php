@@ -104,6 +104,9 @@ class Convertor extends Nette\Object
 		$texy->allowed['longwords'] = FALSE;
 		$texy->allowed['block/html'] = FALSE;
 
+		$texy->imageModule->root = $this->paths['fileMediaPath'];
+		$texy->imageModule->linkedRoot = $this->paths['mediaPath'];
+
 		$texy->phraseModule->tags['phrase/strong'] = 'b';
 		$texy->phraseModule->tags['phrase/em'] = 'i';
 		$texy->phraseModule->tags['phrase/em-alt'] = 'i';

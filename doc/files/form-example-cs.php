@@ -12,7 +12,7 @@ $form->addText('name', 'Jméno:')
 $form->addText('age', 'Věk:')
 	->setType('number')
 	->addRule(Form::INTEGER, 'Věk musí být číslo')
-	->addRule(Form::RANGE, 'Věk musí být v rozmezí od %d do %d let', array(18, 120));
+	->addRule(Form::RANGE, 'Věk musí být v rozmezí od %d do %d let', [18, 120]);
 
 $form->addPassword('password', 'Heslo:')
 	->setRequired('Zvolte si heslo')
@@ -24,10 +24,10 @@ $form->addPassword('passwordVerify', 'Heslo pro kontrolu:')
 
 $form->addSubmit('send', 'Registrovat');
 
-$form->setDefaults(array(
+$form->setDefaults([
 	'name' => 'John',
 	'age' => 33,
-));
+]);
 
 
 

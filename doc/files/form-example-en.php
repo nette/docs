@@ -12,7 +12,7 @@ $form->addText('name', 'Name:')
 $form->addText('age', 'Age:')
 	->setType('number')
 	->addRule(Form::INTEGER, 'Your age must be an integer.')
-	->addRule(Form::RANGE, 'You must be older %d years and be under %d.', array(18, 120));
+	->addRule(Form::RANGE, 'You must be older %d years and be under %d.', [18, 120]);
 
 $form->addPassword('password', 'Password:')
 	->setRequired('Pick a password')
@@ -24,10 +24,10 @@ $form->addPassword('passwordVerify', 'Password again:')
 
 $form->addSubmit('send', 'Register');
 
-$form->setDefaults(array(
+$form->setDefaults([
 	'name' => 'John Doe',
 	'age' => 33,
-));
+]);
 
 
 

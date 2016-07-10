@@ -9,9 +9,8 @@ $form = new Form;
 $form->addText('name', 'Name:')
 	->setRequired('Please fill your name.');
 
-$form->addText('age', 'Age:')
-	->setType('number')
-	->addRule(Form::INTEGER, 'Your age must be an integer.')
+$form->addInteger('age', 'Age:')
+	->setRequired()
 	->addRule(Form::RANGE, 'You must be older %d years and be under %d.', [18, 120]);
 
 $form->addPassword('password', 'Password:')

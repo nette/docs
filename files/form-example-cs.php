@@ -9,9 +9,8 @@ $form = new Form;
 $form->addText('name', 'Jméno:')
 	->setRequired('Zadejte prosím jméno');
 
-$form->addText('age', 'Věk:')
-	->setType('number')
-	->addRule(Form::INTEGER, 'Věk musí být číslo')
+$form->addInteger('age', 'Věk:')
+	->setRequired()
 	->addRule(Form::RANGE, 'Věk musí být v rozmezí od %d do %d let', [18, 120]);
 
 $form->addPassword('password', 'Heslo:')

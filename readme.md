@@ -1,12 +1,8 @@
-Nette Framework Website Content
-===============================
+How to contribute
+=================
 
-Here is the most of content of https://nette.org website. You are free to make changes
-or translate existing pages. Before contributing, please read [contributing information](https://nette.org/writing)
+Nette welcomes contributions. You are free to make changes or translate existing
+pages. Before contributing, please read [information](https://nette.org/writing)
 to make sure everything will be ok.
 
 Thank you for making documentation better!
-
-This content is licensed under a [Creative Commons Attribution-ShareAlike 3.0 Unported
-License](http://creativecommons.org/licenses/by-sa/3.0/legalcode). By contributing you are
-agreeing to license your contribution under this license.

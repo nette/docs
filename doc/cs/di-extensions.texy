@@ -24,18 +24,18 @@ blog: # stejné jméno jako má extension
 	comments: FALSE
 \--
 
-Nastavení si lze přečíst zavoláním metody [getConfig() |api:Nette\DI\CompilerExtension::getConfig()] v rozšíření.
+Nastavení si lze přečíst v proměnné `$this->config` v rozšíření.
 
 /--code php
 class MyBlogExtension extends Nette\DI\CompilerExtension
 {
 	public function loadConfiguration()
 	{
-		$config = $this->getConfig();
+		dump($this->config);
 		// [2] [ 'postsPerPage' => 10, 'comments' => FALSE ]
 \--
 
-Protože uznáváme princip "konvence před konfigurací":http://en.wikipedia.org/wiki/Convention_over_configuration, nastavíme si výchozí hodnoty, aby aplikace fungovala i bez toho, že budeme něco nastavovat. V prvním argumentu metody `getConfig()` můžeme poskytnout výchozí hodnoty, do kterých bude sloučena příslušná sekce konfiguračního souboru.
+Protože uznáváme princip "konvence před konfigurací":http://en.wikipedia.org/wiki/Convention_over_configuration, nastavíme si výchozí hodnoty, aby aplikace fungovala i bez toho, že budeme něco nastavovat, a sloučíme je hodnotami z konfiguračního souboru.
 
 /--code php
 class MyBlogExtension extends Nette\DI\CompilerExtension
@@ -47,55 +47,25 @@ class MyBlogExtension extends Nette\DI\CompilerExtension
 
 	public function loadConfiguration()
 	{
-		$config = $this->getConfig($this->defaults);
+		$this->config += $this->defaults;
 \--
 
-Nastavení máme v poli `$config`, takže je aplikujeme na služby, které vytvoříme. Použijeme k tomu `ContainerBuilder`, který umožňuje to stejné, jako zápis služby v konfiguračním souboru.
+Kompletní nastavení máme v poli `$this->config`, takže je použijeme pro služby, které vytvoříme. Použijeme k tomu `ContainerBuilder`, který umožňuje to stejné, jako zápis služby v konfiguračním souboru.
 
 /--code php
 $builder = $this->getContainerBuilder();
 \--
 
-Vytvoříme si službu `blog.articles`, která bude reprezentovat model pro práci s články a jejich načítání.
+Vytvoříme si jako příklad službu `articles`, což bude objekt třídy `MyBlog\ArticlesModel`, nad kterým ještě zavoláme metodu `setLogger`.
 
 .[tip]
 Konvence je, prefixovat služby v rozšíření jeho názvem, aby nevznikaly konflikty. Pomůže nám s tím metoda `prefix()`.
 
 /--code php
 $builder->addDefinition($this->prefix('articles'))
-	->setClass('MyBlog\ArticlesModel', ['@connection']);
+	->setFactory('MyBlog\ArticlesModel', ['@connection'])
+	->addSetup('setLogger', ['@logger']);
 \--
-
-Dále si vytvoříme továrnu na komponentu, které předáme `blog.articles` a nastavíme počet zobrazených příspěvků na stránku. Jak používat továrny na komponenty si ukážeme později.
-
-/--code php
-$builder->addDefinition($this->prefix('articlesList'))
-	->setClass('MyBlog\Components\ArticlesList', [$this->prefix('@articles')])
-	->addSetup('setPostsPerPage', [$config['postsPerPage']])
-	->setShared(FALSE)->setAutowired(FALSE); // ze služby se stane továrna
-\--
-
-Budeme potřebovat i modelovou třídu pro komentáře `blog.comments`, které předáme připojení k databázi a `blog.articles` a pokud jsou vyplé komentáře, tak je zakážeme.
-
-/--code php
-$comments = $builder->addDefinition($this->prefix('comments'))
-	->setClass('MyBlog\CommentsModel', ['@connection', $this->prefix('@articles')]);
-
-if (!$config['comments']) { // volitelné vypnutí komentářů
-	$comments->addSetup('disableComments');
-}
-\--
-
-Komentáře se musí také někde zobrazovat a psát, takže přidáme ještě jednu továrnu na komponentu `blog.commentsControl`, která nám bude komentáře zobrazovat a dovolí nám psát nové, pokud nebudou vyplé.
-
-/--code php
-$builder->addDefinition($this->prefix('commentsControl'))
-	->setClass('MyBlog\Components\CommentsControl', [$this->prefix('@comments')])
-	->setShared(FALSE)->setAutowired(FALSE); // ze služby se stane továrna
-\--
-
-.[note]
-Toto rozdělení na modely a komponenty je pouze ilustrativní.
 
 
 Načítání dodatečné konfigurace
@@ -106,16 +76,13 @@ Pokud se nám nelíbí vytvářet všechny služby v rozšíření, můžeme jeh
 /--code neon
 services:
 	articles:
-		class: MyBlog\ArticlesModel(@connection)
+		factory: MyBlog\ArticlesModel(@connection)
 
 	comments:
-		class: MyBlog\CommentsModel(@connection, @blog.articles)
+		factory: MyBlog\CommentsModel(@connection, @blog.articles)
 
 	articlesList:
-		class: MyBlog\Components\ArticlesList(@blog.articles)
-
-	commentsControl:
-		class: MyBlog\Components\CommentsControl(@blog.comments)
+		factory: MyBlog\Components\ArticlesList(@blog.articles)
 \--
 
 Který načteme a dodatečně služby nastavíme
@@ -123,25 +90,23 @@ Který načteme a dodatečně služby nastavíme
 /--code php
 public function loadConfiguration()
 {
-	$config = $this->getConfig($this->defaults);
+	$this->config += $this->defaults;
 	$builder = $this->getContainerBuilder();
 
 	// načtení konfiguračního souboru pro rozšíření
-	$this->compiler->parseServices($builder, $this->loadFromFile(__DIR__ . '/blog.neon'), $this->name);
+	$this->compiler->loadDefinitions($builder, $this->loadFromFile(__DIR__ . '/blog.neon')['services'], $this->name);
 
 	// počet článků na stránku v komponentě
 	$builder->getDefinition($this->prefix('articlesList'))
-		->addSetup('setPostsPerPage', [$config['postsPerPage']]);
+		->addSetup('setPostsPerPage', [$this->config['postsPerPage']]);
 
 	// volitelné vypnutí komentářů
-	if (!$config['comments']) {
+	if (!$this->config['comments']) {
 		$builder->getDefinition($this->prefix('comments'))
 			->addSetup('disableComments');
 	}
 }
 \--
-
-Rozšíření se nám krásně vyčistilo a díky syntaxi Neon, jsou definice služeb mnohem lépe čitelné.
 
 
 CompilerExtension::beforeCompile() .{toc: beforeCompile()}
@@ -150,7 +115,7 @@ CompilerExtension::beforeCompile() .{toc: beforeCompile()}
 V této fázi sestavování už by neměly přibývat další služby. Můžeme ovšem upravovat existující a doplnit některé potřebné vazby mezi službami, například pomocí tagů.
 
 
-CompilerExtension::afterCompile(Nette\PhpGenerator\ClassType $class) .{toc: afterCompile()}
+CompilerExtension::afterCompile() .{toc: afterCompile()}
 =================================================================================================
 
 V této fázi už je třída `Container`u vygenerována, obsahuje všechny metody, které vytváří služby a je připravena na zápis do cache. Díky api třídy [Nette\PhpGenerator\ClassType |api:] můžeme přidávat vlastní kód do kontejneru a upravovat tak výsledný kód, který se stará o vytvoření služeb.
@@ -163,13 +128,12 @@ Ukážeme si kousek kódu, kde Nette Framework doplňuje do metody `initialize` 
 public function afterCompile(Nette\PhpGenerator\ClassType $class)
 {
 	$container = $this->getContainerBuilder();
-	$config = $this->getConfig($this->defaults);
 
 	// metoda initialize
-	$initialize = $class->methods['initialize'];
+	$initialize = $class->getMethod('initialize');
 
 	// automatické startování session
-	if ($config['session']['autoStart']) {
+	if ($this->config['session']['autoStart']) {
 		$initialize->addBody('$this->session->start();');
 	}
 
@@ -179,9 +143,6 @@ public function afterCompile(Nette\PhpGenerator\ClassType $class)
 	}
 }
 \--
-
-Metody `beforeCompile()` a `afterCompile()` se liší pouze v tom, že jedna má přístup ke kódu výsledného `Container`u a druhá ne.
-
 
 
 {{themeicon: icon-config.png}}

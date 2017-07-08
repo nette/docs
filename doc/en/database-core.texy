@@ -4,60 +4,319 @@ Database Core
 .[perex]
 Nette Database Core je is database abstraction layer and provides core functionality.
 
-To create a new database connection just create a new instance of [api:Nette\Database\Connection] class:
+
+Connection and Configuration
+============================
+
+To connect to the database, simply create an instance of the [api:Nette\Database\Connection] class:
 
 /--php
-use Nette\Database\Connection;
-$database = new Connection($dsn, $user, $password);
+$database = new Nette\Database\Connection($dsn, $user, $password);
 \--
 
-The 4th optional parameter of the [connection constructor |api:Nette\Database\Connection] allows you to specify some options. These options are passed to the PDO constructor and the internal driver constructor, so they can contain a configuration for both the PDO instance and the driver instance.
+The `$dsn` (data source name) parameter is [the same as used by PDO |http://php.net/manual/en/pdo.construct.php#refsect1-pdo.construct-parameters], eg `host=127.0.0.1;dbname=test`. In the case of failure it throws `Nette\Database\ConnectionException`.
 
-If you want that connection with the database server is not created immediately after an instance of `Connection` is created but only when the database is used, you can do so by setting the configuration to `'lazy' => TRUE`.
+However, a more sophisticated way offers [application configuration |configuring]. We will add a `database` section and it creates the required objects and a database panel in the Tracy bar.
 
-The internal driver class name is detected by provided DSN. However, you can provide you own implementation of an internal driver. To do this, pass your driver name as an option with the `driverClass` key.
-
-/--code php
-$database = new Connection($dsn, $user, $password, [
-	'lazy' => FALSE,
-	'driverClass' => 'App\YourSpecificDriverImplementationName'
-]);
-\--
-
-The easiest way to create a connection is to configure one in your application config, which allows you create multiple connections and helps you to add database panel to Tracy debug bar.
-
-/--code neon
+/--neon
 	database:
-		default:
-			dsn:          "mysql:host=127.0.0.1;dbname=test"
-			user:         "root"
-			password:     "password"
-			options:      [PDO::MYSQL_ATTR_COMPRESS = true]
-			debugger:     true        # debugger bar panel
-			explain:      true        # explain queries in debugger bar
-			conventions:  discovered  # or static or name of your class, default is discovered
-			autowired:    true
-		anotherConnection:
-			dsn: ...
-			autowired: false
+		dsn: 'mysql:host=127.0.0.1;dbname=test'
+		user: root
+		password: password
 \--
+
+The connection object we [receive as a service from a DI container |di-usage], for example:
+
+/--php
+class Model
+{
+	private $database;
+
+	// pass Nette\Database\Context to work with the Database Explorer layer
+	public function __construct(Nette\Database\Connection $database)
+	{
+		$this->database = $database;
+	}
+}
+\--
+
+For more information, see [#Advanced Connection Settings].
 
 
 Queries
---------
+=======
 
-Connection allows you to easily query your database by calling `query` method:
+To query database use `query()` method that returns [ResultSet |api:Nette\Database\ResultSet].
 
 /--php
-$database->query('INSERT INTO users', [ // an array can be a parameter
-	'name' => 'Jim',
-	'created' => new DateTime, // or a DateTime object
-	'avatar' => fopen('image.gif', 'r'), // or a file
-], ...); // it is even possible to use multiple inserts
+$result = $database->query('SELECT name FROM users');
 
-$database->query('UPDATE users SET ? WHERE id=?', $data, $id);
-$database->query('SELECT * FROM categories WHERE id=?', 123)->dump();
+foreach ($result as $row) {
+	echo $row->name;
+}
+
+echo $result->getRowCount(); // returns the number of rows if is known
 \--
+
+.[note]
+Over the `ResultSet` is possible to iterate only once, if we need to iterate multiple times, it is necessary to convert the result to the array via `fetchAll()` method.
+
+You can easily add parameters to the query, note the question mark:
+
+/--php
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+$database->query('SELECT * FROM users WHERE name = ? AND active = ?', $name, $active);
+
+$database->query('SELECT * FROM users WHERE id IN (?)', $ids); // $ids is array
+\--
+
+/--div .[warning]
+	WARNING, never concatenate stringss to avoid [SQL injection vulnerability |https://en.wikipedia.org/wiki/SQL_injection]!
+	/--
+	$database->query('SELECT * FROM users WHERE name = ' . $name); // WRONG!!!
+	\--
+\---
+
+In addition to `query()`, there are other useful methods:
+
+/--php
+// returns the associative array id => name
+$pairs = $database->fetchAssoc('SELECT id, name FROM users');
+
+// returns all rows as array
+$rows = $result->fetchAll('SELECT * FROM users');
+
+// returns single row
+$row = $result->fetch('SELECT * FROM users WHERE id = ?', $id);
+
+// return single field
+$name = $result->fetchField('SELECT name FROM users WHERE id = ?', $id);
+\--
+
+In case of failure, all of these methods throw `Nette\Database\DriverException.`
+
+
+Insert, Update & Delete
+=======================
+
+/--php
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978)
+$database->query('INSERT INTO users', [ // here can be omitted question mark
+	'name' => $name,
+	'year' => $year,
+]);
+
+$id = $database->getInsertId(); // returns the auto-increment of inserted row
+
+$id = $database->getInsertId($sequence); // or sequence value
+\--
+
+Multiple insert:
+
+/--php
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978), ('Jack', 1987)
+$database->query('INSERT INTO users', [
+	'name' => 'Jim',
+	'year' => 1978,
+], [
+	'name' => 'Jack',
+	'year' => 1987,
+]);
+\--
+
+Insert or update, if it already exists:
+
+/--php
+// INSERT INTO users (`id`, `name`, `year`) VALUES (123, 'Jim', 1978)
+//   ON DUPLICATE KEY UPDATE `year` = 1978
+$database->query('INSERT INTO users', [
+	'id' => $id,
+	'name' => $name,
+	'year' => $year,
+], 'ON DUPLICATE KEY UPDATE', [
+	'year' => $year,
+]);
+\--
+
+Update rows:
+
+/--php
+// UPDATE users SET `name` = 'Jim', `year` = 1978 WHERE id = 123
+$result = $database->query('UPDATE users SET', [
+	'name' => $name,
+	'year' => $year,
+], 'WHERE id = ?', $id);
+
+echo $result->getRowCount(); // returns the number of affected rows
+\--
+
+Delete:
+
+/--php
+$result = $database->query('DELETE FROM users WHERE id = ?', $id);
+echo $result->getRowCount(); // returns the number of affected rows
+\--
+
+In the case of failure `query()` throws either `Nette\Database\DriverException` or one of its descendants:
+
+- [ConstraintViolationException |api:Nette\Database\ConstraintViolationException] - violation of any constraint
+- [ForeignKeyConstraintViolationException |api:Nette\Database\ForeignKeyConstraintViolationException] - invalid foreign key
+- [NotNullConstraintViolationException |api:Nette\Database\NotNullConstraintViolationException] - violation of the NOT NULL condition
+- [UniqueConstraintViolationException |api:Nette\Database\UniqueConstraintViolationException] - conflict of unique index
+
+
+
+Advanced queries
+================
+
+In queries, we can use enumerators and operators:
+
+/--php
+$result = $database->query('SELECT * FROM users WHERE ?', [
+	'name' => $names, // ['Jim', 'Jack'],
+	'year >' => $year, // note operator >
+	'role NOT IN' => ['admin', 'owner'],
+]);
+// SELECT * FROM users WHERE
+//    `name` IN ('Jim', 'Jack')
+//    AND `year` > 1978
+//    AND `role` NOT IN ('admin', 'owner')
+\--
+
+By default, conditions are linked by the `AND` operator, which can be changed using `?or`:
+
+/--php
+$result = $database->query('SELECT * FROM users WHERE ?or', [
+	'name' => $name,
+	'year >' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' OR `year` > 1978
+\--
+
+For more complex combinations we will use the so-called SQL literals:
+
+/--php
+$result = $database->query('SELECT * FROM users WHERE ?', [
+	'name' => $name,
+	$database::literal('year > ? AND year < ?', $min, $max),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (year > 1978 AND year < 2017)
+\--
+
+Or:
+
+/--php
+$result = $database->query('SELECT * FROM users WHERE ?', [
+	'name' => $name,
+	$database::literal('?or', [
+		'active' => TRUE,
+		'role' => $role,
+	]),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (`active` = 1 OR `role` = 'admin')
+\--
+
+And that's not all, we can also use files or DateTime objects:
+
+/--php
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'created' => new DateTime, // or $database::literal('NOW()')
+	'avatar' => fopen('image.gif', 'r'), // inserts file contents
+]);
+\--
+
+For UPDATE, we can use operators `+=` a `-=`:
+
+/--php
+$database->query('UPDATE users SET', [
+	'age+=' => 1, // note +=
+	'name' => $database::literal('UPPER(name)'),
+], 'WHERE id = ?', $id);
+// UPDATE users SET `age` = `age` + 1 , `name` = UPPER(name) WHERE id = 123
+\--
+
+Parameters can also be used for sorting:
+
+/--php
+$result = $database->query('SELECT * FROM users ORDER BY', [
+	'name' => TRUE, // ascending
+	'year' => FALSE, // descending
+]);
+// SELECT * FROM users ORDER BY `name`, `year` DESC
+\--
+
+Select from a table or column whose name is in the variable (be careful not to allow the user to manipulate the content of the variable):
+
+/--php
+$table = 'users';
+$column = 'name';
+$result = $database->query('SELECT * FROM ?name WHERE ?name = ?', $table, $column, $value);
+// SELECT * FROM `users` WHERE `name` = 'Jim'
+\--
+
+
+Transactions
+============
+
+There are three methods for dealing with transactions:
+
+/--php
+$database->beginTransaction();
+
+$database->commit();
+
+$database->rollback();
+\--
+
+
+Advanced Connection Settings
+============================
+
+The following settings can be defined in the configuration file:
+
+/--neon
+	database:
+		dsn: 'mysql:host=127.0.0.1;dbname=test'
+		user: root
+		password: password
+		options:
+			PDO::MYSQL_ATTR_COMPRESS: true
+			lazy: true  # establish a connection when it is needed for the first time
+			driverClass:  .... # class database driver
+		debugger: true         # show panel in Tracy baru
+		explain:  true         # show query explains in Tracy bar
+		autowired: true # enabled for first defined connection
+		conventions: discovered # or 'static' or class name, the default is 'discovered'
+\--
+
+In the `options` option (it is 4th parameter of [Connection |api:Nette\Database\Connection] constructor), you can specify additional values ​​found in the PDO drivers documentation.
+
+In the configuration file, we can define more than one database connection:
+
+/--neon
+	database:
+		main:
+			dsn: 'mysql:host=127.0.0.1;dbname=test'
+			user: root
+			password: password
+
+		anotherDb:
+			dsn: 'sqlite::memory:'
+\--
+
+Each connection defined in this way creates two services - the `Nette\Database\Connection` object named as `database.[NAME].connection` (in our case, `database.main.connection` and `database.anotherDb.connection`) and the `Nette\Database\Context` object named as `database.[NAME].context` that is used when working with the [Database Explorer] layer.
+
+First connection services are passed through autowiring, however we can turn it off by `autowired: no`, and turn on for another connection via `autowired: yes`.
+
+Other non-autowired connections can be passed explicitly in the configuration:
+
+/--neon
+services:
+	- UserManager(@database.anotherDb.connection) # or @database.anotherDb.context
+\--
+
 
 {{toc: title}}
 {{themeicon: icon-database.png}}

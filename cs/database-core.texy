@@ -2,134 +2,320 @@ Database Core
 *************
 
 .[perex]
-Nette Database Core je základní vrstva, database abstraction layer, která poskytuje funkcionalitu pro pokládání dotazů.
+Nette Database Core je základní vrstva pro přístup k databázi, tzv. database abstraction layer.
 
-Pro vytvoření nového připojení k databázi stačí vytvořit novou instanci třídy [api:Nette\Database\Connection]. To provedeme buď [pomocí konfigurace|#konfigurace] nebo v případě, kdy používáme Nette Database samostatně, následovně:
+
+Připojení a konfigurace
+=======================
+
+Pro připojení k databázi stačí vytvořit instanci třídy [api:Nette\Database\Connection]:
 
 /--php
-use Nette\Database\Connection;
-$database = new Connection($dsn, $user, $password);
+$database = new Nette\Database\Connection($dsn, $user, $password);
 \--
 
-Více informací v odstavci [#pokročilé nastavení spojení]
+Parametr `$dsn` (data source name) je stejný, [jaký používá PDO |http://php.net/manual/en/pdo.construct.php#refsect1-pdo.construct-parameters], např. `host=127.0.0.1;dbname=test`. V případě selhání vyhodí výjimku `Nette\Database\ConnectionException`.
 
+Nicméně šikovnější způsob nabízí [aplikační konfigurace |configuring], kam stačí přidat sekci `database` a vytvoří se potřebné objekty a také databázový panel v Tracy baru.
 
-Konfigurace
-===========
-
-Nejjednodušším způsobem, jak nastavit připojení k databázi, je v [aplikační konfiguraci |configuring], která umožňuje vytvoření více připojení a také usnadňuje přidání panelu databáze do Tracy debugger baru. Tento zápis vytvoří krom `Nette\Database\Connection` také službu `Nette\Database\Context`, která je nutná pro práci s vrstvou [Database Explorer].
-
-/--code neon
+/--neon
 	database:
-		default:
-			dsn: "mysql:host=127.0.0.1;dbname=test"
-			user: "root"
-			password: "password"
-			options:
-				lazy: true
+		dsn: 'mysql:host=127.0.0.1;dbname=test'
+		user: root
+		password: password
 \--
 
-Více informací v odstavci [#pokročilé nastavení spojení]
+Poté objekt spojení [získáme jako službu z DI kontejneru |di-usage], např.:
+
+/--php
+class Model
+{
+	private $database;
+
+		// pro práci s vrstvou Database Explorer si předáme Nette\Database\Context
+	public function __construct(Nette\Database\Connection $database)
+	{
+		$this->database = $database;
+	}
+}
+\--
+
+Více informací v části [#pokročilé nastavení spojení].
 
 
 Dotazy
 ======
 
-Connection umožňuje jednoduše pokládat databázové dotazy voláním metody `query`, která nám vrací [ResultSet |api:Nette\Database\ResultSet].
+Databázové dotazy pokládáme metodou `query()`, která vrací [ResultSet |api:Nette\Database\ResultSet].
 
 /--php
+$result = $database->query('SELECT name FROM users');
 
-$database->query('INSERT INTO users', [ // parametr může být pole
-	'name' => 'Jim',
-	'created' => new DateTime, // nebo objekt DateTime
-	'avatar' => fopen('image.gif', 'r'), // nebo soubor
-], ...); // je možné také provést více vložení najednou
-
-$database->query('UPDATE users SET ? WHERE id=?', $data, $id);
-
-$result = $database->query('SELECT * FROM users WHERE id=?', 123);
-
-//ResultSet implemetuje iterator
 foreach ($result as $row) {
-	echo $row['name'];
+	echo $row->name;
 }
 
-$rows = $result->fetch(); //vrátí následující řádek nebo FALSE
-$rows = $result->fetchAll(); //vrátí všechny řádky jako pole
+echo $result->getRowCount(); // vrací počet řádků výsledku, pokud je znám
+\--
+
+.[note]
+Nad `ResultSet` je možné iterovat pouze jednou, pokud potřebujeme iterovat vícekrát, je nutno výsledek převést na pole metodou `fetchAll()`.
+
+Do dotazu lze velmi snadno přidávat i parametry, všimněte si otazníku:
+
+/--php
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+$database->query('SELECT * FROM users WHERE name = ? AND active = ?', $name, $active);
+
+$database->query('SELECT * FROM users WHERE id IN (?)', $ids); // $ids je pole
+\--
+
+/--div .[warning]
+	POZOR, nikdy dotazy neskládejte jako řetězce, vznikla by zranitelnost [SQL injection |https://cs.wikipedia.org/wiki/SQL_injection]
+	/--
+	$database->query('SELECT * FROM users WHERE name = ' . $name); // ŠPATNĚ!!!
+	\--
+\---
+
+Kromě `query()` jsou tu další užitečné funkce:
+
+/--php
+// vrátí asociativní pole id => name
+$pairs = $database->fetchAssoc('SELECT id, name FROM users');
+
+// vrátí všechny záznamy jako pole
+$rows = $result->fetchAll('SELECT * FROM users');
+
+// vrátí jeden záznam
+$row = $result->fetch('SELECT * FROM users WHERE id = ?', $id);
+
+// vrátí přímo hodnotu buňky
+$name = $result->fetchField('SELECT name FROM users WHERE id = ?', $id);
+\--
+
+V případě selhání všechny tyto metody vyhodí `Nette\Database\DriverException`.
+
+
+Insert, Update & Delete
+=======================
+
+/--php
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978)
+$database->query('INSERT INTO users', [ // tady můžeme vynechat otazník
+	'name' => $name,
+	'year' => $year,
+]);
+
+$id = $database->getInsertId(); // vrátí auto-increment vloženého záznamu
+
+$id = $database->getInsertId($sequence); // nebo hodnotu sekvence
+\--
+
+Vícenásobný INSERT:
+
+/--php
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978), ('Jack', 1987)
+$database->query('INSERT INTO users', [
+	'name' => 'Jim',
+	'year' => 1978,
+], [
+	'name' => 'Jack',
+	'year' => 1987,
+]);
+\--
+
+Vložení, nebo úprava záznamu, pokud již existuje:
+
+/--php
+// INSERT INTO users (`id`, `name`, `year`) VALUES (123, 'Jim', 1978)
+//   ON DUPLICATE KEY UPDATE `year` = 1978
+$database->query('INSERT INTO users', [
+	'id' => $id,
+	'name' => $name,
+	'year' => $year,
+], 'ON DUPLICATE KEY UPDATE', [
+	'year' => $year,
+]);
+\--
+
+Úprava záznamů:
+
+/--php
+// UPDATE users SET `name` = 'Jim', `year` = 1978 WHERE id = 123
+$result = $database->query('UPDATE users SET', [
+	'name' => $name,
+	'year' => $year,
+], 'WHERE id = ?', $id);
+
+echo $result->getRowCount(); // vrací počet ovlivněných řádků
+\--
+
+Mazání:
+
+/--php
+$result = $database->query('DELETE FROM users WHERE id = ?', $id);
+echo $result->getRowCount(); // vrací počet ovlivněných řádků
+\--
+
+V případě selhání `query()` vyhodí buď `Nette\Database\DriverException` nebo některého z potomků:
+
+- [ConstraintViolationException |api:Nette\Database\ConstraintViolationException] - porušení nějakého omezení pro tabulku
+- [ForeignKeyConstraintViolationException |api:Nette\Database\ForeignKeyConstraintViolationException] - neplatný cizí klíč
+- [NotNullConstraintViolationException |api:Nette\Database\NotNullConstraintViolationException] - porušení podmínky NOT NULL
+- [UniqueConstraintViolationException |api:Nette\Database\UniqueConstraintViolationException] - koliduje unikátní index
+
+
+Pokročilé dotazy
+================
+
+V dotazech můžeme používat výčty a operátory:
+
+/--php
+$result = $database->query('SELECT * FROM users WHERE ?', [
+	'name' => $names, // ['Jim', 'Jack'],
+	'year >' => $year, // všimněte si operátoru >
+	'role NOT IN' => ['admin', 'owner'],
+]);
+// SELECT * FROM users WHERE
+//    `name` IN ('Jim', 'Jack')
+//    AND `year` > 1978
+//    AND `role` NOT IN ('admin', 'owner')
+\--
+
+Podmínky se standardně spojují operátorem `AND`, což můžeme změnit pomocí `?or`:
+
+/--php
+$result = $database->query('SELECT * FROM users WHERE ?or', [
+	'name' => $name,
+	'year >' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' OR `year` > 1978
+\--
+
+Pro složitější kombinace využijeme tzv. SQL literály:
+
+/--php
+$result = $database->query('SELECT * FROM users WHERE ?', [
+	'name' => $name,
+	$database::literal('year > ? AND year < ?', $min, $max),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (year > 1978 AND year < 2017)
+\--
+
+Nebo:
+
+/--php
+$result = $database->query('SELECT * FROM users WHERE ?', [
+	'name' => $name,
+	$database::literal('?or', [
+		'active' => TRUE,
+		'role' => $role,
+	]),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (`active` = 1 OR `role` = 'admin')
+\--
+
+A to není vše, můžeme používat i soubory nebo objekty DateTime:
+
+/--php
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'created' => new DateTime, // nebo $database::literal('NOW()')
+	'avatar' => fopen('image.gif', 'r'), // vloží soubor
+]);
+\--
+
+Pro UPDATE můžeme využít operátorů `+=` a `-=`:
+
+/--php
+$database->query('UPDATE users SET', [
+	'age+=' => 1, // všimněte si +=
+	'name' => $database::literal('UPPER(name)'),
+], 'WHERE id = ?', $id);
+// UPDATE users SET `age` = `age` + 1 , `name` = UPPER(name) WHERE id = 123
+\--
+
+Parametry můžeme použít i pro řazení:
+
+/--php
+$result = $database->query('SELECT * FROM users ORDER BY', [
+	'name' => TRUE, // vzestupně
+	'year' => FALSE, // sestupně
+]);
+// SELECT * FROM users ORDER BY `name`, `year` DESC
+\--
+
+Výběr z tabulky nebo sloupce, jehož název je v proměnné (pozor, nedovolte uživateli manipulovat s obsahem proměnné):
+
+/--php
+$table = 'users';
+$column = 'name';
+$result = $database->query('SELECT * FROM ?name WHERE ?name = ?', $table, $column, $value);
+// SELECT * FROM `users` WHERE `name` = 'Jim'
 \--
 
 
-.[note]
-Nad třídou `ResultSet` je možné iterovat pouze jednou, pokud potřebujeme iterovat vícekrát, je nutno tento objekt převést na pole metodou `fetchAll()`
+Transakce
+=========
+
+Pro práci s transakcemi slouží trojice metod:
+
+/--php
+$database->beginTransaction(); // zahájení transakce
+
+$database->commit(); // potvrzení
+
+$database->rollback(); // vrácení zpět
+\--
 
 
 Pokročilé nastavení spojení
 ===========================
 
+V konfiguračním souboru lze definovat tyto další nastavení:
 
-Volitelný čtvrtý parametr konstruktoru [Connection |api:Nette\Database\Connection] umožňuje přidat dodatečné parametry. Tyto volby jsou předány jak konstruktoru PDO, tak vnitřnímu ovladači, mohou tedy obsahovat konfiguraci pro instanci PDO i pro instanci ovladače.
-
-Připojení může být vytvořeno "líně". To znamená, že připojení k databázi je navázáno až ve chvíli, kdy je poprvé potřeba, ne když je vytvořena instance `Connection`. Toto chování můžeme zapnout přidáním konfigurace `'lazy' => TRUE`.
-
-Ovladač databáze je zvolen podle použitého DSN jména. Můžeme ale poskytnout vlastní implementaci ovladače. To uděláme předáním jména ovladače jako hodnoty parametru `driverClass`.
-
-/--code php
-$database = new Connection($dsn, $user, $password, [
-	'lazy' => FALSE,
-	'driverClass' => 'App\JmenoVasiVlastniImplementaceOvladace'
-]);
-\--
-
-V běžné Nette aplikaci, kde používáme celé Nette a nikoliv jen samostatnou databázovou vrstvu, vytváříme vždy spojení pomocí [aplikační konfigurace |configuring]. Ta je velmi intuitivní a umožní nám také snadno používat vrstvu [Database Explorer]:
-
-/--code neon
+/--neon
 	database:
-		default:
-			dsn:          "mysql:host=127.0.0.1;dbname=test"
-			user:         "root"
-			password:     "password"
-			options:
-				PDO::MYSQL_ATTR_COMPRESS: true
-				lazy: true
-			debugger:     true        # panel v debugger baru
-			explain:      true        # explain dotazů v debugger bar
-			conventions:  discovered  # nebo static nebo vaší jméno třídy, výchozí je discovered
-			autowired: true # defaultní u prvního spojení
-		anotherConnection:
-			dsn: ...
-			autowired: false #defaultní u druhého a dalšího spojení
+		dsn: 'mysql:host=127.0.0.1;dbname=test'
+		user: root
+		password: password
+		options:
+			PDO::MYSQL_ATTR_COMPRESS: true
+			lazy: true  # navázání připojení až když je poprvé potřeba
+			driverClass: .... # třída ovladače databáze
+		debugger: true        # zobrazí panel v Tracy baru
+		explain:  true        # explain dotazů v Tracy bar
+		autowired: true       # povoleno u prvního spojení
+		conventions:  discovered # nebo 'static' nebo jméno třídy, výchozí je 'discovered'
 \--
 
-Práce se databázovými službami
-==============================
+V položce `options` (představuje čtvrtý parametr konstruktoru [Connection |api:Nette\Database\Connection]) můžete uvádět další hodnoty, které najdete v dokumentaci ovladačů PDO.
 
-Každé takto definované spojení vytvoří dvě služby - `Nette\Database\Connection` pod názvem `database.[NAME].connection` (tedy např. `database.default.connection`) a `Nette\Database\Context` pod názvem `database.[NAME].context` (např. `database.default.context`).
+V konfiguračním souboru můžeme definovat i více než jedno databázové spojení:
 
-Pokud si při práci s databází vystačíme s psaním SQL dotazů, jako jsme viděli v této kapitole, bude nám stačit první jmenovaná služba. Pokud však chceme využívat všechny možnosti vrstvy Database Explorer, musíme pracovat se službou `Context`.
+/--neon
+	database:
+		main:
+			dsn: 'mysql:host=127.0.0.1;dbname=test'
+			user: root
+			password: password
 
-V případě, že používáme pouze jedno databázové spojení, nemusíme se o nic starat a vyžádáme si jej [pomocí DI |di-usage].
-
-/--code php
-class UserManager
-{
-
-	private $database;
-
-	public function __construct(Nette\Database\Connection $database)
-	{
-		$this->database = $database;
-		//nebo si vyzadame Nette\Database\Context, pokud chceme pracovat s Database Explorer
-	}
-}
+		anotherDb:
+			dsn: 'sqlite::memory:'
 \--
 
-Jestliže však máme definováno více spojení, je nutné ta spojení, která nejsou autowirovaná (obvykle druhé a následující) předat ručně v konfiguraci:
+Každé takto definované spojení vytvoří dvě služby - objekt `Nette\Database\Connection` pod názvem `database.[NAME].connection` (tedy v našem případě `database.main.connection` a `database.anotherDb.connection`) a objekt `Nette\Database\Context` pod názvem `database.[NAME].context`,
+který se používá při práci s vrstvou [Database Explorer].
 
-/--code neon
+Služby prvního spojení se předávají přes autowiring, nicméně můžeme to vypnout skrze `autowired: no` a naopak u jiného spojení zapnout přes `autowired: yes`.
+
+Služby ostatních spojení, která nejsou autowirovaná, lze předat explicitně v konfiguraci:
+
+/--neon
 services:
-	- UserManager(@database.anotherConnection.connection) #nebo @database.anotherConnection.context
+	- UserManager(@database.anotherDb.connection) # nebo @database.anotherDb.context
 \--
-
 
 
 {{toc: title}}

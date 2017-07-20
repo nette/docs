@@ -101,6 +101,8 @@ if (PHP_SAPI === 'cli') {
 }
 \--
 
+If items with the same keys appear in configuration files, they will be overwritten or merged in the case of arrays. The later file has higher priority.
+
 
 Parameters
 ----------
@@ -171,7 +173,7 @@ Many features of Nette Framework can be set up in configuration file
 - [#Application]
 - [#HTTP headers]
 - [#HTTP proxies]
-- [#Users]
+- [#Access Control]
 - [#Mailing]
 - [#Database]
 - [#Forms]
@@ -245,8 +247,8 @@ You can define your HTTP proxy, so that HTTP request's remote address and remote
 \--
 
 
-Users
------
+Access Control
+--------------
 
 By filling in `users` option you create `SimpleAuthenticator`, by defining `roles` or `resources` you create `Nette\Security\Permission` authorizator. More in [User Authorization and Privileges |access-control].
 
@@ -369,194 +371,293 @@ Tracy debugger
 \--
 
 
+Low-level modifications
+-----------------------
+
+All these settings affect the contents of the DI container and the system services it creates. All these services can still be changed to a low-level. For instance, we can change class of service `application.application`, which is by default `Nette\Application\Application`:
+
+/--neon
+services:
+	application.application:
+		factory: MyApplication
+		alteration: yes
+\--
+
+The `alteration 'flag is informative and says we only modify an existing service.
+
+We can also add setup:
+
+/--neon
+services:
+	application.application:
+		factory: MyApplication
+		alteration: yes
+		setup:
+			- $onStartup = [@resource::init]
+\--
+
+
 
 Custom services
 ===============
 
+The configuration file is place where we add definitions of our own services in section `services`. For example, this is definition of service named `database` which is `PDO` instance:
+
 /--code neon
 services:
-	database: Nette\Database\Connection(%dsn%, %user%, %password%)
+	# in single line
+	database: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
 
 	# or multi-lines
 	database:
-		factory: Nette\Database\Connection(%dsn%, %user%, %password%)
+		factory: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
 
 	# or more multi-lines :-)
 	database:
-		class: Nette\Database\Connection
-		arguments: [%dsn%, %user%, %password%]
+		class: PDO
+		arguments: ['mysql:host=127.0.0.1;dbname=test', root, password]
 \--
 
-Generates:
+It generates factory method in DI container:
 
 /--php
 function createServiceDatabase()
 {
-	return new Nette\Database\Connection(
-		$this->parameters['dsn'],
-		$this->parameters['user'],
-		$this->parameters['password']
-	);
+	$service = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', 'password');
+	return $service;
 }
+\--
+
+In addition to creating a class instance, you can also call the method:
+
+/--neon
+services:
+	database: Database::create(root, password)
+\--
+
+Result:
+
+/--php
+function createServiceDatabase()
+{
+	$service = Database::create('root', 'password');
+	return $service;
+}
+\--
+
+In this case, the `Database::create()` method must have a defined return type either by using an annotation `@return` or a PHP 7 type hint.
+
+We obtain the service from the DI container using the `getService()`:
+
+/--php
+$database = $container->getService('database');
 \--
 
 
 Setup
 -----
 
-/--code neon
+We can call service methods or set properties:
+
+/--neon
 services:
 	database:
-		factory: Nette\Database\Connection(%dsn%, %user%, %password%)
+		factory: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
 		setup:
-			- setCacheStorage(@cacheStorage)
-
+			- setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION)
+			- $mode = 123
 \--
 
-Generates:
+Result:
 
 /--php
-function createServiceDatabase()
+public function createServiceDatabase()
 {
-	$service = new Nette\Database\Connection(...);
-	$service->setCacheStorage($this->cacheStorage);
+	$service = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', 'password');
+	$service->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+	$service->mode = 123;
 	return $service;
 }
 \--
 
-Autowiring feature adds dependencies automatically, so they don't even have to be mentioned:
+In addition to strings and numbers, the method parameters can also be arrays, created objects or method calls:
 
-/--code neon
-setup:
-	- setCacheStorage
-\--
-
-In case the `cacheStorage` service does not exist, it is possible to use a result of a call as a parameter:
-
-/--code neon
-setup:
-	- setCacheStorage( Factory::createStorage() )
-
-	# or a method of other service:
-	- setCacheStorage( @factory::createStorage() )
-\--
-
-Alternatively a newly created class instance:
-
-/--code neon
-setup:
-	- setCacheStorage( Nette\Caching\Storages\FileStorage(%tempDir%) )
-\--
-
-Generates:
-
-/--php
-$service->setCacheStorage(new Nette\Caching\Storages\FileStorage(...));
-\--
-
-You can also set a value of a property:
-
-substitutions
-/--code neon
-setup:
-	- $substitutions( [db: test] )
-\--
-
-Generates:
-
-/--php
-$service->substitutions = ['db' => 'test'];
-\--
-
-Full example:
-
-/--code neon
-parameters:
-	database:
-		driver: mysql
-		host: localhost
-		dbname: test
-		user: jim
-		password: beam
-		substitutions:
-			db: test
-
+/--neon
 services:
-	database:
-		factory: Nette\Database\Connection(
-			'%database.driver%:host=%database.host%;dbname=%database.dbname%',
-			%database.user%, %database.password%, null,
-			Nette\Database\Reflection\DiscoveredReflection()
-		)
+	analyser: My\Analyser(
+		FilesystemIterator(%appDir%)
+		[dryrun: yes, verbose: no]
+		DateTime::createFromFormat('Y-m-d')
+	)
+\--
+
+Result:
+
+/--php
+public function createServiceAnalyser()
+{
+	return new My\Analyser(
+		new FilesystemIterator('...'),
+		['dryrun' => true, 'verbose' => false],
+		DateTime::createFromFormat('Y-m-d')
+	);
+}
+\--
+
+
+Service referencing
+-------------------
+
+We refer to the service using at-sign and the name of the service, ie. `@database`:
+
+/--neon
+services:
+	database: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
+	articles:
+	    factory: Model\ArticleRepository(@database)
+		setup:
+			- setCacheStorage(@cache.storage)   # cache.storage is a system service
+\--
+
+Result:
+
+/--php
+public function createServiceArticles()
+{
+	$service = new Model\ArticleRepository($this->getService('database'));
+	$service->setCacheStorage($this->getService('cache.storage'));
+	return $service;
+}
+\--
+
+We can call referenced service's methods, but for simplicity we write `::` instead of `::`:
+
+/--neon
+services:
+	routerFactory: App\Router\Factory( @http.request::getMethod() )  # http.request je systémová služba
+	router: @routerFactory::create()
+\--
+
+Result:
+
+/--php
+public function createServiceRouterFactory()
+{
+	return new App\Router\Factory($this->getService('http.request')->getMethod());
+}
+
+public function createServiceRouter()
+{
+	return $this->getService('routerFactory')->create();
+}
+\--
+
+
+Autowiring
+----------
+
+Auto-wiring is a great feature that can automatically pass services to the constructor and other methods, so we do not need to write them at all. It saves you a lot of time.
+
+The example of `articles` can be simplified as follows:
+
+/--neon
+services:
+	articles:
+	    factory: Model\ArticleRepository
 		setup:
 			- setCacheStorage
-			- $substitutions( %database.substitutions% )
+\--
 
+Autowiring is driven by typehints, so `ArticleRepository` class must be defined as follows:
+
+/--php
+namespace Model;
+
+class ArticleRepository
+{
+	public function __construct(\PDO $db)
+	{}
+
+	public function setCacheStorage(\Nette\Caching\IStorage $storage)
+	{}
+}
+\--
+
+A service of the type such as `PDO` or `Nette\Caching\IStorage` must be exacly one in the container. If there were more, autowiring would not know which one to pass and throws an exception.
+
+It is possible to place two services of the same type in the container and exclude one of them from the autowire. Autowiring will then work and will automatically pass the second service:
+
+/--neon
+services:
+	mainDatabase: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
+
+	tempDatabase:
+		factory: PDO('sqlite::memory:)
+		autowired: no
+
+	articles: Model\ArticleRepository    # passes @mainDatabase to constructor
+\--
+
+Autowiring can also be restricted to specific classes or interfaces:
+
+/--php
+class Parent
+{}
+
+class Child extends Parent implements Int
+{}
+
+class ParentDependent
+{
+	function __construct(Parent $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(Child $obj)
+	{}
+}
+\--
+
+/--neon
+services:
+	child:
+		factory: Child
+		autowired: [Parent, Int]
+
+	parentDep: ParentDependent  # autowiring automatically passes the service @child
+
+	childDep: ChildDependent  # throws exception!
 \--
 
 
 Anonymous services
 ------------------
 
-Time after time there are services that are in fact not referenced anywhere else in config files. Naming these services in this case is not necessary. To define an anonymous service, use the following syntax:
-
-/--code neon
-services:
-	- Simple\Service
-
-	-
-		factory: Complex\Service
-		setup:
-			- setLang(%lang%)
-\--
-
-To refer to such anonymous service you will need to use the fully qualified class name instead.
-
-/--code neon
-services:
-	router: @App\RouterFactory::createRouter
-\--
-
-Keep in mind that from a nature of anonymous services, it is not possible to register more than one of the same type, because it would lead to an ambiguity.
-
-
-
-Auto-wiring
------------
-
-Auto-wiring feature can automatically pass dependencies into constructor and methods of the service. It uses typehinting and `@return` annotations. There can be only one service matching the type in the container, otherwise an exception is thrown.
-
-To define more than one service of the same type we need to exclude them from auto-wiring:
-
-/--code neon
-services:
-	cacheStorage:
-		factory: Nette\Caching\Storages\FileStorage(%tempDir%)
-
-	tempCacheStorage:
-		factory: Nette\Caching\Storages\DevNullStorage
-		autowired: no
-
-\--
-
-
-When modifying the Nette Framework's core services we need to make sure the container is aware of the classes we want to use. That means using fully qualified class names in `@return` annotations or set the FQ class name with `class` entry.
-
-
-Low-level modifications
------------------------
-
-All these settings affect final DI container. The `alteration` flag is informative and says that we only alter an existing service. If you need to tune these services by yourself, you can redefine them:
+Named services are particularly useful when we want to refer to them from other parts of the configuration file. If the service is no longer referenced by name, it does not need to be named. For anonymous services, use the following syntax:
 
 /--neon
 services:
-	mail.mailer:
-		factory: MySmtpMailer
-		alteration: yes
+	- PDO('sqlite::memory:)
 
-	application.presenterFactory:
-		factory: MyPresenterFactory
-		alteration: yes
+	-
+	    factory: Model\ArticleRepository
+		setup:
+			- setCacheStorage
+\--
+
+However, even anonymous services can be referred to, instead of their name we use their type (class or interface):
+
+/--neon
+services:
+	router: @App\Router\Factory::create
+\--
+
+We get the service from the DI container using the `getByType()`:
+
+/--php
+$database = $container->getByType(PDO::class);
 \--
 
 
@@ -572,7 +673,7 @@ includes:
 	- presenters.neon
 \--
 
-Configuration merging process assigns the highest priority to the file containing `includes` section and the lowest priority to the first included file.
+If items with the same keys appear in configuration files, they will be overwritten or merged in the case of arrays. The later included file has higher priority, the file with the `include` section has the highest priority.
 
 <table class=table>
 <tr>

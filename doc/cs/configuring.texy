@@ -101,6 +101,8 @@ if (PHP_SAPI === 'cli') {
 }
 \--
 
+Pokud se v konfiguračních souborech objeví prvky se stejnými klíči, budou přepsány, nebo v případě polí sloučeny. Později přidaný soubor má vyšší prioritu než předchozí.
+
 
 Parametry
 ---------
@@ -373,120 +375,262 @@ Lze konfigurovat některé parametry Tracy a nastavovat panely do Debugger baru.
 \--
 
 
+Low-level úpravy
+----------------
+
+Všechny uvedené nastavení ovlivňují podobu DI kontejneru a systémových služeb, které vytváří. Všechny tyto služby lze ještě pozměnit na nižší úrovni. Třeba u služby `application.application`, což je standardně objekt `Nette\Application\Application`, můžeme změnit třídu:
+
+/--neon
+services:
+	application.application:
+		factory: MyApplication
+		alteration: yes
+\--
+
+Příznak `alteration` je informativní a říká, že jen modifikujeme existující službu.
+
+Můžeme také doplnit setup:
+
+/--neon
+services:
+	application.application:
+		factory: MyApplication
+		alteration: yes
+		setup:
+			- $onStartup = [@resource::init]
+\--
+
+
+
 Vlastní služby
 ==============
 
-Konfigurační soubor je místem, kam umísťujeme definice vlastních služeb. Slouží k tomu sekce `services`. Například tato definice služby:
+Konfigurační soubor je místem, kam umísťujeme definice vlastních služeb. Slouží k tomu sekce `services`. Například takto může vypadat definice služby pojmenované `database`, což bude instance `PDO`:
 
-/--code neon
+/--neon
+# v jednom řádku
 services:
-	database: Nette\Database\Connection(%dsn%, %user%, %password%)
+	database: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
 
 # nebo ve dvou řádcích:
 	database:
-		factory: Nette\Database\Connection(%dsn%, %user%, %password%)
+		factory: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
 
 # nebo ve třech řádcích :-)
 	database:
-		class: Nette\Database\Connection
-		arguments: [%dsn%, %user%, %password%]
+		class: PDO
+		arguments: ['mysql:host=127.0.0.1;dbname=test', root, password]
 \--
 
+Což vygeneruje tovární metodu v DI kontejneru:
+
+/--php
+function createServiceDatabase()
+{
+	return new PDO('mysql:host=127.0.0.1;dbname=test', 'root', 'password');
+}
+\--
+
+Kromě vytvoření instance třídy lze volat i metodu:
+
+/--neon
+services:
+	database: Database::create(root, password)
+\--
+
+Vygenerovaný kód:
+
+/--php
+function createServiceDatabase()
+{
+	return Database::create('root', 'password');
+}
+\--
+
+V tomto případě je nutné, aby metoda `Database::create()` měla definovaný návratový typ buď pomocí anotace `@return` nebo type hintů v PHP 7.
+
+Službu získáme z DI kontejneru metodou `getService()`:
+
+/--php
+$database = $container->getService('database');
+\--
 
 
 Setup
 -----
 
-/--code neon
+Nad vytvořenou službou můžeme volat metody nebo nastavovat hodnoty proměnným:
+
+/--neon
 services:
 	database:
-		factory: Nette\Database\Connection(%dsn%, %user%, %password%)
+		factory: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
 		setup:
-			- setCacheStorage(@cacheStorage)
-
+			- setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION)
+			- $mode = 123
 \--
 
 Vygeneruje:
 
 /--php
-function createServiceDatabase()
+public function createServiceDatabase()
 {
-	return new Nette\Database\Connection(
-		$this->parameters['dsn'],
-		$this->parameters['user'],
-		$this->parameters['password']
+	$service = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', 'password');
+	$service->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+	$service->mode = 123;
+	return $service;
+}
+\--
+
+Parametry metod mohou být kromě řetězců a čísel i pole, lze vytvářet i nové objekty nebo volat metody:
+
+/--neon
+services:
+	analyser: My\Analyser(
+		FilesystemIterator(%appDir%)
+		[dryrun: yes, verbose: no]
+		DateTime::createFromFormat('Y-m-d')
+	)
+\--
+
+Vygeneruje:
+
+/--php
+public function createServiceAnalyser()
+{
+	return new My\Analyser(
+		new FilesystemIterator('...'),
+		['dryrun' => true, 'verbose' => false],
+		DateTime::createFromFormat('Y-m-d')
 	);
 }
 \--
 
-Autowiring umí odkazy na jiné služby doplnit automaticky, takže lze parametry úplně vynechat:
 
-/--code neon
-setup:
-	- setCacheStorage
-\--
+Propojení služeb
+----------------
 
-Pokud služba `cacheStorage` neexistuje, můžeme jako parametr uvést výsledek volání funkce:
+Na jednotlivé služby se odkazujeme pomocí zavináče a názvu služby, takže například `@database`:
 
-/--code neon
-setup:
-	- setCacheStorage( Factory::createStorage() )
-
-	# nebo metody jiné služby:
-	- setCacheStorage( @factory::createStorage() )
-\--
-
-Případně nově vytvořenou třídu:
-
-/--code neon
-setup:
-	- setCacheStorage( Nette\Caching\Storages\FileStorage(%tempDir%) )
-\--
-
-Vygeneruje:
-
-/--php
-$service->setCacheStorage(new Nette\Caching\Storages\FileStorage(...));
-\--
-
-Lze nastavovat i hodnoty proměnných:
-
-substitutions
-/--code neon
-setup:
-	- $substitutions( [db: test] )
-\--
-
-Vygeneruje:
-
-/--php
-$service->substitutions = ['db' => 'test'];
-\--
-
-Kompletní příklad:
-
-/--code neon
-parameters:
-	database:
-		driver: mysql
-		host: localhost
-		dbname: test
-		user: jim
-		password: beam
-		substitutions:
-			db: test
-
+/--neon
 services:
-	database:
-		factory: Nette\Database\Connection(
-			'%database.driver%:host=%database.host%;dbname=%database.dbname%',
-			%database.user%, %database.password%, null,
-			Nette\Database\Reflection\DiscoveredReflection()
-		)
+	database: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
+	articles:
+	    factory: Model\ArticleRepository(@database)
+		setup:
+			- setCacheStorage(@cache.storage)   # cache.storage je systémová služba
+\--
+
+Vygeneruje:
+
+/--php
+public function createServiceArticles()
+{
+	$service = new Model\ArticleRepository($this->getService('database'));
+	$service->setCacheStorage($this->getService('cache.storage'));
+	return $service;
+}
+\--
+
+Nad odkazovanou službou lze volat metody, nicméně pro jednoduchost místo `->` používáme `::`.
+
+/--neon
+services:
+	routerFactory: App\Router\Factory(@http.request::getMethod())  # http.request je systémová služba
+	router: @routerFactory::create()
+\--
+
+Vygeneruje:
+
+/--php
+public function createServiceRouterFactory()
+{
+	return new App\Router\Factory($this->getService('http.request')->getMethod());
+}
+
+public function createServiceRouter()
+{
+	return $this->getService('routerFactory')->create();
+}
+\--
+
+
+Autowiring
+----------
+
+Autowiring je skvělá vlastnost, která umí automaticky předávat do konstruktoru a dalších metod požadované služby, takže je nemusíme vůbec psát. Ušetří vám spoustu času.
+
+Výše uvedený příklad služby `articles` tak můžeme takto zjednodušit:
+
+/--neon
+services:
+	articles:
+	    factory: Model\ArticleRepository
 		setup:
 			- setCacheStorage
-			- $substitutions( %database.substitutions% )
+\--
 
+Autowiring se řídí podle typehintů, takže aby fungoval, musí být třída `ArticleRepository` definována asi takto:
+
+/--php
+namespace Model;
+
+class ArticleRepository
+{
+	public function __construct(\PDO $db)
+	{}
+
+	public function setCacheStorage(\Nette\Caching\IStorage $storage)
+	{}
+}
+\--
+
+Služba uvedeného typu, jako je `PDO` nebo `Nette\Caching\IStorage`, musí být v kontejneru právě jedna. Pokud by jich bylo víc, autowiring by nevěděl, kterou z nich předat a vyhodil by výjimku.
+
+Je možné v kontejneru umístit dvě služby stejného typu a jednu z nich z autowiringu vyřadit. Autowiring pak bude fungovat a automaticky bude předávat službu druhou:
+
+/--neon
+services:
+	mainDatabase: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
+
+	tempDatabase:
+		factory: PDO('sqlite::memory:)
+		autowired: no
+
+	articles: Model\ArticleRepository    # předá do kontruktoru @mainDatabase
+\--
+
+Lze také autowiring omezit jen pro určité třídy nebo rozhraní:
+
+/--php
+class Parent
+{}
+
+class Child extends Parent implements Int
+{}
+
+class ParentDependent
+{
+	function __construct(Parent $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(Child $obj)
+	{}
+}
+\--
+
+/--neon
+services:
+	child:
+		factory: Child
+		autowired: [Parent, Int]
+
+	parentDep: ParentDependent  # autowiring automaticky předá službu @child
+
+	childDep: ChildDependent  # vyhodí výjimku!
 \--
 
 
@@ -494,64 +638,29 @@ services:
 Anonymní služby
 ---------------
 
-Pojmenování služeb je vhodné hlavně ve chvíli, kdy na ně chceme odkazovat z jiných částí konfiguračního souboru. Pokud na službu již není odkazováno, není ji potřeba pojmenovávat. Pro anonymní služby použijte následující syntax:
-
-/--code neon
-services:
-	- Simple\Service
-
-	-
-		factory: Complex\Service
-		setup:
-			- setLang(%lang%)
-\--
-
-Pokud však budete chtít později odkázat na anonymní službu, budete muset uvést úplný název třídy (rozhraní).
-
-/--code neon
-services:
-	router: @App\RouterFactory::createRouter
-\--
-
-Také je potřeba mít na paměti, že z povahy anonymních služeb nelze mít registrovaných více instancí stejného typu, protože by nebylo možné je rozlišit.
-
-
-Auto-wiring
------------
-
-Auto-wiring umí automaticky předávat do konstruktoru a dalších metod požadované služby. Řídí se podle type hintů a anotací `@return`. Služba odpovídající hledané třídě musí být v kontejneru právě jedna, jinak se vyhodí výjimka.
-
-Pokud potřebujeme definovat více služeb stejného typu, můžeme je z auto-wiringu vyřadit:
-
-/--code neon
-services:
-	cacheStorage:
-		factory: Nette\Caching\Storages\FileStorage(%tempDir%)
-
-	tempCacheStorage:
-		factory: Nette\Caching\Storages\DevNullStorage
-		autowired: no
-
-\--
-
-
-Pokud upravujeme základní služby Nette Frameworku, nesmíme se zapomenout ujistit, že kontejner zná třídy naší implementace. Pokud tedy nastavujeme vlastní `factory` pro službu, tak to znamená mít správně absolutní název třídy v annotaci `@return`, nebo nastavovat vždy i třídu do `class`.
-
-
-Low-level úpravy
-----------------
-
-Máte možnost si jednotlivé služby ještě "doladit" na nižší úrovni. Příznak `alteration` je informativní a říká, že jen modifikujeme existující službu. Takto například nahradíme standardní třídy za své:
+Pojmenování služeb je vhodné hlavně ve chvíli, kdy na ně chceme odkazovat z jiných částí konfiguračního souboru. Pokud na službu není odkazováno názvem, není ji potřeba pojmenovávat. Pro anonymní služby použijte následující syntax:
 
 /--neon
 services:
-	mail.mailer:
-		factory: MySmtpMailer
-		alteration: yes
+	- PDO('sqlite::memory:)
 
-	application.presenterFactory:
-		factory: MyPresenterFactory
-		alteration: yes
+	-
+	    factory: Model\ArticleRepository
+		setup:
+			- setCacheStorage
+\--
+
+Nicméně i na anonymní služby lze odkazovat, jen místo názvu uvedeme jejich typ (třídu nebo rozhraní):
+
+/--neon
+services:
+	router: @App\Router\Factory::create
+\--
+
+Službu získáme z DI kontejneru metodou `getByType()`:
+
+/--php
+$database = $container->getByType(PDO::class);
 \--
 
 
@@ -568,7 +677,7 @@ includes:
 	- presenters.neon
 \--
 
-Pokud se v konfiguračních souborech objeví prvky se stejnými klíči, budou přepsány, nebo v případě polí sloučeny. Při přepisování má nejvyšší prioritu soubor obsahující sekci `includes` a nejnižší první vkládaný soubor.
+Pokud se v konfiguračních souborech objeví prvky se stejnými klíči, budou přepsány, nebo v případě polí sloučeny. Později vkládaný soubor má vyšší prioritu než předchozí, soubor se sekcí `include` má nejvyšší prioritu.
 
 <table class=table>
 <tr>

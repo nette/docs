@@ -1,0 +1,353 @@
+DI: Services Configuration
+**************************
+
+/--div .[perex]
+Dependency Injection (DI) container is easily configured using NEON files. We'll talk about:
+
+- how to add and setup services
+- how to use parameters
+- how to include multiple configuration files
+\--
+
+Configuration is usually written in NEON format. Have fun trying out the syntax at https://ne-on.org.
+
+Services
+========
+
+The configuration file is place where we add definitions of our own services in section `services`. For example, this is definition of service named `database` which is `PDO` instance:
+
+/--neon
+services:
+	# in single line
+	database: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
+
+	# or multi-lines
+	database:
+		factory: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
+
+	# or more multi-lines :-)
+	database:
+		class: PDO
+		arguments: ['mysql:host=127.0.0.1;dbname=test', root, password]
+\--
+
+It generates factory method in DI container:
+
+/--php
+function createServiceDatabase()
+{
+	$service = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', 'password');
+	return $service;
+}
+\--
+
+In addition to creating a class instance, you can also call the method:
+
+/--neon
+services:
+	database: Database::create(root, password)
+\--
+
+Result:
+
+/--php
+function createServiceDatabase()
+{
+	$service = Database::create('root', 'password');
+	return $service;
+}
+\--
+
+In this case, the `Database::create()` method must have a defined return type either by using an annotation `@return` or a PHP 7 type hint.
+
+We obtain the service from the DI container using the `getService()`:
+
+/--php
+$database = $container->getService('database');
+\--
+
+
+Setup
+-----
+
+We can call service methods or set properties:
+
+/--neon
+services:
+	database:
+		factory: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
+		setup:
+			- setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION)
+			- $mode = 123
+\--
+
+Result:
+
+/--php
+public function createServiceDatabase()
+{
+	$service = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', 'password');
+	$service->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+	$service->mode = 123;
+	return $service;
+}
+\--
+
+In addition to strings and numbers, the method parameters can also be arrays, created objects or method calls:
+
+/--neon
+services:
+	analyser: My\Analyser(
+		FilesystemIterator(%appDir%)
+		[dryrun: yes, verbose: no]
+		DateTime::createFromFormat('Y-m-d')
+	)
+\--
+
+Result:
+
+/--php
+public function createServiceAnalyser()
+{
+	return new My\Analyser(
+		new FilesystemIterator('...'),
+		['dryrun' => true, 'verbose' => false],
+		DateTime::createFromFormat('Y-m-d')
+	);
+}
+\--
+
+
+Service referencing
+-------------------
+
+We refer to the service using at-sign and the name of the service, ie. `@database`:
+
+/--neon
+services:
+	database: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
+	articles:
+	    factory: Model\ArticleRepository(@database)
+		setup:
+			- setCacheStorage(@cache.storage)   # cache.storage is a system service
+\--
+
+Result:
+
+/--php
+public function createServiceArticles()
+{
+	$service = new Model\ArticleRepository($this->getService('database'));
+	$service->setCacheStorage($this->getService('cache.storage'));
+	return $service;
+}
+\--
+
+We can call referenced service's methods, but for simplicity we write `::` instead of `::`:
+
+/--neon
+services:
+	routerFactory: App\Router\Factory( @http.request::getMethod() )  # http.request je systémová služba
+	router: @routerFactory::create()
+\--
+
+Result:
+
+/--php
+public function createServiceRouterFactory()
+{
+	return new App\Router\Factory($this->getService('http.request')->getMethod());
+}
+
+public function createServiceRouter()
+{
+	return $this->getService('routerFactory')->create();
+}
+\--
+
+
+Autowiring
+----------
+
+Autowiring is a great feature that can automatically pass services to the constructor and other methods, so we do not need to write them at all. It saves you a lot of time.
+
+The example of `articles` can be simplified as follows:
+
+/--neon
+services:
+	articles:
+	    factory: Model\ArticleRepository
+		setup:
+			- setCacheStorage
+\--
+
+Autowiring is driven by typehints, so `ArticleRepository` class must be defined as follows:
+
+/--php
+namespace Model;
+
+class ArticleRepository
+{
+	public function __construct(\PDO $db)
+	{}
+
+	public function setCacheStorage(\Nette\Caching\IStorage $storage)
+	{}
+}
+\--
+
+A service of the type such as `PDO` or `Nette\Caching\IStorage` must be exacly one in the container. If there were more, autowiring would not know which one to pass and throws an exception.
+
+It is possible to place two services of the same type in the container and exclude one of them from the autowire. Autowiring will then work and will automatically pass the second service:
+
+/--neon
+services:
+	mainDatabase: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
+
+	tempDatabase:
+		factory: PDO('sqlite::memory:)
+		autowired: no
+
+	articles: Model\ArticleRepository    # passes @mainDatabase to constructor
+\--
+
+Autowiring can also be restricted to specific classes or interfaces:
+
+/--php
+class Parent
+{}
+
+class Child extends Parent implements Int
+{}
+
+class ParentDependent
+{
+	function __construct(Parent $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(Child $obj)
+	{}
+}
+\--
+
+/--neon
+services:
+	child:
+		factory: Child
+		autowired: [Parent, Int]
+
+	parentDep: ParentDependent  # autowiring automatically passes the service @child
+
+	childDep: ChildDependent  # throws exception!
+\--
+
+
+Anonymous services
+------------------
+
+Named services are particularly useful when we want to refer to them from other parts of the configuration file. If the service is no longer referenced by name, it does not need to be named. For anonymous services, use the following syntax:
+
+/--neon
+services:
+	- PDO('sqlite::memory:)
+
+	-
+	    factory: Model\ArticleRepository
+		setup:
+			- setCacheStorage
+\--
+
+However, even anonymous services can be referred to, instead of their name we use their type (class or interface):
+
+/--neon
+services:
+	router: @App\Router\Factory::create
+\--
+
+We get the service from the DI container using the `getByType()`:
+
+/--php
+$database = $container->getByType(PDO::class);
+\--
+
+
+Multiple configuration files
+============================
+
+Use `includes` section to add more configuration files.
+
+/--neon
+includes:
+	- parameters.php
+	- services.neon
+	- presenters.neon
+\--
+
+If items with the same keys appear in configuration files, they will be overwritten or merged in the case of arrays. The later included file has higher priority. The file with the `includes` section has higher priority than included files.
+
+<table class=table>
+<tr>
+	<th width=33%>config1.neon</th>
+	<th width=33%>config2.neon</th>
+	<th>result</th>
+</tr>
+<tr>
+	<td>
+/--neon
+items:
+	- 1
+	- 2
+\--
+	</td>
+	<td>
+/--neon
+items:
+	- 3
+\--
+	</td>
+	<td>
+/--neon
+items:
+	- 1
+	- 2
+	- 3
+\--
+	</td>
+</tr>
+</table>
+
+To prevent merging of a certain array use exclamation mark right after the name of the array:
+
+<table class=table>
+<tr>
+	<th width=33%>config1.neon</th>
+	<th width=33%>config2.neon</th>
+	<th>result</th>
+</tr>
+<tr>
+	<td>
+/--neon
+items:
+	- 1
+	- 2
+\--
+	</td>
+	<td>
+/--neon
+items!:
+	- 3
+\--
+	</td>
+	<td>
+/--neon
+items:
+	- 3
+\--
+	</td>
+</tr>
+</table>
+
+{{composer: nette/di}}

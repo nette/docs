@@ -4,31 +4,306 @@ Stránkování
 .[perex]
 Při tvorbě webových aplikací se velmi často setkáte s požadavkem na omezení počtu vypsaných položek na stránce. Protože stránkovací matematika umí být zrádná, pomůže vám [Nette\Utils\Paginator |api:].
 
+Pamatuj, že Paginator pomůže jen s matematikou; Výběr části dat, jejich zobrazení a zobrazení akcí Paginatoru je na tobě. .[tip]
 
-Vytvoříme si objekt stránkovače, kterému nastavíme počet položek zobrazených na stránce, číslo aktuální stránky a celkový počet položek, je-li znám.
-
-/--php
-$paginator = new Nette\Utils\Paginator;
-$paginator->setItemCount(356); // celkový počet položek (např. článků)
-$paginator->setItemsPerPage(30); // počet položek na stránce
-$paginator->setPage(1); // číslo aktuální stránky, číslováno od 1
-\--
-
-Tento objekt si můžeme vložit třeba do šablony a pak už se jen srozumitelně ptát
+Vyjdeme ze stavu, kdy vypisujeme všechna data bez stránkování. Pro výběr dat z databáze máme třídu ArticleRepository, která kromě konstruktoru obsahuje metodu `findPublishedArticles`, která vrací všechny publikované články seřazené sestupně podle data publikace.
 
 /--php
-if ($paginator->first) ... // jsme na první stránce?
-if ($paginator->last) ... // jsme na poslední stránce?
-echo $paginator->page; // číslo aktuální stránky
+<?php
+
+namespace App\Model;
+
+use Nette;
+
+
+class ArticleRepository
+{
+  use Nette\SmartObject;
+
+  /** @var Nette\Database\Connection */
+  private $database;
+
+
+  public function __construct(Nette\Database\Connection $database)
+  {
+    $this->database = $database;
+  }
+
+
+  public function findPublishedArticles(): \Nette\Database\ResultSet
+  {
+    return $this->database->query(
+      'SELECT * FROM articles
+       WHERE created_at < ?
+       ORDER BY created_at DESC',
+      new \DateTime());
+  }
+}
 \--
 
-Stránkovač využijeme při formulování SQL dotazu. Metody `getLength()` a `getOffset()` vrací hodnoty používané v klauzulích LIMIT a OFFSET.
+V presenteru si pak injectujeme modelovou třídu a v render metodě si vyžádáme publikované články, které předáme do šablony:
 
 /--php
-$result = $database->table('products')
-	->limit($paginator->getLength(), $paginator->getOffset());
+<?php
+
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+  /** @var ArticleRepository @inject */
+  public $articleRepository;
+
+
+  public function renderDefault()
+  {
+    $this->template->articles = $this->articleRepository->findPublishedArticles();
+  }
+}
 \--
 
-Pokud potřebujeme stránkovat v opačném pořadí, tj. stránka č. 1 odpovídá nejvyššímu offsetu, nahradíme metodu `getOffset()` za `getCountdownOffset()`.
+V šabloně se pak postaráme o výpis článků:
+
+/--latte
+{block content}
+<h1>Články</h1>
+
+<div class="articles">
+    {foreach $articles as $article}
+        <h2>{$article->title}</h2>
+        <p>{$article->content}</p>
+    {/foreach}
+</div>
+\--
+
+
+Tímto způsobem umíme vypsat všechny články, což však začne působit problémy v momentě, kdy počet článků vzroste. V tom okamžiku se příjde vhod implementace stránkovacího mechanismu.
+
+Ten zajistí, že se všechny články rozdělí do několika stránek a my zobrazíme jen články jedné aktuální stránky. Celkový počet stránek a rozdělení článků si vypočte Paginator sám podle toho, kolik článků celkem máme a kolik článků na stránku chceme zobrazit.
+
+V prvním kroku si upravíme metodu pro získání článků ve třídě repositáře tak, aby nám uměla vracet jen články pro jednu stránku. Také přidáme metodu pro zjištění celkového počtu článku v databázi, kterou budeme potřebovat pro nastavení Paginatoru:
+
+/--php
+<?php
+
+namespace App\Model;
+
+use Nette;
+
+
+class ArticleRepository
+{
+  use Nette\SmartObject;
+
+  /** @var Nette\Database\Connection */
+  private $database;
+
+
+  public function __construct(Nette\Database\Connection $database)
+  {
+    $this->database = $database;
+  }
+
+
+  public function findPublishedArticles(int $limit, int $offset): \Nette\Database\ResultSet
+  {
+    return $this->database->query(
+      'SELECT * FROM articles
+       WHERE created_at < ?
+       ORDER BY created_at DESC
+       LIMIT ?
+       OFFSET ?',
+      new \DateTime(), $limit, $offset);
+  }
+
+  /**
+   * Vrací celkový počet publikovaných článků
+   */
+  public function getPublishedArticlesCount(): int
+  {
+    return $this->database->fetchField('SELECT COUNT(*) FROM articles WHERE created_at < ?', new \DateTime());
+  }
+}
+\--
+
+Následně se pustíme do úprav presenteru. Do render metody budeme předávat číslo aktuálně zobrazené stránky. Pro případ, kdy nebude toto číslo součástí url, nastavíme defaultní hodnotu první stránky.
+
+Dále také render metodu rozšíříme o získání instance Paginatoru, jeho nastavení a výběru správných článků pro zobrazení v šabloně. HomepagePresenter bude po úpravách vypadat takto:
+
+/--php
+<?php
+
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+  /** @var ArticleRepository @inject */
+  public $articleRepository;
+
+
+  public function renderDefault(int $page = 1)
+  {
+    // Zjistíme si celkový počet publikovaných článků
+    $articlesCount = $this->articleRepository->getPublishedArticlesCount();
+
+    // Vyrobíme si instanci Paginatoru a nastavíme jej
+    $paginator = new Nette\Utils\Paginator;
+    $paginator->setItemCount($articlesCount); // celkový počet článků
+    $paginator->setItemsPerPage(10); // počet položek na stránce
+    $paginator->setPage($page); // číslo aktuální stránky
+
+    // Z databáze si vytáhneme omezenou množinu článků podle výpočtu Paginatoru
+    $articles = $this->articleRepository->findPublishedArticles($paginator->getLength(), $paginator->getOffset());
+
+    // kterou předáme do šablony
+    $this->template->articles = $articles;
+    // a také samotný Paginator pro zobrazení možností stránkování
+    $this->template->paginator = $paginator;
+  }
+}
+\--
+
+Šablona nám už nyní iteruje jen nad články jedné stránky, stačí nám přidat stránkovací odkazy:
+
+/--latte
+{block content}
+<h1>Články</h1>
+
+<div class="articles">
+  {foreach $articles as $article}
+    <h2>{$article->title}</h2>
+    <p>{$article->content}</p>
+  {/foreach}
+</div>
+
+<div class="pagination">
+  {if !$paginator->isFirst()}
+    <a n:href="default, 1">První</a>
+    &nbsp;|&nbsp;
+    <a n:href="default, $paginator->page-1">Předchozí</a>
+    &nbsp;|&nbsp;
+  {/if}
+
+  Stránka {$paginator->page} z {$paginator->pageCount}
+
+  {if !$paginator->isLast()}
+    &nbsp;|&nbsp;
+    <a n:href="default, $paginator->page+1">Další</a>
+    &nbsp;|&nbsp;
+    <a n:href="default, $paginator->pageCount">Poslední</a>
+  {/if}
+</div>
+\--
+
+
+Takto jsme doplnili stránku o možnost stránkování pomocí Paginatoru. V případě, kdy namísto [Nette Database Core |Database Core] jako databázovou vrstvu použijeme [Nette Database Explorer |Database Explorer], jsme schopni implementovat stránkování i bez použití Paginatoru. Třída `Nette\Database\Table\Selection` totiž obsahuje metodu [page |api:Nette\Database\Table\Selection::_page] s logikou stránkování převzatou z Paginatoru.
+
+Repozitář bude při tomto způsobu implementace vypadat takto:
+
+/--php
+<?php
+
+namespace App\Model;
+
+use Nette;
+
+
+class ArticleRepository
+{
+  use Nette\SmartObject;
+
+  /** @var Nette\Database\Context */
+  private $database;
+
+
+  public function __construct(Nette\Database\Context $database)
+  {
+    $this->database = $database;
+  }
+
+
+  public function findPublishedArticles(): \Nette\Database\Table\Selection
+  {
+    return $this->database->table('articles')
+      ->where('created_at < ', new \DateTime())
+      ->order('created_at DESC');
+  }
+}
+\--
+
+
+V presenteru nemusíme vytvářet Paginator, použijeme místo něj metodu třídy `Selection`, kterou nám vrací repositář:
+
+/--php
+<?php
+
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+  /** @var ArticleRepository @inject */
+  public $articleRepository;
+
+
+  public function renderDefault(int $page = 1)
+  {
+    // Vytáhneme si publikované články
+    $articles = $this->articleRepository->findPublishedArticles();
+
+    // a do šablony pošleme pouze jejich část omezenou podle výpočtu metody page
+    $lastPage = 0;
+    $this->template->articles = $articles->page($page, 10, $lastPage);
+
+    // a také potřebná data pro zobrazení možností stránkování
+    $this->template->page = $page;
+    $this->template->lastPage = $lastPage;
+  }
+}
+\--
+
+Protože do šablony nyní neposíláme Paginator, upravíme část zobrazující stránkovací odkazy:
+
+/--latte
+{block content}
+<h1>Články</h1>
+
+<div class="articles">
+  {foreach $articles as $article}
+    <h2>{$article->title}</h2>
+    <p>{$article->content}</p>
+  {/foreach}
+</div>
+
+<div class="pagination">
+  {if $page > 1}
+    <a n:href="default, 1">První</a>
+    &nbsp;|&nbsp;
+    <a n:href="default, $page-1">Předchozí</a>
+    &nbsp;|&nbsp;
+  {/if}
+
+  Stránka {$page} z {$lastPage}
+
+  {if $page < $lastPage}
+    &nbsp;|&nbsp;
+    <a n:href="default, $page+1">Další</a>
+    &nbsp;|&nbsp;
+    <a n:href="default, $lastPage">Poslední</a>
+  {/if}
+</div>
+\--
+
+Tímto způsobem jsme implementovali stránkovací mechanismus bez použití Paginatoru.
 
 {{composer: nette/utils}}

@@ -357,9 +357,20 @@ class ArticleRepository
 }
 \--
 
-Služba uvedeného typu, jako je `PDO` nebo `Nette\Caching\IStorage`, musí být v kontejneru právě jedna. Pokud by jich bylo víc, autowiring by nevěděl, kterou z nich předat a vyhodil by výjimku.
 
-Je možné v kontejneru umístit dvě služby stejného typu a jednu z nich z autowiringu vyřadit. Autowiring pak bude fungovat a automaticky bude předávat službu druhou:
+Omezení autowiringu
+-------------------
+
+Aby bylo možné použit autowiring, musí pro každý typ být v kontejneru právě jedna služba. Pokud by jich bylo víc, autowiring by nevěděl, kterou z nich předat a vyhodil by výjimku:
+
+/--neon
+services:
+	mainDatabase: PDO(%dsn%, %user%, %password%)
+	tempDatabase: PDO('sqlite::memory:)
+	articles: Model\ArticleRepository  # VYHODÍ VÝJIMKU
+\--
+
+Řešením by bylo buď autowiring obejít a explicitně uvést název služby (tj `articles: Model\ArticleRepository(@mainDatabase)`). Nebo jej u jedné ze služeb můžeme vypnout. Autowiring pak bude fungovat a automaticky bude předávat službu druhou:
 
 /--neon
 services:
@@ -367,44 +378,134 @@ services:
 
 	tempDatabase:
 		factory: PDO('sqlite::memory:)
-		autowired: no
+		autowired: no                  # služba tempDatabase je vyřazena z autowiringu
 
-	articles: Model\ArticleRepository    # předá do kontruktoru @mainDatabase
+	articles: Model\ArticleRepository  # tudíž předá do kontruktoru mainDatabase
 \--
 
-Lze také autowiring omezit jen pro určité třídy nebo rozhraní:
+
+Lze také autowiring omezit jen pro určité třídy nebo rozhraní. Ukážeme si to na příkladu:
 
 /--php
-class Parent
+interface FooInterface
 {}
 
-class Child extends Parent implements Int
+class BarClass implements FooInterface
+{}
+
+class FooDependent
+{
+	function __construct(FooInterface $obj)
+	{}
+}
+
+class BarDependent
+{
+	function __construct(BarClass $obj)
+	{}
+}
+\--
+
+Nejpve příklad bez omezení autowiringu:
+
+/--neon
+services:
+	bar: BarClass
+	fooDep: FooDependent  # autowiring předá do konstruktoru službu bar
+	barDep: BarDependent  # autowiring předá do konstruktoru službu bar
+\--
+
+Autowiring v obou případech předá do konstruktoru službu `bar` protože vyhovuje typu `BarClass` i `FooInterface`. Ale teď to omezíme jen na interface:
+
+/--neon
+services:
+	bar:
+		factory: BarClass
+		autowired: FooInterface
+
+	fooDep: FooDependent  # autowiring předá do konstruktoru službu bar
+	barDep: BarDependent  # VYHODÍ VÝJIMKU
+\--
+
+Autowiring u služby `barDep` vyhodí výjimku `Nette\DI\ServiceCreationException`, protože nemá službu, kterou by jí předal do konstruktoru. Služba `bar` je totiž autowirová jen pod `FooInterface` a nikoliv `BarClass`. A obráceně, pokud bychom v klíči uvedli `autowired: BarClass`, vyhodila by výjimku služba `fooDep`.
+
+V klíči `autowired` je možné uvést i několik tříd a interfaců jako pole:
+
+/--neon
+services:
+	bar:
+		factory: BarClass
+		autowired: [BarClass, FooInterface]
+\--
+
+Podobně to bude fungovat i v případě dědičnosti, což si ukážeme na dalším příkladu:
+
+/--php
+class ParentClass
+{}
+
+class ChildClass extends ParentClass
 {}
 
 class ParentDependent
 {
-	function __construct(Parent $obj)
+	function __construct(ParentClass $obj)
 	{}
 }
 
 class ChildDependent
 {
-	function __construct(Child $obj)
+	function __construct(ChildClass $obj)
 	{}
 }
 \--
 
+Služby vložíme do konfiguračního souboru s tím, že `child` bude mít omezený autowiring jen pro `ChildClass` (a potomky).
+
 /--neon
 services:
 	child:
-		factory: Child
-		autowired: [Parent, Int]
+		factory: ChildClass
+		autowired: ChildClass   # lze použít 'self'
 
-	parentDep: ParentDependent  # autowiring automaticky předá službu @child
-
-	childDep: ChildDependent  # vyhodí výjimku!
+	parentDep: ParentDependent  # VYHODÍ VÝJIMKU, službu child nelze použít
+	childDep: ChildDependent    # autowiring předá do konstruktoru službu child
 \--
 
+V tomto případě by bylo možné místo `autowired: ChildClass` zapsat `autowired: self`, jelikož za `self` znamená třídu služby.
+
+
+Preference autowiringu
+----------------------
+
+V autowiringu můžeme také určité služby pro určité typy preferovat. Pro ukázku použijeme výše uvedené třídy.
+
+Pokud bychom je všechny zaregistrovali jako služby, tak by autowiring selhal:
+
+/--neon
+services:
+	parent: ParentClass
+	child: ChildClass
+	parentDep: ParentDependent  # autowiring předá do konstruktoru službu child
+	childDep: ChildDependent    # VYHODÍ VÝJIMKU
+\--
+
+Služba `parentDep` vyhodí výjimku `Multiple services of type ParentClass found: parent, child`, protože do jejího kontruktoru pasují obě služby `parent` i `child` a autowiring nemůže jednoznačně rozhodnout, kterou z nich zvolit.
+
+U služby `child` můžeme omezit její autowirování jen na třídu `ChildClass`, takže nebude předaná tam, kde se očekává `ParentClass`, což jsme si už ukazovali výše. Teď ale navíc přidáme ještě službu `parent`:
+
+/--neon
+services:
+	parent: ParentClass
+	child:
+		factory: ChildClass
+		autowired: ChildClass
+
+	parentDep: ParentDependent  # autowiring předá do konstruktoru službu parent
+	childDep: ChildDependent    # autowiring předá do konstruktoru službu child
+\--
+
+V případě služby `parentDep` se do konstruktoru předá `parent`, protože teď je to jediný vyhovující objekt kvůli omezení definovaném u služby `child`. Tím omezením se z ní ale zároveň stala pro tento typ *preferovaná služba*. Proto služba `childDep` nevyhodí výjimku, že existují dvě vyhovující služby (tj. `child` a `parent`), které lze do konstruktoru předat, ale použije preferovanou službu, tedy `child`.
 
 
 Více konfiguračních souborů

@@ -5,6 +5,8 @@ Nette welcomes contributions. You are free to make changes or translate existing
 pages. Before contributing, please read [information](https://nette.org/writing)
 to make sure everything is ok.
 
+You can use an online editor https://editor.nette.org.
+
 Before you send a pull request, run code standard test please.
 
 ```sh

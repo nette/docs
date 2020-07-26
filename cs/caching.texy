@@ -17,201 +17,167 @@ Instalace:
 composer require nette/caching
 ```
 
-Nette Framework nabízí velmi intuitivní API pro práci s cache. Ostatně, nic jiného jste asi ani nečekali, že? ;-) Než si ukážeme první příklad, je třeba zvážit, kam se mají data fyzicky ukládat. Můžeme použít databázi, server Memcached, nebo nejdostupnější úložiště, což je pevný disk:
-
-```php
-// úložištěm bude adresář 'temp' na disku
-$storage = new Nette\Caching\Storages\FileStorage('temp');
-```
-
-Úložiště [api:Nette\Caching\Storages\FileStorage] je velmi dobře optimalizované pro výkon a především zajišťuje plnou atomicitu operací. Co to znamená? Že při použití cache se nemůže stát, že přečteme soubor, který ještě není (jiným vláknem) kompletně zapsaný, nebo že by vám jej někdo "pod rukama" smazal. Použití cache je tedy zcela bezpečné. Více o úložišti se dozvíte v kapitole [Úložiště |#Úložiště].
+Používání cache je v Nette velmi snadné, přitom pokrývá i velmi pokročilé potřeby. Je navrženo pro výkon a 100% odolnost. V základu najdete adaptéry pro nejběžnější backendové úložiště. Umožňuje invalidaci založenou na značkách, časovou expiraci, má ochranu proti cache stampede atd.
 
 
-Pro samotnou práci s cache používáme objekt [api:Nette\Caching\Cache]:
+Základní použití
+================
+
+Středobodem práce s cache neboli mezipamětí představuje objekt [api:Nette\Caching\Cache]. Vytvoříme si jeho instanci a jako parametr předáme konstruktoru tzv. úložiště. Což je objekt reprezentující místo, kam se budou data fyzicky ukládat (databáze, Memcached, soubory na disku, ...). K úložišti se dostaneme tak, že si jej necháte předat pomocí [dependency injection |di-usage] s typehintem `Nette\Caching\IStorage`. Vše podstatné se dozvíte v [části Úložiště|#Úložiště].
+
+Pro následující ukázky předpokládejme, že máme vytvořený alias `Cache` a v proměnné `$storage` úložiště.
 
 ```php
 use Nette\Caching\Cache;
 
-$cache = new Cache($storage);
+$storage // instance of Nette\Caching\IStorage
 ```
 
-Obsah proměnné `$data` zapíšeme do cache pod klíčem `$key`:
+Cache je vlastně *key–value store*, tedy data čteme a zapisujeme pod klíči stejně jako u asociativních polí. Aplikace se skládají z řady nezávislých částí a pokud všechny budou používat jedno úložiště (představte si jeden adresář na disku), dříve nebo později by došlo ke kolizi klíčů. Nette Framework problém řeší tak, že celý prostor rozděluje na jmenné prostory (podadresáře). Každá část programu pak používá svůj prostor s unikátním názvem a k žádné kolizi již dojít nemůže.
+
+Název prostoru uvedeme jako druhý parametr konstruktoru třídy Cache:
 
 ```php
-$cache->save($key, $data);
+$cache = new Cache($storage, 'Full Html Pages');
 ```
 
-A takto z cache čteme: (pokud položka v cache není, vrátí metoda null)
+Nyní můžeme pomocí objektu `$cache` z mezipaměti číst a zapisovat do ní. K obojímu slouží metoda `load()`. Prvním argumentem je klíč a druhým PHP callback, který se zavolá, když klíč není nalezen v cache. Callback hodnotu vygeneruje, vrátí a ta se uloží do cache:
 
 ```php
-$value = $cache->load($key);
-if ($value === null) ...
-```
-
-Metoda `load()` má jako druhý parametr `callable` `$fallback`, který je využit ve chvíli, kdy daná položka neexistuje. Tento callback dostane parametrem odkaz na pole `$dependencies`, jehož pomocí lze nastavit [pravidla pro zneplatnění |#expirace-a-invalidace].
-
-```php
-$value = $cache->load($key, function (&$dependencies) {
-	// nějaká data
-	return 15;
+$value = $cache->load($key, function () use ($key) {
+	$computedValue = ...; // náročný výpočet
+	return $computedValue;
 });
 ```
 
-Položku z cache vymažeme uložením null, nebo metodou `remove()`:
+Pokud druhý parametr neuvedeme `$value = $cache->load($key)`, vrátí se `null`, pokud položka v cache není.
+
+.[tip]
+Prima je, že do cache lze ukládat jakékoliv serializovatelné struktury, nemusí to být jen řetězce. A totéž platí dokonce i pro klíče.
+
+Položku z mezipaměti vymažeme metodou `remove()`:
 
 ```php
-$cache->save($key, null);
-// nebo
 $cache->remove($key);
 ```
 
-.[note]
-Do cache lze ukládat jakékoliv struktury, nemusí to být jen řetězec. A totéž platí i pro klíče.
+Uložit položku do mezipaměti lze také metodou `$cache->save($key, $value, array $dependencies = [])`. Preferovaná je nicméně výše uvedený způsob pomocí `load()`.
 
 
-Webové aplikace se běžně skládají z celé řady vzájemně nezávislých částí, a pokud všechny cachují data do společného úložiště (tedy třeba adresáře), dříve nebo později by došlo ke kolizi názvů. Nette Framework problém řeší tak, že celý prostor rozděluje na sekce (v případě `FileStorage` jde o podadresáře). Každá část programu pak používá svou sekci s unikátním názvem a k žádné kolizi již dojít nemůže. Název sekce uvedeme jako druhý parametr konstruktoru třídy Cache:
+
+
+Memoizace
+=========
+
+Memoizace znamená cachování výsledku volání funkce nebo metody, abyste jej mohli použít příště bez vypočítávání stejné věci znovu a znovu.
+
+Memoizovaně lze volat metody a funkce pomocí `call(callable $callback, ...$args)`:
 
 ```php
-$cache = new Cache($storage, 'HtmlOutput');
+$result = $cache->call('gethostbyaddr', $ip);
+```
+
+Funkce `gethostbyaddr()` se tak zavolá pro každý parametr `$ip` jen jednou a příště už se vrátí hodnota z cache.
+
+Také je možné vytvořit si memoizovaný obal nad metodou nebo funkcí, který lze volat až později:
+
+```php
+function factorial($num)
+{
+	return ...;
+}
+
+$memoizedFactorial = $cache->wrap('factorial');
+
+$result = $memoizedFactorial(5); // poprvé vypočítá
+$result = $memoizedFactorial(5); // podruhé z cache
 ```
 
 
-Cachování v šablonách
+Expirace & invalidace
 =====================
 
-Cachování v šablonách je velmi snadné, stačí část šablony obalit značkami `{cache}...{/cache}`. Cache se automaticky invaliduje ve chvíli, kdy se změní zdrojová šablona (včetně případných inkludovaných šablon uvnitř bloku cache). Značky `{cache}` lze vnořovat do sebe, a když se vnořený blok zneplatní (například tagem), zneplatní se i blok nadřazený.
+S ukládáním do cache je potřeba řešit otázku, kdy se dříve uložená data stanou neplatná. Nette Framework nabízí mechanismus, jak omezit platnost dat nebo je řízeně mazat (v terminologii frameworku „invalidovat“).
 
-Ve značce je možné uvést klíče, na které se bude cache vázat (zde proměnná `$id`) a nastavit expiraci a [tagy pro zneplatnění |#expirace-pomoci-tagu-a-priority]
-
-```html
-{cache $id, expire => '20 minutes', tags => [tag1, tag2]}
-	...
-{/cache}
-```
-
-Všechny položky jsou volitelné, takže nemusíme uvádět ani expiraci, ani tagy, nakonec ani klíče.
-
-Použití cache lze také podmínit pomocí `if` - obsah se pak bude cachovat pouze bude-li splněna podmínka:
-
-```html
-{cache $id, if => !$form->isSubmitted()}
-	{$form}
-{/cache}
-```
-
-Pokud teprve v šabloně získáváme data z modelu (princip on demand nebo-li lazy), bude cache obzvlášť efektivní.
-
-
-
-Cachování výsledku funkce
-=========================
-
-Cachování výsledku volání funkce nebo metody lze zapsat pomocí metody `call()`:
+Platnost dat se nastavuje v okamžiku ukládání a to pomocí třetího parametru metody `save()`, např.:
 
 ```php
-$name = $cache->call('gethostbyaddr', $ip);
-```
-
-Funkce `gethostbyaddr($ip)` se tak zavolá jen jednou a příště už se vrací hodnota z cache. Samozřejmě pro různé `$ip` se cachují různé výsledky.
-
-
-Obdobně je možné obalit si nějakou operaci cachí a volat až později.
-
-```php
-function calculate($number)
-{
-	return 'number is ' . $number;
-}
-
-$wrapper = $cache->wrap('calculate');
-
-$result = $wrapper(1); // number is 1
-$result = $wrapper(2); // number is 2
-```
-
-
-Cachování výstupu
-=================
-
-Výstup můžeme cachovat nejen v šablonách:
-
-```php
-if ($block = $cache->start($key)) {
-
-	... vypisujeme data ..
-
-	$block->end(); // uložíme výstup do cache
-}
-```
-
-V případě, že výstup už je v cache uložen, tak ho metoda `start()` vypíše a vrátí `null`. V opačném případě začne výstup odchytávat a vrátí objekt `$block`, pomocí něhož nakonec vypsaná data uložíme do cache.
-
-
-Expirace a invalidace
-=====================
-
-S ukládáním dat do cache vznikají dva problémy. Jednak je tu pochopitelně hrozba, že se úložiště zcela zaplní a nebude možné další data zapisovat. A také se může stát, že některá dříve uložená data se stanou v průběhu času neplatná. Nette Framework proto nabízí mechanismus, jak omezit platnost dat nebo je řízeně mazat (v terminologii frameworku „invalidovat“).
-
-Platnost dat se nastavuje v okamžiku ukládání a to pomocí třetího parametru metody `save`:
-
-```php
-$cache->save($key, $data, [
-	Cache::EXPIRE => '20 minutes', // akceptuje i sekundy nebo timestamp
-]);
-```
-
-Z kódu je patrné, že jsme data uložili s platností 20 minut. Po uplynutí této doby bude cache hlásit, že pod klíčem `$key` žádný záznam nemá (tj. vrátí `null`). Pokud bychom chtěli prodloužit dobu platnosti s každým čtením, lze toho docílit takto:
-
-```php
-$cache->save($key, $data, [
-	Cache::EXPIRE => '20 minutes',
-	Cache::SLIDING => true,
-]);
-```
-
-Šikovná je možnost nechat data vyexpirovat v okamžiku, kdy se změní určitý soubor či některý z více souborů. Toho lze využít třeba při ukládání dat vzniklých parsováním těchto souborů do cache. Pro bezproblémovou funkčnost je třeba používat absolutní cesty.
-
-```php
-$cache->save($key, $data, [
-	Cache::FILES => 'data.yaml', // lze uvést i pole souborů
-]);
-```
-
-Kritérium `Cache::FILES` je samozřejmě možné kombinovat i s časovou expirací `Cache::EXPIRE` apod.
-
-Cache může být závislá i na jiných položkách cache. Což lze využít tehdy, když ukládáme do cache třeba celou HTML stránku a pod jinými klíči její fragmenty. Jakmile se část změní, invaliduje se celá stránka.
-
-```php
-$cache->save('page', $html, [
-	// vyexpiruje, když vyexpiruje frag1 nebo frag2
-	Cache::ITEMS => ['frag1', 'frag2'],
-]);
-```
-
-
-Expiraci lze řídit i pomocí vlastních callbacků:
-
-```php
-function controlExpiration($val)
-{
-	return $val;
-}
-
 $cache->save($key, $value, [
-	Cache::CALLBACKS => [['controlExpiration', 1]],
+	Cache::EXPIRE => '20 minutes',
 ]);
 ```
 
-
-Expirace pomocí tagů a priority
-===============================
-
-Velmi užitečným invalidačním nástrojem jsou tzv. tagy. Každé položce v cache můžeme přiřadit seznam tagů. Mějme třeba HTML stránku s článkem a komentáři, kterou budeme cachovat. Při ukládání specifikujeme tagy:
+Nebo pomocí parametru `$dependencies` předávaného referencí do callbacku metody `load()`, např.:
 
 ```php
-$cache->save($articleId, $html, [
-	Cache::TAGS => ["article/$articleId", "comments/$articleId"],
+$value = $cache->load($key, function (&$dependencies) {
+	$dependencies[Cache::EXPIRE] = '20 minutes';
+	return ...;
 ]);
+```
+
+V dalších ukázkách budeme předpokládat druhou variantu a tedy existenci proměnné `$dependencies`.
+
+
+Expirace
+--------
+
+Nejjednodušší exirace představuje časový limit. Takto uložíme do cache data s platností 20 minut:
+
+```php
+// akceptuje i počet sekund nebo UNIX timestamp
+$dependencies[Cache::EXPIRE] = '20 minutes';
+```
+
+Pokud bychom chtěli prodloužit dobu platnosti s každým čtením, lze toho docílit následovně, ale pozor, režie cache tím vzroste:
+
+```php
+$dependencies[Cache::SLIDING] = true;
+```
+
+Šikovná je možnost nechat data vyexpirovat v okamžiku, kdy se změní soubor či některý z více souborů. Toho lze využít třeba při ukládání dat vzniklých zpracováním těchto souborů do cache. Používejte absolutní cesty.
+
+```php
+$dependencies[Cache::FILES] = '/path/to/data.yaml';
+// nebo
+$dependencies[Cache::FILES] = ['/path/to/data1.yaml', '/path/to/data2.yaml'];
+```
+
+Můžeme nechat položku v cache vyexpirovat ve chvíli, kdy vyexpiruje jiná položka (či některá z více jiných). Což lze využít tehdy, když ukládáme do cache třeba celou HTML stránku a pod jinými klíči její fragmenty. Jakmile se fragment změní, invaliduje se celá stránka. Pokud fragmenty máme uložené pod klíči např. `frag1` a `frag2`, použijeme:
+
+```php
+$dependencies[Cache::ITEMS] = ['frag1', 'frag2'];
+```
+
+Expiraci lze řídit i pomocí vlastních funkcí nebo statických metod, které vždy při čtení rozhodnou, zda je položka ještě platná. Takto třeba můžeme nechat položku vyexpirovat vždy, když se změní verze PHP. Vytvoříme funkci, která porovná aktuální verzi s parameterem, a při ukládání přidáme mezi závislosti pole ve tvaru `[nazev funkce, ...argumenty]`:
+
+```php
+function checkPhpVersion($ver): bool
+{
+	return $ver === PHP_VERSION_ID;
+}
+
+$dependencies[Cache::CALLBACKS] = [
+	['checkPhpVersion', PHP_VERSION_ID] // expiruj když checkPhpVersion(...) === false
+];
+```
+
+Všechny kritéria je samozřejmě možné kombinovat. Cache pak vyexpiruje, když alespoň jedno kritérium není splněno.
+
+```php
+$dependencies[Cache::EXPIRE] = '20 minutes';
+$dependencies[Cache::FILES] = '/path/to/data.yaml';
+```
+
+
+
+Invalidace pomocí tagů
+----------------------
+
+Velmi užitečným invalidačním nástrojem jsou tzv. tagy. Každé položce v cache můžeme přiřadit seznam tagů, což jsou libovolné řetězce. Mějme třeba HTML stránku s článkem a komentáři, kterou budeme cachovat. Při ukládání specifikujeme tagy:
+
+```php
+$dependencies[Cache::TAGS] = ["article/$articleId", "comments/$articleId"];
 ```
 
 Přesuňme se do administrace. Tady najdeme formulář pro editaci článku. Společně s uložením článku do databáze zavoláme příkaz `clean()`, který smaže z cache položky dle tagu:
@@ -230,144 +196,238 @@ $cache->clean([
 ]);
 ```
 
-Čeho jsme tím dosáhli? Že se nám HTML cache bude invalidovat (mazat) sama. Kdykoliv uživatel změní článek s ID = 10, dojde k vynucené invalidaci tagu `article/10` a HTML stránka, která uvedený tag nese, se z cache smaže. Totéž nastane při vložení nového komentáře pod příslušný článek.
+Čeho jsme tím dosáhli? Že se nám HTML cache bude invalidovat (mazat), kdykoliv se změní článek nebo komentáře. Když se edituje článek s ID = 10, dojde k vynucené invalidaci tagu `article/10` a HTML stránka, která uvedený tag nese, se z cache smaže. Totéž nastane při vložení nového komentáře pod příslušný článek.
+
+.[note]
+Tagy vyžadují tzv. [#Journal].
 
 
-Obdobou tagů je řízení expirace dle priority:
+Invalidace pomocí priority
+--------------------------
+
+Jednotlivým položkám v cache můžeme nastavit prioritu, pomocí které je bude možné mazat, když třeba cache přesáhne určitou velikost:
 
 ```php
-$cache->save($key, $value, [
-	Cache::PRIORITY => 50,
-]);
+$dependencies[Cache::PRIORITY] = 50;
+```
 
-// smažeme všechny položky s prioritou rovnou nebo menší než 100:
+Smažeme všechny položky s prioritou rovnou nebo menší než 100:
+
+```php
 $cache->clean([
 	Cache::PRIORITY => 100,
 ]);
 ```
 
-A nakonec zmiňme parametr Cache::ALL, který smaže vše.
+.[note]
+Priority vyžadují tzv. [#Journal].
+
+
+Smazání cache
+-------------
+
+Parametr `Cache::ALL` smaže vše:
+
+```php
+$cache->clean([
+	Cache::ALL => true,
+]);
+```
+
+
+Hromadné čtení
+==============
+
+Pro hromadné čtení a zápisy do cache slouží metoda `bulkLoad()`, které předáme pole klíčů a získáme pole hodnot:
+
+```php
+$values = $cache->bulkLoad($keys);
+```
+
+Metoda `bulkLoad()` funguje podobně jako `load()` i s druhým parameterm callbackem, kterému se předává klíč generované položky:
+
+```php
+$values = $cache->bulkLoad($keys, function ($key, &$dependencies) {
+	$computedValue = ...; // náročný výpočet
+	return $computedValue;
+});
+```
+
+
+Cachování výstupu
+=================
+
+Velmi elegantně lze zachytávat a cachovat výstup:
+
+```php
+if ($capture = $cache->start($key)) {
+
+	echo ... // vypisujeme data
+
+	$capture->end(); // uložíme výstup do cache
+}
+```
+
+V případě, že výstup už je v cache uložen, tak ho metoda `start()` vypíše a vrátí `null`, tedy podmínka se nevykoná. V opačném případě začne výstup zachytávat a vrátí objekt `$capture`, pomocí něhož nakonec vypsaná data uložíme do cache.
+
+
+Cachování v Latte
+=================
+
+Cachování v šablonách [Latte|latte:] je velmi snadné, stačí část šablony obalit značkami `{cache}...{/cache}`. Cache se automaticky invaliduje ve chvíli, kdy se změní zdrojová šablona (včetně případných inkludovaných šablon uvnitř bloku cache). Značky `{cache}` lze vnořovat do sebe a když se vnořený blok zneplatní (například tagem), zneplatní se i blok nadřazený.
+
+Ve značce je možné uvést klíče, na které se bude cache vázat (zde proměnná `$id`) a nastavit expiraci a [tagy pro zneplatnění |#Invalidace pomocí tagů]
+
+```html
+{cache $id, expire => '20 minutes', tags => [tag1, tag2]}
+	...
+{/cache}
+```
+
+Všechny položky jsou volitelné, takže nemusíme uvádět ani expiraci, ani tagy, nakonec ani klíče.
+
+Použití cache lze také podmínit pomocí `if` - obsah se pak bude cachovat pouze bude-li splněna podmínka:
+
+```html
+{cache $id, if => !$form->isSubmitted()}
+	{$form}
+{/cache}
+```
 
 
 Úložiště
 ========
 
-Kromě představeného úložiště `FileStorage` jsou v Nette připraveny tyto další uložište:
-|------------------------------------
-| Úložiště | Popis | Hromadné čtení |
-|------------------------------------
-| [FileStorage |api:Nette\Caching\Storages\FileStorage] | výchozí úložiště s ukládáním do souboru na disk | - |
-| [MemcachedStorage |api:Nette\Caching\Storages\MemcachedStorage] | využívá `Memcached` caching systém | ano |
-| [MemoryStorage |api:Nette\Caching\Storages\MemoryStorage] | data jsou dočasně v paměti | - |
-| [SQLiteStorage |api:Nette\Caching\Storages\SQLiteStorage] | data se ukládají do SQLite databáze | ano |
-| [DevNullStorage |api:Nette\Caching\Storages\DevNullStorage] | data se neukládají, vhodné pro testování | - |
+Úložiště je objekt reprezentující místo, kam se data fyzicky ukládají. Můžeme použít databázi, server Memcached, nebo nejdostupnější úložiště, což jsou soubory na disku.
 
-Lze si také napsat vlastní úložiště, jediný požadavek je, aby implementovalo rozhraní [IStorage |api:Nette\Caching\IStorage].
+|-----------------
+| Úložiště | Popis
+|-----------------
+| [#FileStorage] | výchozí úložiště s ukládáním do souborů na disk
+| [#MemcachedStorage] | využívá `Memcached` server
+| [#MemoryStorage] | data jsou dočasně v paměti
+| [#SQLiteStorage] | data se ukládají do SQLite databáze
+| [#DevNullStorage] | data se neukládají, vhodné pro testování
+
+K objektu úložiště se dostanete tak, že si jej necháte předat pomocí [dependency injection |di-usage] s typehintem `Nette\Caching\IStorage`. Jako výchozí úložiště poskytuje Nette objekt FileStorage ukládající data do podsložky `cache` v adresáři pro [dočasné soubory|bootstrap#dočasné soubory].
+
+Změnit úložiště můžete v konfiguraci:
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\DevNullStorage
+```
 
 
-Služba úložiště
----------------
+FileStorage
+-----------
 
-K objektu úložiště se dostanete tak, že si jej necháte předat pomocí [dependency injection |di-usage] s typehintem `Nette\Caching\IStorage`. Jako výchozí úložiště poskytuje Nette objekt FileStorage ukládající data do adresáře určeného parametrem `tempDir` nastaveným v `Bootstrap.php` pomocí `$configurator->setTempDirectory()`.
+Zapisuje cache do souborů na disku. Úložiště `Nette\Caching\Storages\FileStorage` je velmi dobře optimalizované pro výkon a především zajišťuje plnou atomicitu operací. Co to znamená? Že při použití cache se nemůže stát, že přečteme soubor, který ještě není jiným vláknem kompletně zapsaný, nebo že by vám jej někdo "pod rukama" smazal. Použití cache je tedy zcela bezpečné.
+
+Toto úložiště má také vestavěnou důležitou funkci, která brání před extrémním nárůstem využití CPU ve chvíli, kdy se cache smaže nebo ještě není zahřátá (tj. vytvořená). Jedná se o prevenci před "cache stampede":https://en.wikipedia.org/wiki/Cache_stampede.
+Stává se, že v jednu chvíli se sejde větší počet souběžných požadavků, které chtějí z cache stejnou věc (např. výsledek drahého SQL dotazu) a protože v mezipaměti není, začnou všechny procesy vykonávat stejný SQL dotaz.
+Vytížení se tak násobí a může se dokonce stát, že žádné vlákno nestihne odpovědět v časovém limitu, cache se nevytvoří a aplikace zkolabuje.
+Naštěstí cache v Nette funguje tak, že při více souběžných požadavcích na jednu položku ji generuje pouze první vlákno, ostatní čekají a následně využíjí vygenerovaný výsledek.
+
+Příklad vytvoření FileStorage:
+
+```php
+// úložištěm bude adresář '/path/to/temp' na disku
+$storage = new Nette\Caching\Storages\FileStorage('/path/to/temp');
+```
+
+MemcachedStorage
+----------------
+
+Server [Memcached|https://memcached.org] je vysoce výkonný systém ukládání do distribuované paměti, jehož adaptér je `Nette\Caching\Storages\MemcachedStorage`. V konfiguraci uvedeme IP adresu a port, pokud se liší od standardního 11211.
+
+.[caution]
+Vyžaduje PHP rozšíření `memcached`.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\MemcachedStorage('10.0.0.5')
+```
+
+MemoryStorage
+-------------
+
+`Nette\Caching\Storages\MemoryStorage` je úložiště, která data ukládá do PHP pole, a tedy se s ukončením požadavku ztratí.
+
+
+SQLiteStorage
+-------------
+
+Databáze SQLite a adaptér `Nette\Caching\Storages\SQLiteStorage` nabízí způsob, jak ukládat cache do jediného souboru na disku. V konfiguraci uvedeme cestu k tomuto souboru.
+
+.[caution]
+Vyžaduje PHP rozšíření `pdo` a `pdo_sqlite`.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\SQLiteStorage('$tempDir%/cache.db')
+```
+
+DevNullStorage
+--------------
+
+Speciální implementací úložiště je `Nette\Caching\Storages\DevNullStorage`, které ve skutečnosti data neukládá vůbec. Je tak vhodné pro testování, když chceme eliminovat vliv cache.
+
+
+
+Použití cache v kódu
+====================
+
+Při používání cache v kódu máme dva způsoby, jak na to. První z nich je ten, že si necháme předat pomocí [dependency injection |di-usage] úložište a vytvoříme objekt `Cache`:
 
 ```php
 use Nette;
 
-class MyPresenter
+class ClassOne
 {
-	/** @var Nette\Caching\IStorage */
-	private $storage;
+	/** @var Nette\Caching\Cache */
+	private $cache;
 
 	public function __construct(Nette\Caching\IStorage $storage)
 	{
-		$this->storage = $storage;
-	}
-
-	public function actionDefault(): void
-	{
-		$cache = new Nette\Caching\Cache($this->storage, 'htmlFront');
-		$cache->save($key, $data);
+		$this->cache = new Nette\Caching\Cache($storage, 'my-namespace');
 	}
 }
 ```
 
-
-Vypnutí cache pro testování
----------------------------
-
-Speciální implementací úložiště `Nette\Caching\IStorage` je [DevNullStorage|api:Nette\Caching\Storages\DevNullStorage], které ve skutečnosti data neukládá vůbec. Je tak vhodné pro testování, kdy chceme eliminovat vliv cache.
-
-Nastavíme v konfiguraci:
-```neon
-services:
-	cacheStorage:
-		factory: Nette\Caching\Storages\DevNullStorage
-```
-
-
-Konkurenční cachování
-=====================
-
-Smazání cache je běžná operace po nahrání nové verze aplikace na server. V tu chvíli ovšem dostane server docela zabrat, protože musí vybudovat cache novou. Získání některých dat může být dost náročné, příkladem je třeba cache pro [RobotLoader]. A pokud navíc v krátkém okamžiku přijde třeba 30 požadavků a všechny se snaží o totéž, náročnost ještě násobně roste.
-
-Řešením je upravit chování aplikace tak, aby data vytvářelo vždy jen jedno vlákno a ostatní čekala. K tomu stačí jediné - uvést hodnotu ve formě callbacku nebo anonymní funkce:
+Druhá možnost je, že si necháme rovnou předat objekt `Cache`:
 
 ```php
-$result = $cache->save($key, function () {
-	return buildData(); // náročná operace
-});
-```
-
-Framework pak zajistí, že tělo funkce bude v jednu chvíli volat jen jedno vlákno a ostatní budou čekat. Pokud vlákno z nějakého důvodu selže, dostane šanci jiné.
-
-
-Použití cache napříč aplikací
-=============================
-
-Při použití cache ve službách aplikace čelíme rozhodnutí, zda předávat do služeb objekt `Cache` nebo pouze `IStorage`. Vyžaduje-li služba cache pouze pro sebe, předáváme `IStorage`:
-
-```php
-use Nette\Caching;
-
-class MyService
+class ClassTwo
 {
-	/** @var Caching\Cache */
+	/** @var Nette\Caching\Cache */
 	private $cache;
 
-	public function __construct(Caching\IStorage $storage)
-	{
-		$this->cache = new Caching\Cache($storage, 'my-service');
-	}
-}
-```
-
-Služba dostane instanci úložiště z DI kontejneru:
-```neon
-services:
-	- MyService
-```
-
-Jiná situace je, pokud potřebujeme více instancí jedné služby, ale oddělenou cache.
-```php
-use Nette\Caching;
-
-class MyService
-{
-	/** @var Caching\Cache */
-	private $cache;
-
-	public function __construct(Caching\Cache $cache)
+	public function __construct(Nette\Caching\Cache $cache)
 	{
 		$this->cache = $cache;
 	}
 }
 ```
 
-Objekt cache vytváříme pro každou službu zvlášť:
+Objekt `Cache` se potom vytvoří přímo v konfiguraci tímto způsobem:
+
 ```neon
 services:
-	one: MyService( Nette\Caching\Cache(namespace: 'one') )
-	two: MyService( Nette\Caching\Cache(namespace: 'two') )
+	- ClassTwo( Nette\Caching\Cache(namespace: 'my-namespace') )
+```
+
+
+Journal
+=======
+
+Nette si tagy a priority ukládá do tzv. journalu. Standardně se k tomu používá SQLite a soubor `journal.s3db` a **vyžadují se PHP rozšíření `pdo` a `pdo_sqlite`.**
+
+Změnit journal můžete v konfiguraci:
+
+```neon
+services:
+	cache.journal: MyJournal
 ```
 
 

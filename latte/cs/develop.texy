@@ -1,0 +1,217 @@
+Latte pro vývojáře
+******************
+
+
+Jak vykreslit šablonu
+=====================
+
+Jak vykreslit šablonu? Stačí spustit tento kód:
+
+```php
+$latte = new Latte\Engine;
+
+$latte->setTempDirectory('/path/to/tempdir');
+
+$params = [
+	'items' => ['one', 'two', 'three'],
+];
+
+// kresli na výstup
+$latte->render('template.latte', $params);
+// kresli do řetězce
+$html = $latte->renderToString('template.latte', $params);
+```
+
+Latte automaticky přegenerovává cache při každé změně šablony, což můžeme v produkčním prostředí vypnout a ušetřit tím malinko výkonu:
+
+```php
+$latte->setAutoRefresh(false);
+```
+
+Místo pole `$params` můžete také použít objekt, což přináší některé výhody. Získáte [pohodlné napovídání v IDE|type-system]
+a cestu pro registraci filtrů a funkcí:
+
+```php
+class MyTemplate
+{
+	public $items = ['one', 'two', 'three'];
+}
+
+$params = new MyTemplate;
+$latte->render('template.latte', $params);
+```
+
+
+Načítání šablon z řetězce
+=========================
+
+Pokud nemáme naši šablonu uloženou v souboru, ale pouze v proměnných, musíme nastavit loader na `Latte\Loaders\StringLoader`.
+
+```php
+$latte->setLoader(new Latte\Loaders\StringLoader([
+	'main.file' => '{include other.file}',
+	'other.file' => '{if true} {$var} {/if}',
+]));
+
+$latte->render('main.file', $params);
+```
+
+
+Vlastní filtr
+=============
+
+Jako filtr lze do šablony zaregistrovat libovolný callback:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFilter('shortify', function (string $s): string {
+	return mb_substr($s, 0, 10); // zkrátí text na 10 písmen
+});
+```
+
+V tomto případě by bylo šikovnější, kdyby filtr přijímal další parametr:
+
+```php
+$latte->addFilter('shortify', function (string $s, int $len = 10): string {
+	return mb_substr($s, 0, $len);
+});
+```
+
+V šabloně se potom volá takto:
+
+```html
+<p>{$text|shortify}</p>
+<p>{$text|shortify:100}</p>
+```
+
+Druhým způsobem definice filtru je třída šablony. Důležité je uvést anotaci `@filter`:
+
+```php
+class MyTemplate
+{
+	/** @filter */
+	public function shortify(string $s, int $len = 10): string
+	{
+		return mb_substr($s, 0, $len); // zkrátí text na 10 písmen
+	}
+}
+
+$params = new MyTemplate;
+...
+$latte->render('template.latte', $params);
+```
+
+
+Univerzální filtr
+-----------------
+
+Manuální registraci více filtrů lze nahradit registrací jednoho univerzálního:
+
+```php
+$latte->addFilter(null, 'Filters::common');
+```
+
+Ten dostane jako parametr název požadovaného filtru:
+
+```php
+class Filters
+{
+	public static function common($filter, $value)
+	{
+		if (method_exists(__CLASS__, $filter)) {
+			$args = func_get_args();
+			array_shift($args);
+			return call_user_func_array([__CLASS__, $filter], $args);
+		}
+	}
+
+	public static function shortify($s, $len = 10)
+	{
+		return mb_substr($s, 0, $len);
+	}
+}
+```
+
+
+Funkce
+======
+
+V Latte můžete používat všechny funkce PHP a zároveň si definovat své vlastní:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFunction('random', function (...$args) {
+	return array_rand($args);
+});
+```
+
+Použití je pak stejné, jako když voláte PHP funkci:
+
+```html
+{random(jablko, pomeranč, citron)} // vypíše například: jablko
+```
+
+Druhým způsobem definice funkce je třída šablony. Důležité je uvést anotaci `@function`:
+
+```php
+class MyTemplate
+{
+	/** @function */
+	public function random(...$args)
+	{
+		return array_rand($args);
+	}
+}
+
+$params = new MyTemplate;
+...
+$latte->render('template.latte', $params);
+```
+
+
+Vlastní tagy
+============
+
+Latte poskytuje API pro tvorbu vlastních tagů. Není to nic složitého. Značky přidáváme v sadách, přičemž sadu může tvořit i jediná značka.
+
+```php
+$latte = new Latte\Engine;
+
+// vytvoříme si sadu
+$set = new Latte\Macros\MacroSet($latte->getCompiler());
+
+// do sady přidáme párové tagy {try} ... {/try}
+$set->addMacro(
+	'try', // název tagu
+	'try {',  // PHP kód nahrazující otevírací tag
+	'} catch (\Exception $e) {}' // kód nahrazující uzavírací tag
+);
+```
+
+Pokud značka není párová, třetí parametr metody `addMacro()` vynecháme.
+
+PHP kód uváděný ve druhém a třetím parametru může obsahovat zástupné symboly:
+
+- `%node.word` - vloží první argument tagu
+- `%node.array` - vloží argumenty tagu naformátované jako PHP pole
+- `%node.args` - vloží argumenty tagu naformátované jako PHP kód
+- `%escape(...)` - nahradí za aktuální escapovací funkcí
+- `%modify(...)` - nahradí sérií modifikátorů
+
+Příklad:
+
+```php
+$set->addMacro('if', 'if (%node.args):', 'endif');
+```
+
+Pokud je logika značek ještě složitější, můžeme místo řetězců uvést callbacky či lambda funkce. Jako první parametr dostanou objekt [MacroNode |api:Latte\MacroNode] reprezentující aktuální uzel, druhým parametrem je objekt [PhpWriter |api:Latte\PhpWriter], který usnadňuje generování výstupního kódu.
+
+```php
+$set->addMacro('if', function ($node, $writer) {
+	return $writer->write('if (%node.args):');
+}, 'endif');
+```
+
+
+
+{{composer: latte/latte}}

@@ -1,0 +1,125 @@
+Průběžné testování s GitLab CI
+******************************
+
+V dnešní době se hojně používá GitLab, důvodů je více - intuitivní ovládání GUI, ale hlavní výhodou je možnost používat GitLab včetně CI runneru buď jako SaaS [https://gitlab.com/] a anebo na vlastním serveru, včetně CI runneru.
+
+Pojďme si ukázat, jak jednoduše přidat CI na GitLab.
+
+Jak funguje GitLab CI
+=====================
+
+GitLab CI((Continuous Integration)) (dále jen CI) je velmi populární služba pro automatizaci [průběžné integrace](https://cs.wikipedia.org/wiki/Průběžná_integrace). Je poskytována zdarma.¨(Pro soukromé repozitáře má omezené CI minuty, netýká se instalace CI runneru na vlastním serveru.)) a nabízí automatizované spouštění testů, deploy aplikací atd. po zápisu změny do repozitáře. Je plně integrována do prostředí GitLabu.
+
+CI runner se konfiguruje souborem `.gitlab-ci.yml` umístěným v kořenovém adresáři projektu. Obsahuje několik bloků, které si podrobněji popíšeme:
+
+Je potřeba nedefinovat stages, aby CI runner vědělo, jak se mají úlohy po sobě spouštět. Úlohy se spouští paralelně v jednotlivé stagi.
+
+Každý job by měl mít definován nějaký image, jinak se použije výchozí image, definovaný v konfiguraci CI runneru.
+
+Proměnné prostředí
+------------------
+
+V sekci `variables` nastavujeme další enc proměnné pro běh testů. Pro každou odrážku se skripty provedou samostatně a v jedné odrážce lze definovat více proměnných. Dále v textu budeme používat proměnnou `TESTER_PHP_BIN`, abychom mohli testy pouštět také s parametrem `-p php-cgi`.
+
+```yaml
+variables:
+  - TESTER_PHP_BIN="php"
+```
+
+Spouštění testů
+---------------
+
+Testy se spouštějí v sekci `script`, kde stačí zavolat tester. Předpokládejme, že testy jsou umístěny ve složce `tests/` a používáte vlastní `php.ini` umístěné ve složce s testy. Pomocí `-s` si necháme vypsat informace o přeskočených testech. Jako binárku nastavíme v parametru `-p` hodnotu proměnné `TESTER_PHP_BIN`, kterou jsme si nastavili v bloku `env`.
+
+```yaml
+script:
+  - ./vendor/bin/tester -p $TESTER_PHP_BIN -s -c ./tests/php.ini ./tests
+```
+
+Nastavení dalších služeb
+------------------------
+
+CI runner nám umožňuje zapnout další služby. Například Redis server na který ukládáte cache.
+
+```yaml
+services:
+  - redis-server:lastest
+```
+
+Inicializace databáze:
+----------------------
+
+Databáze MySQL je již předinstalována. Běží na adrese `mysql` a přihlásit se můžete na účet `root` s heslem `password`, které je nastaveno v env proměnné `MYSQL_ROOT_PASSWORD`. Pokud byste chtěli spouštět integrační testy, můžete si do ni naimportovat testovací databázi, kterou máte například v souboru `tests/testbase.sql`:
+
+```yaml
+
+variables:
+    MYSQL_DATABASE: test_db
+    MYSQL_ROOT_PASSWORD: password
+
+services:
+    - mysql:latest
+
+before_script:
+  - mysql -u root -e 'CREATE DATABASE testbase;'
+  - mysql -u root testbase < tests/testbase.sql
+```
+
+Výsledná ukázka konfiguračního souboru
+--------------------------------------
+
+Celý `.gitlab-ci.yml` pak vypadá takto:
+
+```yml
+variables:
+    GIT_DEPTH: "1"
+    # Configure mysql environment variables (https://hub.docker.com/r/_/mysql/)
+    MYSQL_DATABASE: test_db
+    MYSQL_ROOT_PASSWORD: password
+
+stages:
+    - code_checker
+    - test
+
+code_checker:
+    stage: code_checker
+    image: sunfoxcz/php-build:7.4
+    script:
+        - composer create-project --no-interaction --no-progress --prefer-dist nette/code-checker temp/code-checker
+        - php temp/code-checker/src/code-checker.php --short-arrays -d app
+        - php temp/code-checker/src/code-checker.php --short-arrays -d tests
+
+.test_template: &test_template
+    stage: test
+    services:
+        - mysql:latest
+    before_script:
+        - composer install --no-interaction --no-progress --no-suggest --optimize-autoloader
+        - cp app/config/config.test.neon app/config/local.neon
+        - "mysql -h mysql $MYSQL_DATABASE -p$MYSQL_ROOT_PASSWORD < sql/000_structure.sql"
+        - "mysql -h mysql $MYSQL_DATABASE -p$MYSQL_ROOT_PASSWORD < tests/data/testdata.sql"
+        - vendor/bin/phinx migrate -e production
+    script:
+        - vendor/bin/tester -s -p php -c tests/php.ini tests
+
+test:7.2:
+    image: sunfoxcz/php-build:7.2
+    <<: *test_template
+
+test:7.3:
+    image: sunfoxcz/php-build:7.3
+    <<: *test_template
+
+test:7.4:
+    image: sunfoxcz/php-build:7.4
+    <<: *test_template
+
+test:8.0:
+    image: sunfoxcz/php-build:8.0
+    <<: *test_template
+```
+
+Vynechání testů u commitu
+-------------------------
+
+Některé commity není nutné testovat. Stačí uvést kdekoliv v commit message parametr `[ci skip]` a CI bude tento commit ignorovat. Pokud používáte GIT verzi 2.10 a novější, můžete namísto použití `[ci skip]` v commit message, použít příkaz `git push -o ci.skip`.

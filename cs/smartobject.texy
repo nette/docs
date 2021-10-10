@@ -1,0 +1,189 @@
+SmartObject: rozšíření objektů v PHP
+************************************
+
+<div class=perex>
+
+SmartObject rozšiřuje objektové schopnosti PHP o několik syntaktických cukrátek. Máte rádi cukrátka? Čtěte a dozvíte se
+
+- proč je dobré používat `Nette\SmartObject`
+- co jsou to *property*
+- jak vyvolávat události
+
+</div>
+
+V této kapitole se budeme věnovat převážně traitě `Nette\SmartObject`, která rozšiřuje objektové schopnosti PHP. Tuto traitu používají takřka všechny třídy Nette Framework. Zároveň je natolik transparentní, abyste ji mohli používat i u vašich tříd. Zkusme si říct, proč byste to měli dělat.
+
+Traita `Nette\SmartObject` je zjednodušeným nástupcem dnes již zastaralé třídy `Nette\Object` z Nette 2.x.
+
+Instalace:
+
+```shell
+composer require nette/utils
+```
+
+
+Striktní třídy
+==============
+
+PHP je jazyk na sekání chyb jako stvořený, neboť dává vývojáři značnou volnost. Jak tomu udělat přítrž a začít psát programy bez těžko odhalitelných chyb? Stačí si nastavit přísnější laťku a dodržovat určitá pravidla.
+
+Najdete v tomto příkladu chybu?
+
+```php
+class Circle
+{
+	public $radius = 0.0;
+
+	public function getArea()
+	{
+		return $this->radius * $this->radius * M_PI;
+	}
+}
+
+$circle = new Circle;
+$circle->raduis = 10;
+echo $circle->getArea(); // 10² * π ≈ 314
+```
+
+Na první pohled se zdá, že kód by měl vypsat přibližně 314, nicméně vypíše nulu. Jak je to možné? Omylem se místo `$circle->radius` do kódu dostalo `raduis`, drobný překlep. Záludnost chyby tkví hlavně v tom, že na ni PHP nijak neupozorní, nepomůže ani sledování chyb Warning nebo Notice. Z hlediska jazyka to není chyba, ačkoliv stojí hodně námahy ji vypátrat.
+
+Uvedenou chybu bychom ihned odhalili, pokud by třída `Circle` používala `Nette\SmartObject`:
+
+```php
+class Circle
+{
+	use Nette\SmartObject;
+}
+```
+
+Zatímco dosud kód tiše (ale chybně) proběhl, teď už je situace jiná:
+
+[* debugger-circle.png *]
+
+Traita `Nette\SmartObject` učinila `Circle` striktnější a na použití nedeklarované proměnné reagoval vyhozením výjimky, kterou [Tracy |tracy:] zobrazila. Řádek s fatálním překlepem je odhalen a označen, textová zpráva situaci popisuje slovy: *Cannot write to an undeclared property Circle::$raduis, did you mean $radius?* (nelze zapsat do nedeklarované proměnné Circle::$raduis, myslel jste $radius?). Programátor zvolá „áhá“ a může promptně zareagovat. Chybu, které by si dlouho nemusel ani všimnout a jen za velkého úsilí by ji odhaloval, dostal srozumitelně naservírovanou na červeném podnose.
+
+První schopnost traity `Nette\SmartObject`, kterou jsme si ukázali, je vyhazování výjimek při přístupu k nedeklarovanému členu třídy.
+
+```php
+$circle = new Circle;
+echo $circle->undeclared; // vyhodí Nette\MemberAccessException
+$circle->undeclared = 1; // vyhodí Nette\MemberAccessException
+$circle->unknownMethod(); // také vyhodí Nette\MemberAccessException
+```
+
+Tím její možnosti zdaleka nekončí.
+
+.[note]
+Používejte `SmartObject` pouze u základních tříd, které od nikoho nedědí, funkčnost se promítne do všech jejích potomků.
+
+
+Properties, gettery a settery
+=============================
+
+*(Pro zkušenější programátory)*
+
+Termínem *property* (česky vlastnost) se v moderních objektově orientovaných jazycích (např. C#, Python, Ruby, JavaScript) označují [speciální členy tříd|https://en.wikipedia.org/wiki/Property_(programming)], které se tváří jako proměnné, ale ve skutečnosti jsou reprezentovány metodami. Při přiřazení nebo čtení hodnoty této „proměnné“ se zavolá příslušná metoda (tzv. getter nebo setter). Jde o velice šikovnou věc, díky ní máme přístup k proměnným plně pod kontrolou. Můžeme tak validovat vstupy nebo generovat výsledky až ve chvíli, kdy se property čte.
+
+Každá třída, která používá traitu `Nette\SmartObject`, umí property imitovat. Jak na to?
+
+- Přidej třídě anotaci ve tvaru `@property <type> $xyz`
+- Vytvořte getter s názvem `getXyz()` nebo `isXyz()`, setter s názvem `setXyz()`
+- Getter a setter musí být *public* nebo *protected* a oba jsou volitelné, mohou tedy existovat *read-only* nebo *write-only* property
+
+Property využijeme u třídy Circle, abychom zajistili, že do proměnné `$radius` se dostanou jen nezáporná čísla. Nahradíme `public $radius` za property:
+
+```php
+/**
+ * @property float $radius
+ * @property-read bool $visible
+ */
+class Circle
+{
+	use Nette\SmartObject;
+
+	private $radius = 0.0; // už není public!
+
+	// getter pro property $radius
+	protected function getRadius()
+	{
+		return $this->radius;
+	}
+
+	// setter pro property $radius
+	protected function setRadius($radius)
+	{
+		// hodnotu před uložením sanitizujeme
+		$this->radius = max(0.0, (float) $radius);
+	}
+
+	// getter pro property $visible
+	protected function isVisible()
+	{
+		return $this->radius > 0;
+	}
+}
+
+$circle = new Circle;
+$circle->radius = 10;  // ve skutečnosti volá setRadius(10)
+echo $circle->radius;  // volá getRadius()
+echo $circle->visible; // volá isVisible()
+```
+
+Properties jsou především "syntaktickým cukříkem"((syntactic sugar)), jehož smyslem je zpřehlednit kód a osladit tak programátorovi život. Pokud nechcete, nemusíte je používat.
+
+
+Události
+========
+
+*(Pro zkušenější programátory)*
+
+Vytvoříme si frontu funkcí, které se zavolají, když se změní poloměr kruhu. Změně poloměru říkejme událost `change` a jednotlivým funkcím handlery události:
+
+```php
+class Circle
+{
+	use Nette\SmartObject;
+
+	/** @var array */
+	public $onChange = [];
+
+	public function setRadius($radius)
+	{
+		// zavoláme callbacky v $onChange s parametry $this, $radius
+		$this->onChange($this, $radius);
+
+		$this->radius = max(0.0, (float) $radius);
+	}
+}
+
+$circle = new Circle;
+
+// přidám handler události
+$circle->onChange[] = function (Circle $circle, $newValue) {
+	echo 'došlo ke změně';
+};
+
+$circle->setRadius(10);
+```
+
+V kódu metody `setRadius` vidíte další syntaktický cukr - místo iterace nad polem `$onChange` a voláním jednotlivých callbacků stačí napsat stručné `onChange(...)` a uvést parametry, které se předají každému callbacku.
+
+SmartObject tedy vytvoří fiktivní metodu `onChange()` pojmenovanou stejně jako pole `$onChange`. Konvence ve tvaru `on` + slovo je podmínkou.
+
+
+Statické třídy
+==============
+
+Statické třídy, tedy třídy, které nejsou určené k vytváření instancí, můžete označit traitou `Nette\StaticClass`:
+
+```php
+class Strings
+{
+	use Nette\StaticClass;
+}
+```
+
+Při pokusu o vytvoření instance se vyhodí výjimka `LogicException` s informací, že uvedená třída je statická.
+
+
+{{composer: nette/utils}}

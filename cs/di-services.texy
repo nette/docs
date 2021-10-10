@@ -1,0 +1,344 @@
+DI: Služby
+**********
+
+.[perex]
+Konfigurace je místem, kam umísťujeme definice vlastních služeb. Slouží k tomu sekce `services`.
+
+Například takto může vypadat definice služby pojmenované `database`, což bude instance `PDO`:
+
+```neon
+services:
+	database: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
+```
+
+Pojďme se podívat na zápis podrobněji:
+
+```neon
+services:
+	# v jednom řádku
+	database: PDO(%dsn%, %user%, %password%)
+
+	# nebo ve dvou řádcích:
+	database:
+		factory: PDO(%dsn%, %user%, %password%)
+
+	# s názvy parametrů (na pořadí nezáleží)
+	database:
+		factory: PDO(dsn: %dsn%, username: %user%)
+
+	# nebo ve třech řádcích :-)
+	database:
+		factory: PDO
+		arguments: [%dsn%, %user%, %password%]
+```
+
+Což vygeneruje tovární metodu v DI kontejneru:
+
+```php
+function createServiceDatabase(): PDO
+{
+	$service = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', 'secret');
+	return $service;
+}
+```
+
+Kromě vytvoření instance třídy lze volat i metodu:
+
+```neon
+services:
+	database: Database::create(root, secret)
+```
+
+Vygenerovaný kód:
+
+```php
+function createServiceDatabase()
+{
+	$service = Database::create('root', 'secret');
+	return $service;
+}
+```
+
+V tomto případě je nutné, aby metoda `Database::create()` měla definovaný návratový typ.
+
+Službu získáme z DI kontejneru metodou `getService()`:
+
+```php
+$database = $container->getService('database');
+```
+
+
+Setup
+=====
+
+Nad vytvořenou službou můžeme volat metody nebo nastavovat hodnoty proměnným a statickým proměnným:
+
+```neon
+services:
+	database:
+		factory: PDO(%dsn%, %user%, %password%)
+		setup:
+			- setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION)
+			- $mode = 123
+			- '$items[]' = 456
+
+	myService:
+		factory: MyService
+		setup:
+			- MyService::$foo = 2
+```
+
+Vygeneruje:
+
+```php
+public function createServiceDatabase(): PDO
+{
+	$service = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', 'secret');
+	$service->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+	$service->mode = 123;
+	$service->items[] = 456;
+	return $service;
+}
+
+public function createServiceMyService(): MyService
+{
+	$service = new MyService;
+	MyService::$foo = 2;
+	return $service;
+}
+```
+
+Parametry metod mohou být kromě řetězců a čísel i pole, lze vytvářet i nové objekty nebo volat metody:
+
+```neon
+services:
+	analyser: My\Analyser(
+		FilesystemIterator(%appDir%)
+		[dryrun: true, verbose: false]
+		DateTime::createFromFormat('Y-m-d')
+	)
+```
+
+Vygeneruje:
+
+```php
+public function createServiceAnalyser(): My\Analyser
+{
+	return new My\Analyser(
+		new FilesystemIterator('...'),
+		['dryrun' => true, 'verbose' => false],
+		DateTime::createFromFormat('Y-m-d')
+	);
+}
+```
+
+
+Odkazování na služby
+====================
+
+Na jednotlivé služby se odkazujeme pomocí zavináče a názvu služby, takže například `@database`:
+
+```neon
+services:
+	database: PDO(%dsn%, %user%, %password%)
+	articles:
+		factory: Model\ArticleRepository(@database)
+		setup:
+			- setCacheStorage(@cache.storage)   # cache.storage je systémová služba
+```
+
+Vygeneruje:
+
+```php
+public function createServiceArticles(): Model\ArticleRepository
+{
+	$service = new Model\ArticleRepository($this->getService('database'));
+	$service->setCacheStorage($this->getService('cache.storage'));
+	return $service;
+}
+```
+
+I na anonymní služby lze odkazovat přes zavináč, jen místo názvu uvedeme jejich typ (třídu nebo rozhraní). Tohle ovšem obvykle není potřeba dělat díky [autowiringu|di-autowiring].
+
+```neon
+services:
+	articles:
+		factory: Model\ArticleRepository(@Nette\Database\Connection)  # nebo @\PDO
+```
+
+
+Anonymní služby
+===============
+
+Pojmenování služeb je vhodné hlavně ve chvíli, kdy na ně chceme odkazovat z jiných částí konfiguračního souboru. Pokud na službu není odkazováno názvem, není ji potřeba pojmenovávat. Pro anonymní služby použijte následující syntax:
+
+```neon
+services:
+	- PDO('sqlite::memory:')
+
+	-
+		factory: Model\ArticleRepository
+		setup:
+			- setCacheStorage
+```
+
+Službu získáme z DI kontejneru metodou `getByType()`:
+
+```php
+$database = $container->getByType(PDO::class);
+$repository = $container->getByType(Model\ArticleRepository::class);
+```
+
+
+Pokročilá syntaxe
+=================
+
+Formát NEON nám dává mimořádně silné výrazové prostředky, pomocí kterých můžete zapsat téměř cokoliv.
+
+Nad odkazovanou službou lze volat metody, nicméně pro jednoduchost místo `->` používáme `::`.
+
+```neon
+services:
+	routerFactory: App\Router\Factory
+	router: @routerFactory::create()
+```
+
+Vygeneruje:
+
+```php
+public function createServiceRouterFactory(): App\Router\Factory
+{
+	return new App\Router\Factory;
+}
+
+public function createServiceRouter(): Router
+{
+	return $this->getService('routerFactory')->create();
+}
+```
+
+Volání method lze zřetězit za sebe:
+
+```neon
+services:
+	foo: FooFactory::build()::get()
+```
+
+Vygeneruje:
+
+```php
+public function createServiceFoo()
+{
+	return FooFactory::build()->get();
+}
+```
+
+Volání metod lze použít i v parametrech. Krom metod je lze volat i globální funkce, před jejich názvem dáme čtyřtečku:
+
+```neon
+services:
+	routerFactory: App\Router\Factory( Foo::bar() )   # volání statické metody
+	setup:
+		- setIp( @http.request::getRemoteAddress() )  # http.request je systémová služba
+		- setMode( ::getenv(NETTE_MODE) )             # global function getenv
+```
+
+Vygeneruje:
+
+```php
+public function createServiceRouterFactory(): App\Router\Factory
+{
+	$service = new App\Router\Factory( Foo::bar() );
+	$service->setIp( $this->getService('http.request')->getRemoteAddress() );
+	$service->setMode( getenv('NETTE_MODE') );
+	return $service;
+}
+```
+
+Zápis ve tvaru `NázevTřídy([parametry, ...])`, který používáme obvykle v položce `factory` a který znamená vytvoření objektu, vlastně odpovídá zápisu v PHP jen s tím rozdílem, že vynecháváme operátor `new`. Tento zápis můžeme používat i kdekoliv jinde, třeba jako parametr:
+
+```neon
+services:
+	articles:
+		factory: Model\ArticleRepository( PDO(%dsn%, %user%, %password%) )
+		setup:
+			- setCacheStorage( Nette\Caching\Storages\DevNullStorage() )
+```
+
+Vygeneruje:
+
+```php
+public function createServiceArticles(): Model\ArticleRepository
+{
+	$service = new Model\ArticleRepository( new PDO('mysql:host=127.0.0.1;dbname=test', 'root', 'secret') );
+	$service->setCacheStorage( new Nette\Caching\Storages\DevNullStorage );
+	return $service;
+}
+```
+
+Dokonce nad vytvořeným objektem můžeme rovnou volat metody:
+
+```neon
+services:
+	router: App\Router\Factory()::create()
+	# pozor, neplést s App\Router\Factory::create()
+```
+
+Vygeneruje:
+
+```php
+public function createServiceRouter(): Router
+{
+	return (new App\Router\Factory())->create();
+}
+```
+
+
+Režim Inject
+============
+
+Pomocí příznaku `inject: true` se aktivuje předávání závislostí přes veřejné proměnné s anotací [inject |di-passing-dependencies#Anotace inject] a metody [inject*() |di-passing-dependencies#Předávání metodou inject*()].
+
+```neon
+services:
+	articles:
+		factory: App\Model\Articles
+		inject: true
+```
+
+V základním nastavení je `inject` aktivováno pouze pro presentery.
+
+
+Modifikace služeb
+=================
+
+V DI kontejneru je řada služeb, které přidaly vestavěné nebo [vaše rozšíření|#rozšíření]. Definice těchto služeb lze v konfiguraci pozměnit. Třeba u služby `application.application`, což je standardně objekt `Nette\Application\Application`, můžeme změnit třídu:
+
+```neon
+services:
+	application.application:
+		factory: MyApplication
+		alteration: true
+```
+
+Příznak `alteration` je informativní a říká, že jen modifikujeme existující službu.
+
+Můžeme také doplnit setup:
+
+```neon
+services:
+	application.application:
+		factory: MyApplication
+		alteration: true
+		setup:
+			- $onStartup = [@resource::init]
+```
+
+Službu přidanou rozšířením lze také z kontejneru odstranit:
+
+```neon
+services:
+	cache.journal: false
+```
+
+{{composer: nette/di}}

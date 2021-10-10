@@ -1,0 +1,345 @@
+DI: Services
+************
+
+.[perex]
+The configuration is a place where we add definitions of our own services in section `services`.
+
+For example, this is the definition of service named `database` which is `PDO` instance:
+
+```neon
+services:
+	database: PDO('mysql:host=127.0.0.1;dbname=test', root, password)
+```
+
+Let's look at the notation in more detail:
+
+```neon
+services:
+	# in a single line
+	database: PDO(%dsn%, %user%, %password%)
+
+	# or multi-lines
+	database:
+		factory: PDO(%dsn%, %user%, %password%)
+
+	# with parameter names (the order does not matter)
+	database:
+		factory: PDO(dsn: %dsn%, username: %user%)
+
+	# or more multi-lines :-)
+	database:
+		factory: PDO
+		arguments: [%dsn%, %user%, %password%]
+```
+
+It generates factory method in DI container:
+
+```php
+function createServiceDatabase(): PDO
+{
+	$service = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', 'secret');
+	return $service;
+}
+```
+
+In addition to creating a class instance, you can also call the method:
+
+```neon
+services:
+	database: Database::create(root, secret)
+```
+
+Result:
+
+```php
+function createServiceDatabase()
+{
+	$service = Database::create('root', 'secret');
+	return $service;
+}
+```
+
+In this case, the `Database::create()` method must have a defined return type.
+
+We obtain the service from the DI container using the `getService()`:
+
+```php
+$database = $container->getService('database');
+```
+
+
+Setup
+=====
+
+We can call service methods or set properties and static properties:
+
+```neon
+services:
+	database:
+		factory: PDO(%dsn%, %user%, %password%)
+		setup:
+			- setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION)
+			- $mode = 123
+			- '$items[]' = 456
+
+	myService:
+		factory: MyService
+		setup:
+			- MyService::$foo = 2
+```
+
+Result:
+
+```php
+public function createServiceDatabase(): PDO
+{
+	$service = new PDO('mysql:host=127.0.0.1;dbname=test', 'root', 'secret');
+	$service->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+	$service->mode = 123;
+	$service->items[] = 456;
+	return $service;
+}
+
+public function createServiceMyService(): MyService
+{
+	$service = new MyService;
+	MyService::$foo = 2;
+	return $service;
+}
+```
+
+In addition to strings and numbers, the method parameters can also be arrays, created objects or method calls:
+
+```neon
+services:
+	analyser: My\Analyser(
+		FilesystemIterator(%appDir%)
+		[dryrun: true, verbose: false]
+		DateTime::createFromFormat('Y-m-d')
+	)
+```
+
+Result:
+
+```php
+public function createServiceAnalyser(): My\Analyser
+{
+	return new My\Analyser(
+		new FilesystemIterator('...'),
+		['dryrun' => true, 'verbose' => false],
+		DateTime::createFromFormat('Y-m-d')
+	);
+}
+```
+
+
+Service Referencing
+===================
+
+We refer to the service using at-sign and the name of the service, ie. `@database`:
+
+```neon
+services:
+	database: PDO(%dsn%, %user%, %password%)
+	articles:
+		factory: Model\ArticleRepository(@database)
+		setup:
+			- setCacheStorage(@cache.storage)   # cache.storage is a system service
+```
+
+Result:
+
+```php
+public function createServiceArticles(): Model\ArticleRepository
+{
+	$service = new Model\ArticleRepository($this->getService('database'));
+	$service->setCacheStorage($this->getService('cache.storage'));
+	return $service;
+}
+```
+
+Even anonymous services can be referred to via `@`, instead of their name we use their type (class or interface). However, this does not usually have to be done thanks to [autowiring|di-autowiring].
+
+```neon
+services:
+	articles:
+		factory: Model\ArticleRepository(@Nette\Database\Connection)  # or @\PDO
+```
+
+
+Anonymous Services
+==================
+
+Named services are particularly useful when we want to refer to them from other parts of the configuration file. If the service is no longer referenced by name, it does not need to be named. For anonymous services, use the following syntax:
+
+```neon
+services:
+	- PDO('sqlite::memory:')
+
+	-
+		factory: Model\ArticleRepository
+		setup:
+			- setCacheStorage
+```
+
+We get the service from the DI container using the `getByType()`:
+
+```php
+$database = $container->getByType(PDO::class);
+$repository = $container->getByType(Model\ArticleRepository::class);
+```
+
+
+Advanced syntax
+===============
+
+The NEON format gives us extraordinary powerful syntax expression, with which you can write almost everything.
+
+We can call referenced service's methods, but for simplicity we write `::` instead of `->`:
+
+```neon
+services:
+	routerFactory: App\Router\Factory
+	router: @routerFactory::create()
+```
+
+Result:
+
+```php
+public function createServiceRouterFactory(): App\Router\Factory
+{
+	return new App\Router\Factory;
+}
+
+public function createServiceRouter(): Router
+{
+	return $this->getService('routerFactory')->create();
+}
+```
+
+Calling a method can be concatenated:
+
+```neon
+services:
+	foo: FooFactory::build()::get()
+```
+
+Generates:
+
+```php
+public function createServiceFoo()
+{
+	return FooFactory::build()->get();
+}
+```
+
+Method calls can also be used in parameters. In addition, to the methods, we can also call global functions, before its name we put `::`:
+
+```neon
+services:
+	routerFactory: App\Router\Factory( Foo::bar() )   # static method calling
+	setup:
+		- setIp( @http.request::getRemoteAddress() )  # http.request is system service
+		- setMode( ::getenv(NETTE_MODE) )             # global function getenv
+```
+
+Generates:
+
+```php
+public function createServiceRouterFactory(): App\Router\Factory
+{
+	$service = new App\Router\Factory( Foo::bar() );
+	$service->setIp( $this->getService('http.request')->getRemoteAddress() );
+	$service->setMode( getenv('NETTE_MODE') );
+	return $service;
+}
+```
+
+The form `ClassName([parameters, ...])`, which we usually use in the `factory` entry and which means creating an object, actually corresponds to the PHP syntax, except that we omit the `new` operator. We can also use this syntax anywhere else, for example as a parameter:
+
+```neon
+services:
+	articles:
+		factory: Model\ArticleRepository( PDO(%dsn%, %user%, %password%) )
+		setup:
+			- setCacheStorage( Nette\Caching\Storages\DevNullStorage() )
+```
+
+Generates:
+
+```php
+public function createServiceArticles(): Model\ArticleRepository
+{
+	$service = new Model\ArticleRepository( new PDO('mysql:host=127.0.0.1;dbname=test', 'root', 'secret') );
+	$service->setCacheStorage( new Nette\Caching\Storages\DevNullStorage );
+	return $service;
+}
+```
+
+Even we can call the created object's methods:
+
+```neon
+services:
+	router: App\Router\Factory()::create()
+	# don't confuse with App\Router\Factory::create()
+```
+
+Generates:
+
+```php
+public function createServiceRouter(): Router
+{
+	return (new App\Router\Factory())->create();
+}
+```
+
+
+Inject Mode
+===========
+
+The option `inject: true` enables passing dependencies via variables with [inject |di-passing-dependencies#inject-annotations] annotation and [inject*() |di-passing-dependencies#passing-by-an-inject-method] methods.
+
+```neon
+services:
+	articles:
+		factory: App\Model\Articles
+		inject: true
+```
+
+By default is `inject` attribute enabled only for presenters.
+
+
+Service Modification
+====================
+
+In addition, there are a number of services in the DI container that have added by built-in or [your extensions |#Extensions]. The definitions of these services can be changed in the configuration. For example, we can change the class of service `application.application`, which is by default `Nette\Application\Application`:
+
+```neon
+services:
+	application.application:
+		factory: MyApplication
+		alteration: true
+```
+
+The `alteration` flag is informative and says we only modify an existing service.
+
+We can also add setup:
+
+```neon
+services:
+	application.application:
+		factory: MyApplication
+		alteration: true
+		setup:
+			- $onStartup = [@resource::init]
+```
+
+You can also remove a service added by an extension from the container:
+
+```neon
+services:
+	cache.journal: false
+```
+
+
+{{composer: nette/di}}

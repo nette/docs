@@ -1,5 +1,5 @@
-Form Validation
-***************
+Forms Validation
+****************
 
 
 Required Controls
@@ -140,6 +140,8 @@ $form->addText(/* ... */)
 		->addRule(/* ... */);
 ```
 
+In Nette, it is very easy to react to the fulfillment or not of a condition on the JavaScript side using the `toggle()` method, see [#Dynamic JavaScript].
+
 
 References Between Controls
 ===========================
@@ -153,27 +155,103 @@ $form->addText('text')
 ```
 
 
-Custom Rules
-============
+Custom Rules and Conditions
+===========================
 
-We can create our own rules or conditions. As a rule, we pass any PHP callback.
+Sometimes we get into a situation where the built-in validation rules in Nette are not enough and we need to validate the data from the user in our own way. In Nette this is very easy!
+
+You can pass any callback as the first parameter to the `addRule()` or `addCondition()` methods. The callback accepts the element itself as the first parameter and returns a boolean value indicating whether the validation was successful. When adding a rule using `addRule()`, additional arguments can be passed, and these are then passed as the second parameter.
+
+The custom set of validators can thus be created as a class with static methods:
 
 ```php
 class MyValidators
 {
-	// tests whether the value is divisible by an argument
-	public static function divisibilityValidator(BaseControl $input, $arg): bool
+	// tests whether the value is divisible by the argument
+	public static function validateDivisibility(BaseControl $input, $arg): bool
 	{
 		return $input->getValue() % $arg === 0;
 	}
+
+	public static function validateEmailDomain(BaseControl $input, $domain)
+	{
+		// additional validators
+	}
+}
+```
+
+The usage is then very simple:
+
+```php
+$form->addInteger('num')
+	->addRule(
+		[MyValidators::class, 'validateDivisibility'],
+		'The value must be a multiple of %d',
+		8
+	);
+```
+
+Custom validation rules can also be added to JavaScript. The only requirement is that the rule must be a static method. Its name for the JavaScript validator is created by concatenating the class name without backslashes `\`, the underscore `_`, and the method name. For example, write `App\MyValidators::validateDivisibility` as `AppMyValidators_validateDivisibility` and add it to the `Nette.validators` object:
+
+```js
+Nette.validators['AppMyValidators_validateDivisibility'] = (elem, args, val) => {
+	return val % args === 0;
+};
+```
+
+
+Event onValidate
+================
+
+After the form is submitted, validation is performed by checking the individual rules added by `addRule()` and then calling [event|glossary#Events] `onValidate`. Its handler can be used for additional validation, typically to verify the correct combination of values in multiple form elements.
+
+If an error is detected, it is passed to the form using the `addError()` method. This can be called either on a specific element or directly on the form.
+
+```php
+protected function createComponentSignInForm(): Form
+{
+	$form = new Form;
+	// ...
+	$form->onValidate[] = [$this, 'validateSignInForm'];
+	return $form;
 }
 
-$input->addRule(
-	'MyValidators::divisibilityValidator',
-	'Number must be multiple of %d',
-	8
-);
+public function validateSignInForm(Form $form, \stdClass $data): void
+{
+	if ($data->foo > 1 && $data->bar > 5) {
+		$form->addError('This combination is not possible.');
+	}
+}
 ```
+
+
+Processing Errors
+=================
+
+In many cases, we discover an error when we are processing a valid form, e.g. when we write a new entry to the database and encounter a duplicate key. In this case, we pass the error back to the form using the `addError()` method. This can be called either on a specific item or directly on the form:
+
+```php
+try {
+	$data = $form->getValues();
+	$this->user->login($data->username, $data->password);
+	$this->redirect('Homepage:');
+
+} catch (Nette\Security\AuthenticationException $e) {
+	if ($e->getCode() === Nette\Security\Authenticator::INVALID_CREDENTIAL) {
+		$form->addError('Invalid password.');
+	}
+}
+```
+
+If possible, we recommend adding the error directly to the form element, as it will appear next to it when using the default renderer.
+
+```php
+$form['date']->addError('Sorry, this date is already taken.');
+```
+
+You can call `addError()` repeatedly to pass multiple error messages to a form or element. You get them with `getErrors()`.
+
+Note that `$form->getErrors()` returns a summary of all error messages, even those passed directly to individual elements, not just directly to the form. Error messages passed only to the form are retrieved via `$form->getOwnErrors()`.
 
 
 Modifying Input Values
@@ -192,8 +270,8 @@ $form->addText('zip', 'Postcode:')
 The filter is included between the validation rules and conditions and therefore depends on the order of the methods, ie the filter and the rule are called in the same order as is the order of the `addFilter()` and `addRule()` methods.
 
 
-JavaScript
-==========
+JavaScript Validation
+=====================
 
 The language of validation rules and conditions is powerful. Even though all constructions work both server-side and client-side, in JavaScript. Rules are transferred in HTML attributes `data-nette-rules` as JSON.
 The validation itself is handled by another script, which hooks all form's `submit` events, iterates over all inputs and runs respective validations.
@@ -233,20 +311,30 @@ netteForms.initOnLoad();
 ```
 
 
-Custom Rules in JS
-------------------
+Dynamic JavaScript
+==================
 
-Custom validation rules can also be added to JavaScript. The condition is that the callback of the custom rule on the PHP side is a global function or a static method. Then we add its JavaScript equivalent to the JS object `Nette.validators`:
+Do you only want to show the address fields only if the user chooses to send the goods by post? No problem. The key is a pair of methods `addCondition()` & `toggle()`:
 
-```html
-<script>
-Nette.validators.divisibilityValidator = function(elem, args, val) {
-	return val % args === 0;
-};
-</script>
+```php
+$form->addCheckbox('send_it')
+	->addCondition($form::EQUAL, true)
+		->toggle('#address-container');
 ```
 
-If PHP validation callback is a static method, we derive the name for JavaScript by removing all backslashes `\` and by replacing the double colon by single underscore `_`, e.g. `App\MyValidator::divisibilityValidator` is converted to `AppMyValidator_divisibilityValidator`.
+This code says that when the condition is met, that is, when the checkbox is checked, the HTML element `#address-container` will be visible. And vice versa. So, we place the form elements with the recipient's address in a container with that ID, and when the checkbox is clicked, they are hidden or shown. This is handled by the `netteForms.js` script.
+
+Any selector can be passed as an argument to the `toggle()` method. For historical reasons, an alphanumeric string with no other special characters is treated as an element ID, the same as if it were preceded by the `#` character. The second optional parameter allows us to reverse the behavior, i.e. if we used `toggle('#address-container', false)`, the element would be displayed only if the checkbox was unchecked.
+
+The default JavaScript implementation changes the `hidden` property for elements. However, we can easily change the behavior, for example by adding an animation. Just override the `Nette.toggle` method in JavaScript with a custom solution:
+
+``js
+Nette.toggle = (selector, visible, srcElement, event) => {
+	document.querySelectorAll(selector).forEach((el) => {
+		// hide or show 'el' according to the value of 'visible'
+	});
+};
+```
 
 
 Disabling Validation
@@ -276,63 +364,6 @@ $form->addSubmit('send5')
 ```
 
 [#Event onValidate] on the form is always invoked and is not affected by the `setValidationScope`. `onValidate` event on the container is invoked only when this container is specified for partial validation.
-
-
-Postprocessing Errors
-=====================
-
-We often find that the user's input is wrong even though each of the form's controls is technically valid. For example, stumbling upon a duplicate key when inserting a new database row. Or invalid login credentials. In that case, we can add the error manually with `addError()` method. It can be called either on a specific input or on a form itself:
-
-```php
-try {
-	$data = $form->getValues();
-	$this->user->login($data->username, $data->password);
-	$this->redirect('Homepage:');
-
-} catch (Nette\Security\AuthenticationException $e) {
-	if ($e->getCode() === Nette\Security\Authenticator::INVALID_CREDENTIAL) {
-		$form->addError('Invalid password.');
-	}
-}
-```
-
-It's recommended to link the error directly to a form element because then the error will be displayed next to it when using default renderer.
-
-```php
-$form['date']->addError("We apologize but this date has been already taken.");
-```
-
-You can call `addError()` repeatedly to add multiple error messages to form or field. You can get them with `getErrors()`.
-
-Note that `$form->getErrors()` returns a summary of all error messages, even those that were added directly to individual controls, not just the form. You can get error messages passed directly to the form via `$form->getOwnErrors()`.
-
-
-Event onValidate
-================
-
-Validation raises the `onValidate` [event|glossary#Events], the handler of which can be used for additional validation, typically to verify the correct combination of values in multiple form controls:
-
-```php
-protected function createComponentSignInForm(): Form
-{
-	$form = new Form;
-	// ...
-	$form->onValidate[] = [$this, 'validateSignInForm'];
-	return $form;
-}
-
-public function validateSignInForm(Form $form): void
-{
-	$data = $form->getValues();
-
-	if (/* ... */) { // validation logic
-		$form->addError('Password does not match.');
-	}
-}
-```
-
-You can bind multiple functions to the event. The function is considered successful if it doesn't add any error using `$form->addError()`.
-
 
 
 {{composer: nette/forms}}

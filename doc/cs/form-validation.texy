@@ -140,6 +140,8 @@ $form->addText(/* ... */)
 		->addRule(/* ... */);
 ```
 
+V Nette lze velmi snadno reagovat na splnění či nesplnění podmíny i na straně JavaScriptu pomocí metody `toggle()`, viz [#dynamický JavaScript].
+
 
 Reference mezi prvky
 ====================
@@ -156,24 +158,101 @@ $form->addText('text')
 Vlastní pravidla a podmínky
 ===========================
 
-Můžeme vytvářet vlastní pravidla nebo podmínky. Jako pravidlo předáme libovolný PHP callback.
+Občas se dostaneme do situace, kdy nám vestavěná validační pravidla v Nette nestačí a potřebujeme data od uživatele validovat po svém. V Nette je to velmi jednoduché!
+
+Metodám `addRule()` či `addCondition()` lze první parametr předat libovolný callback. Ten přijímá jako první parametr samotný prvek a vrací boolean hodnotu určující, zda validace proběhla v pořádku. Při přidávání pravidla pomocí `addRule()` je možné zadat i další argumenty, ty jsou pak předány jako druhý parametr.
+
+Vlastní sadu validátorů tak můžeme vytvořit jako třídu se statickými metodami:
 
 ```php
 class MyValidators
 {
 	// testuje, zda je hodnota dělitelná argumentem
-	public static function divisibilityValidator(BaseControl $input, $arg): bool
+	public static function validateDivisibility(BaseControl $input, $arg): bool
 	{
 		return $input->getValue() % $arg === 0;
 	}
+
+	public static function validateEmailDomain(BaseControl $input, $domain)
+	{
+		// další validátory
+	}
+}
+```
+
+Použití je pak velmi jednoduché:
+
+```php
+$form->addInteger('num')
+	->addRule(
+		[MyValidators::class, 'validateDivisibility'],
+		'Hodnota musí být násobkem čísla %d',
+		8
+	);
+```
+
+Vlastní validační pravidla lze přidávat i do JavaScriptu. Podmínkou je, aby pravidlo byla statická metoda. Její název pro JavaScriptový validátor vznikne spojením názvu třídy bez zpětných lomítek `\`, podtržítka `_` a názvu metody. Např. `App\MyValidators::validateDivisibility` zapíšeme jako `AppMyValidators_validateDivisibility` a přidáme do objektu `Nette.validators`:
+
+```js
+Nette.validators['AppMyValidators_validateDivisibility'] = (elem, args, val) => {
+	return val % args === 0;
+};
+```
+
+
+Událost onValidate
+==================
+
+Po odeslání formuláře se provádí validace, kdy se zkontrolují jednotlivá pravidla přidaná pomocí `addRule()` a následně se vyvolá [událost|glossary#Události] `onValidate`. Její handler lze využít k doplňkové validaci, typicky ověření správné kombinace hodnot ve více prvcích formuláře.
+
+Pokud se odhalí chyba, předáme ji do formuláře metodou `addError()`. Tu lze volat buď na konkrétním prvku, nebo přímo na formuláři.
+
+```php
+protected function createComponentSignInForm(): Form
+{
+	$form = new Form;
+	// ...
+	$form->onValidate[] = [$this, 'validateSignInForm'];
+	return $form;
 }
 
-$input->addRule(
-	'MyValidators::divisibilityValidator',
-	'Hodnota musí být násobkem čísla %d',
-	8
-);
+public function validateSignInForm(Form $form, \stdClass $data): void
+{
+	if ($data->foo > 1 && $data->bar > 5) {
+		$form->addError('Tato kombinace není možná.');
+	}
+}
 ```
+
+
+Chyby při zpracování
+====================
+
+V mnoha případech se o chybě dozvíme až ve chvíli, kdy zpracováváme platný formulář, například zapisujeme novou položku do databáze a narazíme na duplicitu klíčů. V takovém případě chybu opět předáme do formuláře metodou `addError()`. Tu lze volat buď na konkrétním prvku, nebo přímo na formuláři:
+
+```php
+try {
+	$data = $form->getValues();
+	$this->user->login($data->username, $data->password);
+	$this->redirect('Homepage:');
+
+} catch (Nette\Security\AuthenticationException $e) {
+	if ($e->getCode() === Nette\Security\Authenticator::INVALID_CREDENTIAL) {
+		$form->addError('Neplatné heslo.');
+	}
+	// ...
+}
+```
+
+Pokud je to možné, doporučujeme připojit chybu přímo k prvku formuláře, protože se zobrazí vedle něj při použití výchozího rendereru.
+
+```php
+$form['date']->addError('Omlouváme se, ale toto datum již je zabrané.');
+```
+
+Můžete `addError()` volat opakovaně a tak předat formuláři nebo prvku více chybových zpráv. Získáte je pomocí `getErrors()`.
+
+Pozor, `$form->getErrors()` vrací sumář všech chybových zpráv, i těch, co byly předány přímo jednotlivým prvkům, nejen přímo formuláři. Chybové zprávy předané pouze formuláři získáte přes `$form->getOwnErrors()`.
 
 
 Úprava vstupu
@@ -192,8 +271,8 @@ $form->addText('zip', 'PSČ:')
 Filtr se začlení mezi validační pravidla a podmínky a tedy záleží na pořadí metod, tj. filtr a pravidlo se volají v takovém pořadí, jako je pořadí metod `addFilter()` a `addRule()`.
 
 
-JavaScript
-==========
+JavaScriptová validace
+======================
 
 Jazyk pro formulování podmínek a pravidel je velice silný. Všechny konstrukce přitom fungují jak na straně serveru, tak i na straně JavaScriptu. Přenáší se v HTML atributech `data-nette-rules` jako JSON.
 Samotnou validaci pak provádí skript, který odchytí událost formuláře `submit`, projde jednotlivé prvky a vykoná příslušnou validaci.
@@ -233,20 +312,30 @@ netteForms.initOnLoad();
 ```
 
 
-Vlastní pravidla v JS
----------------------
+Dynamický JavaScript
+====================
 
-Vlastní validační pravidla lze přidávat i do JavaScriptu. Podmínkou je, aby callback vlastního pravidla na straně PHP byla globální funkce nebo statická metoda. Potom její JavaScriptovou obdobu přidáme do objektu `Nette.validators`:
+Chcete zobrazit políčka pro zadání adresy pouze pokud uživatel zvolí zboží zaslat poštou? Žádný problém. Klíčem je dvojice metod `addCondition()` & `toggle()`:
 
-```html
-<script>
-Nette.validators.divisibilityValidator = function(elem, args, val) {
-	return val % args === 0;
-};
-</script>
+```php
+$form->addCheckbox('send_it')
+	->addCondition($form::EQUAL, true)
+		->toggle('#address-container');
 ```
 
-Pokud je validační callback v PHP statická metoda, tak název pro JavaScriptový validátor vznikne odstraněním zpětných lomítek `\` a nahrazením čtyřtečky za podtržítko `_`, např. `App\MyValidator::divisibilityValidator` zapíšeme jako `AppMyValidator_divisibilityValidator`.
+Tento kód říká, že když je podmínka splněná, tedy když je zaškrtnutý checkbox, bude viditelný HTML element `#address-container`. A obráceně. Prvky formuláře s adresou příjemce tak umístíme do kontejneru s tímto ID a při kliknutí na checkbox se skryjí nebo zobrazí. To zajišťuje skript `netteForms.js`.
+
+Jako argument metody `toggle()` je možné předat libovolný selektor. Z historických důvodů se alfanumerický řetězec bez dalších speciálních znaků chápe jako ID prvku, tedy stejně, jako by mu předcházel znak `#`. Druhý nepovinný parametr umožňuje obrátit chování, tj. pokud bychom použili `toggle('#address-container', false)`, element by se naopak zobrazil pouze tehdy, pokud by checkbox zaškrtnutý nebyl.
+
+Výchozí implementace v JavaScriptu mění elementům property `hidden`. Chování však můžeme snadno změnit, například přidat animaci. Stačí v JavaScriptu přepsat metodu `Nette.toggle` vlastním řešením:
+
+```js
+Nette.toggle = (selector, visible, srcElement, event) => {
+	document.querySelectorAll(selector).forEach((el) => {
+		// skryjeme nebo zobrazime 'el' dle hodnoty 'visible'
+	});
+};
+```
 
 
 Vypnutí validace
@@ -276,63 +365,6 @@ $form->addSubmit('send5')
 ```
 
 `setValidationScope` neovlivní [#událost onValidate] u formuláře, která bude zavolána vždy. Událost `onValidate` u kontejneru bude vyvolána pouze pokud je tento kontejner označen pro částečnou validaci.
-
-
-Chyby při zpracování
-====================
-
-V mnoha případech se o chybě dozvíme až ve chvíli, kdy zpracováváme platný formulář, například zapisujeme novou položku do databáze a narazíme na duplicitu klíčů. V takovém případě chybu zpětně předáme do formuláře metodou `addError()`. Tu lze volat buď na konkrétním prvku, nebo přímo na formuláři:
-
-```php
-try {
-	$data = $form->getValues();
-	$this->user->login($data->username, $data->password);
-	$this->redirect('Homepage:');
-
-} catch (Nette\Security\AuthenticationException $e) {
-	if ($e->getCode() === Nette\Security\Authenticator::INVALID_CREDENTIAL) {
-		$form->addError('Neplatné heslo.');
-	}
-	// ...
-}
-```
-
-Doporučuje se připojit chybu přímo k prvku formuláře, protože se zobrazí vedle něj při použití výchozího rendereru.
-
-```php
-$form['date']->addError('Omlouváme se, ale toto datum již je zabrané.');
-```
-
-Můžete `addError()` volat opakovaně a tak předat formuláři nebo prvku více chybových zpráv. Získáte je pomocí `getErrors()`.
-
-Pozor, `$form->getErrors()` vrací sumář všech chybových zpráv, i těch, co byly předány přímo jednotlivým prvkům, nejen přímo formuláři. Chybové zprávy předané pouze formuláři získáte přes `$form->getOwnErrors()`.
-
-
-Událost onValidate
-==================
-
-Při validování se vyvolá [událost|glossary#Události] `onValidate`, jejíž handler lze využít k doplňkové validaci, typicky ověření správné kombinace hodnot ve více prvcích formuláře:
-
-```php
-protected function createComponentSignInForm(): Form
-{
-	$form = new Form;
-	// ...
-	$form->onValidate[] = [$this, 'validateSignInForm'];
-	return $form;
-}
-
-public function validateSignInForm(Form $form): void
-{
-	$data = $form->getValues();
-
-	if (/* ... */) { // validační podmínka
-		$form->addError('Tato kombinace není možná.');
-	}
-}
-```
-
-Na událost `onValidate` můžete registrovat libovolný počet handlerů.
 
 
 {{composer: nette/forms}}

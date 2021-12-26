@@ -1,0 +1,229 @@
+Přihlašování uživatelů (Autentizace)
+************************************
+
+<div class=perex>
+
+Pomalu žádná webová aplikace se neobejde bez mechanismu přihlašování uživatelů a ověřování uživatelských oprávnění. V této kapitole si povíme o:
+
+- přihlašování a odhlašování uživatelů
+- vlastních autentikátorech
+
+</div>
+
+V příkladech budeme používat objekt třídy [api:Nette\Security\User], který představuje aktuálního uživatele a ke kterému se dostanete tak, že si jej necháte předat pomocí [dependency injection |di:passing-dependencies]. V presenterech stačí jen zavolat `$user = $this->getUser()`.
+
+
+Autentizace
+===========
+
+Autentizací se rozumí **přihlašování uživatelů**, tedy proces, při kterém se ověřuje, zda je uživatel opravdu tím, za koho se vydává. Obvykle se prokazuje uživatelským jménem a heslem. Ověření provede tzv. [#autentikátor]. Pokud přihlášení selže, vyhodí se `Nette\Security\AuthenticationException`.
+
+```php
+try {
+	$user->login($username, $password);
+} catch (Nette\Security\AuthenticationException $e) {
+	$this->flashMessage('Uživatelské jméno nebo heslo je nesprávné');
+}
+```
+
+Ohlášení uživatele:
+
+```php
+$user->logout();
+```
+
+A zjištění, že je přihlášen:
+
+```php
+echo $user->isLoggedIn() ? 'ano' : 'ne';
+```
+
+Velmi jednoduché, viďte? A všechny bezpečnostní aspekty řeší Nette za vás.
+
+Ještě lze nastavit časový interval, po jehož uplynutí dojde k odhlášení uživatele (jinak se odhlásí s [expirací session|nette:configuring#session]). K tomu slouží metoda `setExpiration()`, která se volá před `login()`. Jako parametr uveďte řetězec s relativním časem:
+
+Kromě odhlášení metodu `logout()` lze uživatele odhlásit po uplynutí časového intervalu nebo zavření prohlížeče. K nastavení slouží metoda `setExpiration()`, kterou voláme při přihlašování. Jako parametr lze uvést relativní čas v sekundách, UNIX timestamp nebo textový zápis.
+
+```php
+// přihlášení vyprší po 30 minutách neaktivity
+$user->setExpiration('30 minutes');
+
+// zrušení expirace
+$user->setExpiration(0);
+```
+
+Expirace musí být nastavena na stejnou nebo nižší hodnotu, než jakou má expirace session.
+
+Důvod odhlášení prozradí metoda `$user->getLogoutReason()`, která vrací buď konstantu `Nette\Security\IUserStorage::INACTIVITY` (vypršel časový limit) nebo `IUserStorage::MANUAL` (odhlášen metodou `logout()`).
+
+V presenterech můžete ověřit přihlášení v metodě `startup()`:
+
+```php
+protected function startup()
+{
+	parent::startup();
+	if (!$this->getUser()->isLoggedIn()) {
+		$this->redirect('Sign:in');
+	}
+}
+```
+
+
+Autentikátor
+============
+
+Jde o objekt, který ověřuje přihlašovací údaje, tedy zpravidla jméno a heslo. Triviální podobou je třída [api:Nette\Security\SimpleAuthenticator], kterou můžeme nadefinovat v [konfiguraci|nette:configuring#Přístupová oprávnění]:
+
+```neon
+security:
+	users:
+		# jméno: heslo
+		frantisek: tajneheslo
+		katka: jestetajnejsiheslo
+```
+
+Toto řešení je vhodné spíš pro testovací účely. Ukážeme si, jak vytvořit autentikátor, který bude ověřovat přihlašovací údaje oproti databázové tabulce.
+
+Autentikátor je objekt implementující rozhraní [api:Nette\Security\IAuthenticator] s metodou `authenticate()`. Jejím úkolem je buď vrátit tzv. [identitu |#identita] nebo vyhodit výjimku `Nette\Security\AuthenticationException`. Bylo by možné u ní ještě uvést chybový kód k jemnějšímu rozlišení vzniklé situace: `IAuthenticator::IDENTITY_NOT_FOUND` a `IAuthenticator::INVALID_CREDENTIAL`.
+
+```php
+use Nette;
+
+class MyAuthenticator implements Nette\Security\IAuthenticator
+{
+	private $database;
+
+	public function __construct(Nette\Database\Context $database)
+	{
+		$this->database = $database;
+	}
+
+	/** @return Nette\Security\IIdentity */
+	public function authenticate(array $credentials)
+	{
+		list($username, $password) = $credentials;
+		$row = $this->database->table('users')
+			->where('username', $username)
+			->fetch();
+
+		if (!$row) {
+			throw new Nette\Security\AuthenticationException('User not found.');
+		}
+
+		if (!Nette\Security\Passwords::verify($password, $row->password)) {
+			throw new Nette\Security\AuthenticationException('Invalid password.');
+		}
+
+		return new Nette\Security\Identity(
+			$row->id,
+			$row->role, // nebo pole více rolí
+			['name' => $row->username]
+		);
+	}
+}
+```
+
+Třída MyAuthenticator komunikuje s databází prostřednictvím [Nette Database Explorer|database:explorer] a pracuje s tabulkou `users`, kde je v sloupci `username` přihlašovací jméno uživatele a ve sloupci `password` [otisk hesla|passwords]. Po ověření jména a hesla vrací identitu, která nese ID uživatele, jeho roli (sloupec `role` v tabulce), o které si více řekneme [později |#role], a pole s dalšími daty (v našem případě uživatelské jméno).
+
+Autentikátor ještě přidáme do konfigurace [jako službu|di:services] DI kontejneru:
+
+```neon
+services:
+	- MyAuthenticator
+```
+
+
+Události $onLoggedIn, $onLoggedOut
+----------------------------------
+
+Objekt `Nette\Security\User` má [události|nette:glossary#Události] `$onLoggedIn` a `$onLoggedOut`, můžete tedy přidat callbacky, které se vyvolají po úspěšném přihlášení resp. po odhlášení uživatele.
+
+
+```php
+$user->onLoggedIn[] = function () {
+	// uživatel byl právě přihlášen
+};
+```
+
+
+Identita
+========
+
+Identita představuje soubor informací o uživateli, který vrací autentikátor a který se následně uchovává v session a získáváme jej pomocí `$user->getIdentity()`. Můžeme tedy získat id, role a další uživatelská data, tak jak jsme si je předali v autentikátoru:
+
+```php
+$user->getIdentity()->getId();
+// funguje i zkratka $user->getId();
+
+$user->getIdentity()->getRoles();
+
+// uživatelská data jsou dostupná jako properties
+// jméno, které jsme si předali v MyAuthenticator
+$user->getIdentity()->name;
+```
+
+Co je důležité, tak že **při odhlášení se identita nesmaže** a je nadále k dispozici. Takže ačkoliv má uživatel identitu, nemusí být přihlášený. Pokud bychom chtěli identitu explicitně smazat, odhlásíme uživatele voláním `$user->logout(true)`.
+
+Díky tomu můžete nadále předpokládat, který uživatel je u počítače a například mu v e-shopu zobrazovat personalizované nabídky, nicméně zobrazit mu jeho osobní údaje můžete až po přihlášení.
+
+Identita je objekt implementující rozhraní [api:Nette\Security\IIdentity], výchozí implementací je [api:Nette\Security\Identity]. A jak bylo zmíněno, udržuje se v session, takže pokud tedy například změníme roli některého z přihlášených uživatelů, zůstanou stará data v jeho identitě až do jeho opětovného přihlášení.
+
+
+Více nezávislých přihlášení
+===========================
+
+Souběžně je možné v rámci jednoho webu a jedné session mít několik nezávislých přihlašujících se uživatelů. Pokud například chceme mít na webu oddělenou autentizaci pro administraci a veřejnou část, stačí každé z nich nastavit vlastní název:
+
+```php
+$user->getStorage()->setNamespace('backend');
+```
+
+Je důležité pamatovat na to, abychom jmenný prostor nastavili vždy na všech místech patřících do dané části. Pakliže používáme presentery, nastavíme jmenný prostor ve společném předkovi pro danou část - obvykle BasePresenter. Učiníme tak rozšířením metody [checkRequirements() |api:Nette\Application\UI\Presenter::checkRequirements()]:
+
+```php
+public function checkRequirements($element)
+{
+	$this->getUser()->getStorage()->setNamespace('backend');
+	parent::checkRequirements($element);
+}
+```
+
+
+Více autentikátorů
+------------------
+
+Rozdělení aplikace na části s nezávislým přihlašováním většinou vyžaduje také různé autentikátory. Jakmile bychom však v konfiguraci služeb zaregistrovali dvě třídy implementující IAuthenticator, Nette by nevědělo, který z nich automaticky přiřadit objektu `Nette\Security\User`, a zobrazilo by chybu. Proto musíme pro autentikátory autowiring omezit tak, aby fungoval, jen když si někdo vyžádá konkrétní třídu, např. FrontAuthenticator, čehož docílíme volbou `autowired: self`:
+
+```neon
+services:
+	-
+		factory: FrontAuthenticator
+		autowired: self
+```
+
+```php
+class SignPresenter extends Nette\Application\UI\Presenter
+{
+	/** @var FrontAuthenticator */
+	private $authenticator;
+
+	public function __construct(FrontAuthenticator $authenticator)
+	{
+		$this->authenticator = $authenticator;
+	}
+}
+```
+
+Autentikátor objektu User nastavíme před voláním metody [login() |api:Nette\Security\User::login()], takže obvykle v kódu formuláře, který ho přihlašuje:
+
+```php
+$form->onSuccess[] = function (Form $form, \stdClass $data) {
+	$user = $this->getUser();
+	$user->setAuthenticator($this->authenticator);
+	$user->login($data->username, $data->password);
+	// ...
+};
+```
+
+{{composer: nette/security}}
+{{leftbar: nette:@menu-topics}}

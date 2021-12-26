@@ -1,0 +1,224 @@
+Authenticating Users
+********************
+
+<div class=perex>
+
+Little to none web applications need no mechanism for user login or checking user privileges. In this chapter, we'll talk about:
+
+- user login and logout
+- custom authenticators and authorizators
+
+</div>
+
+In the examples, we will use an object of class [api:Nette\Security\User], which represents the current user and which you get by passing it using [dependency injection |di:passing-dependencies]. In presenters simply call `$user = $this->getUser()`.
+
+Authentication means **user login**, ie. the process during which a user's identity is verified. The user usually identifies himself using username and password. Verification is performed by the so-called [#authenticator]. If the login fails, it throws `Nette\Security\AuthenticationException`.
+
+```php
+try {
+	$user->login($username, $password);
+} catch (Nette\Security\AuthenticationException $e) {
+	$this->flashMessage('The username or password you entered is incorrect.');
+}
+```
+
+Logging him out:
+
+```php
+$user->logout();
+```
+
+And checking if user is logged in:
+
+```php
+echo $user->isLoggedIn() ? 'yes' : 'no';
+```
+
+Simple, right? And all security aspects are handled by Nette for you.
+
+You can also set the time interval after which the user logs off (otherwise he logs off with [session expiration |nette:configuring#session]). This is done by the method `setExpiration()`, which is called before `login()`. Specify a string with relative time as a parameter:
+
+Besides logging the user out with the `logout()` method, it can be done automatically based on a specified time interval or closing the browser window. For this configuration, we have to call `setExpiration()` during the login process. As an argument, it takes a relative time in seconds, UNIX timestamp, or textual representation of time.
+```php
+// login expires after 30 minutes of inactivity
+$user->setExpiration('30 minutes');
+
+// cancel expiration
+$user->setExpiration(0);
+```
+
+Expiration must be set to value equal or lower than the expiration of sessions.
+
+The reason of the last logout can be obtained by method `$user->getLogoutReason()`, which returns either the constant `Nette\Security\IUserStorage::INACTIVITY` if the time expired or `IUserStorage::MANUAL` when the `logout()` method was called.
+
+In presenters, you can verify login in the `startup()` method:
+
+```php
+protected function startup()
+{
+	parent::startup();
+	if (!$this->getUser()->isLoggedIn()) {
+		$this->redirect('Sign:in');
+	}
+}
+```
+
+
+Authenticator
+=============
+
+It is an object that verifies the login data, ie usually the name and password. The trivial implementation is the class [api:Nette\Security\SimpleAuthenticator], which can be defined in [configuration|nette:configuring#Access Control]:
+
+```neon
+security:
+	users:
+		# name: password
+		johndoe: secret123
+		kathy: evenmoresecretpassword
+```
+
+This solution is more suitable for testing purposes. We will show you how to create an authenticator that will verify credentials against a database table.
+
+An authenticator is an object that implements the [api:Nette\Security\IAuthenticator] interface with method `authenticate()`. Its task is either to return the so-called [#identity] or to throw an exception `Nette\Security\AuthenticationException`. It would also be possible to provide an fine-grain error code `IAuthenticator::IDENTITY_NOT_FOUND` or `IAuthenticator::INVALID_CREDENTIAL`.
+
+```php
+use Nette;
+
+class MyAuthenticator implements Nette\Security\IAuthenticator
+{
+	private $database;
+
+	public function __construct(Nette\Database\Connection $database)
+	{
+		$this->database = $database;
+	}
+
+	/** @return Nette\Security\IIdentity */
+	public function authenticate(array $credentials)
+	{
+		list($username, $password) = $credentials;
+		$row = $this->database->table('users')
+			->where('username', $username)
+			->fetch();
+
+		if (!$row) {
+			throw new Nette\Security\AuthenticationException('User not found.');
+		}
+
+		if (!Nette\Security\Passwords::verify($password, $row->password)) {
+			throw new Nette\Security\AuthenticationException('Invalid password.');
+		}
+
+		return new Nette\Security\Identity(
+			$row->id,
+			$row->role, // or array of roles
+			['name' => $row->username]
+		);
+	}
+}
+```
+
+The MyAuthenticator class communicates with the database through [Nette Database Explorer |database:explorer] and works with table `users`, where column `username` contains the user's login name and column `password` contains [hash|passwords]. After verifying the name and password, it returns the identity with user's ID, role (column `role` in the table), which we will mention [later |#roles], and an array with additional data (in our case, the username).
+
+We will add the authenticator to the configuration [as a service |di:services] of the DI container:
+
+```neon
+services:
+	- MyAuthenticator
+```
+
+
+$onLoggedIn, $onLoggedOut events
+--------------------------------
+
+Object `Nette\Security\User` has [events|nette:glossary#Events] `$onLoggedIn` and `$onLoggedOut`, so you can add callbacks that are triggered after a successful login or after the user logs out.
+
+
+```php
+$user->onLoggedIn[] = function () {
+	// user has just logged in
+};
+```
+
+
+Identity
+========
+
+An identity is a set of information about a user that is returned by the authenticator and which is then stored in a session and retrieved using `$user->getIdentity()`. So we can get the id, roles and other user data as we passed them in the authenticator:
+
+```php
+$user->getIdentity()->getId();
+// also works shortcut $user->getId();
+
+$user->getIdentity()->getRoles();
+
+// user data can be access as properties
+// the name we passed on in MyAuthenticator
+$user->getIdentity()->name;
+```
+
+Importantly, **when user logs out, identity is not deleted** and is still available. So, if identity exists, it by itself does not grant that the user is also logged in. If we want to explicitly delete the identity, we logout the user by `$user->logout(true)`.
+
+Thanks to this, you can still assume which user is at the computer and, for example, display personalized offers in the e-shop, however, you can only display his personal data after logging in.
+
+Identity is an object that implements the [api:Nette\Security\IIdentity] interface, the default implementation is [api:Nette\Security\Identity]. And as mentioned, identity is stored in the session, so if, for example, we change the role of some of the logged-in users, old data will be kept in the identity until he logs in again.
+
+
+Multiple Independent Authentications
+====================================
+
+It is possible to have several independent logged users within one site and one session at a time. For example, if we want to have separate authentication for frontend and backend, we will just set a unique session namespace for each of them:
+
+```php
+$user->getStorage()->setNamespace('backend');
+```
+
+It's necessary to keep in mind that this must be set at all places belonging to the same segment. When using presenters, we will set the namespace in the common ancestor - usually the BasePresenter. In order to do so we will extend the [checkRequirements() |api:Nette\Application\UI\Presenter::checkRequirements()] method:
+
+```php
+public function checkRequirements($element)
+{
+	$this->getUser()->getStorage()->setNamespace('backend');
+	parent::checkRequirements($element);
+}
+```
+
+
+Multiple authenticators
+-----------------------
+
+Dividing an application into segments with independent authentication generally requires different authenticators. However, registering two classes that implement IAuthenticator into config services would trigger an error because Nette wouldn't know which of them should be autowired to the `Nette\Security\User` object. Which is why we must limit autowiring for them with `autowired: self` so that it's activated only when their class is specifically requested:
+
+```neon
+services:
+	-
+		factory: FrontAuthenticator
+		autowired: self
+```
+
+```php
+class SignPresenter extends Nette\Application\UI\Presenter
+{
+	/** @var FrontAuthenticator */
+	private $authenticator;
+
+	public function __construct(FrontAuthenticator $authenticator)
+	{
+		$this->authenticator = $authenticator;
+	}
+}
+```
+
+We only need to set our authenticator to the User object before calling method [login() |api:Nette\Security\User::login()] which typically means in the login form callback:
+
+```php
+$form->onSuccess[] = function (Form $form, \stdClass $data) {
+	$user = $this->getUser();
+	$user->setAuthenticator($this->authenticator);
+	$user->login($data->username, $data->password);
+	// ...
+};
+```
+
+{{composer: nette/security}}
+{{leftbar: nette:@menu-topics}}

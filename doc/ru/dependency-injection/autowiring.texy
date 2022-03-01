@@ -1,0 +1,232 @@
+Автопроводка
+************
+
+.[perex]
+Autowiring, или автопроводка — это отличная функция, которая может автоматически передавать сервисы в конструктор и другие методы, так что нам совсем не нужно их писать. Это сэкономит вам много времени.
+
+Это позволяет нам пропустить подавляющее большинство аргументов при написании определений сервисов. Вместо:
+
+```neon
+services:
+	articles: Model\ArticleRepository(@database, @cache.storage)
+```
+
+Просто напишите:
+
+```neon
+services:
+	articles: Model\ArticleRepository
+```
+
+Автопроводка управляется типами, поэтому класс `ArticleRepository` должен быть определен следующим образом:
+
+```php
+namespace Model;
+
+class ArticleRepository
+{
+	public function __construct(\PDO $db, \Nette\Caching\Storage $storage)
+	{}
+}
+```
+
+Чтобы использовать автопроводку, в контейнере должен быть **только один сервис** для каждого типа. Если бы их было больше, автопроводка не знала бы, какой из них передавать, и выбрасывала бы исключение:
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+	tempDb: PDO('sqlite::memory:')
+	articles: Model\ArticleRepository  # ВЫБРАСЫВАЕТСЯ ИСКЛЮЧЕНИЕ, mainDb и tempDb совпадают
+```
+
+Решением может быть либо обход автоподключения, либо явное указание имени сервиса (т. е. `articles: Model\ArticleRepository(@mainDb)`). Однако удобнее [отключить|#Отключенная автопроводка] автоподключение одного сервиса, или [предпочесть|#Предпочтительная автопроводка] конкретный сервис.
+
+
+Отключенная автопроводка
+------------------------
+
+Вы можете отключить автоподключение сервисов с помощью параметра `autowired: no`:
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+		autowired: false                 # удаляет tempDb из автопроводки
+
+	articles: Model\ArticleRepository    # передает mainDb в конструктор
+```
+
+Сервис `articles` не выбрасывает исключение о том, что есть два соответствующих сервиса типа `PDO` (т. е. `mainDb` и `tempDb`), которые могут быть переданы конструктору, поскольку он видит только сервис `mainDb`.
+
+
+Предпочтительная автопроводка
+-----------------------------
+
+Если у нас есть несколько сервисов одного типа и один из них имеет опцию `autowired`, этот сервис становится предпочтительным:
+
+```neon
+services:
+	mainDb:
+		create: PDO(%dsn%, %user%, %password%)
+		autowired: PDO    # makes it preferred
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+
+	articles: Model\ArticleRepository
+```
+
+Сервис `articles` не выбрасывает исключение, если есть два совпадающих сервиса `PDO` (т. е. `mainDb` и `tempDb`), но использует предпочтительный сервис, т. е. `mainDb`.
+
+
+Коллекция сервисов
+------------------
+
+Автопроводка также может передавать массив сервисов определенного типа. Так как PHP не может нативно обозначать тип элементов массива, в дополнение к типу `array` необходимо добавить комментарий phpDoc с типом элемента, например `ClassName[]`:
+
+```php
+namespace Model;
+
+class ShipManager
+{
+	/**
+	 * @param Shipper[] $shippers
+	 */
+	public function __construct(array $shippers)
+	{}
+}
+```
+
+Затем контейнер DI автоматически передает массив сервисов, соответствующих заданному типу. При этом будут пропущены сервисы, у которых отключена автопроводка.
+
+Если вы не можете контролировать форму комментария phpDoc, вы можете передать массив сервисов непосредственно в конфигурации, используя [`typed()`|services#Специальные функции].
+
+
+Сужение автопроводки
+--------------------
+
+Для отдельных сервисов автоподключение может быть сужено до определенных классов или интерфейсов.
+
+Обычно автоподключение передает функцию каждому параметру метода, типу которого соответствует функция. Сужение означает, что мы указываем условия, которым должны удовлетворять типы, указанные для параметров метода, чтобы им была передана функция.
+
+Рассмотрим пример:
+
+```php
+class ParentClass
+{}
+
+class ChildClass extends ParentClass
+{}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+Если бы мы зарегистрировали их все как сервисы, автоподключение было бы невозможно:
+
+```neon
+services:
+	parent: ParentClass
+	child: ChildClass
+	parentDep: ParentDependent  # ВЫБРАСЫВАЕТ ИСКЛЮЧЕНИЕ, parent и child совпадают
+	childDep: ChildDependent    # передает сервис 'child' конструктору
+```
+
+Сервис `parentDep` выбрасывает исключение `Multiple services of type ParentClass found: parent, child` потому что и `parent`, и `child` помещаются в его конструктор, и автопроводка не может принять решение о том, какой из них выбрать.
+
+Поэтому для сервиса `child` мы можем сузить его автопроводку до `ChildClass`:
+
+```neon
+services:
+	parent: ParentClass
+	child:
+		create: ChildClass
+		autowired: ChildClass   # альтернатива: 'autowired: self'
+
+	parentDep: ParentDependent  # ВЫБРАСЫВАЕТ ИСКЛЮЧЕНИЕ, 'child' не может быть автоподключаемым
+	childDep: ChildDependent    # передает сервис 'child' конструктору
+```
+
+Сервис `parentDep` теперь передается в конструктор сервиса `parentDep`, поскольку теперь это единственный подходящий объект. Сервис `child` больше не передается по автопроводке. Да, функция `child` по-прежнему имеет тип `ParentClass`, но условие сужения, заданное для типа параметра, больше не применяется, т. е. больше не верно, что `ParentClass` *является супертипом* `ChildClass`.
+
+В случае `child`, `autowired: ChildClass` можно записать как `autowired: self`, так как `self` означает текущий тип сервиса.
+
+Ключ `autowired` может включать несколько классов и интерфейсов в качестве массива:
+
+```neon
+autowired: [BarClass, FooInterface]
+```
+
+Давайте попробуем добавить интерфейсы в пример:
+
+```php
+interface FooInterface
+{}
+
+interface BarInterface
+{}
+
+class ParentClass implements FooInterface
+{}
+
+class ChildClass extends ParentClass implements BarInterface
+{}
+
+class FooDependent
+{
+	function __construct(FooInterface $obj)
+	{}
+}
+
+class BarDependent
+{
+	function __construct(BarInterface $obj)
+	{}
+}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+Если мы не ограничиваем сервис `child`, он будет соответствовать конструкторам всех классов `FooDependent`, `BarDependent`, `ParentDependent` и `ChildDependent`, а автопроводка передаст его туда.
+
+Однако, если мы сузим автопроводку до `ChildClass` с помощью `autowired: ChildClass` (или `self`), автопроводка передает его только конструктору `ChildDependent`, поскольку для него требуется аргумент типа `ChildClass` и `ChildClass` *это тип* `ChildClass`. Ни один другой тип, указанный для других параметров, не является заменой `ChildClass`, поэтому сервис не проходит.
+
+Если мы ограничиваем его на `ParentClass` с помощью `autowired: ParentClass`, то автопроводка снова передаст его конструктору `ChildDependent` (потому что требуемый тип `ChildClass` является надмножеством `ParentClass`) и конструктору `ParentDependent`, так как необходимый тип `ParentClass` также соответствует.
+
+Если мы ограничиваем его на `FooInterface`, то он всё равно будет подключаться для `ParentDependent` (требуемый тип `ParentClass` является супертипом `FooInterface`) и `ChildDependent`, но дополнительно к конструктору `FooDependent`, но не `BarDependent`, так как `BarInterface` не супертип `FooInterface`.
+
+```neon
+services:
+	child:
+		create: ChildClass
+		autowired: FooInterface
+
+	fooDep: FooDependent        # передает сервис child конструктору
+	barDep: BarDependent        # ВЫБРАСЫВАЕТ ИСКЛЮЧЕНИЕ, ни один сервис не пройдет
+	parentDep: ParentDependent  # передает сервис child конструктору
+	childDep: ChildDependent    # передает сервис child конструктору
+```
+
+
+{{composer: nette/di}}

@@ -1,0 +1,553 @@
+Database Explorer
+*****************
+
+<div class=perex>
+
+Nette Database Explorer значительно упрощает получение данных из базы данных без написания SQL-запросов.
+
+- использует эффективные запросы
+- данные не передаются без необходимости
+- отличается элегантным синтаксисом
+
+</div>
+
+Чтобы использовать Database Explorer, начните с таблицы — вызовите `table()` на объекте [api:Nette\Database\Explorer]. Проще всего получить экземпляр контекстного объекта [описано здесь |core#Подключение и настройка], или, в случае, когда Nette Database Explorer используется как отдельный инструмент, его можно [создать вручную|#Создание Explorer вручную].
+
+```php
+$books = $explorer->table('book'); // имя таблицы в бд — 'book'
+```
+
+Вызов возвращает экземпляр объекта [Selection |api:Nette\Database\Table\Selection], который можно итерировать для получения всех книг. Каждый элемент (строка) представлен экземпляром [ActiveRow |api:Nette\Database\Table\ActiveRow] с данными, отображенными в его свойствах:
+
+```php
+foreach ($books as $book) {
+	echo $book->title;
+	echo $book->author_id;
+}
+```
+
+Получение только одного конкретного ряда осуществляется методом `get()`, который непосредственно возвращает экземпляр ActiveRow.
+
+```php
+$book = $explorer->table('book')->get(2); // возвращает книгу с идентификатором 2
+echo $book->title;
+echo $book->author_id;
+```
+
+Давайте рассмотрим распространенный случай использования. Вам нужно получить книги и их авторов. Это обычное отношение 1:N. Часто используемым решением является получение данных с помощью одного SQL-запроса с объединением таблиц. Вторая возможность — получить данные отдельно, выполнить один запрос для получения книг, а затем получить автора для каждой книги другим запросом (например, в цикле foreach). Это можно легко оптимизировать для выполнения только двух запросов, один для книг, а другой для нужных авторов — и именно так это делает Nette Database Explorer.
+
+В приведенных ниже примерах мы будем работать со схемой базы данных, показанной на рисунке. Имеются связи OneHasMany (1:N) (автор книги `author_id` и возможный переводчик `translator_id`, который может быть `null`) и связи ManyHasMany (M:N) между книгой и её тегами.
+
+[Пример, включая схему, можно найти на GitHub |https://github.com/nette-examples/books].
+
+[* db-schema-1-.webp *] *** Структура базы данных, используемая в примерах .<>
+
+Следующий код перечисляет имя автора для каждой книги и все её теги. Мы [обсудим ниже |#Работа с отношениями], как это работает внутри.
+
+```php
+$books = $explorer->table('book');
+
+foreach ($books as $book) {
+	echo 'title:      ' . $book->title;
+	echo 'written by: ' . $book->author->name; // $book->author — строка из таблицы 'author'
+
+	echo 'tags: ';
+	foreach ($book->related('book_tag') as $bookTag) {
+		echo $bookTag->tag->name . ', '; // $bookTag->tag — строка из таблицы 'tag'
+	}
+}
+```
+
+Вы будете довольны тем, насколько эффективно работает слой базы данных. Приведенный выше пример делает постоянное количество запросов, которые выглядят следующим образом:
+
+```sql
+SELECT * FROM `book`
+SELECT * FROM `author` WHERE (`author`.`id` IN (11, 12))
+SELECT * FROM `book_tag` WHERE (`book_tag`.`book_id` IN (1, 4, 2, 3))
+SELECT * FROM `tag` WHERE (`tag`.`id` IN (21, 22, 23))
+```
+
+Если вы используете [кэш |/caching/@home] (по умолчанию включено), никакие столбцы не будут запрашиваться без необходимости. После первого запроса в кэше будут сохранены имена использованных столбцов, и Nette Database Explorer будет выполнять запросы только с нужными столбцами:
+
+```sql
+SELECT `id`, `title`, `author_id` FROM `book`
+SELECT `id`, `name` FROM `author` WHERE (`author`.`id` IN (11, 12))
+SELECT `book_id`, `tag_id` FROM `book_tag` WHERE (`book_tag`.`book_id` IN (1, 4, 2, 3))
+SELECT `id`, `name` FROM `tag` WHERE (`tag`.`id` IN (21, 22, 23))
+```
+
+
+Выборки
+=======
+
+Смотрите возможности фильтрации и ограничения строк [api:Nette\Database\Table\Selection]:
+
+.[language-php]
+| `$table->where($where[, $param[, ...]])` | Устанавливаем WHERE, используя AND как клей, если заданы два или более условий
+| `$table->whereOr($where)` | Устанавливаем WHERE, используя OR в качестве связки, если заданы два или более условий
+| `$table->order($columns)` | Устанавливаем ORDER BY, например, с помощью выражения `('column DESC, id DESC')`.
+| `$table->select($columns)` | Устанавливаем извлеченные столбцы, например, с помощью выражения `('col, MD5(col) AS hash')`.
+| `$table->limit($limit[, $offset])` | Устанавливаем LIMIT и OFFSET
+| `$table->page($page, $itemsPerPage[, &$lastPage])` | Включаем пагинацию
+| `$table->group($columns)` | Устанавливаем GROUP BY
+| `$table->having($having)` | Устанавливаем HAVING
+
+Можно использовать текучий интерфейс (Fluent), например `$table->where(...)->order(...)->limit(...)`. Несколько условий `where` или `whereOr` соединяются с помощью оператора `AND`.
+
+
+where()
+-------
+
+Nette Database Explorer может автоматически добавлять необходимые операторы для переданных значений:
+
+.[language-php]
+| `$table->where('field', $value)` | field = $value
+| `$table->where('field', null)` | field IS NULL
+| `$table->where('field > ?', $val)` | field > $val
+| `$table->where('field', [1, 2])` | field IN (1, 2)
+| `$table->where('id = ? OR name = ?', 1, $name)` | id = 1 OR name = 'Jon Snow'
+| `$table->where('field', $explorer->table($tableName))` | field IN (SELECT $primary FROM $tableName)
+| `$table->where('field', $explorer->table($tableName)->select('col'))` | field IN (SELECT col FROM $tableName)
+
+Вы можете указать заполнитель даже без оператора column. Эти вызовы одинаковы.
+
+```php
+$table->where('id = ? OR id = ?', 1, 2);
+$table->where('id ? OR id ?', 1, 2);
+```
+
+Эта функция позволяет генерировать правильный оператор на основе значения:
+
+```php
+$table->where('id ?', 2);    // id = 2
+$table->where('id ?', null); // id IS NULL
+$table->where('id', $ids);   // id IN (...)
+```
+
+Selection корректно обрабатывает и отрицательные условия, работает и для пустых массивов:
+
+```php
+$table->where('id', []);       // id IS NULL AND FALSE
+$table->where('id NOT', []);   // id IS NULL OR TRUE
+$table->where('NOT (id ?)', $ids);  // NOT (id IS NULL AND FALSE)
+
+// это приведет к исключению, данный синтаксис не поддерживается
+$table->where('NOT id ?', $ids);
+```
+
+
+whereOr()
+---------
+
+Пример использования без параметров:
+
+```php
+// WHERE (user_id IS NULL) OR (SUM(`field1`) > SUM(`field2`))
+$table->whereOr([
+	'user_id IS NULL',
+	'SUM(field1) > SUM(field2)',
+]);
+```
+
+Мы используем параметры. Если вы не укажете оператор, Nette Database Explorer автоматически добавит соответствующий оператор:
+
+```php
+// WHERE (`field1` IS NULL) OR (`field2` IN (3, 5)) OR (`amount` > 11)
+$table->whereOr([
+	'field1' => null,
+	'field2' => [3, 5],
+	'amount >' => 11,
+]);
+```
+
+Ключ может содержать выражение, содержащее подстановочные вопросительные знаки, а затем передавать параметры в значении:
+
+```php
+// WHERE (`id` > 12) OR (ROUND(`id`, 5) = 3)
+$table->whereOr([
+	'id > ?' => 12,
+	'ROUND(id, ?) = ?' => [5, 3],
+]);
+```
+
+
+order()
+-------
+
+Примеры использования:
+
+```php
+$table->order('field1');               // ORDER BY `field1`
+$table->order('field1 DESC, field2');  // ORDER BY `field1` DESC, `field2`
+$table->order('field = ? DESC', 123);  // ORDER BY `field` = 123 DESC
+```
+
+
+select()
+--------
+
+Примеры использования:
+
+```php
+$table->select('field1');                 // SELECT `field1`
+$table->select('col, UPPER(col) AS abc'); // SELECT `col`, UPPER(`col`) AS abc
+$table->select('SUBSTR(title, ?)', 3);    // SELECT SUBSTR(`title`, 3)
+```
+
+
+limit()
+-------
+
+Примеры использования:
+
+```php
+$table->limit(1);     // LIMIT 1
+$table->limit(1, 10); // LIMIT 1 OFFSET 10
+```
+
+
+page()
+------
+
+Альтернативный способ установки предела (limit) и смещения (offset):
+
+```php
+$page = 5;
+$itemsPerPage = 10;
+$table->page($page, $itemsPerPage); // LIMIT 10 OFFSET 40
+```
+
+Получение номера последней страницы, переданного в переменную `$lastPage`:
+
+```php
+$table->page($page, $itemsPerPage, $lastPage);
+```
+
+
+group()
+-------
+
+Примеры использования:
+
+```php
+$table->group('field1');          // GROUP BY `field1`
+$table->group('field1, field2');  // GROUP BY `field1`, `field2`
+```
+
+
+having()
+--------
+
+Примеры использования:
+
+```php
+$table->having('COUNT(items) >', 100);  // HAVING COUNT(`items`) > 100
+```
+
+
+Фильтрация по другому значению таблицы .[#joining-key]
+------------------------------------------------------
+
+Довольно часто требуется отфильтровать результаты по какому-либо условию, которое включает другую таблицу базы данных. Для таких условий требуются табличные соединения. Однако вам больше не нужно их писать.
+
+Допустим, вам нужно получить все книги, имя автора которых 'Jon'. Всё, что вам нужно написать, это соединяющий ключ отношения и имя столбца в объединенной таблице. Ключ объединения берется из столбца, который ссылается на таблицу, к которой вы хотите присоединиться. В нашем примере (см. схему db) это столбец `author_id`, и достаточно использовать только его первую часть — `author` (суффикс `_id` можно опустить). `name` — это столбец в таблице `author`, который мы хотим использовать. Условие для переводчика книги (которое связано с колонкой `translator_id`) может быть создано так же просто.
+
+```php
+$books = $explorer->table('book');
+$books->where('author.name LIKE ?', '%Jon%');
+$books->where('translator.name', 'David Grudl');
+```
+
+Логика соединительных ключей определяется реализацией [Conventions |api:Nette\Database\Conventions]. Мы рекомендуем использовать [DiscoveredConventions |api:Nette\Database\Conventions\DiscoveredConventions], который анализирует ваши внешние ключи и позволяет легко работать с этими отношениями.
+
+Отношения между книгой и её автором — 1:N. Обратные отношения также возможны. Мы называем это **обратным соединением**. Взгляните на другой пример. Мы хотим получить всех авторов, которые написали более 3 книг. Чтобы сделать соединение обратным, мы используем `:` (двоеточие). Двоеточие означает, что объединенное отношение имеет значение hasMany (и это вполне логично, так как две точки больше, чем одна). К сожалению, класс Selection недостаточно умен, поэтому мы должны помочь с агрегацией и предоставить оператор `GROUP BY`, также условие должно быть записано в виде оператора `HAVING`.
+
+```php
+$authors = $explorer->table('author');
+$authors->group('author.id')
+	->having('COUNT(:book.id) > 3');
+```
+
+Вы, наверное, заметили, что выражение объединения относится к книге, но неясно, объединяем ли мы через `author_id` или `translator_id`. В приведенном выше примере Selection соединяется через столбец `author_id`, потому что найдено совпадение с исходной таблицей — таблицей `author`. Если бы такого совпадения не было, и было бы больше возможностей, Nette выбросил бы [AmbiguousReferenceKeyException |api:Nette\Database\Conventions\AmbiguousReferenceKeyException].
+
+Чтобы выполнить объединение через колонку `translator_id`, предоставьте необязательный параметр в выражении объединения.
+
+```php
+$authors = $explorer->table('author');
+$authors->group('author.id')
+	->having('COUNT(:book(translator).id) > 3');
+```
+
+Давайте рассмотрим более сложное выражение присоединения.
+
+Мы хотим найти всех авторов, которые написали что-то о PHP. У всех книг есть теги, поэтому мы должны выбрать тех авторов, которые написали любую книгу с тегом PHP.
+
+```php
+$authors = $explorer->table('author');
+$authors->where(':book:book_tags.tag.name', 'PHP')
+	->group('author.id')
+	->having('COUNT(:book:book_tags.tag.id) > 0');
+```
+
+
+Агрегированные запросы
+----------------------
+
+| `$table->count('*')` | Получаем количество строк
+| `$table->count("DISTINCT $column")` | Получаем количество отдельных значений
+| `$table->min($column)` | Получаем минимальное значение
+| `$table->max($column)` | Получаем максимальное значение
+| `$table->sum($column)` | Получаем сумму всех значений
+| `$table->aggregation("GROUP_CONCAT($column)")` | Запускаем любую функцию агрегации
+
+.[caution]
+Метод `count()` без указания параметров выбирает все записи и возвращает размер массива, что очень неэффективно. Например, если вам нужно подсчитать количество строк для пейджинга, всегда указывайте первый аргумент.
+
+
+Экранирование и кавычки
+=======================
+
+Database Explorer умен и избавится от параметров и идентификаторов кавычек за вас. Тем не менее, необходимо соблюдать следующие основные правила:
+
+- ключевые слова, функции, процедуры должны быть в верхнем регистре
+- столбцы и таблицы должны быть в нижнем регистре
+- передавайте переменные в качестве параметров, не объединяйте их
+
+```php
+->where('name like ?', 'John'); //  НЕПРАВИЛЬНО! Генерирует: `name` `like` ?
+->where('name LIKE ?', 'John'); // ПРАВИЛЬНО
+
+->where('KEY = ?', $value); // НЕПРАВИЛЬНО! КЛЮЧ - это ключевое слово
+->where('key = ?', $value); // ПРАВИЛЬНО. Генерирует: `key` = ?
+
+->where('name = ' . $name); // Неправильно! sql-инъекция!
+->where('name = ?', $name); // ПРАВИЛЬНО
+
+->select('DATE_FORMAT(created, "%d.%m.%Y")'); // НЕПРАВИЛЬНО! Передавайте переменные как параметры, не конкатенируйте
+->select('DATE_FORMAT(created, ?)', '%d.%m.%Y'); // ПРАВИЛЬНО
+```
+
+.[warning]
+Неправильное использование может привести к образованию дыр в безопасности
+
+
+Получение данных
+================
+
+| `foreach ($table as $id => $row)` | Итерация по всем строкам результата
+| `$row = $table->get($id)` | Получаем одну строку с идентификатором $id из таблицы
+| `$row = $table->fetch()` | Получаем следующую строку из результата
+| `$array = $table->fetchPairs($key, $value)` | Выборка всех значений в виде ассоциативного массива
+| `$array = $table->fetchPairs($key)` | Выборка всех строк в виде ассоциативного массива
+| `count($table)` | Получаем количество строк в результирующем наборе
+
+
+Вставка, обновление и удаление
+==============================
+
+Метод `insert()` принимает массив объектов Traversable (например, [ArrayHash |/utils/arrays#ArrayHash], который возвращает [forms|/forms/@home]):
+
+```php
+$row = $explorer->table('users')->insert([
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978)
+```
+
+Если для таблицы определен первичный ключ, возвращается объект ActiveRow, содержащий вставленную строку.
+
+Вставка нескольких значений:
+
+```php
+$explorer->table('users')->insert([
+	[
+		'name' => 'Jim',
+		'year' => 1978,
+	], [
+		'name' => 'Jack',
+		'year' => 1987,
+	]
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978), ('Jack', 1987)
+```
+
+В качестве параметров можно передавать файлы или объекты DateTime:
+
+```php
+$explorer->table('users')->insert([
+	'name' => $name,
+	'created' => new DateTime, // или $explorer::literal('NOW()')
+	'avatar' => fopen('image.gif', 'r'), // вставляет файл
+]);
+```
+
+Обновление (возвращает количество затронутых строк):
+
+```php
+$count = $explorer->table('users')
+	->where('id', 10) // должен вызываться до update()
+	->update([
+		'name' => 'Ned Stark'
+	]);
+// UPDATE `users` SET `name`='Ned Stark' WHERE (`id` = 10)
+```
+
+Для обновления мы можем использовать операторы `+=` и `-=`:
+
+```php
+$explorer->table('users')
+	->update([
+		'age+=' => 1, // see +=
+	]);
+// UPDATE users SET `age` = `age` + 1
+```
+
+Удаление (возвращает количество удаленных строк):
+
+```php
+$count = $explorer->table('users')
+	->where('id', 10)
+	->delete();
+// DELETE FROM `users` WHERE (`id` = 10)
+```
+
+
+Работа с отношениями
+====================
+
+
+Один к одному ("has one")
+-------------------------
+Отношение «Один к одному» — распространенный случай использования. У книги *есть один* автор. Книга *имеет одного* переводчика. Получение связанной строки в основном осуществляется методом `ref()`. Он принимает два аргумента: имя целевой таблицы и столбец исходного соединения. См. пример:
+
+```php
+$book = $explorer->table('book')->get(1);
+$book->ref('author', 'author_id');
+```
+
+В приведенном выше примере мы извлекаем связанную запись об авторе из таблицы `author`, поиск первичного ключа автора осуществляется по столбцу `book.author_id`. Метод Ref() возвращает экземпляр ActiveRow или null, если нет подходящей записи. Возвращенная строка является экземпляром ActiveRow, поэтому мы можем работать с ней так же, как и с записью книги.
+
+```php
+$author = $book->ref('author', 'author_id');
+$author->name;
+$author->born;
+
+// или напрямую
+$book->ref('author', 'author_id')->name;
+$book->ref('author', 'author_id')->born;
+```
+
+У книги также один переводчик, поэтому узнать имя переводчика довольно просто.
+```php
+$book->ref('author', 'translator_id')->name
+```
+
+Всё это хорошо, но несколько громоздко, не находите? Database Explorer уже содержит определения внешних ключей, так почему бы не использовать их автоматически? Давайте сделаем это!
+
+Если мы вызываем свойство, которого не существует, ActiveRow пытается разрешить имя вызывающего свойства как отношение 'has one'. Получение этого свойства аналогично вызову метода ref() только с одним аргументом. Мы будем называть единственный аргумент **key**. Ключ будет разрешен в конкретное отношение внешнего ключа. Переданный ключ сопоставляется со столбцами строки, и если он совпадает, то внешний ключ, определенный в сопоставленном столбце, используется для получения данных из связанной целевой таблицы. См. пример:
+
+```php
+$book->author->name;
+// то же самое
+$book->ref('author')->name;
+```
+
+Экземпляр ActiveRow не имеет колонки автора. Все столбцы книги ищутся на предмет совпадения с *key*. Совпадение в данном случае означает, что имя столбца должно содержать ключ. Так, в приведенном примере столбец `author_id` содержит строку 'author' и поэтому сопоставляется с ключом 'author'. Если вы хотите получить переводчика книги, то в качестве ключа можно использовать, например, 'translator', так как ключ 'translator' будет соответствовать столбцу `translator_id`. Подробнее о логике подбора ключей вы можете прочитать в главе [Joining expressions |#joining-key].
+
+```php
+echo $book->title . ': ';
+echo $book->author->name;
+if ($book->translator) {
+	echo ' (translated by ' . $book->translator->name . ')';
+}
+```
+
+Если вы хотите получить несколько книг, используйте тот же подход. Nette Database Explorer найдет авторов и переводчиков сразу для всех найденных книг.
+
+```php
+$books = $explorer->table('book');
+foreach ($books as $book) {
+	echo $book->title . ': ';
+	echo $book->author->name;
+	if ($book->translator) {
+		echo ' (translated by ' . $book->translator->name . ')';
+	}
+}
+```
+
+Код будет выполнять только эти 3 запроса:
+```sql
+SELECT * FROM `book`;
+SELECT * FROM `author` WHERE (`id` IN (1, 2, 3)); -- ids of fetched books from author_id column
+SELECT * FROM `author` WHERE (`id` IN (2, 3));    -- ids of fetched books from translator_id column
+```
+
+
+Один ко многим ("has many")
+---------------------------
+
+Отношение «один ко многим» — это просто обратное отношение «один к одному». Автор *написал* *много* книг. Автор *перевел* *много* книг. Как видите, этот тип отношения немного сложнее, потому что отношение является «именованным» ("написал", "перевел"). У экземпляра ActiveRow есть метод `related()`, который возвращает массив связанных записей. Записи также являются экземплярами ActiveRow. См. пример ниже:
+
+```php
+$author = $explorer->table('author')->get(11);
+echo $author->name . ' написал:';
+
+foreach ($author->related('book.author_id') as $book) {
+	echo $book->title;
+}
+
+echo 'и перевёл:';
+foreach ($author->related('book.translator_id') as $book) {
+	echo $book->title;
+}
+```
+
+Метод `related()` принимает полное описание соединения, передаваемое как два аргумента или как один аргумент, соединённый точкой. Первый аргумент — целевая таблица, второй — целевой столбец.
+
+```php
+$author->related('book.translator_id');
+// то же самое
+$author->related('book', 'translator_id');
+```
+
+Вы можете использовать эвристику Nette Database Explorer, основанную на внешних ключах, и указать только аргумент **key**. Ключ будет сопоставлен со всеми внешними ключами, указывающими на текущую таблицу (таблица `author`). Если есть совпадение, Nette Database Explorer будет использовать этот внешний ключ, в противном случае он выбросит [Nette\InvalidArgumentException|api:Nette\InvalidArgumentException] или [AmbiguousReferenceKeyException |api:Nette\Database\Conventions\AmbiguousReferenceKeyException]. Подробнее о логике подбора ключей вы можете прочитать в главе [Joining expressions |#joining-key].
+
+Конечно, вы можете вызвать связанные методы для всех найденных авторов, и Nette Database Explorer снова получит соответствующие книги сразу.
+
+```php
+$authors = $explorer->table('author');
+foreach ($authors as $author) {
+	echo $author->name . ' написал:';
+	foreach ($author->related('book') as $book) {
+		$book->title;
+	}
+}
+```
+
+В приведенном выше примере будет выполнено только два запроса:
+
+```sql
+SELECT * FROM `author`;
+SELECT * FROM `book` WHERE (`author_id` IN (1, 2, 3)); -- идентификаторы найденных авторов
+```
+
+
+Создание Explorer вручную
+=========================
+
+Соединение с базой данных может быть создано с помощью конфигурации приложения. В таких случаях создается служба `Nette\Database\Explorer`, которая может быть передана в качестве зависимости с помощью DI-контейнера.
+
+Однако, если Nette Database Explorer используется как самостоятельный инструмент, экземпляр объекта `Nette\Database\Explorer` должен быть создан вручную.
+
+```php
+// $storage implements Nette\Caching\Storage:
+$storage = new Nette\Caching\Storages\FileStorage($tempDir);
+$connection = new Nette\Database\Connection($dsn, $user, $password);
+$structure = new Nette\Database\Structure($connection, $storage);
+$conventions = new Nette\Database\Conventions\DiscoveredConventions($structure);
+$explorer = new Nette\Database\Explorer($connection, $structure, $conventions, $storage);
+```
+
+
+{{composer: nette/database}}

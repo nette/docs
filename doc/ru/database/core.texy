@@ -1,0 +1,354 @@
+Database Core
+*************
+
+.[perex]
+Nette Database Core является уровнем абстракции базы данных и обеспечивает основную функциональность.
+
+
+Установка
+=========
+
+Загрузите и установите пакет с помощью [Composer|/best-practices/composer]:
+
+```shell
+composer require nette/database
+```
+
+
+Подключение и настройка
+=======================
+
+Чтобы подключиться к базе данных, просто создайте экземпляр класса [api:Nette\Database\Connection]:
+
+```php
+$database = new Nette\Database\Connection($dsn, $user, $password);
+```
+
+Параметр `$dsn` (имя источника данных) — [такой же, как используется в PDO |https://www.php.net/manual/ru/pdo.construct.php#refsect1-pdo.construct-parameters], например `host=127.0.0.1;dbname=test`. В случае неудачи выбрасывается исключение `Nette\Database\ConnectionException`.
+
+Однако, более сложный способ предлагает [конфигурация приложения |configuration]. Мы добавим раздел `database`, и он создаст необходимые объекты и панель `Database` в панели отладки [Tracy |tracy:].
+
+```neon
+database:
+	dsn: 'mysql:host=127.0.0.1;dbname=test'
+	user: root
+	password: password
+```
+
+Объект соединения, который мы [получаем как сервис от DI-контейнера |/dependency-injection/passing-dependencies], например:
+
+```php
+class Model
+{
+	private $database;
+
+	// pass Nette\Database\Explorer to work with the Database Explorer layer
+	public function __construct(Nette\Database\Connection $database)
+	{
+		$this->database = $database;
+	}
+}
+```
+
+Для получения дополнительной информации смотрите [конфигурацию базы данных|configuration].
+
+
+Запросы
+=======
+
+Для запроса к базе данных используйте метод `query()`, который возвращает [ResultSet |api:Nette\Database\ResultSet].
+
+```php
+$result = $database->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+}
+
+echo $result->getRowCount(); // возвращает количество строк, если оно известно
+```
+
+.[note]
+Над `ResultSet` можно выполнить итерацию только один раз, если нам нужно выполнить итерацию несколько раз, необходимо преобразовать результат в массив с помощью метода `fetchAll()`.
+
+Вы можете легко добавить параметры в запрос, обратите внимание на знак вопроса:
+
+```php
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+$database->query('SELECT * FROM users WHERE name = ? AND active = ?', $name, $active);
+
+$database->query('SELECT * FROM users WHERE id IN (?)', $ids); // $ids - массив
+```
+
+<div class=warning>
+ВНИМАНИЕ, никогда не объединяйте строки во избежание [уязвимости через SQL-инъекции |https://ru.wikipedia.org/wiki/%D0%92%D0%BD%D0%B5%D0%B4%D1%80%D0%B5%D0%BD%D0%B8%D0%B5_SQL-%D0%BA%D0%BE%D0%B4%D0%B0]!
+/--
+$db->query('SELECT * FROM users WHERE name = ' . $name); // НЕПРАВИЛЬНО!!!
+\--
+</div>
+
+В случае неудачи `query()` выбрасывает либо исключение `Nette\Database\DriverException`, либо одно из его дочерних исключений:
+
+- [ConstraintViolationException |api:Nette\Database\ConstraintViolationException] - нарушение любого из условий
+- [ForeignKeyConstraintViolationException |api:Nette\Database\ForeignKeyConstraintViolationException] - недопустимый внешний ключ
+- [NotNullConstraintViolationException |api:Nette\Database\NotNullConstraintViolationException] - нарушение условия NOT NULL
+- [UniqueConstraintViolationException |api:Nette\Database\UniqueConstraintViolationException] - конфликт уникального индекса
+
+Помимо `query()`, существуют и другие полезные методы:
+
+```php
+// возвращает ассоциативный массив id => name
+$pairs = $database->fetchPairs('SELECT id, name FROM users');
+
+// возвращает все строки в виде массива
+$rows = $database->fetchAll('SELECT * FROM users');
+
+// возвращает одну строку
+$row = $database->fetch('SELECT * FROM users WHERE id = ?', $id);
+
+// возвращает одно поле
+$name = $database->fetchField('SELECT name FROM users WHERE id = ?', $id);
+```
+
+В случае неудачи все эти методы выбрасывают исключение `Nette\Database\DriverException`.
+
+
+Вставка, обновление и удаление
+==============================
+
+Параметр, который мы вставляем в SQL-запрос, также может быть массивом (в этом случае можно пропустить подстановочный знак `?`), что может быть полезно для оператора `INSERT`:
+
+```php
+$database->query('INSERT INTO users ?', [ // здесь может быть опущен знак вопроса
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978)
+
+$id = $database->getInsertId(); // возвращает автоинкремент вставленной строки
+
+$id = $database->getInsertId($sequence); // или значение последовательности
+```
+
+Вставка нескольких значений:
+
+```php
+$database->query('INSERT INTO users', [
+	[
+		'name' => 'Jim',
+		'year' => 1978,
+	], [
+		'name' => 'Jack',
+		'year' => 1987,
+	]
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978), ('Jack', 1987)
+```
+
+Мы также можем передавать файлы или объекты DateTime:
+
+```php
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'created' => new DateTime, // или $database::literal('NOW()')
+	'avatar' => fopen('image.gif', 'r'), // вставляет содержимое файла
+]);
+```
+
+Обновление строк:
+
+```php
+$result = $database->query('UPDATE users SET', [
+	'name' => $name,
+	'year' => $year,
+], 'WHERE id = ?', $id);
+// UPDATE users SET `name` = 'Jim', `year` = 1978 WHERE id = 123
+
+echo $result->getRowCount(); // возвращает количество затронутых строк
+```
+
+Для UPDATE мы можем использовать операторы `+=` и `-=`:
+
+```php
+$database->query('UPDATE users SET', [
+	'age+=' => 1, // note +=
+], 'WHERE id = ?', $id);
+// UPDATE users SET `age` = `age` + 1
+```
+
+Удаление:
+
+```php
+$result = $database->query('DELETE FROM users WHERE id = ?', $id);
+echo $result->getRowCount(); // возвращает количество затронутых строк
+```
+
+
+Продвинутые запросы
+===================
+
+Вставка или обновление, если запись уже существует:
+
+```php
+$database->query('INSERT INTO users', [
+	'id' => $id,
+	'name' => $name,
+	'year' => $year,
+], 'ON DUPLICATE KEY UPDATE', [
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`id`, `name`, `year`) VALUES (123, 'Jim', 1978)
+//   ON DUPLICATE KEY UPDATE `name` = 'Jim', `year` = 1978
+```
+
+Обратите внимание, что Nette Database распознает SQL-контекст, в который вставлен параметр массива, и строит SQL-код соответствующим образом. Так, из первого массива он генерирует `(id, name, year) VALUES (123, 'Jim', 1978)`, а второй преобразует в `name = 'Jim', year = 1978`.
+
+Мы также можем описать сортировку с помощью массива, в котором ключами являются имена столбцов, а значениями — значения типа boolean, определяющие, следует ли сортировать в порядке возрастания:
+
+```php
+$database->query('SELECT id FROM author ORDER BY', [
+	'id' => true, // ascending
+	'name' => false, // descending
+]);
+// SELECT id FROM author ORDER BY `id`, `name` DESC
+```
+
+Если обнаружение не сработало, вы можете указать форму сборки с помощью подстановочного знака `?`, за которым следует подсказка. Поддерживаются следующие подсказки:
+
+| ?values | (key1, key2, ...) VALUES (value1, value2, ...)
+| ?set    | key1 = value1, key2 = value2, ...
+| ?and    | key1 = value1 AND key2 = value2 ...
+| ?or     | key1 = value1 OR key2 = value2 ...
+| ?order  | key1 ASC, key2 DESC
+
+В предложении WHERE используется оператор `?and`, поэтому условия связаны `AND`:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND `year` = 1978
+```
+
+Который можно легко изменить на `OR`, используя подстановочный знак `?or`:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE ?or', [
+	'name' => $name,
+	'year' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' OR `year` = 1978
+```
+
+Мы можем использовать операторы в условиях:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name <>' => $name,
+	'year >' => $year,
+]);
+// SELECT * FROM users WHERE `name` <> 'Jim' AND `year` > 1978
+```
+
+А также перечисления:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => ['Jim', 'Jack'],
+	'role NOT IN' => ['admin', 'owner'], // перечисление + оператор NOT IN
+]);
+// SELECT * FROM users WHERE
+//   `name` IN ('Jim', 'Jack') AND `role` NOT IN ('admin', 'owner')
+```
+
+Мы также можем включить часть пользовательского SQL-кода, используя так называемый SQL-литерал:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year >' => $database::literal('YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (`year` > YEAR())
+```
+
+В качестве альтернативы:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (year > YEAR())
+```
+
+SQL-литерал также может иметь свои параметры:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > ? AND year < ?', $min, $max),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (year > 1978 AND year < 2017)
+```
+
+Благодаря этому мы можем создавать интересные комбинации:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('?or', [
+		'active' => true,
+		'role' => $role,
+	]),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (`active` = 1 OR `role` = 'admin')
+```
+
+
+Имя переменной
+==============
+
+Существует подстановочный знак `?name', который используется, если имя таблицы или столбца является переменной. (Осторожно, не позволяйте пользователю манипулировать содержимым такой переменной):
+
+```php
+$table = 'blog.users';
+$column = 'name';
+$database->query('SELECT * FROM ?name WHERE ?name = ?', $table, $column, $name);
+// SELECT * FROM `blog`.`users` WHERE `name` = 'Jim'
+```
+
+
+Транзакции
+==========
+
+Существует три метода работы с транзакциями:
+
+```php
+$database->beginTransaction();
+
+$database->commit();
+
+$database->rollback();
+```
+
+Элегантный способ предлагает метод `transaction()`. Вы передаете обратный вызов, который выполняется в транзакции. Если во время выполнения возникает исключение, транзакция сбрасывается, если всё идет хорошо, транзакция фиксируется.
+
+```php
+$id = $database->transaction(function ($database) {
+	$database->query('DELETE FROM ...');
+	$database->query('INSERT INTO ...');
+	// ...
+	return $database->getInsertId();
+});
+```
+
+Как видите, метод `transaction()` возвращает возвращаемое значение обратного вызова.
+
+Транзакция() также может быть вложенной, что упрощает реализацию независимых хранилищ.
+
+
+{{composer: nette/database}}

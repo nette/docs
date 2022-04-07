@@ -1,0 +1,575 @@
+Vytváříme Extension
+*******************
+
+.[perex]{data-version:3.0}
+Tzv. rozšíření je opakovatelně použitelná třída, která může definovat vlastní značky, filtry, funkce, providery, atd.
+
+Rozšíření vytváříme tehdy, pokud chceme své úpravy Latte znovu použít v různých projektech nebo je sdílet s ostatními.
+Je užitečné vytvářet rozšíření i pro každý webový projekt, které bude obsahovat všechny specifické značky a filtry, které chcete v šablonách projektu využívat.
+
+
+Třída rozšíření
+===============
+
+Rozšíření je třída dědící od [api:Latte\Extension]. Do Latte se registruje pomocí `addExtension()` (případně [konfiguračním souborem |doc:application/configuration#Šablony Latte]):
+
+```php
+$latte = new Latte\Engine;
+$latte->addExtension(new MyLatteExtension);
+```
+
+Pokud zaregistrujete vícero rozšíření a ty definují stejně pojmenované tagy, filtry nebo funkce, vyhrává poslední přidané rozšíření. Z toho také plyne, že vaše rozšíření mohou přepisovat nativní značky/filtry/funkce.
+
+Kdykoliv v třídě provedete změnu a není vypnutý auto-refresh, Latte automaticky překompiluje vaše šablony.
+
+Třída může implementovat kteroukoliv z následujících metod:
+
+```php
+abstract class Extension
+{
+	/**
+	 * Inicializace před kompilací šablony.
+	 */
+	public function beforeCompile(Engine $engine): void;
+
+	/**
+	 * Vrací seznam parserů pro značky Latte.
+	 * @return array<string, callable>
+	 */
+	public function getTags(): array;
+
+	/**
+	 * Vrací seznam průchodů kompilátoru.
+	 * @return array<string, callable>
+	 */
+	public function getPasses(): array;
+
+	/**
+	 * Vrací seznam |filtrů.
+	 * @return array<string, callable>
+	 */
+	public function getFilters(): array;
+
+	/**
+	 * Vrací seznam funkcí použitých v šablonách.
+	 * @return array<string, callable>
+	 */
+	public function getFunctions(): array;
+
+	/**
+	 * Vrací seznam providerů.
+	 * @return array<mixed>
+	 */
+	public function getProviders(): array;
+
+	/**
+	 * Vrací hodnotu pro rozlišení více verzí šablony.
+	 */
+	public function getCacheKey(Engine $engine): mixed;
+
+	/**
+	 * Inicializace před vykreslením šablony.
+	 */
+	public function beforeRender(Template $template): void;
+}
+```
+
+Pro představu, jak rozšíření vypadá, se podívejte na vestavěné "CoreExtension":https://github.com/nette/latte/blob/master/src/Latte/Essential/CoreExtension.php.
+
+
+beforeCompile(Latte\Engine $engine): void .[method]
+---------------------------------------------------
+
+Volá se před kompilací šablony. Metodu lze využít např. pro inicializace související s kompilací.
+
+
+getTags(): array .[method]
+--------------------------
+
+Volá se při kompilaci šablony. Vrací asociativní pole *název tagu => callable*, což jsou [#parsovací funkce tagu].
+
+```php
+public function getTags(): array
+{
+	return [
+		'foo' => [FooNode::class, 'create'],
+		'bar' => [BarNode::class, 'create'],
+		'n:baz' => [NBazNode::class, 'create'],
+		// ...
+	];
+}
+```
+
+Značka `n:baz` představuje ryzí n:atribut, tj. jde o značku, kterou lze zapisovat pouze jako atribut.
+
+V případě značek `foo` a `bar` Latte samo rozezná, zda jsou párové, a pokud ano, bude je možné automaticky zapisovat i pomocí n:atributů, včetně variant s prefixy `n:inner-foo` a `n:tag-foo`.
+
+Pořadí provádění takovýchto n:atributů je dáno jejich pořadím v poli vráceném `getTags()`. Tedy `n:foo` se provede vždy před `n:bar`, i kdyby byly atributy v HTML značce uvedeny v opačném pořadí jako `<div n:bar="..." n:foo="...">`.
+
+Pokud potřebujete stanovit pořadí n:atributů napříč více rozšířeními, použijte pomocnou metodu `order()`, kde parametr `before` a nebo `after` určuje, před nebo za kterými značkami se daná značka zařadí.
+
+```php
+public function getTags(): array
+{
+	return [
+		'foo' => self::order([FooNode::class, 'create'], before: 'bar')]
+		'bar' => self::order([BarNode::class, 'create'], after: ['block', 'snippet'])]
+	];
+}
+```
+
+
+getPasses(): array .[method]
+----------------------------
+
+Volá se při kompilaci šablony. Vrací asociativní pole *název pass => callable*, což jsou funkce představující tzv. [#průchody kompilátoru], které procházejí a modifikujou AST.
+
+Opět je možné využít pomocnou metodu `order()`. Hodnotou parametrů `before` nebo `after` může být `'*'` s významem před/za všemi.
+
+```php
+public function getPasses(): array
+{
+	return [
+		'optimize' => [Passes::class, 'optimizePass'],
+		'sandbox' => self::order([$this, 'sandboxPass'], before: '*'),
+		// ...
+	];
+}
+```
+
+
+beforeRender(Latte\Engine $engine): void .[method]
+--------------------------------------------------
+
+Volá se před každým vykreslením šablony. Metodu lze využít např. pro inicializaci proměnných používaných při vykreslování.
+
+
+getFilters(): array .[method]
+-----------------------------
+
+Volá se před vykreslením šablony. Vrací [filtry|extending-latte#filtry] jako asociativní pole *název filtru => callable*.
+
+```php
+public function getFilters(): array
+{
+	return [
+		'batch' => [$this, 'batchFilter'],
+		'trim' => [$this, 'trimFilter'],
+		// ...
+	];
+}
+```
+
+/--comment
+TODO: ODSTRANIT $this
+\--
+
+
+getFunctions(): array .[method]
+-------------------------------
+
+Volá se před vykreslením šablony. Vrací [funkce|extending-latte#funkce] jako asociativní pole *název funkce => callable*.
+
+```php
+public function getFunctions(): array
+{
+	return [
+		'clamp' => [$this, 'clampFunction'],
+		'divisibleBy' => [$this, 'divisibleByFunction'],
+		// ...
+	];
+}
+```
+
+
+getProviders(): array .[method]
+-------------------------------
+
+Volá se před vykreslením šablony. Vrací pole tzv. providers, což jsou zpravidla objekty, které za běhu využívají tagy. Přistupují k nim přes `$this->global->...`.
+
+```php
+public function getProviders(): array
+{
+	return [
+		'myFoo' => $this->foo,
+		'myBar' => $this->bar,
+		// ...
+	];
+}
+```
+
+
+getCacheKey(Latte\Engine $engine): mixed .[method]
+--------------------------------------------------
+
+Volá se před vykreslením šablony. Vrácená hodnota se stane součástí klíče, jehož hash je obsažen v názvu souboru se zkompilovanou šablonou. Tedy pro různé vrácené hodnoty Latte vygeneruje různé soubory v cache.
+
+
+Jak Latte funguje?
+==================
+
+Pro pochopení toho, jak definovat vlastní tagy nebo compiler passes, je nezbytné porozumět, jak funguje Latte pod kapotou.
+
+Kompilace šablon v Latte probíhá zjednodušeně takto:
+
+- Nejprve **lexer** tokenizuje zdrojový kód šablony na malé části (tokeny) pro snadnější zpracování.
+- Poté **parser** převede proud tokenů na smysluplný strom uzlů (abstraktní syntaktický strom, AST).
+- Nakonec překladač **vygeneruje** z AST třídu PHP, která vykresluje šablonu, a uloží ji do cache.
+
+Ve skutečnosti je kompilace o něco složitější. Latte **má dva** lexery a parsery: jeden pro HTML šablonu a druhý pro PHP-like kód uvnitř tagů. A také parsování neprobíhá až po tokenizaci, ale lexer i parser běží paralelně ve dvou "vláknech" a koordinují se. Je to raketová věda :-)
+
+Dále své parsovací rutiny mají i všechny tagy. Když parser narazí na tag, zavolá jeho parsovací funkci (vrací je [Extension::getTags()|#getTags]).
+Jejich úkolem je naparsovat argumenty značky a v případě párových značek i vnitřní obsah. Vrací *uzel*, který se stane součástí AST. Podrobně v části [#Parsovací funkce tagu].
+
+Když parser dokončí práci, máme kompletní AST reprezentující šablonu. Kořenovým uzlem je `Latte\Compiler\Nodes\TemplateNode`. Jednotlivé uzly uvnitř stromu pak reprezentují nejen tagy, ale i HTML elementy, jejich atributy, všechny výrazy použité uvnitř značek atd.
+
+Poté přicházejí na řadu tzv. [#Průchody kompilátoru], což jsou funkce (vrací je [Extension::getPasses()|#getPasses]), které modifikují AST.
+
+Celý proces od načtení obsahu šablony přes parsování až po vygenerování výsledného souboru se dá sekvenčně vykonat tímto kódem, se kterým můžete experimentovat a dumpovat si jednotlivé mezikroky:
+
+```php
+$latte = new Latte\Engine;
+$source = $latte->getLoader()->getContent($file);
+$ast = $latte->parse($source);
+$latte->applyPasses($ast);
+$code = $latte->generate($ast, $file);
+```
+
+
+Příklad AST
+-----------
+
+Pro lepší představu o podobě AST přidáváme ukázku. Toto je zdrojová šablona:
+
+```latte
+{foreach $category->getItems() as $item}
+	<li>{$item->name|upper}</li>
+	{else}
+	no items found
+{/foreach}
+```
+
+A toto její reprezentace v podobě AST:
+
+/--pre
+Latte\Compiler\Nodes\<b>TemplateNode</b>(
+   Latte\Compiler\Nodes\<b>FragmentNode</b>(
+      - Latte\Essential\Nodes\<b>ForeachNode</b>(
+           expression: Latte\Compiler\Nodes\Php\Expression\<b>MethodCallNode</b>(
+              object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$category')
+              name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('getItems')
+           )
+           value: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+           content: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+              - Latte\Compiler\Nodes\<b>TextNode</b>('  ')
+              - Latte\Compiler\Nodes\<b>Html\ElementNode</b>('li')(
+                   content: Latte\Essential\Nodes\<b>PrintNode</b>(
+                      expression: Latte\Compiler\Nodes\Php\Expression\<b>PropertyFetchNode</b>(
+                         object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+                         name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('name')
+                      )
+                      modifier: Latte\Compiler\Nodes\Php\<b>ModifierNode</b>(
+                         filters:
+                            - Latte\Compiler\Nodes\Php\<b>FilterNode</b>('upper')
+                      )
+                   )
+                )
+            )
+            else: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+               - Latte\Compiler\Nodes\<b>TextNode</b>('no items found')
+            )
+        )
+   )
+)
+\--
+
+
+Vlastní tagy
+============
+
+K definování nové značky jsou zapotřebí tři kroky:
+
+- definování [#parsovací funkce tagu] (zodpovědná za parsování tagu do uzlu)
+- vytvoření třídy uzlu (zodpovědné za [#generování PHP kódu] a [#procházení AST])
+- registrace tagu pomocí [Extension::getTags()|#getTags]
+
+
+Parsovací funkce tagu
+---------------------
+
+Parsování tagů ma na starosti jeho parsovací funkce (ta, kterou vrací [Extension::getTags()|#getTags]). Jejím úkolem je naparsovat a zkontrolovat případné argumenty uvnitř značky (k tomu využívá TagParser).
+A dále, pokud je značka párová, požádá TemplateParser o naparsování a vrácení vnitřního obsahu.
+Funkce vytvoří a vrátí uzel, který je zpravidla potomkem `Latte\Compiler\Nodes\StatementNode`, a ten se stane součástí AST.
+
+Pro každý uzel si vytváříme třídu, což uděláme teď hned a parsovací funkci do ní elegantně umístíme jako statickou továrnu. Jako příklad si zkusíme vytvořit známý tag `{foreach}`:
+
+```php
+use Latte\Compiler\Nodes\StatementNode;
+
+class ForeachNode extends StatementNode
+{
+	// parsovací funkce, která zatím pouze vytváří uzel
+	public static function create(Latte\Compiler\Tag $tag): self
+	{
+		$node = new self;
+		return $node;
+	}
+
+	public function print(Latte\Compiler\PrintContext $context): string
+	{
+		// kód doplníme později
+	}
+
+	public function &getIterator(): \Generator
+	{
+		// kód doplníme později
+	}
+}
+```
+
+Parsovací funkci `create()` se předává objekt [api:Latte\Compiler\Tag], který nese základní informace o tagu (jestli jde o klasický tag nebo n:attribut, na jakém řádku se nachází, apod.) a hlavně zpřístupňuje [api:Latte\Compiler\TagParser] v `$tag->parser`.
+
+Pokud značka musí mít argumenty, zkontrolujeme jejich existenci zavoláním `$tag->expectArguments()`. Pro jejich parsování jsou k dispozici metody objektu `$tag->parser`:
+
+- `parseExpression(): ExpressionNode` pro PHP-like výraz (např. `10 + 3`)
+- `parseUnquotedStringOrExpression(): ExpressionNode` pro výraz nebo *unquoted-řetězec*
+- `parseArguments(): ArrayNode` obsah pole (např. `10, true, foo => bar`)
+- `parseModifier(): ModifierNode` pro modifikátor (např `|upper|truncate:10`)
+- `parseType(): ExpressionNode` pro typehint (např. `int|string` nebo `Foo\Bar[]`)
+
+a dále nízkoúrovňový [api:Latte\Compiler\TokenStream] operující přímo s tokeny:
+
+- `$tag->parser->stream->consume(...): Token`
+- `$tag->parser->stream->tryConsume(...): ?Token`
+
+Latte drobnými způsoby rozšiřuje syntaxi PHP, například o modifikátory, zkrácené ternání operátory, nebo umožňuje jednoduché alfanumerické řetězce psát bez uvozovek. Proto používáme termím *PHP-like* místo PHP. Tudíž metoda `parseExpression()` naparsuje např. `foo` jako `'foo'`.
+Vedle toho *unquoted-řetězec* je speciálním případem řetězce, který také nemusí být v uvozovkách, ale zároveň nemusí být ani alfanumerický. Jde třeba o cestu k souboru ve značce `{include ../file.latte}`. K jeho naparsování slouží metoda `parseUnquotedStringOrExpression()`.
+
+.[note]
+Studium tříd uzlů, které jsou součástí Latte, je nejlepší způsob, jak se naučit všechny podrobnosti o procesu parsování.
+
+Vraťmě se ke značce `{foreach}`. V ní očekáváme argumenty ve tvaru `výraz + 'as' + druhý výraz` a naparsujeme je následujícícm způsobem:
+
+```php
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\AreaNode;
+
+class ForeachNode extends StatementNode
+{
+	public ExpressionNode $expression;
+	public ExpressionNode $value;
+
+	public static function create(Latte\Compiler\Tag $tag): self
+	{
+		$tag->expectArguments();
+		$node = new self;
+		$node->expression = $tag->parser->parseExpression();
+		$tag->parser->stream->consume('as');
+		$node->value = $parser->parseExpression();
+		return $node;
+	}
+}
+```
+
+Výrazy, které jsme zapsali do proměnných `$expression` a `$value`, představují poduzly.
+
+.[tip]
+Proměnné s poduzly definujte jako **public**, aby je bylo možné případně modifikovat v [dalších krocích zpracování |#Průchody kompilátoru]. Zároveň je nutné je **zpřístupnit** pro [procházení |#Procházení AST].
+
+U párových značek, jako je ta naše, musí metoda ještě nechat TemplateParser naparsovat její vnitřek. Tohle obstará `yield`, který vrací dvojici &#91;vnitří obsah, koncová značka]. Vnitřní obsah uložíme do proměnné `$node->content`.
+
+```php
+public AreaNode $content;
+
+public static function create(Latte\Compiler\Tag $tag): \Generator
+{
+	// ...
+	[$node->content, $endTag] = yield;
+	return $node;
+}
+```
+
+Klíčové slovo `yield` způsobí, že se metoda `create()` přeruší, řízení se vrátí zpátky k TemplateParser, který pokračuje v parsování obsahu dokud nenarazí na koncovou značku. Poté předá řízení zpět do `create()`, která pokračuje od místa, kde skončila. Užitím `yield` metoda automaticky vrací `Generator`.
+
+Do `yield` lze také předat pole názvů značek, u kterých chceme parsování zastavit, pokud se vyskytnou dříve než koncová značka. To nám pomůže implemenotovat konstrukci `{foreach}...{else}...{/foreach}`. Pokud se objeví `{else}`, obsah za ní naparsujeme do `$node->elseContent`:
+
+```php
+public AreaNode $content;
+public ?AreaNode $elseContent = null;
+
+public static function create(Latte\Compiler\Tag $tag): \Generator
+{
+	// ...
+	[$node->content, $nextTag] = yield ['else'];
+	if ($nextTag?->name === 'else') {
+		[$node->elseContent] = yield;
+	}
+
+	return $node;
+}
+```
+
+Vrácením uzlu je parsování tagu dokončeno.
+
+
+Generování PHP kódu
+-------------------
+
+Každý uzel musí implementovat metodu `print()`. Vrací PHP kód vykreslující danou část šablony (runtime kód). Jako parametr se jí předává objekt [api:Latte\Compiler\PrintContext], který má užitečnou metodu `format()` zjednodušující sestavení výsledného kódu.
+
+Metoda `format(string $mask, ...$args)` akceptuje v masce tyto placeholdery:
+- `%node` vypisuje Node
+- `%dump` vyexporuje hodnotu do PHP
+- `%raw` vloží přímo text bez jakékoliv transformace
+- `%args` vypíše ArrayNode jako argumenty volání funkce
+- `%line` vypíše komentář s číslem řádku
+- `%escape(...)` escapuje obsah
+- `%modify(...)` aplikuje modifikátor
+- `%modifyContent(...)` aplikuje modifikátor pro bloky
+
+
+Naše funkce `print()` by mohla vypadat takto (pro jednoduchost zanedbáváme `else` větev):
+
+```php
+public function print(Latte\Compiler\PrintContext $context): string
+{
+	return $context->format(
+		<<<'XX'
+			foreach (%node as %node) %line {
+				%node
+			}
+
+			XX,
+		$this->expression,
+		$this->value,
+		$this->position,
+		$this->content,
+	);
+}
+```
+
+Proměnnou `$this->position` definuje už třída [api:Latte\Compiler\Node] a nastavuje ji parser. Obsahuje objekt [api:Latte\Compiler\Position] s pozicí tagu ve zdrojovém kódu v podobě čísla řádku a sloupce.
+
+Runtime kód může využívat pomocné proměnné. Aby nedošlo ke kolizi s proměnnými, které používá samotná šablona, je zvykem je prefixovat znaky `$ʟ__`.
+
+Může také za běhu využívat libovolné hodnoty, které si do šablony předá v podobě tzv. providerů metodou [Extension::getProviders()|#getProviders]. K nim přistupuje pomocí `$this->global->...`.
+
+
+Procházení AST
+--------------
+
+Aby bylo možné AST strom procházet do hloubky, je nutné implementovat metodu `getIterator()`. Ta zpřístupní poduzly:
+
+```php
+public function &getIterator(): \Generator
+{
+	yield $this->expression;
+	yield $this->value;
+	yield $this->content;
+	if ($this->elseContent) {
+		yield $this->elseContent;
+	}
+}
+```
+
+Všimněte si, že `getIterator()` vrací reference. Právě díky tomu mohou *node visitors* jednotlivé uzly měnit za jiné.
+
+.[warning]
+Pokud má uzel poduzly, je nezbytné tuto metodu implementovat a všechny poduzly zpřístupnit. Jinak by mohla vzniknout bezpečnostní díra.
+
+
+Průchody kompilátoru
+====================
+
+Průchody kompilátoru jsou funkce, které modifikují AST nebo sbírají v nich informace. Vrací je metoda [Extension::getPasses()|#getPasses].
+
+
+Node Traverser
+--------------
+
+Nejběžnějším způsobem práce s AST je použití [api:Latte\Compiler\NodeTraverser]:
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+
+$ast = (new NodeTraverser)->traverse(
+	$ast,
+	enter: fn(Node $node) => ...,
+	leave: fn(Node $node) => ...,
+);
+```
+
+Funkce *enter* (tj. node visitor) je volána při prvním setkání s uzlem, ještě před zpracováním jeho poduzlů. Funkce *leave* je volána po návštěvě všech poduzlů.
+Běžným postupem je, že funkce *enter* se používá ke shromáždění některých informací a poté funkce *leave* na jejich základě provede úpravy. V době, kdy je volána funkce *leave*, bude již veškerý kód uvnitř uzlu navštíven a potřebné informace shromážděny.
+
+Jak AST modifikovat? Nejjednodušším způsobem je jednoduše měnit vlastnosti uzlů. Druhým způsobem je uzel zcela nahradit vrácením uzlu nového. Příklad: následující kód změní všechna celá čísla v AST na řetězce (např. 42 se změní na `'42'`).
+
+```php
+use Latte\Compiler\Nodes\Php;
+
+$ast = (new NodeTraverser)->traverse(
+	$ast,
+	leave: function (Node $node) {
+		if ($node instanceof Php\Scalar\IntegerNode) {
+            return new Php\Scalar\StringNode((string) $node->value);
+        }
+	},
+);
+```
+
+Modul AST může snadno obsahovat tisíce uzlů a procházení všech uzlů může být pomalé. V některých případech je možné se úplnému procházení vyhnout.
+
+Pokud ve stromu hledáte všechny uzly `Html\ElementNode`, pak víte, že jakmile jednou uvidíte uzel `Php\ExpressionNode`, nemá smysl kontrolovat také všechny jeho podřízené uzly, protože HTML nemůže být uvnitř ve výrazech. V takovém případě můžete traverseru přikázat, aby do uzlu třídy neprováděl rekurzi:
+
+```php
+$ast = (new NodeTraverser)->traverse(
+	$ast,
+	enter: function (Node $node) {
+		if ($node instanceof Php\ExpressionNode) {
+			return NodeTraverser::DontTraverseChildren;
+        }
+        // ...
+	},
+);
+```
+
+Pokud hledáte pouze jeden konkrétní uzel, je také možné po jeho nalezení procházení zcela přerušit.
+
+```php
+$ast = (new NodeTraverser)->traverse(
+	$ast,
+	enter: function (Node $node) {
+		if ($node instanceof Nodes\ParametersNode) {
+			return NodeTraverser::StopTraversal;
+        }
+        // ...
+	},
+);
+```
+
+
+Pomocníci pro uzly
+------------------
+
+Třída [api:Latte\Compiler\NodeHelpers] poskytuje některé metody, které mohou najít uzly AST, které buď splňují určitou podmínku atd. Několik příkladů:
+
+```php
+use Latte\Compiler\NodeHelpers;
+
+// najde všechny uzly prvků HTML
+$elements = NodeHelpers::find($ast, fn(Node $node) => $node instanceof Nodes\Html\ElementNode);
+
+// najde první textový uzel
+$text = NodeHelpers::findFirst($ast, fn(Node $node) => $node instanceof Nodes\TextNode);
+
+// převede uzel PHP na skutečnou hodnotu
+$value = NodeHelpers::toValue($node);
+
+// převede statický textový uzel na řetězec
+$text = NodeHelpers::toText($node);
+```
+
+
+{{composer: latte/latte}}

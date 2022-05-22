@@ -1,0 +1,305 @@
+Extending Latte
+***************
+
+.[perex]
+Latte is very flexible and can be extended in many ways: you can add custom filters, functions, tags, loaders, etc. We will show you how to do it.
+
+
+How Many Roads Lead to Rome?
+============================
+
+Since some of the ways of extending Latte can be blended, let's first try to explain the differences between them. As an example, let's try to implement a *Lorem ipsum* generator, which is passed the number of words to generate.
+
+The main Latte language construct is the tag. We can implement a generator by extending Latte with a new tag:
+
+```latte
+{lipsum 40}
+```
+
+The tag will work great. However, the generator in the form of a tag may not be flexible enough because it cannot be used in an expression. By the way, in practice, you rarely need to generate tags; and that's good news, because tags are a more complicated way to extend.
+
+Okay, let's try creating a filter instead of a tag:
+
+```latte
+{=40|lipsum}
+```
+
+Again, a valid option. But the filter should transform the passed value into something else. Here we use the value `40`, which indicates the number of words generated, as the filter argument, not as the value we want to transform.
+
+So let's try using function:
+
+```latte
+{lipsum(40)}
+```
+
+That's it! For this particular example, creating a function is the ideal extension point to use. You can call it anywhere where an expression is accepted, for example:
+
+```latte
+{var $text = lipsum(40)}
+```
+
+
+Filters
+=======
+
+Create a filter by registering its name and any PHP callable, such as a function:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFilter('shortify', function (string $s): string {
+	return mb_substr($s, 0, 10); // shortens the text to 10 characters
+});
+```
+
+In this case it would be better for the filter to get an additional parameter:
+
+```php
+$latte->addFilter('shortify', function (string $s, int $len = 10): string {
+	return mb_substr($s, 0, $len);
+});
+```
+
+We use it in a template like this:
+
+```html
+<p>{$text|shortify}</p>
+<p>{$text|shortify:100}</p>
+```
+
+As you can see, the function receives the left side of the filter before the pipe `|` as the first argument and the arguments passed to the filter after `:` as the next arguments.
+
+Of course, the function representing the filter can accept any number of parameters, and variadic parameters are also supported.
+
+
+Filters in the Template Class
+-----------------------------
+
+The second way to define a filter is to use [template class|type-system]. We create a method with the `TemplateFilter` attribute:
+
+```php
+class MyTemplate
+{
+	#[Latte\Attributes\TemplateFilter]
+	public function shortify(string $s, int $len = 10): string
+	{
+		return mb_substr($s, 0, $len);
+	}
+}
+
+$params = new MyTemplate;
+$latte->render('template.latte', $params);
+```
+
+If you are using PHP 7.x and Latte 2.x, use the `/** @filter */` annotation instead of the attribute.
+
+
+Filter Loader .{data-version:2.10}
+----------------------------------
+
+Instead of registering individual filters, you can create a so-called loader, which is a function that is called with the filter name as an argument and returns its PHP callable, or null.
+
+```php
+$latte->addFilterLoader([new Filters, 'load']);
+
+
+class Filters
+{
+	public function load(string $filter): ?callable
+	{
+		if (method_exists($this, $filter)) {
+			return [$this, $filter];
+		}
+		return null;
+	}
+
+	public function shortify($s, $len = 10)
+	{
+		return mb_substr($s, 0, $len);
+	}
+
+	// ...
+}
+```
+
+
+Contextual Filters
+------------------
+
+A contextual filter is one that accepts an object [api:Latte\Runtime\FilterInfo] in the first parameter, followed by other parameters as in the case of classical filters. It is registered in the same way, Latte itself recognizes that the filter is contextual:
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('foo', function (FilterInfo $info, string $str): string {
+	// ...
+});
+```
+
+Context filters can detect and change the content-type they receive in the `$info->contentType` variable. If the filter is called classically over a variable (e.g. `{$var|foo}`), the `$info->contentType` will contain null.
+
+The filter should first check if the content-type of the input string is supported. It can also change it. Example of a filter that accepts text (or null) and returns HTML:
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('money', function (FilterInfo $info, float $amount): string {
+	// first we check if the input's content-type is text
+	if (!in_array($info->contentType, [null, ContentType::Text])) {
+		throw new Exception("Filter |money used in incompatible content type $info->contentType.");
+	}
+
+	// change content-type to HTML
+	$info->contentType = ContentType::Html;
+	return "<i>$num Kč</i>";
+});
+```
+
+.[note]
+In this case, the filter must ensure correct escaping of the data.
+
+All filters that are used over [blocks|tags#block] (e.g. as `{block|foo}...{/block}`) must be contextual.
+
+
+Functions
+=========
+
+By default, all native PHP functions can be used in Latte, unless the sandbox disables it. But you can also define your own functions. They can override the native functions.
+
+Create a function by registering its name and any PHP callable:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFunction('random', function (...$args) {
+	return $args[array_rand($args)];
+});
+```
+
+The usage is then the same as when calling the PHP function:
+
+```html
+{random(apple, orange, lemon)} // prints for example: apple
+```
+
+
+Functions in the Template Class
+-------------------------------
+
+The second way to define a function is to use [template class|type-system]. We create a method with the `TemplateFunction` attribute:
+
+```php
+class MyTemplate
+{
+	#[Latte\Attributes\TemplateFunction]
+	public function random(...$args)
+	{
+		return $args[array_rand($args)];
+	}
+}
+
+$params = new MyTemplate;
+$latte->render('template.latte', $params);
+```
+
+If you are using PHP 7.x and Latte 2.x, use the `/** @function */` annotation instead of the attribute.
+
+
+Loaders
+=======
+
+Loaders are responsible for loading templates from a source, such as a file system. They are set using the `setLoader()` method:
+
+```php
+$latte->setLoader(new MyLoader);
+```
+
+The built-in loaders are:
+
+
+FileLoader
+----------
+
+Default loader. Loads templates from the filesystem.
+
+Access to files can be restricted by setting the base directory:
+
+```php
+$latte->setLoader(new Latte\Loaders\FileLoader($templateDir));
+$latte->render('test.latte');
+```
+
+
+StringLoader
+------------
+
+Loads templates from strings. This loader is very useful for unit testing. It can also be used for small projects where it may make sense to store all templates in a single PHP file.
+
+```php
+$latte->setLoader(new Latte\Loaders\StringLoader([
+	'main.file' => '{include other.file}',
+	'other.file' => '{if true} {$var} {/if}',
+]));
+
+$latte->render('main.file');
+```
+
+Simplified use:
+
+```php
+$template = '{if true} {$var} {/if}';
+$latte->setLoader(new Latte\Loaders\StringLoader);
+$latte->render($template);
+```
+
+
+Creating a Custom Loader
+------------------------
+
+Loader is a class that implements the [api:Latte\Loader] interface.
+
+
+Tags
+====
+
+Latte provides API for making your own tags. It isn't difficult at all. Tags are added in sets (a set can consist of a single tag).
+
+```php
+$latte = new Latte\Engine;
+
+// lets create a set
+$set = new Latte\Macros\MacroSet($latte->getCompiler());
+
+// add new pair tag {try} ... {/try}
+$set->addMacro(
+	'try', // tag name
+	'try {',  // PHP code replacing the opening brace
+	'} catch (\Exception $e) {}' // code replacing the closing brace
+);
+```
+
+If we omit the last parameter of `addMacro()` method, we denote the tag is not paired.
+
+PHP code in the second and third parameter can contain tags:
+
+- `%node.word` - inserts the first tag argument
+- `%node.array` - inserts the tag arguments formatted as a PHP array
+- `%node.args` - inserts the tag arguments formatted as PHP code
+- `%node.line` - inserts a comment with the line number in the template
+- `%escape(...)` - replaced by the current escape function
+- `%modify(...)` - replaced by a sequence of filters
+
+For example:
+
+```php
+$set->addMacro('if', 'if (%node.args):', 'endif');
+```
+
+If the tag logic is more complex we can use callbacks or lambda functions instead of strings. In the first parameter, they will get [MacroNode |api:Latte\MacroNode] object which represents the current node, the second parameter is [PhpWriter |api:Latte\PhpWriter] object which helps with generating the output code.
+
+```php
+$set->addMacro('if', function ($node, $writer) {
+	return $writer->write('if (%node.args):');
+}, 'endif');
+```
+
+
+{{composer: latte/latte}}

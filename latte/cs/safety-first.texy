@@ -1,19 +1,332 @@
-Bezpečnost především
-********************
+Latte je synonymum bezpečnosti
+******************************
+
+<div class=perex>
+
+Latte je jediný šablonovací systém pro PHP s efektivní ochranou proti kritické zranitelnosti Cross-site Scripting (XSS). A to díky tzv. kontextově sensitivnímu escapování. Povíme si,
+
+- jaký je princip zranitelnosti XSS a proč je tak nebezpečná
+- čím to, že je Latte v obraně před XSS tak efektivní
+- jak lze v šablonách Twig, Blade a spol. snadno udělat bezpečnostní díru
+
+</div>
+
+
+Cross-site Scripting (XSS)
+==========================
+
+Cross-site Scripting (zkráceně XSS) je jednou z nejčastějších zranitelností webových stránek a přitom velmi nebezpečnou. Umožní útočníkovi vložit do cizí stránky škodlivý skript (tzv. malware), který se spustí v prohlížeči nic netušícího uživatele.
+
+Co všechno může takový skript napáchat? Může například odeslat útočníkovi libovolný obsah z napadené stránky, včetně citlivých údajů zobrazených po přihlášení. Může stránku pozměnit nebo provádět další požadavky jménem uživatele.
+Pokud by se například jednalo o webmail, může si přečíst citlivé zprávy, pozměnit zobrazovaný obsah nebo přenastavit konfiguraci, např. zapnout přeposílání kopií všech zpráv na útočníkovu adresu, aby získal přístup i k budoucím emailům.
+
+Proto také XSS figuruje na předních místech žebříčků nejnebezpečnějších zranitelností. Pokud se na webové stránce zranitelnost objeví, je nutné ji co nejdříve odstranit, aby se zabránilo zneužití.
+
+
+Jak zranitelnost vzniká?
+------------------------
+
+Chyba vzniká v místě, kde se webová stránka generuje a vypisují se proměnné. Představte si, že vytváříte stránku s vyhledáváním, a na začátku bude odstavec s hledaným výrazem v podobě:
+
+```php
+echo '<p>Výsledky vyhledávání pro <em>' . $search . '</em></p>';
+```
+
+Útočník může do vyhledávacího políčka a potažmo do proměnné `$search` zapsat libovolný řetězec, tedy i HTML kód jako `<script>alert("Hacked!")</script>`. Protože výstup není nijak ošetřen, stane se součástí zobrazené stránky:
+
+```html
+<p>Výsledky vyhledávání pro <em><script>alert("Hacked!")</script></em></p>
+```
+
+Prohlížeč místo toho, aby vypsal hledaný řetězec, spustí JavaScript. A tím přebírá vládu nad stránkou útočník.
+
+Můžete namítnout, že vložením kódu do proměnné sice dojde ke spuštění JavaScriptu, ale jen v útočníkově prohlížeči. Jak se dostane k oběti? Z tohoto pohledu rozlišujeme několik typů XSS. V našem příkladu s vyhledáváním hovoříme o *reflected XSS*.
+Zde je ještě potřeba navést oběť, aby klikla na odkaz, který bude obsahovat škodlivý kód v parametru:
+
+```
+https://example.com/?search=<script>alert("Hacked!")</script>
+```
+
+Navedení uživatele na odkaz sice vyžaduje určité sociální inženýrství, ale není to nic složitého. Uživatelé na odkazy, ať už v emailech nebo na sociálních sítích, klikají bez větších rozmyslů. A že je v adrese něco podezřelého se dá zamaskovat pomocí zkracovače URL, uživatel pak vidí jen `bit.ly/xxx`.
+
+Nicméně existuje i druhá a mnohem nebezpečnější forma útoku označovaná jako *stored XSS* nebo *persistent XSS*, kdy se útočníkovi podaří uložit škodlivý kód na server tak, aby byl automaticky vkládán do některých stránek.
+
+Příkladem jsou stránky, kam uživatelé píší komentáře. Útočník pošle příspěvek obsahující kód a ten se uloží na server. Pokud stránky nejsou dostatečně zabezpečené, bude se pak spouštět v prohlížeči každého návštěvníka.
+
+Mohlo by se zdát, že jádro útoku spočívá v tom dostat do stránky řetězec `<script>`. Ve skutečnosti "způsobů vložení JavaScriptu je mnoho":https://cheatsheetseries.owasp.org/cheatsheets/XSS_Filter_Evasion_Cheat_Sheet.html.
+Ukážeme si třeba příklad vložení pomocí HTML atributu. Mějme fotogalerii, kde lze vkládat k obrázkům popisek, který se vypíše v atributu `alt`:
+
+```php
+echo '<img src="' . $imageFile . '" alt="' . $imageAlt . '">';
+```
+
+Útočníkovi stačí jako popisek vložit šikovně sestavený řetězec `" onload="alert('Hacked!')` a když vypsání nebude ošetřeno, výsledný kód bude vypadat takto:
+
+```html
+<img src="photo0145.webp" alt="" onload="alert('Hacked!')">
+```
+
+Součástí stránky se nyní stává podvržený atribut `onload`. Prohlížeč kód v něm obsažený spustí hned po stažení obrázku. Hacked!
+
+
+Jak se bránit XSS?
+------------------
+
+Jakékoliv pokusy útok detekovat pomocí blacklistu, jako například blokovat řetězec `<script>` apod., jsou nedostačující. Základem funkční obrany je **důsledná sanitizace všech dat vypisovaných uvnitř stránky.**
+
+Především jde o nahrazení všech znaků se speciálním významem za jiné odpovídající sekvence, čemuž se slangově říká **escapování** (první znak sekvence se nazývá únikovým, odtud pojmenování).
+Třeba v textu HTML má speciální význam znak `<`, který když nemá být interpretován jako začátek tagu, musíme jej nahradit vizuálně odpovídající sekvencí, tzv. HTML entitou `&lt;`.
+A prohlížeč vypíše menšítko.
+
+**Velmi důležité je rozlišovat kontext, ve kterém data vypisujeme**. Protože v různých kontextech se řetězce různě sanitizují. V různých kontextech mají speciální význam různé znaky.
+Například se liší escapování v textu HTML, v atributech HTML, uvnitř některých speciálních elementů, atd. Za chvíli to probereme podrobně.
+
+Ošetření je nejlepší provádět přímo při vypsáním řetězce ve stránce, čímž zajistíme, že se opravdu provede a provede se právě jednou. Nejlepší je, pokud ošetření obstará **automaticky** přímo šablonovací systém.
+Protože pokud ošetření neprobíhá automaticky, může na něj programátor zapomenout. A jedno opomenutí znamená, že web je zranitelný.
+
+Nicméně XSS se netýká jen vypisování dat v šablonách, ale i dalších částí aplikace, které musí správně zacházet s nedůvěryhodnými daty. Například je nutné, aby JavaScript ve vaší aplikaci nepoužíval ve spojitosti s nimi `innerHTML`, ale pouze `innerText` nebo `textContent`.
+Speciální pozor je potřeba dávat na funkce, které vyhodnocují řetězce jako JavaScript, což je `eval()`, ale taky `setTimeout()`, případně použití funkce `setAttribute()` s eventovými atributy jako `onload` apod. Tohle už ale jde mimo oblast, kterou pokrývají šablony.
+
+**Ideální obrana ve 3 bodech:**
+
+1) rozezná kontext, ve kterém se data vypisují
+2) sanitizuje data podle pravidel daného kontextu (tedy „kontextově sensitivně“)
+3) dělá to automaticky
 
 
 Kontextově sensitivní escapování
 ================================
 
-Byť je [Cross Site Scripting (XSS) |nette:glossary#cross-site-scripting-xss] jedním z nejtriviálnějších způsobů narušení webových stránek, jde o zranitelnost nejčastější. Přitom velmi závažnou, protože může vést k zcizení identity a podobně. Obranou je důsledné [escapování |nette:glossary#escapovani] vypisovaných dat, tj. převod znaků majících v daném kontextu speciální význam na jiné odpovídající sekvence.
+Co se přesně myslí slovem kontext? Jde o místo v dokumentu s vlastními pravidly pro ošetřování vypisovaných dat. Odvíjí se od typu dokumentu (HTML, XML, CSS, JavaScript, plain text, ...) a může se lišit v jeho konkrétních částech.
+Například v HTML dokumentu je takových míst (kontextů), kde platí velmi odlišná pravidla, celá řada. Možná budete překvapeni, kolik jich je. Tady máme první čtveřici:
 
-Pokud kodér na escapování zapomene, vznikne v aplikaci bezpečnostní díra. Proto šablonovací systémy začínají přicházet s automatickým escapováním. Problém je ale v tom, že na webové stránce existují různé kontexty a v každém je potřeba ošetřit vypisované proměnné trošku jinak. Může tak vzniknou bezpečnostní díra i kvůli špatně zvolené escapovací funkci.
+```html
+<p>#text</p>
+<img src="#atribut">
+<textarea>#rawtext</textarea>
+<!-- #komentář -->
+```
 
-Latte je však dál. Disponuje unikátní technologií *Kontextově sensitivní escapování* (Context-Aware Escaping), která rozezná, ve které části dokumentu se značka nachází a podle toho zvolí správné escapování. Co to znamená?
+Výchozím a základním kontextem HTML stránky je HTML text. Jaká zde platí pravidla? Speciální význam mají znaky `<` a `&`, které představují začátek značky nebo entity, takže je musíme escapovat, a to nahrazením za HTML entitu (`<` za `&lt;` `&` za `&amp`).
 
-Že v Latte není potřeba nic manuálně ošetřovat. **Vše se děje automaticky, správně a důsledně.** Nemusíte se bát bezpečnostních děr.
+Druhým nejběžnějším kontextem je hodnota HTML atributu. Od textu se liší v tom, že speciální význam tu má uvozovka `"` nebo `'`, která atribut ohraničuje. Tu je třeba zapsat entitou, aby nebyla chápána jako konec atributu.
+Naopak v atributu lze bezpečně používat znak `<`, protože tady žádný speciální význam nemá, tady nemůže být chápán jako začátek značky či komentáře.
+Ale pozor, v HTML lze psát hodnoty atributů i bez uvozovek, v takovém případě má speciální význam celá řada znaků, jde tedy o další samostatný kontext.
 
-Podívejme se, jak to funguje. Vytvoříme si šablonu:
+Možná vás překvapí, ale speciální pravidla platí uvnitř elementů `<textarea>` a `<title>`, kde se znak `<` nemusí (ale může) escapovat, pokud za ním nenásleduje `/`. Ale to je spíš perlička.
+
+Zajímavé je to uvnitř HTML komentářů. Tady se totiž k escapování nepoužívají HTML entity. Dokonce žádná specifikace neuvádí, jak by se mělo v komentářích escapovat.
+Jen je nutné dodržet poněkud "kuriozní pravidla":https://html.spec.whatwg.org/multipage/syntax.html#comments a vyhnout se v nich určitým kombinacím znaků.
+
+Kontexty se také mohou vrstvit, k čemuž dochází, když vložíme JavaScript nebo CSS do HTML. To lze udělat dvěma odlišnými způsoby, elementem a atributem:
+
+```html
+<script>#js-element</script>
+<img onclick="#js-atribut">
+
+<style>#css-element</style>
+<p style="#css-atribut"></p>
+```
+
+Dvě cesty a dva různé způsoby escapování dat. Uvnitř elementu `<script>` a `<style>` se stejně jako v případě HTML komentářů escapování pomocí HTML entit neprovádí. Při vypisování dat uvnitř těchto elementů je potřeba dodržet jediné pravidlo: text nesmí obsahovat sekvenci `</script` resp. `</style`.
+
+Naopak v atributech `style` a `on***` se pomocí HTML entit escapuje.
+
+A samozřejmě uvnitř vnořeného JavaScriptu nebo CSS platí escapovací pravidla těchto jazyků. Takže řetezec v atributu např. `onload` se nejprve escapuje podle pravidel JS a potom podle pravidel HTML atributu.
+
+Uff... Jak vidíte, HTML je velmi komplexní dokument, kde se vrství kontexty, a bez uvědomění si, kde přesně data vypisuji (tj. v jakém kontextu), nelze říct, jak to správně udělat.
+
+
+Chcete příklad?
+---------------
+
+Mějme řetězec `Rock'n'Roll`.
+
+Pokud jej budete vypisovat v HTML textu, zrovna v tomhle případě netřeba dělat žádné záměny, protože řetězec neobsahuje žádný znak se speciálním významem. Jiná situace nastane, pokud jej vypíšete uvnitř HTML atributu uvozeného do jednoduchých uvozovek. V takovém případě je potřeba escapovat uvozovky na HTML entity:
+
+```html
+<div title='Rock&apos;n&apos;Roll'></div>
+```
+
+Tohle bylo jednoduché. Mnohem zajímavější situace nastane při vrstvení kontextů, například pokud řetězec bude součástí JavaScriptu.
+
+Nejprve jej tedy vypíšeme do samotného JavaScriptu. Tj. obalíme jej do uvozovek a zároveň escapujeme pomocí znaku `\` uvozovky v něm obsažené:
+
+```js
+'Rock\'n\'Roll'
+```
+
+Ještě můžeme doplnit volání nějaké funkce, ať kód něco dělá:
+
+```js
+alert('Rock\'n\'Roll');
+```
+
+Pokud tento kód vložíme do HTML dokumentu pomocí `<script>`, netřeba nic dalšího upravovat, protože se v něm nevyskytuje zakázaná sekvence `</script`:
+
+```html
+<script> alert('Rock\'n\'Roll'); </script>
+```
+
+Pokud bychom jej však chtěli vložit do HTML atributu, musíme ještě escapovat uvozovky na HTML entity:
+
+```html
+<div onclick='alert(&apos;Rock\&apos;n\&apos;Roll&apos;)'></div>
+```
+
+Vnořeným kontextem ale nemusí být jen JS nebo CSS. Běžně jím je také URL. Parametry v URL se escapují tak, že se znaky se speciálním významen převádějí na sekvence začínající `%`. Příklad:
+
+```
+https://example.org/?a=Jazz&b=Rock%27n%27Roll
+```
+
+A když tento řetězec vypíšeme v atributu, ještě aplikujeme escapování podle tohoto kontextu a nahradíme `&` za `&amp`:
+
+```html
+<a href="https://example.org/?a=Jazz&amp;b=Rock%27n%27Roll">
+```
+
+Pokud jste dočetli až sem, gratulujeme, bylo to vyčerpávající. Teď už máte dobrou představu o tom, co jsou to kontexty a escapování. A nemusíte mít obavy, že je to složité. Latte tohle totiž dělá za vás automaticky.
+
+
+Latte vs naivní systémy
+=======================
+
+Ukázali jsem si, jak se správně escapuje v HTML dokumentu a jak zásadní je znalost kontextu, tedy místa, kde data vypisujeme. Jinými slovy, jak funguje kontextově sensitvní escapování.
+Ačkoliv jde o nezbytný předpoklad funkční obrany před XSS, **Latte je jediný šablonovací systém pro PHP, který tohle umí.**
+
+Jak je to možné, když všechny systémy dnes tvrdí, že mají automatické escapování?
+Automatické escapování bez znalosti kontextu je trošku bullshit, který **vytváří falešný dojem bezpečí**.
+
+Šablonovací systémy, jako je Twig, Laravel Blade a další, nevidí v šabloně žádnou HTML strukturu. Nevidí tudíž ani kontexty. Oproti Latte jsou slepé a naivní. Zpracovávají jen vlastní značky, vše ostatní je pro ně nepodstatný tok znaků:
+
+<div class="juxtapose juxtapose--dark-handle" data-startingposition="80" data-animation="juxtapose-wiper">
+
+```twig .{file:Twig šablona, jak ji vidí samotný Twig}
+░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░
+░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░
+```
+
+```twig .{file:Twig šablona, jak ji vidí designer}
+- v textu: <span>{{ text }}</span>
+- v tagu: <span {{ text }} ></span>
+- v atributu: <span title='{{ text }}'></span>
+- v atributu bez uvozovek: <span title={{ text }}></span>
+- v atributu obsahujícím URL: <a href="{{ text }}"></a>
+- v atributu obsahujícím JavaScript: <img onload="{{ text }}">
+- v atributu obsahujícím CSS: <span style="{{ text }}"></span>
+- v JavaScriptu: <script>var = {{ text }}</script>
+- v CSS: <style>body { content: {{ text }}; }</style>
+- v komentáři: <!-- {{ text }} -->
+```
+
+</div>
+
+Naivní systémy jen mechanicky převádějí znaky `< > & ' "` na HTML entity, což je sice ve většině případů užití platný způsob escapování, ale zdaleka ne vždy. Nemohou tak odhalit ani předejít vzniku různých bezpečnostní děr, jak si ukážeme dále.
+
+Latte šablonu vidí stejně jako vy. Chápe HTML, XML, rozeznává značky, atributy atd. A díky tomu rozlišuje jednotlivé kontexty a podle nich ošetřuje data. Nabízí tak opravdu efektivní ochranu proti kritické zranitelnosti Cross-site Scripting.
+
+
+Živá ukázka
+===========
+
+Vlevo vidíte šablonu v Latte, vpravo je vygenerovaný HTML kód. Několikrát se tu vypisuje proměnná `$text` a pokaždé v trošku jiném kontextu. A tedy i trošku jinak escapovaná. Kód šablony můžete sami editovat, například změnit obsah proměnné atd. Zkuste si to:
+
+<div class="grid fiddle wiki-expanded">
+<div class="contains-pre">
+
+``` .{file:template.latte; min-height: 14em}[fiddle-source]
+{* ZKUS UPRAVIT TUTO ŠABLONU *}
+{var $text = "Rock'n'Roll"}
+- <span>{$text}</span>
+- <span title='{$text}'></span>
+- <span title={$text}></span>
+- <img onload="{$text}">
+- <script>var = {$text}</script>
+- <!-- {$text} -->
+```
+
+</div>
+
+<div class="contains-pre">
+
+``` .{file:view-source:...; min-height: 14em}[fiddle-output]
+- <span>Rock'n'Roll</span>
+- <span title='Rock&apos;n&apos;Roll'></span>
+- <span title="Rock&apos;n&apos;Roll"></span>
+- <img onload="&quot;Rock&apos;n&apos;Roll&quot;">
+- <script>var = "Rock'n'Roll"</script>
+- <!-- Rock'n'Roll -->
+```
+
+</div>
+</div>
+
+Není to skvělé! Latte dělá kontextově sensitivní escapování automaticky, takže programátor:
+
+- nemusí přemýšlet ani vědět, jak se kde escapuje
+- nemůže se splést
+- nemůže na escapování zapomenout
+
+Tohle dokonce nejsou všechny kontexty, které Latte při vypisování rozlišuje a pro které přizpůsobuje ošetření dat. Další zajimavé případy si projdeme nyní.
+
+
+Jak hacknout naivní systémy
+===========================
+
+Na několika praktických příkladech si ukážeme, jak je rozlišování kontextů důležité a proč naivní šablonovací systémy neposkytují dostatečnou ochranu před XSS, na rozdíl od Latte.
+Jako zástupce naivního systému použijeme v ukázkách Twig, ale totéž platí i pro ostatní systémy.
+
+
+Zranitelnost atributem
+----------------------
+
+Pokusíme se do stránky injektovat škodlivý kód pomocí HTML atributu, jak jsme si [ukazovali výše|#Jak zranitelnost vzniká]. Mějme šablonu v Twigu vykreslující obrázek:
+
+```twig .{file:Twig}
+<img src={{ imageFile }} alt={{ imageAlt }}>
+```
+
+Všimněte si, že okolo hodnot atributů nejsou uvozovky. Kodér na ně mohl zapomenout, což se prostě stává. Například v Reactu se kód píše takto, bez uvozovek, a kodér, který střídá jazyky, pak na uvozovky může snadno zapomenout.
+
+Útočník jako popisek obrázku vloží šikovně sestavený řetězec `foo onload=alert('Hacked!')`. Už víme, že Twig nemůže poznat, jestli se proměnná vypisuje v toku HTML textu, uvnitř atributu, HTML komentáře, atd., zkrátka nerozlišuje kontexty. A jen mechanicky převádí znaky `< > & ' "` na HTML entity.
+Takže výsledný kód bude vypadat takto:
+
+```html
+<img src=photo0145.webp alt=foo onload=alert(&#039;Hacked!&#039;)>
+```
+
+**A vznikla bezpečností díra!**
+
+Součástí stránky se stal podvržený atribut `onload` a prohlížeč ihned po stažení obrázku jej spustí.
+
+Nyní se podíváme, jak si se stejnou šablonou poradí Latte:
+
+```latte .{file:Latte}
+<img src={$imageFile} alt={$imageAlt}>
+```
+
+Latte vidí šablonu stejně jako vy. Na rozdíl od Twigu chápe HTML a ví, že proměnná se vypisuje jako hodnota atributu, který není v uvozovkách. Proto je doplní. Když útočník vloží stejný popisek, výsledný kód bude vypadat takto:
+
+```html
+<img src="photo0145.webp" alt="foo onload=alert(&apos;Hacked!&apos;)">
+```
+
+**Latte úspěšně zabránilo XSS.**
+
+
+Vypsání proměnné v JavaScript
+-----------------------------
+
+Díky kontextově sensitivnímu escapování je možné zcela nativně používat PHP proměnné uvnitř JavaScriptu.
 
 ```latte
 <p onclick="alert({$movie})">{$movie}</p>
@@ -23,18 +336,15 @@ Podívejme se, jak to funguje. Vytvoříme si šablonu:
 
 Pokud bude proměnná `$movie` obsahovat řetězec `'Amarcord & 8 1/2'`, vygeneruje se následující výstup. Všimněte si, že uvnitř HTML se použije jiné escapování, než uvnitř JavaScriptu a ještě jiné v atributu `onclick`:
 
-
 ```latte
 <p onclick="alert(&quot;Amarcord &amp; 8 1\/2&quot;)">Amarcord &amp; 8 1/2</p>
 
 <script>var movie = "Amarcord & 8 1\/2";</script>
 ```
 
-Díky kontextově sensitivnímu escapování je šablona jednoduchá a vaše aplikace přitom bude perfektně zabezpečená proti Cross Site Scripting. Dokonce je možné zcela nativně používat PHP proměnné uvnitř JavaScriptu!
-
 
 Kontrola odkazů
-===============
+---------------
 
 Latte automaticky kontroluje, zda proměnná použitá v atributech `src` nebo `href` obsahuje webovou URL (tj. protokol HTTP) a předchází vypsání odkazů, které mohou představovat bezpečnostní riziko.
 
@@ -50,4 +360,12 @@ Vypíše:
 <a href="">klikni</a>
 ```
 
-Kontrola se dá vypnout pomocí filtru [noCheck|filters#noCheck].
+Kontrola se dá vypnout pomocí filtru [nocheck|filters#nocheck].
+
+
+Limity Latte
+============
+
+Latte není zcela kompletní ochranou před XSS pro celou aplikaci. Byli bychom neradi, kdybyste při použití Latte přestali nad bezpečností přemýšlet.
+Cílem Latte je zajistit, aby útočník nemohl pozměnit strukturu stránky, podvrhnout HTML elementy nebo atributy. Ale nekontroluje obsahovou správnost vypisovaných dat. Nebo správnost chování JavaScriptu.
+To už jde mimo kompetence šablonovacího systému. Ověřování správnosti dat, zejména těch vložených uživatelem a tedy nedůvěryhodných, je důležitým úkolem programátora.

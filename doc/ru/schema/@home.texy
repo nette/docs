@@ -1,0 +1,454 @@
+Schema: валидация данных
+************************
+
+.[perex]
+Практичная библиотека для проверки и нормализации структур данных по заданной схеме с интеллектуальным и простым в понимании API.
+
+
+Установка
+---------
+
+Загрузите и установите пакет с помощью [Composer|/best-practices/composer]:
+
+```shell
+composer require nette/schema
+```
+
+
+Использование
+-------------
+
+В переменной `$schema` у нас есть схема валидации (что именно это значит и как её создать, мы расскажем позже), а в переменной `$data` у нас есть структура данных, которую мы хотим валидировать и нормализовать. Это могут быть, например, данные, отправленные пользователем через API, конфигурационный файл и т. д.
+
+Задачей занимается класс [api:Nette\Schema\Processor], который обрабатывает входные данные и либо возвращает нормализованные данные, либо выбрасывает исключение [api:Nette\Schema\ValidationException] при ошибке.
+
+```php
+$processor = new Nette\Schema\Processor;
+
+try {
+	$normalized = $processor->process($schema, $data);
+} catch (Nette\Schema\ValidationException $e) {
+	echo 'Data is invalid: ' . $e->getMessage();
+}
+```
+
+Метод `$e->getMessages()` возвращает массив всех строк сообщений, а `$e->getMessageObjects()` возвращает все сообщения в виде объектов "Nette\Schema\Message":https://api.nette.org/3.1/Nette/Schema/Message.html.
+
+
+Определение схемы
+-----------------
+
+А теперь давайте создадим схему. С помощью класса [api:Nette\Schema\Expect] мы фактически определяем, как должны выглядеть данные. Предположим, что входные данные должны представлять собой структуру (например, массив), содержащий элементы `processRefund` типа bool и `refundAmount` типа int.
+
+```php
+use Nette\Schema\Expect;
+
+$schema = Expect::structure([
+	'processRefund' => Expect::bool(),
+	'refundAmount' => Expect::int(),
+]);
+```
+
+Мы считаем, что определение схемы выглядит понятным, даже если вы видите его в первый раз.
+
+Отправим следующие данные для проверки:
+
+```php
+$data = [
+	'processRefund' => true,
+	'refundAmount' => 17,
+];
+
+$normalized = $processor->process($schema, $data); // OK, проходит
+```
+
+Выход, т. е. значением `$normalized`, является объект `stdClass`. Если мы хотим, чтобы результатом был массив, мы добавляем приведение к схеме `Expect::structure([...])->castTo('array')`.
+
+Все элементы структуры являются необязательными и имеют значение по умолчанию `null`. Пример:
+
+```php
+$data = [
+	'refundAmount' => 17,
+];
+
+$normalized = $processor->process($schema, $data); // OK, проходит
+// $normalized = {'processRefund' => null, 'refundAmount' => 17}
+```
+
+Тот факт, что значением по умолчанию является `null`, не означает, что оно будет принято во входных данных `'processRefund' => null`. Нет, входные данные должны быть булевыми, т. е. только `true` или `false`. Нам пришлось бы явно разрешить `null` через `Expect::bool()->nullable()`.
+
+Элемент можно сделать обязательным, используя `Expect::bool()->required()`. Мы меняем значение по умолчанию на `false`, используя `Expect::bool()->default(false)` или коротко `Expect::bool(false)`.
+
+А что если мы захотим принимать `1` и `0` помимо булевых чисел? Перечислим допустимые значения, которые мы также нормализуем в boolean:
+
+```php
+$schema = Expect::structure([
+	'processRefund' => Expect::anyOf(true, false, 1, 0)->castTo('bool'),
+	'refundAmount' => Expect::int(),
+]);
+
+$normalized = $processor->process($schema, $data);
+is_bool($normalized->processRefund); // true
+```
+
+Теперь вы знаете основы того, как определяется схема и как ведут себя отдельные элементы структуры. Теперь мы покажем, какие ещё элементы могут быть использованы при определении схемы.
+
+
+Типы данных: type()
+-------------------
+
+Все стандартные типы данных PHP могут быть перечислены в схеме:
+
+```php
+Expect::string($default = null)
+Expect::int($default = null)
+Expect::float($default = null)
+Expect::bool($default = null)
+Expect::null()
+Expect::array($default = [])
+```
+
+А затем все типы, [поддерживаемые валидаторами |/utils/validators#Expected Types] через `Expect::type('scalar')` или сокращенно `Expect::scalar()`. Также принимаются имена классов или интерфейсов, например: `Expect::type('AddressEntity')`.
+
+Вы также можете использовать нотацию объединения:
+
+```php
+Expect::type('bool|string|array')
+```
+
+Значение по умолчанию всегда `null`, за исключением `array` и `list`, где это пустой массив. (Список — это массив, индексированный в порядке возрастания числовых ключей от нуля, то есть неассоциативный массив).
+
+
+Массив значений: arrayOf() listOf()
+-----------------------------------
+
+Массив — слишком общая структура, полезнее указать, какие именно элементы он может содержать. Например, массив, элементами которого могут быть только строки:
+
+```php
+$schema = Expect::arrayOf('string');
+
+$processor->process($schema, ['hello', 'world']); // OK
+$processor->process($schema, ['a' => 'hello', 'b' => 'world']); // OK
+$processor->process($schema, ['key' => 123]); // ОШИБКА: 123 не строка
+```
+
+Второй параметр может использоваться для указания ключей (начиная с версии 1.2):
+
+```php
+$schema = Expect::arrayOf('string', 'int');
+
+$processor->process($schema, ['hello', 'world']); // OK
+$processor->process($schema, ['a' => 'hello']); // ОШИБКА: 'a' не int
+```
+
+Список представляет собой индексированный массив:
+
+```php
+$schema = Expect::listOf('string');
+
+$processor->process($schema, ['a', 'b']); // OK
+$processor->process($schema, ['a', 123]); // ОШИБКА: 123 не строка
+$processor->process($schema, ['key' => 'a']); // ОШИБКА: не список
+$processor->process($schema, [1 => 'a', 0 => 'b']); // ОШИБКА: не список
+```
+
+Параметр также может быть схемой, поэтому мы можем написать:
+
+```php
+Expect::arrayOf(Expect::bool())
+```
+
+Значение по умолчанию — пустой массив. Если вы укажете значение по умолчанию, оно будет объединено с переданными данными. Это можно отключить с помощью `mergeDefaults(false)` (начиная с версии 1.1).
+
+
+Перечисление: anyOf()
+---------------------
+
+`anyOf()` — это набор значений или схем, которыми может быть значение. Вот как записать массив элементов, которые могут быть либо `'a'`, либо `true`, либо `null`:
+
+```php
+$schema = Expect::listOf(
+	Expect::anyOf('a', true, null)
+);
+
+$processor->process($schema, ['a', true, null, 'a']); // OK
+$processor->process($schema, ['a', false]); // ОШИБКА: false тут не место
+```
+
+Элементы перечисления также могут быть схемами:
+
+```php
+$schema = Expect::listOf(
+	Expect::anyOf(Expect::string(), true, null)
+);
+
+$processor->process($schema, ['foo', true, null, 'bar']); // OK
+$processor->process($schema, [123]); // ОШИБКА
+```
+
+Метод `anyOf()` принимает варианты как отдельные параметры, а не как массив. Чтобы передать ему массив значений, используйте оператор распаковки `anyOf(...$variants)`.
+
+Значение по умолчанию — `null`. Используйте метод `firstIsDefault()`, чтобы сделать первый элемент элементом по умолчанию:
+
+```php
+// default is 'hello'
+Expect::anyOf(Expect::string('hello'), true, null)->firstIsDefault();
+```
+
+
+Структуры
+----------
+
+Структуры — это объекты с определенными ключами. Каждая из этих пар ключ => значение называется "свойством":
+
+Структуры принимают массивы и объекты и возвращают объекты `stdClass` (если вы не измените его с помощью `castTo('array')` и т. д.).
+
+По умолчанию все свойства являются необязательными и имеют значение по умолчанию `null`. Вы можете определить обязательные свойства, используя `required()`:
+
+```php
+$schema = Expect::structure([
+	'required' => Expect::string()->required(),
+	'optional' => Expect::string(), // значение по умолчанию — null
+]);
+
+$processor->process($schema, ['optional' => '']);
+// ОШИБКА: опция 'required' отсутствует
+
+$processor->process($schema, ['required' => 'foo']);
+// OK, возвращает {'required' => 'foo', 'optional' => null}
+```
+
+Если вы не хотите выводить свойства только со значением по умолчанию, используйте `skipDefaults()`:
+
+```php
+$schema = Expect::structure([
+	'required' => Expect::string()->required(),
+	'optional' => Expect::string(),
+])->skipDefaults();
+
+$processor->process($schema, ['required' => 'foo']);
+// OK, возвращает {'required' => 'foo'}
+```
+
+Хотя `null` является значением по умолчанию свойства `optional`, оно не допускается во входных данных (значение должно быть строкой). Свойства, принимающие значение `null`, определяются с помощью `nullable()`:
+
+```php
+$schema = Expect::structure([
+	'optional' => Expect::string(),
+	'nullable' => Expect::string()->nullable(),
+]);
+
+$processor->process($schema, ['optional' => null]);
+// ОШИБКА: 'optional' ожидается как строка, а предоставляется null.
+
+$processor->process($schema, ['nullable' => null]);
+// OK, возвращает {'optional' => null, 'nullable' => null}
+```
+
+По умолчанию, во входных данных не может быть лишних элементов:
+
+```php
+$schema = Expect::structure([
+	'key' => Expect::string(),
+]);
+
+$processor->process($schema, ['additional' => 1]);
+// ОШИБКА: Неожиданный элемент 'additional'
+```
+
+Подобные элементы изменить с помощью `otherItems()`. В качестве параметра мы укажем схему для каждого дополнительного элемента:
+
+```php
+$schema = Expect::structure([
+	'key' => Expect::string(),
+])->otherItems(Expect::int());
+
+$processor->process($schema, ['additional' => 1]); // OK
+$processor->process($schema, ['additional' => true]); // ОШИБКА
+```
+
+
+Устаревшие элементы .{data-version:1.1}
+--------------------------------
+
+Вы можете объявить свойство устаревшим, используя метод `deprecated([string $message])`. Уведомления об устаревании возвращаются с помощью `$processor->getWarnings()`:
+
+```php
+$schema = Expect::structure([
+	'old' => Expect::int()->deprecated('Элемент %path% устарел'),
+]);
+
+$processor->process($schema, ['old' => 1]); // OK
+$processor->getWarnings(); // ["Элемент 'old' устарел"]
+```
+
+
+Диапазоны: min() max()
+----------------------
+
+Используйте `min()` и `max()` для ограничения количества элементов в массивах:
+
+```php
+// массив, минимум 10 элементов, максимум 20 элементов
+Expect::array()->min(10)->max(20);
+```
+
+Для строк ограничивает их длину:
+
+```php
+// строка, длиной не менее 10 символов, максимум 20 символов
+Expect::string()->min(10)->max(20);
+```
+
+Для чисел ограничивает их значение:
+
+```php
+// целое число, от 10 до 20 включительно
+Expect::int()->min(10)->max(20);
+```
+
+Конечно, можно упомянуть только `min()`, или только `max()`:
+
+```php
+// строка, максимум 20 символов
+Expect::string()->max(20);
+```
+
+
+Регулярные выражения: pattern()
+-------------------------------
+
+Используя `pattern()`, вы можете указать регулярное выражение, которому должна соответствовать **вся** входная строка (т.е. как если бы она была завернута в символы `^` a `$`):
+
+```php
+// только 9 цифр
+Expect::string()->pattern('\d{9}');
+```
+
+
+Пользовательские утверждения: assert()
+--------------------------------------
+
+Вы можете добавить любые другие ограничения, используя `assert(callable $fn)`.
+
+```php
+$countIsEven = function ($v) { return count($v) % 2 === 0; };
+
+$schema = Expect::arrayOf('string')
+	->assert($countIsEven); // число должно быть чётным
+
+$processor->process($schema, ['a', 'b']); // OK
+$processor->process($schema, ['a', 'b', 'c']); // ОШИБКА: 3 - нечётное число
+```
+
+Или
+
+```php
+Expect::string()->assert('is_file'); // файл должен существовать
+```
+
+Вы можете добавить собственное описание для каждого утверждения. Оно будет частью сообщения об ошибке.
+
+```php
+$schema = Expect::arrayOf('string')
+	->assert($countIsEven, 'Четные элементы в массиве');
+
+$processor->process($schema, ['a', 'b', 'c']);
+// Неудачное утверждение "Четные элементы в массиве" для элемента с массивом значений.
+```
+
+Этот метод можно вызывать многократно для добавления новых утверждений.
+
+
+Сопоставление с объектами: from()
+---------------------------------
+
+Из класса можно сгенерировать схему структуры. Пример:
+
+```php
+class Config
+{
+	/** @var string */
+	public $name;
+	/** @var string|null */
+	public $password;
+	/** @var bool */
+	public $admin = false;
+}
+
+$schema = Expect::from(new Config);
+
+$data = [
+	'name' => 'jeff',
+];
+
+$normalized = $processor->process($schema, $data);
+// $normalized instanceof Config
+// $normalized = {'name' => 'jeff', 'password' => null, 'admin' => false}
+```
+
+Если вы используете PHP 7.4 или выше, вы можете использовать встроенные типы:
+
+```php
+class Config
+{
+	public string $name;
+	public ?string $password;
+	public bool $admin = false;
+}
+
+$schema = Expect::from(new Config);
+```
+
+Поддерживаются также анонимные классы:
+
+```php
+$schema = Expect::from(new class {
+	public string $name;
+	public ?string $password;
+	public bool $admin = false;
+});
+```
+
+Поскольку информации, полученной из определения класса, может быть недостаточно, вы можете добавить пользовательскую схему для элементов с помощью второго параметра:
+
+```php
+$schema = Expect::from(new Config, [
+	'name' => Expect::string()->pattern('\w:.*'),
+]);
+```
+
+
+Приведение: castTo()
+-----------------
+
+Успешно проверенные данные могут быть отброшены:
+
+```php
+Expect::scalar()->castTo('string');
+```
+
+В дополнение к собственным типам PHP, вы также можете приводить к классам:
+
+```php
+Expect::scalar()->castTo('AddressEntity');
+```
+
+
+Нормализация: before()
+-----------------------
+
+Перед самой проверкой данные могут быть нормализованы с помощью метода `before()`. В качестве примера, пусть есть элемент, который должен быть массивом строк (например, `['a', 'b', 'c']`), но получает входные данные в виде строки `a b c`:
+
+```php
+$explode = function ($v) { return explode(' ', $v); };
+
+$schema = Expect::arrayOf('string')
+	->before($explode);
+
+$normalized = $processor->process($schema, 'a b c');
+// OK, возвращает ['a', 'b', 'c']
+```
+
+{{composer: nette/schema}}
+{{leftbar: /@menu-topics}}

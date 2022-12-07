@@ -1,0 +1,257 @@
+Autowiring (Autocableado)
+*************************
+
+.[perex]
+El Autowiring es una gran característica que puede pasar automáticamente servicios al constructor y otros métodos, por lo que no necesitamos escribirlos en absoluto. Te ahorra mucho tiempo.
+
+Esto nos permite saltarnos la gran mayoría de argumentos a la hora de redactar las definiciones de los servicios. En lugar de:
+
+```neon
+services:
+	articles: Model\ArticleRepository(@database, @cache.storage)
+```
+
+Sólo escribe:
+
+```neon
+services:
+	articles: Model\ArticleRepository
+```
+
+El autowiring se rige por tipos, por lo que la clase `ArticleRepository` debe definirse de la siguiente manera:
+
+```php
+namespace Model;
+
+class ArticleRepository
+{
+	public function __construct(\PDO $db, \Nette\Caching\Storage $storage)
+	{}
+}
+```
+
+Para utilizar el autowiring, debe haber **sólo un servicio** para cada tipo en el contenedor. Si hubiera más, el autowiring no sabría cuál pasar y lanzaría una excepción:
+
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+	tempDb: PDO('sqlite::memory:')
+	articles: Model\ArticleRepository  # THROWS EXCEPTION, ambas mainDb y tempDb coinciden
+```
+
+La solución sería evitar el autowiring e indicar explícitamente el nombre del servicio (es decir, `articles: Model\ArticleRepository(@mainDb)`). Sin embargo, es más conveniente [desactivar|#Disabled autowiring] el autowiring de uno de los servicios, o el primer servicio [preferido|#Preferred Autowiring].
+
+
+Desactivar Autowiring
+---------------------
+
+Puedes desactivar el autowiring del servicio utilizando la opción `autowired: no`:
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+		autowired: false                 # elimina tempDb del autocableado
+
+	articles: Model\ArticleRepository    # por lo tanto pasa mainDb al constructor
+```
+
+El servicio `articles` no lanza la excepción de que hay dos servicios coincidentes de tipo `PDO` (es decir, `mainDb` y `tempDb`) que se pueden pasar al constructor, porque sólo ve el servicio `mainDb`.
+
+
+Preferir Autowiring
+-------------------
+
+Si tenemos más servicios del mismo tipo y uno de ellos tiene la opción `autowired`, este servicio se convierte en el preferido:
+
+```neon
+services:
+	mainDb:
+		create: PDO(%dsn%, %user%, %password%)
+		autowired: PDO    # lo hace preferible
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+
+	articles: Model\ArticleRepository
+```
+
+El servicio `articles` no lanza la excepción de que hay dos servicios `PDO` coincidentes (es decir, `mainDb` y `tempDb`), sino que utiliza el servicio preferido, es decir, `mainDb`.
+
+
+Colección de Servicios
+----------------------
+
+El autowiring también puede pasar un array de servicios de un tipo particular. Dado que PHP no puede anotar de forma nativa el tipo de elementos de array, además del tipo `array`, se debe añadir un comentario phpDoc con el tipo de elemento como `ClassName[]`:
+
+```php
+namespace Model;
+
+class ShipManager
+{
+	/**
+	 * @param Shipper[] $shippers
+	 */
+	public function __construct(array $shippers)
+	{}
+}
+```
+
+El contenedor DI pasa automáticamente una matriz de servicios que coinciden con el tipo dado. Omitirá los servicios que tengan desactivado el autowiring.
+
+Si no puede controlar la forma del comentario phpDoc, puede pasar un array de servicios directamente en la configuración usando [`typed()`|services#Special Functions].
+
+
+Argumentos escalares
+--------------------
+
+El autowiring sólo puede pasar objetos y matrices de objetos. Argumentos escalares (por ejemplo, cadenas, números, booleanos) [escribir en configuración |services#Arguments].
+Una alternativa es crear un *setting-object* que encapsula un valor escalar (o múltiples valores) como un objeto, que luego puede ser pasado de nuevo utilizando autowiring.
+
+```php
+class MySettings
+{
+	public function __construct(
+		// readonly puede ser usado desde PHP 8.1
+		public readonly bool $value,
+	)
+	{}
+}
+```
+
+Un servicio se crea añadiéndolo a la configuración:
+
+```neon
+services:
+	- MySettings('any value')
+```
+
+Todas las clases lo solicitarán mediante el autowiring
+
+
+Estrechamiento del Autowiring
+-----------------------------
+
+Para servicios individuales, el autowiring puede limitarse a clases o interfaces específicas.
+
+Normalmente, el autowiring pasa el servicio a cada parámetro de método a cuyo tipo corresponde el servicio. Estrechar significa que especificamos las condiciones que deben cumplir los tipos especificados para los parámetros del método para que se les pase el servicio.
+
+Veamos un ejemplo:
+
+```php
+class ParentClass
+{}
+
+class ChildClass extends ParentClass
+{}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+Si los registráramos todos como servicios, el autowiring fallaría:
+
+```neon
+services:
+	parent: ParentClass
+	child: ChildClass
+	parentDep: ParentDependent  # THROWS EXCEPTION, coincidencia de padres e hijos
+	childDep: ChildDependent    # pasa el servicio 'child' al constructor
+```
+
+El servicio `parentDep` lanza la excepción `Multiple services of type ParentClass found: parent, child` porque tanto `parent` como `child` caben en su constructor y el autowiring no puede tomar una decisión sobre cuál elegir.
+
+Para el servicio `child`, podemos por tanto limitar su autowiring a `ChildClass`:
+
+```neon
+services:
+	parent: ParentClass
+	child:
+		create: ChildClass
+		autowired: ChildClass   # alternative: 'autowired: self'
+
+	parentDep: ParentDependent  # THROWS EXCEPTION, the 'child' can not be autowired
+	childDep: ChildDependent    # pasa el servicio 'child' al constructor
+```
+
+El servicio `parentDep` ahora se pasa al constructor del servicio `parentDep`, ya que ahora es el único objeto coincidente. El servicio `child` ya no se pasa por autowiring. Sí, el servicio `child` sigue siendo de tipo `ParentClass`, pero la condición de restricción dada para el tipo de parámetro ya no se aplica, es decir, ya no es cierto que `ParentClass` *es un supertipo* de `ChildClass`.
+
+En el caso de `child`, `autowired: ChildClass` podría escribirse como `autowired: self` ya que `self` significa tipo de servicio actual.
+
+La clave `autowired` puede incluir varias clases e interfaces como array:
+
+```neon
+autowired: [BarClass, FooInterface]
+```
+
+Intentemos añadir interfaces al ejemplo:
+
+```php
+interface FooInterface
+{}
+
+interface BarInterface
+{}
+
+class ParentClass implements FooInterface
+{}
+
+class ChildClass extends ParentClass implements BarInterface
+{}
+
+class FooDependent
+{
+	function __construct(FooInterface $obj)
+	{}
+}
+
+class BarDependent
+{
+	function __construct(BarInterface $obj)
+	{}
+}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+Cuando no limitamos el servicio `child`, entrará en los constructores de todas las clases `FooDependent`, `BarDependent`, `ParentDependent` y `ChildDependent` y el autowiring lo pasará allí.
+
+Sin embargo, si limitamos su autowiring a `ChildClass` utilizando `autowired: ChildClass` (o `self`), el autowiring sólo lo pasa al constructor `ChildDependent`, porque requiere un argumento de tipo `ChildClass` y `ChildClass` *es de tipo* `ChildClass`. Ningún otro tipo especificado para los otros parámetros es un superconjunto de `ChildClass`, por lo que el servicio no se pasa.
+
+Si lo restringimos a `ParentClass` usando `autowired: ParentClass`, el autowiring lo pasará de nuevo al constructor `ChildDependent` (ya que el tipo requerido `ChildClass` es un superconjunto de `ParentClass`) y al constructor `ParentDependent` también, ya que el tipo requerido de `ParentClass` también es coincidente.
+
+Si lo restringimos a `FooInterface`, seguirá autoconectándose a `ParentDependent` (el tipo requerido `ParentClass` es un supertipo de `FooInterface`) y `ChildDependent`, pero además al constructor `FooDependent`, pero no a `BarDependent`, ya que `BarInterface` no es un supertipo de `FooInterface`.
+
+```neon
+services:
+	child:
+		create: ChildClass
+		autowired: FooInterface
+
+	fooDep: FooDependent        # pasa el servicio hijo al constructor
+	barDep: BarDependent        # THROWS EXCEPTION, ningún servicio pasaría
+	parentDep: ParentDependent  # pasa el servicio hijo al constructor
+	childDep: ChildDependent    # pasa el servicio hijo al constructor
+```

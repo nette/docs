@@ -1,0 +1,174 @@
+Snippets dinâmicos
+******************
+
+Muitas vezes, no desenvolvimento de aplicações é necessário realizar operações AJAX, por exemplo, em filas individuais de uma tabela ou itens de lista. Como exemplo, podemos optar por listar artigos, permitindo ao usuário logado selecionar uma classificação "like/dislike" para cada um deles. O código do apresentador e o modelo correspondente sem AJAX será algo parecido com isto (eu listo os trechos mais importantes, o código assume a existência de um serviço para marcar as classificações e obter uma coleção de artigos - a implementação específica não é importante para os propósitos deste tutorial):
+
+```php
+public function handleLike(int $articleId): void
+{
+	$this->ratingService->saveLike($articleId, $this->user->id);
+	$this->redirect('this');
+}
+
+public function handleUnlike(int $articleId): void
+{
+	$this->ratingService->removeLike($articleId, $this->user->id);
+	$this->redirect('this');
+}
+```
+
+Modelo:
+
+```latte
+<article n:foreach="$articles as $article">
+	<h2>{$article->title}</h2>
+	<div class="content">{$article->content}</div>
+	{if !$article->liked}
+		<a n:href="like! $article->id" class=ajax>I like it</a>
+	{else}
+		<a n:href="unlike! $article->id" class=ajax>I don't like it anymore</a>
+	{/if}
+</article>
+```
+
+
+Ajaxização .[#toc-ajaxization]
+==============================
+
+Vamos agora trazer o AJAX para esta simples aplicação. Mudar a classificação de um artigo não é suficientemente importante para exigir um pedido HTTP com redirecionamento, então o ideal é que isso seja feito com AJAX em segundo plano. Usaremos o [script do handler dos add-ons |https://componette.org/vojtech-dobes/nette.ajax.js/] com a convenção usual de que os links AJAX têm a classe CSS `ajax`.
+
+No entanto, como fazer isso especificamente? A Nette oferece 2 maneiras: a maneira dinâmica do snippet e a maneira dos componentes. Ambas têm seus prós e contras, por isso vamos mostrar-lhes uma a uma.
+
+
+A maneira Dynamic Snippets .[#toc-the-dynamic-snippets-way]
+===========================================================
+
+Na terminologia latte, um snippet dinâmico é um caso de uso específico da tag `{snippet}` onde uma variável é usada no nome do snippet. Tal trecho não pode ser encontrado apenas em qualquer parte do modelo - ele deve ser envolvido por um trecho estático, ou seja, um trecho normal, ou dentro de um `{snippetArea}`. Poderíamos modificar nosso modelo da seguinte forma.
+
+
+```latte
+{snippet articlesContainer}
+	<article n:foreach="$articles as $article">
+		<h2>{$article->title}</h2>
+		<div class="content">{$article->content}</div>
+		{snippet article-$article->id}
+			{if !$article->liked}
+				<a n:href="like! $article->id" class=ajax>I like it</a>
+			{else}
+				<a n:href="unlike! $article->id" class=ajax>I don't like it anymore</a>
+			{/if}
+		{/snippet}
+	</article>
+{/snippet}
+```
+
+Cada artigo agora define um único trecho, que tem uma identificação do artigo no título. Todos estes trechos são então embrulhados em um único trecho chamado `articlesContainer`. Se omitirmos este trecho de embrulho, Latte nos alertará com uma exceção.
+
+Tudo o que resta a fazer é acrescentar um novo desenho ao apresentador - apenas redesenhar o invólucro estático.
+
+```php
+public function handleLike(int $articleId): void
+{
+	$this->ratingService->saveLike($articleId, $this->user->id);
+	if ($this->isAjax()) {
+		$this->redrawControl('articlesContainer');
+		// $this->redrawControl('article-' . $articleId); -- není potřeba
+	} else {
+		$this->redirect('this');
+	}
+}
+```
+
+Modifique o método irmão `handleUnlike()` da mesma forma, e o AJAX está em funcionamento!
+
+A solução tem, no entanto, um lado negativo. Se nos aprofundarmos mais na forma como o pedido AJAX funciona, descobrimos que, embora a aplicação pareça eficiente na aparência (só devolve um único trecho para um determinado artigo), ela na verdade renderiza todos os trechos no servidor. Ele colocou o trecho desejado em nossa carga útil, e descartou os outros (assim, desnecessariamente, ele também os recuperou do banco de dados).
+
+Para otimizar este processo, será necessário tomar medidas onde passamos a coleção `$articles` para o modelo (digamos no método `renderDefault()` ). Aproveitaremos o fato de que o processamento do sinal ocorre antes da `render<Something>` métodos:
+
+```php
+public function handleLike(int $articleId): void
+{
+	// ...
+	if ($this->isAjax()) {
+		// ...
+		$this->template->articles = [
+			$this->connection->table('articles')->get($articleId),
+		];
+	} else {
+		// ...
+}
+
+public function renderDefault(): void
+{
+	if (!isset($this->template->articles)) {
+		$this->template->articles = $this->connection->table('articles');
+	}
+}
+```
+
+Agora, quando o sinal é processado, em vez de uma coleção com todos os artigos, apenas um array com um único artigo é passado para o modelo - aquele que queremos renderizar e enviar a carga útil para o navegador. Assim, `{foreach}` será feito apenas uma vez e nenhum trecho extra será entregue.
+
+
+Via Componente .[#toc-component-way]
+====================================
+
+Uma solução completamente diferente utiliza uma abordagem diferente para evitar trechos dinâmicos. O truque é mover toda a lógica para um componente separado - de agora em diante, não temos um apresentador para cuidar de entrar na classificação, mas um dedicado `LikeControl`. A classe será parecida com a seguinte (além disso, conterá também os métodos `render`, `handleUnlike`, etc.):
+
+```php
+class LikeControl extends Nette\Application\UI\Control
+{
+	public function __construct(
+		private Article $article,
+	) {
+	}
+
+	public function handleLike(): void
+	{
+		$this->ratingService->saveLike($this->article->id, $this->presenter->user->id);
+		if ($this->presenter->isAjax()) {
+			$this->redrawControl();
+		} else {
+			$this->presenter->redirect('this');
+		}
+	}
+}
+```
+
+Modelo de componente:
+
+```latte
+{snippet}
+	{if !$article->liked}
+		<a n:href="like!" class=ajax>I like it</a>
+	{else}
+		<a n:href="unlike!" class=ajax>I don't like it anymore</a>
+	{/if}
+{/snippet}
+```
+
+É claro que mudaremos o modelo de visualização e teremos que adicionar uma fábrica ao apresentador. Como criaremos o componente tantas vezes quanto recebermos artigos do banco de dados, usaremos a [aplicação: |application:Multiplier] classe [multiplicadora |application:Multiplier] para "multiplicá-lo".
+
+```php
+protected function createComponentLikeControl()
+{
+	$articles = $this->connection->table('articles');
+	return new Nette\Application\UI\Multiplier(function (int $articleId) use ($articles) {
+		return new LikeControl($articles[$articleId]);
+	});
+}
+```
+
+A visualização do modelo é reduzida ao mínimo necessário (e completamente livre de trechos!):
+
+```latte
+<article n:foreach="$articles as $article">
+	<h2>{$article->title}</h2>
+	<div class="content">{$article->content}</div>
+	{control "likeControl-$article->id"}
+</article>
+```
+
+Estamos quase terminando: a aplicação agora vai funcionar em AJAX. Aqui também temos que otimizar a aplicação, pois devido ao uso do Nette Database, o processamento do sinal carregará desnecessariamente todos os artigos do banco de dados em vez de um. Entretanto, a vantagem é que não haverá renderização, porque apenas nosso componente é realmente renderizado.
+
+{{priority: -1}}
+{{sitename: Melhores Práticas}}

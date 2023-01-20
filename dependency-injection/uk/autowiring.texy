@@ -1,0 +1,260 @@
+Автозв'язування
+***************
+
+.[perex]
+Autowiring, або автозв'язування - це чудова функція, яка може автоматично передавати сервіси до конструктора та інших методів, так що нам зовсім не потрібно їх писати. Це заощадить вам багато часу.
+
+Це дозволяє нам пропустити переважну більшість аргументів під час написання визначень сервісів. Замість:
+
+```neon
+services:
+	articles: Model\ArticleRepository(@database, @cache.storage)
+```
+
+Просто напишіть:
+
+```neon
+services:
+	articles: Model\ArticleRepository
+```
+
+Автозв'язування керується типами, тому клас `ArticleRepository` має бути визначений таким чином:
+
+```php
+namespace Model;
+
+class ArticleRepository
+{
+	public function __construct(\PDO $db, \Nette\Caching\Storage $storage)
+	{}
+}
+```
+
+Щоб використовувати автозв'язування, у контейнері має бути **тільки один сервіс** для кожного типу. Якби їх було більше, автозв'язування не знало б, який із них передавати, і викидало б виняток:
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+	tempDb: PDO('sqlite::memory:')
+	articles: Model\ArticleRepository # EXCEPT, mainDb та tempDb співпадають
+```
+
+Рішенням може бути або обхід автопідключення, або явна вказівка імені сервісу (тобто `articles: Model\ArticleRepository(@mainDb)`). Однак зручніше [відключити |#Disabled-Autowiring] автозв'язування одного сервісу, або віддати [перевагу |#Preferred-Autowiring] конкретному сервісу.
+
+
+Вимкнене автозв'язування .[#toc-disabled-autowiring]
+----------------------------------------------------
+
+Ви можете вимкнути автоматичне визначення залежностей сервісів за допомогою параметра `autowired: no`:
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+		autowired: false # видаляє tempDb з автозв'язування
+
+	articles: Model\ArticleRepository # передає mainDb у конструктор
+```
+
+Сервіс `articles` не викидає виняток про те, що є два відповідні сервіси типу `PDO` (тобто `mainDb` і `tempDb`), які можуть бути передані конструктору, оскільки він бачить тільки сервіс `mainDb`.
+
+.[note]
+Налаштування autowiring у Nette працює інакше, ніж у Symfony, де опція `autowire: false` говорить, що autowiring не повинен використовуватися для аргументів конструктора сервісу.
+У Nette autowiring використовується завжди, будь то аргументи конструктора або будь-якого іншого методу. Опція `autowired: false` говорить, що екземпляр сервісу не повинен передаватися нікуди з використанням autowiring.
+
+
+Переважне автозв'язування .[#toc-preferred-autowiring]
+------------------------------------------------------
+
+Якщо у нас є кілька сервісів одного типу і один з них має опцію `autowired`, цей сервіс стає кращим:
+
+```neon
+services:
+	mainDb:
+		create: PDO(%dsn%, %user%, %password%)
+		autowired: PDO # робить його кращим
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+
+	articles: Model\ArticleRepository
+```
+
+Сервіс `articles` не викидає виняток, якщо є два сервіси, що збігаються, `PDO` (тобто `mainDb` і `tempDb`), але використовує кращий сервіс, тобто `mainDb`.
+
+
+Колекція сервісів .[#toc-collection-of-services]
+------------------------------------------------
+
+Автозв'язування також може передавати масив сервісів певного типу. Оскільки PHP не може нативно позначати тип елементів масиву, на додаток до типу `array` необхідно додати коментар phpDoc з типом елемента, наприклад `ClassName[]`:
+
+```php
+namespace Model;
+
+class ShipManager
+{
+	/**
+	 * @param Shipper[] $shippers
+	 */
+	public function __construct(array $shippers)
+	{}
+}
+```
+
+Потім контейнер DI автоматично передає масив сервісів, що відповідають заданому типу. При цьому будуть пропущені сервіси, у яких відключено автозв'язування.
+
+Якщо ви не можете контролювати форму коментаря phpDoc, ви можете передати масив сервісів безпосередньо в конфігурації, використовуючи [`typed()` |services#Special-Functions].
+
+
+Скалярні аргументи .[#toc-scalar-arguments]
+-------------------------------------------
+
+Autowiring може передавати тільки об'єкти та масиви об'єктів. Скалярні аргументи (наприклад, рядки, числа, булеви) [записуються в конфігурації |services#Arguments].
+Альтернативою може бути створення [settings-object |best-practices:passing-settings-to-presenters], який інкапсулює скалярне значення (або кілька значень) як об'єкт, який потім може бути переданий знову за допомогою autowiring.
+
+```php
+class MySettings
+{
+	public function __construct(
+		// readonly можна використовувати починаючи з PHP 8.1
+		public readonly bool $value,
+	)
+	{}
+}
+```
+
+Ви створюєте сервіс, додаючи його в конфігурацію:
+
+```neon
+services:
+	- MySettings('любое значение')
+```
+
+Потім усі класи будуть запитувати його через autowiring.
+
+
+Звуження автозв'язування .[#toc-narrowing-of-autowiring]
+--------------------------------------------------------
+
+Для окремих сервісів автопідключення може бути звужене до певних класів або інтерфейсів.
+
+Зазвичай автозв'язування передає функцію кожному параметру методу, типу якого відповідає функція. Звуження означає, що ми вказуємо умови, яким мають задовольняти типи, зазначені для параметрів методу, щоб їм було передано функцію.
+
+Розглянемо приклад:
+
+```php
+class ParentClass
+{}
+
+class ChildClass extends ParentClass
+{}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+Якби ми зареєстрували їх усі як сервіси, автозв'язування було б неможливим:
+
+```neon
+services:
+	parent: ParentClass
+	child: ChildClass
+	parentDep: ParentDependent # ВИБОРУЄ ВИНЯТОК, parent і child збігаються
+	childDep: ChildDependent   # передає сервіс 'child' конструктору
+```
+
+Сервіс `parentDep` викидає виняток `Multiple services of type ParentClass found: parent, child` тому що і `parent`, і `child` поміщаються в його конструктор, і автозв'язування не може ухвалити рішення про те, який із них вибрати.
+
+Тому для сервісу `child` ми можемо звузити його автозв'язування до `ChildClass`:
+
+```neon
+services:
+	parent: ParentClass
+	child:
+		create: ChildClass
+		autowired: ChildClass  # альтернатива: 'autowired: self'
+
+	parentDep: ParentDependent # ВИБИРАЄ ВИНЯТОК, 'child' не може бути автопідключуваним
+	childDep: ChildDependent   # передає сервіс 'child' конструктору
+```
+
+Сервіс `parentDep` тепер передається в конструктор сервісу `parentDep`, оскільки тепер це єдиний відповідний об'єкт. Сервіс `child` більше не передається через автозв'язування. Так, функція `child`, як і раніше, має тип `ParentClass`, але умова звуження, задана для типу параметра, більше не застосовується, тобто більше не вірно, що `ParentClass` *є супертипом* `ChildClass`.
+
+У випадку `child`, `autowired: ChildClass` можна записати як `autowired: self`, оскільки `self` означає поточний тип сервісу.
+
+Ключ `autowired` може включати кілька класів та інтерфейсів як масив:
+
+```neon
+autowired: [BarClass, FooInterface]
+```
+
+Давайте спробуємо додати інтерфейси в приклад:
+
+```php
+interface FooInterface
+{}
+
+interface BarInterface
+{}
+
+class ParentClass implements FooInterface
+{}
+
+class ChildClass extends ParentClass implements BarInterface
+{}
+
+class FooDependent
+{
+	function __construct(FooInterface $obj)
+	{}
+}
+
+class BarDependent
+{
+	function __construct(BarInterface $obj)
+	{}
+}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+Якщо ми не обмежуємо сервіс `child`, він відповідатиме конструкторам усіх класів `FooDependent`, `BarDependent`, `ParentDependent` і `ChildDependent`, а автозв'язування передасть його туди.
+
+Однак, якщо ми звузимо автозв'язування до `ChildClass` за допомогою `autowired: ChildClass` (або `self`), автозв'язування передає його тільки конструктору `ChildDependent`, оскільки для нього потрібен аргумент типу `ChildClass` і `ChildClass` *це тип* `ChildClass`. Жоден інший тип, вказаний для інших параметрів, не є заміною `ChildClass`, тому сервіс не проходить.
+
+Якщо ми обмежуємо його на `ParentClass` за допомогою `autowired: ParentClass`, то автозв'язування знову передасть його конструктору `ChildDependent` (оскільки потрібний тип `ChildClass` є надмножиною `ParentClass`) і конструктору `ParentDependent`, оскільки необхідний тип `ParentClass` також відповідає.
+
+Якщо ми обмежуємо його на `FooInterface`, то він все одно буде підключатися для `ParentDependent` (необхідний тип `ParentClass` є супертипом `FooInterface`) і `ChildDependent`, але додатково до конструктора `FooDependent`, але не `BarDependent`, тому що `BarInterface` не супертип `FooInterface`.
+
+```neon
+services:
+	child:
+		create: ChildClass
+		autowired: FooInterface
+
+	fooDep: FooDependent       # передає сервіс child конструктору
+	barDep: BarDependent       # ВИБИРАЄ ВИНЯТОК, жоден сервіс не пройде
+	parentDep: ParentDependent # передає сервіс child конструктору
+	childDep: ChildDependent   # передає сервіс child конструктору
+```

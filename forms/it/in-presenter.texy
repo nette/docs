@@ -1,0 +1,432 @@
+Moduli in Presentatori
+**********************
+
+.[perex]
+Nette Forms semplifica notevolmente la creazione e l'elaborazione dei moduli Web. In questo capitolo imparerete a utilizzare i moduli all'interno dei presentatori.
+
+Se siete interessati a utilizzarli in modo completamente autonomo senza il resto del framework, esiste una guida per i [moduli autonomi |standalone].
+
+
+Primo modulo .[#toc-first-form]
+===============================
+
+Proviamo a scrivere un semplice modulo di registrazione. Il suo codice sarà simile a questo:
+
+```php
+use Nette\Application\UI\Form;
+
+$form = new Form;
+$form->addText('name', 'Name:');
+$form->addPassword('password', 'Password:');
+$form->addSubmit('send', 'Sign up');
+$form->onSuccess[] = [$this, 'formSucceeded'];
+```
+
+e nel browser il risultato dovrebbe apparire come questo:
+
+[* form-en.webp *]
+
+Il modulo nel presentatore è un oggetto della classe `Nette\Application\UI\Form`, il suo predecessore `Nette\Forms\Form` è destinato a un uso indipendente. Abbiamo aggiunto i campi nome, password e pulsante di invio. Infine, la riga con `$form->onSuccess` dice che dopo l'invio e l'avvenuta convalida, deve essere richiamato il metodo `$this->formSucceeded()`.
+
+Dal punto di vista del presentatore, il modulo è un componente comune. Pertanto, viene trattato come un componente e incorporato nel presentatore con il [metodo factory |application:components#Factory Methods]. L'aspetto sarà il seguente:
+
+```php .{file:app/Presenters/HomepagePresenter.php}
+use Nette;
+use Nette\Application\UI\Form;
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	protected function createComponentRegistrationForm(): Form
+	{
+		$form = new Form;
+		$form->addText('name', 'Name:');
+		$form->addPassword('password', 'Password:');
+		$form->addSubmit('send', 'Sign up');
+		$form->onSuccess[] = [$this, 'formSucceeded'];
+		return $form;
+	}
+
+	public function formSucceeded(Form $form, $data): void
+	{
+		// qui elaboriamo i dati inviati dal form
+		// $data->name contiene nome
+		// $data->password contiene la password
+		$this->flashMessage('Ti sei iscritto con successo.');
+		$this->redirect('Homepage:');
+	}
+}
+```
+
+E il rendering nel template viene effettuato utilizzando il tag `{control}`:
+
+```latte .{file:app/Presenters/templates/Homepage/default.latte}
+<h1>Registration</h1>
+
+{control registrationForm}
+```
+
+E questo è tutto :-) Abbiamo un modulo funzionale e perfettamente [protetto |#Vulnerability Protection].
+
+Ora starete pensando che è stato troppo veloce, chiedendovi come sia possibile che venga chiamato il metodo `formSucceeded()` e quali siano i parametri che riceve. Certo, avete ragione, questo merita una spiegazione.
+
+Nette propone un meccanismo interessante, che chiamiamo [stile Hollywood |application:components#Hollywood style]. Invece di dover chiedere continuamente se è successo qualcosa ("il modulo è stato inviato?", "è stato inviato in modo valido?" o "non è stato inviato?"), si dice al framework "quando il modulo è completato in modo valido, chiama questo metodo" e si lascia lavorare ulteriormente. Chi programma in JavaScript ha familiarità con questo stile di programmazione. Si scrivono funzioni che vengono chiamate quando si verifica un determinato [evento |nette:glossary#Events]. Il linguaggio passa loro gli argomenti appropriati.
+
+Questo è il modo in cui è costruito il codice del presentatore di cui sopra. L'array `$form->onSuccess` rappresenta l'elenco dei callback PHP che Nette chiamerà quando il modulo viene inviato e compilato correttamente.
+All'interno del [ciclo di vita del presentatore |application:presenters#Life Cycle of Presenter], si tratta di un cosiddetto segnale, quindi vengono chiamate dopo il metodo `action*` e prima del metodo `render*`.
+A ogni callback passa il modulo stesso nel primo parametro e i dati inviati come oggetto [ArrayHash |utils:arrays#ArrayHash] nel secondo. È possibile omettere il primo parametro se non si ha bisogno dell'oggetto form. Il secondo parametro può essere ancora più utile, ma ne parleremo [più avanti |#Mapping to Classes].
+
+L'oggetto `$data` contiene le proprietà `name` e `password` con i dati inseriti dall'utente. Di solito si inviano direttamente i dati per una successiva elaborazione, che può essere, ad esempio, l'inserimento nel database. Tuttavia, è possibile che si verifichi un errore durante l'elaborazione, ad esempio che il nome utente sia già stato preso. In questo caso, passiamo l'errore al form utilizzando `addError()` e lasciamo che venga ridisegnato, con un messaggio di errore:
+
+```php
+$form->addError('Sorry, username is already in use.');
+```
+
+Oltre a `onSuccess`, c'è anche `onSubmit`: le callback vengono sempre richiamate dopo l'invio del modulo, anche se non è stato compilato correttamente. E infine `onError`: le callback vengono chiamate solo se l'invio non è valido. Vengono richiamati anche se si invalida il form in `onSuccess` o `onSubmit` utilizzando `addError()`.
+
+Dopo aver elaborato il modulo, si passa alla pagina successiva. In questo modo si evita che il modulo venga involontariamente ripresentato facendo clic sul pulsante *refresh*, *back* o spostando la cronologia del browser.
+
+Provare ad aggiungere altri [controlli al modulo |controls].
+
+
+Accesso ai controlli .[#toc-access-to-controls]
+===============================================
+
+Il form è un componente del presenter, nel nostro caso chiamato `registrationForm` (dal nome del metodo di fabbrica `createComponentRegistrationForm`), quindi in qualsiasi punto del presenter è possibile accedere al form utilizzando:
+
+```php
+$form = $this->getComponent('registrationForm');
+// sintassi alternativa: $form = $this['registrationForm'];
+```
+
+Anche i singoli controlli del modulo sono componenti, quindi è possibile accedervi nello stesso modo:
+
+```php
+$input = $form->getComponent('name'); // oppure $input = $form['name'];
+$button = $form->getComponent('send'); // oppure $button = $form['send'];
+```
+
+I controlli vengono rimossi utilizzando unset:
+
+```php
+unset($form['name']);
+```
+
+
+Regole di validazione .[#toc-validation-rules]
+==============================================
+
+La parola *valido* è stata usata più volte, ma il modulo non ha ancora regole di convalida. Risolviamo il problema.
+
+Il nome sarà obbligatorio, quindi lo contrassegneremo con il metodo `setRequired()`, il cui argomento è il testo del messaggio di errore che verrà visualizzato se l'utente non lo compila. Se non viene fornito alcun argomento, viene utilizzato il messaggio di errore predefinito.
+
+```php
+$form->addText('name', 'Name:')
+	->setRequired('Please fill your name.');
+```
+
+Provate a inviare il modulo senza il nome compilato e vedrete che verrà visualizzato un messaggio di errore e il browser o il server lo rifiuteranno finché non lo compilate.
+
+Allo stesso tempo, non sarà possibile ingannare il sistema digitando solo spazi nell'input, ad esempio. Non c'è modo. Nette taglia automaticamente gli spazi bianchi a destra e a sinistra. Provate. È un'operazione che si dovrebbe sempre fare per ogni inserimento di una singola riga, ma che spesso viene dimenticata. Nette lo fa automaticamente. (Si può provare a ingannare i moduli e inviare una stringa multilinea come nome. Anche in questo caso, Nette non si lascia ingannare e le interruzioni di riga si trasformano in spazi).
+
+Il modulo viene sempre convalidato sul lato server, ma viene generata anche una convalida JavaScript, che è rapida e l'utente viene a conoscenza dell'errore immediatamente, senza dover inviare il modulo al server. Questo è gestito dallo script `netteForms.js`.
+Inserirlo nel modello di layout:
+
+```latte
+<script src="https://nette.github.io/resources/js/3/netteForms.min.js"></script>
+```
+
+Se si guarda nel codice sorgente della pagina con il modulo, si può notare che Nette inserisce i campi obbligatori in elementi con una classe CSS `required`. Provate ad aggiungere il seguente stile al modello e l'etichetta "Nome" diventerà rossa. In modo elegante, contrassegniamo i campi obbligatori per gli utenti:
+
+```latte
+<style>
+.required label { color: maroon }
+</style>
+```
+
+Ulteriori regole di validazione saranno aggiunte con il metodo `addRule()`. Il primo parametro è la regola, il secondo è di nuovo il testo del messaggio di errore e l'argomento opzionale regola di validazione può seguire. Che cosa significa?
+
+Il modulo riceverà un altro input opzionale *età* con la condizione che deve essere un numero (`addInteger()`) e in determinati limiti (`$form::Range`). E qui useremo il terzo argomento di `addRule()`, l'intervallo stesso:
+
+```php
+$form->addInteger('age', 'Age:')
+	->addRule($form::Range, 'You must be older 18 years and be under 120.', [18, 120]);
+```
+
+.[tip]
+Se l'utente non compila il campo, le regole di validazione non saranno verificate, perché il campo è opzionale.
+
+Ovviamente c'è spazio per un piccolo refactoring. Nel messaggio di errore e nel terzo parametro, i numeri sono elencati in duplice copia, il che non è ideale. Se stessimo creando un [modulo multilingue |best-practices:translations] e il messaggio contenente i numeri dovesse essere tradotto in più lingue, sarebbe più difficile modificare i valori. Per questo motivo, è possibile utilizzare i caratteri sostitutivi `%d`:
+
+```php
+	->addRule($form::Range, 'You must be older %d years and be under %d.', [18, 120]);
+```
+
+Torniamo al campo *password*, rendiamolo *richiesto* e verifichiamo la lunghezza minima della password (`$form::MinLength`), sempre utilizzando i caratteri sostitutivi del messaggio:
+
+```php
+$form->addPassword('password', 'Password:')
+	->setRequired('Pick a password')
+	->addRule($form::MinLength, 'Your password has to be at least %d long', 8);
+```
+
+Aggiungeremo un campo `passwordVerify` al modulo, dove l'utente inserisce nuovamente la password, per il controllo. Utilizzando le regole di validazione, verifichiamo se le due password sono uguali (`$form::Equal`). E come argomento diamo un riferimento alla prima password usando le [parentesi quadre |#Access to Controls]:
+
+```php
+$form->addPassword('passwordVerify', 'Password again:')
+	->setRequired('Fill your password again to check for typo')
+	->addRule($form::Equal, 'Password mismatch', $form['password'])
+	->setOmitted();
+```
+
+Con `setOmitted()`, contrassegniamo un elemento il cui valore non ci interessa e che esiste solo per la validazione. Il suo valore non viene passato a `$data`.
+
+Abbiamo un modulo completamente funzionale con validazione in PHP e JavaScript. Le capacità di validazione di Nette sono molto più ampie: si possono creare condizioni, visualizzare e nascondere parti di una pagina in base a esse, ecc. Potete trovare tutte le informazioni nel capitolo sulla [convalida dei moduli |validation].
+
+
+Valori predefiniti .[#toc-default-values]
+=========================================
+
+Spesso si impostano valori predefiniti per i controlli dei moduli:
+
+```php
+$form->addEmail('email', 'Email')
+	->setDefaultValue($lastUsedEmail);
+```
+
+Spesso è utile impostare i valori predefiniti per tutti i controlli contemporaneamente. Ad esempio, quando il modulo viene utilizzato per modificare i record. Leggiamo il record dal database e lo impostiamo come valore predefinito:
+
+```php
+//$row = ['name' => 'John', 'age' => '33', /* ... */];
+$form->setDefaults($row);
+```
+
+Chiamare `setDefaults()` dopo aver definito i controlli.
+
+
+Rendering del modulo .[#toc-rendering-the-form]
+===============================================
+
+Per impostazione predefinita, il modulo viene reso come una tabella. I singoli controlli seguono le linee guida di base per l'accessibilità del Web. Tutte le etichette sono generate come elementi `<label>` e sono associate ai rispettivi input; facendo clic sull'etichetta si sposta il cursore sull'input.
+
+Possiamo impostare qualsiasi attributo HTML per ogni elemento. Ad esempio, aggiungere un segnaposto:
+
+```php
+$form->addInteger('age', 'Age:')
+	->setHtmlAttribute('placeholder', 'Please fill in the age');
+```
+
+Ci sono davvero molti modi per rendere un modulo, quindi è un [capitolo |rendering] dedicato [al rendering |rendering].
+
+
+Mappatura delle classi .[#toc-mapping-to-classes]
+=================================================
+
+Torniamo al metodo `formSucceeded()`, che nel secondo parametro `$data` riceve i dati inviati come oggetto `ArrayHash`. Poiché si tratta di una classe generica, come `stdClass`, ci mancheranno alcune comodità nel lavorare con essa, come il completamento del codice per le proprietà negli editor
+o l'analisi statica del codice. Questo potrebbe essere risolto con una classe specifica per ogni modulo, le cui proprietà rappresentano i singoli controlli. Ad esempio:
+
+```php
+class RegistrationFormData
+{
+	public string $name;
+	public int $age;
+	public string $password;
+}
+```
+
+A partire da PHP 8.0, è possibile utilizzare questa elegante notazione che utilizza un costruttore:
+
+```php
+class RegistrationFormData
+{
+	public function __construct(
+		public string $name,
+		public int $age,
+		public string $password,
+	) {
+	}
+}
+```
+
+Come dire a Nette di restituire i dati come oggetti di questa classe? È più facile di quanto si pensi. Basta specificare la classe come tipo del parametro `$data` nel gestore:
+
+```php
+public function formSucceeded(Form $form, RegistrationFormData $data): void
+{
+	// $nome è un'istanza di RegistrationFormData
+	$name = $data->name;
+	// ...
+}
+```
+
+Si può anche specificare `array` come tipo e i dati verranno passati come array.
+
+In modo simile, si può usare il metodo `getValues()`, al quale si passa come parametro il nome della classe o dell'oggetto da idratare:
+
+```php
+$data = $form->getValues(RegistrationFormData::class);
+$name = $data->name;
+```
+
+Se i moduli sono costituiti da una struttura a più livelli composta da contenitori, creare una classe separata per ciascuno di essi:
+
+```php
+$form = new Form;
+$person = $form->addContainer('person');
+$person->addText('firstName');
+/* ... */
+
+class PersonFormData
+{
+	public string $firstName;
+	public string $lastName;
+}
+
+class RegistrationFormData
+{
+	public PersonFormData $person;
+	public int $age;
+	public string $password;
+}
+```
+
+La mappatura sa quindi dal tipo di proprietà `$person` che deve mappare il contenitore alla classe `PersonFormData`. Se la proprietà contiene un array di contenitori, fornire il tipo `array` e passare la classe da mappare direttamente al contenitore:
+
+```php
+$person->setMappedType(PersonFormData::class);
+```
+
+
+Pulsanti di invio multipli .[#toc-multiple-submit-buttons]
+==========================================================
+
+Se il modulo ha più di un pulsante, di solito dobbiamo distinguere quale è stato premuto. Possiamo creare una funzione per ogni pulsante. Impostarla come gestore dell'[evento |nette:glossary#Events] `onClick`:
+
+```php
+$form->addSubmit('save', 'Save')
+	->onClick[] = [$this, 'saveButtonPressed'];
+
+$form->addSubmit('delete', 'Delete')
+	->onClick[] = [$this, 'deleteButtonPressed'];
+```
+
+Anche questi gestori sono chiamati solo nel caso in cui il modulo sia valido, come nel caso dell'evento `onSuccess`. La differenza è che il primo parametro può essere l'oggetto pulsante di invio invece del modulo, a seconda del tipo specificato:
+
+```php
+public function saveButtonPressed(Nette\Forms\Controls\Button $button, $data)
+{
+	$form = $button->getForm();
+	// ...
+}
+```
+
+Quando un modulo viene inviato con il tasto <kbd>Invio</kbd>, viene trattato come se fosse stato inviato con il primo pulsante.
+
+
+Evento onAnchor .[#toc-event-onanchor]
+======================================
+
+Quando si costruisce un form con un metodo di fabbrica (come `createComponentRegistrationForm`), non si sa ancora se è stato inviato o i dati con cui è stato inviato. Ma ci sono casi in cui è necessario conoscere i valori inviati, forse perché da essi dipende l'aspetto del form, oppure perché sono usati per selectbox dipendenti, ecc.
+
+Pertanto, è possibile far sì che il codice che costruisce il form venga richiamato quando è ancorato, cioè è già collegato al presentatore e conosce i dati inviati. Questo codice sarà inserito nell'array `$onAnchor`:
+
+```php
+$country = $form->addSelect('country', 'Country:', $this->model->getCountries());
+$city = $form->addSelect('city', 'City:');
+
+$form->onAnchor[] = function () use ($country, $city) {
+	// questa funzione sarà richiamata quando il form saprà che i dati sono stati inviati con
+	// in modo da poter utilizzare il metodo getValue()
+	$val = $country->getValue();
+	$city->setItems($val ? $this->model->getCities($val) : []);
+};
+```
+
+
+Protezione dalle vulnerabilità .[#toc-vulnerability-protection]
+===============================================================
+
+Nette Framework si impegna a fondo per essere sicuro e, poiché i moduli sono l'input più comune dell'utente, i moduli di Nette sono praticamente impenetrabili. Tutto viene mantenuto in modo dinamico e trasparente, nulla deve essere impostato manualmente.
+
+Oltre a proteggere i moduli da attacchi mirati a vulnerabilità ben note come [Cross-Site Scripting (XSS) |nette:glossary#cross-site-scripting-xss] e [Cross-Site Request Forgery (CSRF) |nette:glossary#cross-site-request-forgery-csrf], svolge molte piccole operazioni di sicurezza a cui non è più necessario pensare.
+
+Ad esempio, filtra tutti i caratteri di controllo dagli input e controlla la validità della codifica UTF-8, in modo che i dati del modulo siano sempre puliti. Per le caselle di selezione e gli elenchi di scelta, verifica che le voci selezionate siano effettivamente quelle proposte e che non ci siano state contraffazioni. Abbiamo già detto che per gli input di testo a riga singola, rimuove i caratteri di fine riga che un utente malintenzionato potrebbe inviare. Per gli input multilinea, normalizza i caratteri di fine riga. E così via.
+
+Nette risolve per voi vulnerabilità di sicurezza che la maggior parte dei programmatori non ha idea che esistano.
+
+L'attacco CSRF menzionato consiste nel fatto che un aggressore attira la vittima a visitare una pagina che esegue silenziosamente una richiesta nel browser della vittima al server in cui la vittima è attualmente loggata, e il server crede che la richiesta sia stata fatta dalla vittima a suo piacimento. Pertanto, Nette impedisce l'invio del modulo tramite POST da un altro dominio. Se per qualche motivo si desidera disattivare la protezione e consentire l'invio del modulo da un altro dominio, utilizzare:
+
+```php
+$form->allowCrossOrigin(); // ATTENZIONE! Disattiva la protezione!
+```
+
+Questa protezione utilizza un cookie SameSite denominato `_nss`. La protezione dei cookie SameSite potrebbe non essere affidabile al 100%, quindi è una buona idea attivare la protezione dei token:
+
+```php
+$form->addProtection();
+```
+
+Si consiglia vivamente di applicare questa protezione ai moduli di una parte amministrativa dell'applicazione che modificano dati sensibili. Il framework protegge da un attacco CSRF generando e validando il token di autenticazione che viene memorizzato in una sessione (l'argomento è il messaggio di errore mostrato se il token è scaduto). Per questo motivo è necessario che sia avviata una sessione prima di visualizzare il modulo. Nella parte amministrativa del sito web, di solito la sessione è già avviata, grazie al login dell'utente.
+Altrimenti, avviare la sessione con il metodo `Nette\Http\Session::start()`.
+
+
+Utilizzo di un modulo in più presentatori .[#toc-using-one-form-in-multiple-presenters]
+=======================================================================================
+
+Se si ha la necessità di utilizzare un modulo in più di un presentatore, si consiglia di creare un factory per esso, da passare poi al presentatore. Un luogo adatto per questa classe è, ad esempio, la cartella `app/Forms`.
+
+La classe factory potrebbe avere il seguente aspetto:
+
+```php
+use Nette\Application\UI\Form;
+
+class SignInFormFactory
+{
+	public function create(): Form
+	{
+		$form = new Form;
+		$form->addText('name', 'Name:');
+		$form->addSubmit('send', 'Log in');
+		return $form;
+	}
+}
+```
+
+Chiediamo alla classe di produrre il modulo nel metodo factory per i componenti del presentatore:
+
+```php
+public function __construct(
+	private SignInFormFactory $formFactory,
+) {
+}
+
+protected function createComponentSignInForm(): Form
+{
+	$form = $this->formFactory->create();
+	// possiamo modificare il form, qui ad esempio cambiamo l'etichetta del pulsante
+	$form['login']->setCaption('Continue');
+	$form->onSuccess[] = [$this, 'signInFormSubmitted']; // e aggiungiamo un gestore
+	return $form;
+}
+```
+
+Anche il gestore dell'elaborazione del modulo può essere fornito dal factory:
+
+```php
+use Nette\Application\UI\Form;
+
+class SignInFormFactory
+{
+	public function create(): Form
+	{
+		$form = new Form;
+		$form->addText('name', 'Name:');
+		$form->addSubmit('send', 'Log in');
+		$form->onSuccess[] = function (Form $form, $data): void {
+			// qui elaboriamo il modulo inviato
+		};
+		return $form;
+	}
+}
+```
+
+Abbiamo così una rapida introduzione ai moduli in Nette. Provate a dare un'occhiata alla cartella [degli esempi |https://github.com/nette/forms/tree/master/examples] nella distribuzione per trovare ulteriori spunti.

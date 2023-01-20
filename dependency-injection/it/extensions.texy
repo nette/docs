@@ -1,0 +1,194 @@
+Creazione di estensioni per Nette DI
+************************************
+
+.[perex]
+La generazione di un contenitore DI, oltre ai file di configurazione, riguarda anche le cosiddette *estensioni*. Le attiviamo nel file di configurazione nella sezione `extensions`.
+
+In questo modo si aggiunge l'estensione rappresentata dalla classe `BlogExtension` con il nome `blog`:
+
+```neon
+extensions:
+	blog: BlogExtension
+```
+
+Ogni estensione del compilatore eredita da [api:Nette\DI\CompilerExtension] e può implementare i seguenti metodi che vengono richiamati durante la compilazione di DI:
+
+1. getConfigSchema()
+2. loadConfiguration()
+3. prima della compilazione()
+4. dopo la compilazione()
+
+
+getConfigSchema() .[method]
+===========================
+
+Questo metodo viene chiamato per primo. Definisce lo schema usato per convalidare i parametri di configurazione.
+
+Le estensioni sono configurate in una sezione il cui nome è lo stesso di quella in cui è stata aggiunta l'estensione, ad esempio `blog`.
+
+```neon
+# Lo stesso nome della mia estensione
+blog:
+	postsPerPage: 10
+	comments: false
+```
+
+Verrà definito uno schema che descrive tutte le opzioni di configurazione, compresi i loro tipi, i valori accettati ed eventualmente i valori predefiniti:
+
+```php
+use Nette\Schema\Expect;
+
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function getConfigSchema(): Nette\Schema\Schema
+	{
+		return Expect::structure([
+			'postsPerPage' => Expect::int(),
+			'allowComments' => Expect::bool()->default(true),
+		]);
+	}
+}
+```
+
+Vedere lo [Schema |schema:] per la documentazione. Inoltre, è possibile specificare quali opzioni possono essere [dinamiche |application:bootstrap#Dynamic Parameters] usando `dynamic()`, per esempio `Expect::int()->dynamic()`.
+
+Si accede alla configurazione tramite `$this->config`, che è un oggetto `stdClass`:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		$num = $this->config->postPerPage;
+		if ($this->config->allowComments) {
+			// ...
+		}
+	}
+}
+```
+
+
+loadConfiguration() .[method]
+=============================
+
+Questo metodo è usato per aggiungere servizi al contenitore. Questo viene fatto da [api:Nette\DI\ContainerBuilder]:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		$builder = $this->getContainerBuilder();
+		$builder->addDefinition($this->prefix('articles'))
+			->setFactory(App\Model\HomepageArticles::class, ['@connection']) // o setCreator()
+			->addSetup('setLogger', ['@logger']);
+	}
+}
+```
+
+La convenzione prevede che i servizi aggiunti da un'estensione abbiano un prefisso con il suo nome, in modo da evitare conflitti di nomi. Questo viene fatto da `prefix()`, quindi se l'estensione si chiama "blog", il servizio si chiamerà `blog.articles`.
+
+Se dobbiamo rinominare un servizio, possiamo creare un alias con il suo nome originale per mantenere la retrocompatibilità. Lo stesso fa Nette per esempio per `routing.router`, che è disponibile anche con il nome precedente `router`.
+
+```php
+$builder->addAlias('router', 'routing.router');
+```
+
+
+Recuperare i servizi da un file .[#toc-retrieve-services-from-a-file]
+---------------------------------------------------------------------
+
+È possibile creare servizi utilizzando l'API ContainerBuilder, ma anche aggiungerli tramite il noto file di configurazione NEON e la sua sezione `services`. Il prefisso `@extension` rappresenta l'estensione corrente.
+
+```neon
+services:
+	articles:
+		create: MyBlog\ArticlesModel(@connection)
+
+	comments:
+		create: MyBlog\CommentsModel(@connection, @extension.articles)
+
+	articlesList:
+		create: MyBlog\Components\ArticlesList(@extension.articles)
+```
+
+Aggiungeremo i servizi in questo modo:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		$builder = $this->getContainerBuilder();
+
+		// carica il file di configurazione dell'estensione
+		$this->compiler->loadDefinitionsFromConfig(
+			$this->loadFromFile(__DIR__ . '/blog.neon')['services'],
+		);
+	}
+}
+```
+
+
+beforeCompile() .[method]
+=========================
+
+Il metodo viene richiamato quando il contenitore contiene tutti i servizi aggiunti dalle singole estensioni nei metodi `loadConfiguration` e i file di configurazione dell'utente. In questa fase di assemblaggio, si possono modificare le definizioni dei servizi o aggiungere collegamenti tra di essi. Si può usare il metodo `findByTag()` per cercare i servizi per tag, o il metodo `findByType()` per cercare per classe o interfaccia.
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function beforeCompile()
+	{
+		$builder = $this->getContainerBuilder();
+
+		foreach ($builder->findByTag('logaware') as $serviceName => $tagValue) {
+			$builder->getDefinition($serviceName)->addSetup('setLogger');
+		}
+	}
+}
+```
+
+
+afterCompile() .[method]
+========================
+
+In questa fase, la classe contenitore è già generata come oggetto [ClassType |php-generator:#classes], contiene tutti i metodi che il servizio crea ed è pronta per la cache come file PHP. A questo punto, possiamo ancora modificare il codice della classe risultante.
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function afterCompile(Nette\PhpGenerator\ClassType $class)
+	{
+		$method = $class->getMethod('__construct');
+		// ...
+	}
+}
+```
+
+
+$inizializzazione .[wiki-method]
+================================
+
+Il Configuratore chiama il codice di inizializzazione dopo la [creazione del contenitore |application:bootstrap#index.php], che viene creato scrivendo su un oggetto `$this->initialization` con il [metodo addBody() |php-generator:#method-and-function-body].
+
+Verrà mostrato un esempio di come avviare una sessione o servizi che hanno il tag `run` usando il codice di inizializzazione:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		// avvio automatico della sessione
+		if ($this->config->session->autoStart) {
+			$this->initialization->addBody('$this->getService("session")->start()');
+		}
+
+		// i servizi con tag 'run' devono essere creati dopo l'istanziazione del contenitore
+		$builder = $this->getContainerBuilder();
+		foreach ($builder->findByTag('run') as $name => $foo) {
+			$this->initialization->addBody('$this->getService(?);', [$name]);
+		}
+	}
+}
+```

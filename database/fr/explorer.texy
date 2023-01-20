@@ -1,0 +1,550 @@
+Explorateur de bases de données
+*******************************
+
+<div class=perex>
+
+Nette Database Explorer simplifie considérablement l'extraction de données de la base de données sans avoir à écrire de requêtes SQL.
+
+- utilise des requêtes efficaces
+- aucune donnée n'est transmise inutilement
+- présente une syntaxe élégante
+
+</div>
+
+Pour utiliser Database Explorer, commencez par une table - appelez `table()` sur un objet [api:Nette\Database\Explorer]. La manière la plus simple d'obtenir une instance d'objet de contexte est [décrite ici |core#Connection and Configuration], ou, pour le cas où Nette Database Explorer est utilisé comme un outil autonome, elle peut être [créée manuellement |#Creating Explorer Manually].
+
+```php
+$books = $explorer->table('book'); // le nom de la table de la base de données est 'book'.
+```
+
+L'appel renvoie une instance de l'objet [Selection |api:Nette\Database\Table\Selection], qui peut être itéré pour récupérer tous les livres. Chaque élément (une ligne) est représenté par une instance de [ActiveRow |api:Nette\Database\Table\ActiveRow] avec des données mappées à ses propriétés :
+
+```php
+foreach ($books as $book) {
+	echo $book->title;
+	echo $book->author_id;
+}
+```
+
+L'obtention d'une ligne spécifique se fait par la méthode `get()`, qui renvoie directement une instance ActiveRow.
+
+```php
+$book = $explorer->table('book')->get(2); // renvoie le livre avec l'id 2
+echo $book->title;
+echo $book->author_id;
+```
+
+Voyons un cas d'utilisation courant. Vous avez besoin de récupérer des livres et leurs auteurs. Il s'agit d'une relation 1:N courante. La solution la plus courante est de récupérer les données en utilisant une seule requête SQL avec des jointures de tables. La deuxième possibilité est de récupérer les données séparément, d'exécuter une requête pour obtenir les livres, puis d'obtenir un auteur pour chaque livre au moyen d'une autre requête (par exemple, dans votre cycle foreach). Cela pourrait être facilement optimisé pour n'exécuter que deux requêtes, une pour les livres, et une autre pour les auteurs nécessaires - et c'est exactement la façon dont Nette Database Explorer le fait.
+
+Dans les exemples ci-dessous, nous allons travailler avec le schéma de base de données de la figure. Il existe des liens OneHasMany (1:N) (auteur du livre `author_id` et traducteur éventuel `translator_id`, qui peut être `null`) et ManyHasMany (M:N) entre le livre et ses étiquettes.
+
+[Un exemple, incluant un schéma, se trouve sur GitHub |https://github.com/nette-examples/books].
+
+[* db-schema-1-.webp *] *** Structure de la base de données utilisée dans les exemples .<>
+
+Le code suivant liste le nom de l'auteur pour chaque livre et toutes ses balises. Nous [verrons dans un instant |#Working with relationships] comment cela fonctionne en interne.
+
+```php
+$books = $explorer->table('book');
+
+foreach ($books as $book) {
+	echo 'titre: ' . $book->title;
+	echo 'écrit par: ' . $book->author->name; // $book->author est une ligne de la table 'author'.
+
+	echo 'tags: ';
+	foreach ($book->related('book_tag') as $bookTag) {
+		echo $bookTag->tag->name . ', '; // $bookTag->tag est une ligne de la table 'tag'.
+	}
+}
+```
+
+Vous serez heureux de constater l'efficacité du fonctionnement de la couche de base de données. L'exemple ci-dessus fait un nombre constant de requêtes qui ressemblent à ceci :
+
+```sql
+SELECT * FROM `book`
+SELECT * FROM `author` WHERE (`author`.`id` IN (11, 12))
+SELECT * FROM `book_tag` WHERE (`book_tag`.`book_id` IN (1, 4, 2, 3))
+SELECT * FROM `tag` WHERE (`tag`.`id` IN (21, 22, 23))
+```
+
+Si vous utilisez le [cache |caching:] (activé par défaut), aucune colonne ne sera interrogée inutilement. Après la première requête, le cache stockera les noms des colonnes utilisées et Nette Database Explorer exécutera les requêtes uniquement avec les colonnes nécessaires :
+
+```sql
+SELECT `id`, `title`, `author_id` FROM `book`
+SELECT `id`, `name` FROM `author` WHERE (`author`.`id` IN (11, 12))
+SELECT `book_id`, `tag_id` FROM `book_tag` WHERE (`book_tag`.`book_id` IN (1, 4, 2, 3))
+SELECT `id`, `name` FROM `tag` WHERE (`tag`.`id` IN (21, 22, 23))
+```
+
+
+Sélections .[#toc-selections]
+=============================
+
+Voir les possibilités de filtrer et de restreindre les lignes [api:Nette\Database\Table\Selection]:
+
+.[language-php]
+| `$table->where($where[, $param[, ...]])` | Définir WHERE en utilisant AND comme colle si deux conditions ou plus sont fournies.
+| `$table->whereOr($where)` | Définir WHERE en utilisant OR comme colle si deux ou plusieurs conditions sont fournies
+| `$table->order($columns)` | Définir ORDER BY, peut être une expression `('column DESC, id DESC')`
+| `$table->select($columns)` | Définir les colonnes extraites, peut être une expression `('col, MD5(col) AS hash')`
+| `$table->limit($limit[, $offset])` | Définir LIMIT et OFFSET
+| `$table->page($page, $itemsPerPage[, &$lastPage])` | Activation de la pagination
+| `$table->group($columns)` | Définir GROUP BY
+| `$table->having($having)` | Définir HAVING
+
+Une interface fluide peut être utilisée, par exemple `$table->where(...)->order(...)->limit(...)`. Les conditions multiples de `where` ou `whereOr` sont connectées avec l'opérateur `AND`.
+
+
+où() .[#toc-where]
+------------------
+
+Nette Database Explorer peut ajouter automatiquement les opérateurs nécessaires pour les valeurs passées :
+
+.[language-php]
+| `$table->where('field', $value)` | field = $value
+| `$table->where('field', null)` | field IS NULL
+| `$table->where('field > ?', $val)` | field > $val
+| `$table->where('field', [1, 2])` | champ IN (1, 2)
+| `$table->where('id = ? OR name = ?', 1, $name)` | id = 1 OR name = 'Jon Snow' (nom de l'utilisateur)
+| `$table->where('field', $explorer->table($tableName))` | champ IN (SELECT $primary FROM $tableName)
+| `$table->where('field', $explorer->table($tableName)->select('col'))` | champ IN (SELECT col FROM $tableName)
+
+Vous pouvez fournir un caractère de remplacement même sans opérateur de colonne. Ces appels sont les mêmes.
+
+```php
+$table->where('id = ? OR id = ?', 1, 2);
+$table->where('id ? OR id ?', 1, 2);
+```
+
+Cette fonctionnalité permet de générer l'opérateur correct en fonction de la valeur :
+
+```php
+$table->where('id ?', 2);    // id = 2
+$table->where('id ?', null); // id IS NULL
+$table->where('id', $ids);   // id IN (...)
+```
+
+La sélection gère correctement les conditions négatives, et fonctionne également pour les tableaux vides :
+
+```php
+$table->where('id', []);       // id IS NULL AND FALSE
+$table->where('id NOT', []);   // id IS NULL OR TRUE
+$table->where('NOT (id ?)', $ids);  // NOT (id IS NULL AND FALSE)
+
+// ceci lancera une exception, cette syntaxe n'est pas supportée.
+$table->where('NOT id ?', $ids);
+```
+
+
+whereOr() .[#toc-whereor]
+-------------------------
+
+Exemple d'utilisation sans paramètres :
+
+```php
+// WHERE (user_id IS NULL) OR (SUM(`field1`) > SUM(`field2`))
+$table->whereOr([
+	'user_id IS NULL',
+	'SUM(field1) > SUM(field2)',
+]);
+```
+
+On utilise les paramètres. Si vous ne spécifiez pas d'opérateur, Nette Database Explorer ajoutera automatiquement l'opérateur approprié :
+
+```php
+// WHERE (`field1` IS NULL) OR (`field2` IN (3, 5)) OR (`amount` > 11)
+$table->whereOr([
+	'field1' => null,
+	'field2' => [3, 5],
+	'amount >' => 11,
+]);
+```
+
+La clé peut contenir une expression contenant des points d'interrogation joker, puis passer des paramètres dans la valeur :
+
+```php
+// WHERE (`id` > 12) OR (ROUND(`id`, 5) = 3)
+$table->whereOr([
+	'id > ?' => 12,
+	'ROUND(id, ?) = ?' => [5, 3],
+]);
+```
+
+
+commande() .[#toc-order]
+------------------------
+
+Exemples d'utilisation :
+
+```php
+$table->order('field1');               // ORDER BY `field1`
+$table->order('field1 DESC, field2');  // ORDER BY `field1` DESC, `field2`
+$table->order('field = ? DESC', 123);  // ORDER BY `field` = 123 DESC
+```
+
+
+select() .[#toc-select]
+-----------------------
+
+Exemples d'utilisation :
+
+```php
+$table->select('field1');                 // SELECT `field1`
+$table->select('col, UPPER(col) AS abc'); // SELECT `col`, UPPER(`col`) AS abc
+$table->select('SUBSTR(title, ?)', 3);    // SELECT SUBSTR(`title`, 3)
+```
+
+
+limit() .[#toc-limit]
+---------------------
+
+Exemples d'utilisation :
+
+```php
+$table->limit(1);     // LIMIT 1
+$table->limit(1, 10); // LIMIT 1 OFFSET 10
+```
+
+
+page() .[#toc-page]
+-------------------
+
+Une autre façon de définir la limite et le décalage :
+
+```php
+$page = 5;
+$itemsPerPage = 10;
+$table->page($page, $itemsPerPage); // LIMIT 10 OFFSET 40
+```
+
+Récupérer le dernier numéro de page, passé à la variable `$lastPage`:
+
+```php
+$table->page($page, $itemsPerPage, $lastPage);
+```
+
+
+group() .[#toc-group]
+---------------------
+
+Exemples d'utilisation :
+
+```php
+$table->group('field1');          // GROUP BY `field1`
+$table->group('field1, field2');  // GROUP BY `field1`, `field2`
+```
+
+
+ayant() .[#toc-having]
+----------------------
+
+Exemples d'utilisation :
+
+```php
+$table->having('COUNT(items) >', 100);  // HAVING COUNT(`items`) > 100
+```
+
+
+Filtrage par une autre valeur de la table .[#toc-joining-key]
+-------------------------------------------------------------
+
+Vous avez souvent besoin de filtrer les résultats en fonction d'une condition qui implique une autre table de la base de données. Ces types de conditions nécessitent une jointure de table. Cependant, vous n'avez plus besoin de les écrire.
+
+Disons que vous devez obtenir tous les livres dont l'auteur s'appelle "Jon". Tout ce que vous devez écrire est la clé de jointure de la relation et le nom de la colonne dans la table jointe. La clé de jointure est dérivée de la colonne qui fait référence à la table que vous voulez joindre. Dans notre exemple (voir le schéma de la base de données), il s'agit de la colonne `author_id`, et il suffit d'en utiliser la première partie - `author` (le suffixe `_id` peut être omis). `name` est une colonne de la table `author` que nous souhaitons utiliser. Il est tout aussi facile de créer une condition pour le traducteur de livres (qui est relié par la colonne `translator_id` ).
+
+```php
+$books = $explorer->table('book');
+$books->where('author.name LIKE ?', '%Jon%');
+$books->where('translator.name', 'David Grudl');
+```
+
+La logique de la clé de jonction est pilotée par la mise en œuvre des [Conventions |api:Nette\Database\Conventions]. Nous vous encourageons à utiliser [DiscoveredConventions |api:Nette\Database\Conventions\DiscoveredConventions], qui analyse vos clés étrangères et vous permet de travailler facilement avec ces relations.
+
+La relation entre le livre et son auteur est 1:N. La relation inverse est également possible. Nous l'appelons **backjoin**. Prenons un autre exemple. Nous souhaitons récupérer tous les auteurs qui ont écrit plus de 3 livres. Pour que la jointure soit inversée, nous utilisons l'instruction `:` (colon). Colon means that the joined relationship means hasMany (and it's quite logical too, as two dots are more than one dot). Unfortunately, the Selection class isn't smart enough, so we have to help with the aggregation and provide a `GROUP BY`. La condition doit également être écrite sous la forme d'une instruction `HAVING`.
+
+```php
+$authors = $explorer->table('author');
+$authors->group('author.id')
+	->having('COUNT(:book.id) > 3');
+```
+
+Vous avez peut-être remarqué que l'expression de jointure fait référence au livre, mais il n'est pas clair si nous faisons la jointure par `author_id` ou `translator_id`. Dans l'exemple ci-dessus, Selection fait la jointure par la colonne `author_id` parce qu'une correspondance avec la table source a été trouvée - la table `author`. Si une telle correspondance n'avait pas été trouvée et qu'il y avait d'autres possibilités, Nette aurait lancé [AmbiguousReferenceKeyException |api:Nette\Database\Conventions\AmbiguousReferenceKeyException].
+
+Pour effectuer une jointure via la colonne `translator_id`, fournissez un paramètre facultatif dans l'expression de jointure.
+
+```php
+$authors = $explorer->table('author');
+$authors->group('author.id')
+	->having('COUNT(:book(translator).id) > 3');
+```
+
+Examinons maintenant des expressions de jointure plus complexes.
+
+Nous aimerions trouver tous les auteurs qui ont écrit quelque chose sur PHP. Tous les livres ont une étiquette, nous devons donc sélectionner les auteurs qui ont écrit un livre avec l'étiquette PHP.
+
+```php
+$authors = $explorer->table('author');
+$authors->where(':book:book_tags.tag.name', 'PHP')
+	->group('author.id')
+	->having('COUNT(:book:book_tags.tag.id) > 0');
+```
+
+
+Requêtes agrégées .[#toc-aggregate-queries]
+-------------------------------------------
+
+| `$table->count('*')` | Obtenir le nombre de lignes
+| `$table->count("DISTINCT $column")` | Obtenir le nombre de valeurs distinctes
+| `$table->min($column)` | Obtenir la valeur minimale
+| `$table->max($column)` | Obtenir la valeur maximale
+| `$table->sum($column)` | Obtenir la somme de toutes les valeurs
+| `$table->aggregation("GROUP_CONCAT($column)")` | Exécuter une fonction d'agrégation quelconque
+
+.[caution]
+La méthode `count()` sans aucun paramètre spécifié sélectionne tous les enregistrements et renvoie la taille du tableau, ce qui est très inefficace. Par exemple, si vous devez calculer le nombre de lignes pour la pagination, spécifiez toujours le premier argument.
+
+
+Échappement et citation .[#toc-escaping-quoting]
+================================================
+
+Database Explorer est intelligent et échappe les paramètres et les identificateurs de citation pour vous. Ces règles de base doivent cependant être respectées :
+
+- les mots-clés, fonctions, procédures doivent être en majuscules
+- les colonnes et les tables doivent être en minuscules
+- passer des variables comme paramètres, ne pas les concaténer
+
+```php
+->where('name like ?', 'John'); // FAUX ! génère: `name` `like` ?
+->where('name LIKE ?', 'John'); // CORRECT
+
+->where('KEY = ?', $value); // FAUX ! KEY est un mot-clé
+->where('key = ?', $value); // CORRECT. génère: `key` = ?
+
+->where('name = ' . $name); // FAUX ! injection sql !
+->where('name = ?', $name); // CORRECT
+
+->select('DATE_FORMAT(created, "%d.%m.%Y")'); // FAUX ! passer des variables comme paramètres, ne pas concaténer
+->select('DATE_FORMAT(created, ?)', '%d.%m.%Y'); // CORRECT
+```
+
+.[warning]
+Une mauvaise utilisation peut entraîner des failles de sécurité
+
+
+Récupération des données .[#toc-fetching-data]
+==============================================
+
+| `foreach ($table as $id => $row)` | Itérer sur toutes les lignes du résultat
+| `$row = $table->get($id)` | Récupérer une seule ligne avec l'ID $id dans le tableau.
+| `$row = $table->fetch()` | Récupérer la ligne suivante dans le résultat
+| `$array = $table->fetchPairs($key, $value)` | Récupérer toutes les valeurs dans un tableau associatif
+| `$array = $table->fetchPairs($key)` | Récupère toutes les lignes dans un tableau associatif
+| `count($table)` | Obtenir le nombre de lignes dans le jeu de résultats
+
+
+Insertion, mise à jour et suppression .[#toc-insert-update-delete]
+==================================================================
+
+La méthode `insert()` accepte un tableau d'objets Traversables (par exemple [ArrayHash |utils:arrays#ArrayHash] qui renvoie des [formes |forms:]) :
+
+```php
+$row = $explorer->table('users')->insert([
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978)
+```
+
+Si la clé primaire est définie sur la table, un objet ActiveRow contenant la ligne insérée est retourné.
+
+Insertion multiple :
+
+```php
+$explorer->table('users')->insert([
+	[
+		'name' => 'Jim',
+		'year' => 1978,
+	], [
+		'name' => 'Jack',
+		'year' => 1987,
+	],
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978), ('Jack', 1987)
+```
+
+Des fichiers ou des objets DateTime peuvent être passés comme paramètres :
+
+```php
+$explorer->table('users')->insert([
+	'name' => $name,
+	'created' => new DateTime, // ou $explorer::literal('NOW()')
+	'avatar' => fopen('image.gif', 'r'), // insère le fichier
+]);
+```
+
+Mise à jour (renvoie le nombre de lignes affectées) :
+
+```php
+$count = $explorer->table('users')
+	->where('id', 10) // doit être appelé avant update()
+	->update([
+		'name' => 'Ned Stark'
+	]);
+// UPDATE `users` SET `name`='Ned Stark' WHERE (`id` = 10)
+```
+
+Pour la mise à jour, nous pouvons utiliser les opérateurs `+=` a `-=`:
+
+```php
+$explorer->table('users')
+	->update([
+		'age+=' => 1, // voir +=
+	]);
+// UPDATE users SET `age` = `age` + 1
+```
+
+Suppression (renvoie le nombre de lignes supprimées) :
+
+```php
+$count = $explorer->table('users')
+	->where('id', 10)
+	->delete();
+// DELETE FROM `users` WHERE (`id` = 10)
+```
+
+
+Travailler avec des relations .[#toc-working-with-relationships]
+================================================================
+
+
+A une relation .[#toc-has-one-relation]
+---------------------------------------
+Une seule relation est un cas d'utilisation courant. Le livre *a un* auteur. Le livre *a un* traducteur. L'obtention d'une ligne liée se fait principalement par la méthode `ref()`. Elle accepte deux arguments : le nom de la table cible et la colonne de jonction source. Voir l'exemple :
+
+```php
+$book = $explorer->table('book')->get(1);
+$book->ref('author', 'author_id');
+```
+
+Dans l'exemple ci-dessus, nous récupérons l'entrée relative à l'auteur dans la table `author`, la clé primaire de l'auteur est recherchée dans la colonne `book.author_id`. La méthode Ref() retourne une instance ActiveRow ou null s'il n'y a pas d'entrée appropriée. La ligne retournée est une instance d'ActiveRow, nous pouvons donc travailler avec elle de la même manière qu'avec l'entrée du livre.
+
+```php
+$author = $book->ref('author', 'author_id');
+$author->name;
+$author->born;
+
+// ou directement
+$book->ref('author', 'author_id')->name;
+$book->ref('author', 'author_id')->born;
+```
+
+Le livre a aussi un traducteur, donc obtenir le nom du traducteur est assez facile.
+```php
+$book->ref('author', 'translator_id')->name
+```
+
+Tout cela est bien, mais c'est un peu lourd, ne pensez-vous pas ? Database Explorer contient déjà les définitions des clés étrangères, alors pourquoi ne pas les utiliser automatiquement ? Faisons cela !
+
+Si nous appelons une propriété qui n'existe pas, ActiveRow essaie de résoudre le nom de la propriété appelante comme une relation 'has one'. Obtenir cette propriété est la même chose qu'appeler la méthode ref() avec un seul argument. Nous appellerons le seul argument **key**. La clé sera résolue en relation particulière de clé étrangère. La clé passée est comparée aux colonnes de la ligne, et si elle correspond, la clé étrangère définie sur la colonne correspondante est utilisée pour obtenir les données de la table cible correspondante. Voir l'exemple :
+
+```php
+$book->author->name;
+// identique à
+$book->ref('author')->name;
+```
+
+L'instance ActiveRow n'a pas de colonne auteur. Toutes les colonnes de livres sont recherchées pour une correspondance avec *key*. Dans ce cas, la correspondance signifie que le nom de la colonne doit contenir la clé. Ainsi, dans l'exemple ci-dessus, la colonne `author_id` contient la chaîne 'auteur' et est donc recherchée par la clé 'auteur'. Si vous voulez obtenir le traducteur du livre, vous pouvez utiliser par exemple 'translator' comme clé, car la clé 'translator' correspondra à la colonne `translator_id`. Vous trouverez plus d'informations sur la logique de correspondance des clés dans le chapitre sur les [expressions de jointure |#joining-key].
+
+```php
+echo $book->title . ': ';
+echo $book->author->name;
+if ($book->translator) {
+	echo ' (translated by ' . $book->translator->name . ')';
+}
+```
+
+Si vous souhaitez récupérer plusieurs livres, vous devez utiliser la même approche. Nette Database Explorer recherchera les auteurs et les traducteurs pour tous les livres recherchés en une seule fois.
+
+```php
+$books = $explorer->table('book');
+foreach ($books as $book) {
+	echo $book->title . ': ';
+	echo $book->author->name;
+	if ($book->translator) {
+		echo ' (translated by ' . $book->translator->name . ')';
+	}
+}
+```
+
+Le code n'exécutera que ces 3 requêtes :
+```sql
+SELECT * FROM `book`;
+SELECT * FROM `author` WHERE (`id` IN (1, 2, 3)); -- ids of fetched books from author_id column
+SELECT * FROM `author` WHERE (`id` IN (2, 3));    -- ids of fetched books from translator_id column
+```
+
+
+A plusieurs relations .[#toc-has-many-relation]
+-----------------------------------------------
+
+La relation "has many" est une relation inversée "has one". L'auteur *a* écrit *beaucoup* de livres. L'auteur *a* traduit *beaucoup* de livres. Comme vous pouvez le constater, ce type de relation est un peu plus difficile car la relation est "nommée" ("écrit", "traduit"). L'instance ActiveRow possède la méthode `related()`, qui renvoie un tableau d'entrées liées. Les entrées sont également des instances ActiveRow. Voir l'exemple ci-dessous :
+
+```php
+$author = $explorer->table('author')->get(11);
+echo $author->name . ' has written:';
+
+foreach ($author->related('book.author_id') as $book) {
+	echo $book->title;
+}
+
+echo 'and translated:';
+foreach ($author->related('book.translator_id') as $book) {
+	echo $book->title;
+}
+```
+
+Méthode `related()` La méthode accepte la description complète de la jointure passée comme deux arguments ou comme un argument joint par un point. Le premier argument est la table cible, le second est la colonne cible.
+
+```php
+$author->related('book.translator_id');
+// identique à
+$author->related('book', 'translator_id');
+```
+
+Vous pouvez utiliser l'heuristique de Nette Database Explorer basée sur les clés étrangères et fournir uniquement l'argument **key**. La clé sera comparée à toutes les clés étrangères pointant vers la table actuelle (`author` table). S'il y a une correspondance, Nette Database Explorer utilisera cette clé étrangère, sinon, il lancera [Nette\InvalidArgumentException |api:Nette\InvalidArgumentException] ou [AmbiguousReferenceKeyException |api:Nette\Database\Conventions\AmbiguousReferenceKeyException]. Vous pouvez trouver plus d'informations sur la logique de correspondance des clés dans le chapitre sur les [expressions de jointure |#joining-key].
+
+Bien sûr, vous pouvez appeler les méthodes connexes pour tous les auteurs récupérés, Nette Database Explorer récupérera à nouveau les livres appropriés en une seule fois.
+
+```php
+$authors = $explorer->table('author');
+foreach ($authors as $author) {
+	echo $author->name . ' has written:';
+	foreach ($author->related('book') as $book) {
+		$book->title;
+	}
+}
+```
+
+L'exemple ci-dessus n'exécutera que deux requêtes :
+
+```sql
+SELECT * FROM `author`;
+SELECT * FROM `book` WHERE (`author_id` IN (1, 2, 3)); -- ids of fetched authors
+```
+
+
+Création manuelle de l'explorateur .[#toc-creating-explorer-manually]
+=====================================================================
+
+Une connexion à la base de données peut être créée en utilisant la configuration de l'application. Dans ce cas, un service `Nette\Database\Explorer` est créé et peut être transmis comme dépendance à l'aide du conteneur DI.
+
+Cependant, si Nette Database Explorer est utilisé comme un outil autonome, une instance de l'objet `Nette\Database\Explorer` doit être créée manuellement.
+
+```php
+// $storage implémente Nette\Caching\Storage:
+$storage = new Nette\Caching\Storages\FileStorage($tempDir);
+$connection = new Nette\Database\Connection($dsn, $user, $password);
+$structure = new Nette\Database\Structure($connection, $storage);
+$conventions = new Nette\Database\Conventions\DiscoveredConventions($structure);
+$explorer = new Nette\Database\Explorer($connection, $structure, $conventions, $storage);
+```

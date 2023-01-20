@@ -1,0 +1,287 @@
+Latte allungabile
+*****************
+
+.[perex]
+Latte è molto flessibile e può essere esteso in molti modi: si possono aggiungere filtri personalizzati, funzioni, tag, caricatori, ecc. Vi mostriamo come fare.
+
+Questo capitolo descrive i diversi modi per estendere Latte. Se volete riutilizzare le vostre modifiche in progetti diversi o se volete condividerle con altri, dovete [creare una cosiddetta estensione |creating-extension].
+
+
+Quante strade portano a Roma? .[#toc-how-many-roads-lead-to-rome]
+=================================================================
+
+Poiché alcuni dei modi di estendere Latte possono essere mescolati, proviamo prima a spiegare le differenze tra loro. Per esempio, proviamo a implementare un generatore di *Lorem ipsum*, al quale viene passato il numero di parole da generare.
+
+Il costrutto principale del linguaggio Latte è il tag. Possiamo implementare un generatore estendendo Latte con un nuovo tag:
+
+```latte
+{lipsum 40}
+```
+
+Il tag funzionerà benissimo. Tuttavia, il generatore sotto forma di tag potrebbe non essere abbastanza flessibile, perché non può essere usato in un'espressione. Comunque, nella pratica, raramente si ha bisogno di generare tag; e questa è una buona notizia, perché i tag sono un modo più complicato di estendere.
+
+Proviamo a creare un filtro invece di un tag:
+
+```latte
+{=40|lipsum}
+```
+
+Anche in questo caso, si tratta di un'opzione valida. Ma il filtro dovrebbe trasformare il valore passato in qualcos'altro. Qui usiamo il valore `40`, che indica il numero di parole generate, come argomento del filtro, non come valore da trasformare.
+
+Proviamo quindi a usare la funzione
+
+```latte
+{lipsum(40)}
+```
+
+Ecco fatto! Per questo particolare esempio, la creazione di una funzione è il punto di estensione ideale da utilizzare. È possibile chiamarla ovunque sia accettata un'espressione, ad esempio:
+
+```latte
+{var $text = lipsum(40)}
+```
+
+
+Filtri .[#toc-filters]
+======================
+
+Creare un filtro registrando il suo nome e qualsiasi callable PHP, come ad esempio una funzione:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFilter('shortify', fn(string $s) => mb_substr($s, 0, 10)); // accorcia il testo a 10 caratteri
+```
+
+In questo caso sarebbe meglio che il filtro ottenesse un parametro aggiuntivo:
+
+```php
+$latte->addFilter('shortify', function (string $s, int $len = 10): string {
+	return mb_substr($s, 0, $len);
+});
+```
+
+Lo usiamo in un modello come questo:
+
+```latte
+<p>{$text|shortify}</p>
+<p>{$text|shortify:100}</p>
+```
+
+Come si può vedere, la funzione riceve il lato sinistro del filtro prima della pipe `|` as the first argument and the arguments passed to the filter after `:` come prossimo argomento.
+
+Naturalmente, la funzione che rappresenta il filtro può accettare un numero qualsiasi di parametri e sono supportati anche i parametri variabili.
+
+
+Filtri che utilizzano la classe .[#toc-filters-using-the-class]
+---------------------------------------------------------------
+
+Il secondo modo per definire un filtro è quello di [usare la classe |develop#Parameters as a class]. Si crea un metodo con l'attributo `TemplateFilter`:
+
+```php
+class TemplateParameters
+{
+	public function __construct(
+		// parametri
+	) {}
+
+	#[Latte\Attributes\TemplateFilter]
+	public function shortify(string $s, int $len = 10): string
+	{
+		return mb_substr($s, 0, $len);
+	}
+}
+
+$params = new TemplateParameters(/* ... */);
+$latte->render('template.latte', $params);
+```
+
+Se si utilizza PHP 7.x e Latte 2.x, utilizzare l'annotazione `/** @filter */` invece dell'attributo.
+
+
+Caricatore di filtri .[#toc-filter-loader]
+------------------------------------------
+
+Invece di registrare i singoli filtri, si può creare un cosiddetto caricatore, che è una funzione che viene chiamata con il nome del filtro come parametro e restituisce il suo callable PHP, oppure null.
+
+```php
+$latte->addFilterLoader([new Filters, 'load']);
+
+
+class Filters
+{
+	public function load(string $filter): ?callable
+	{
+		if (in_array($filter, get_class_methods($this))) {
+			return [$this, $filter];
+		}
+		return null;
+	}
+
+	public function shortify($s, $len = 10)
+	{
+		return mb_substr($s, 0, $len);
+	}
+
+	// ...
+}
+```
+
+
+Filtri contestuali .[#toc-contextual-filters]
+---------------------------------------------
+
+Un filtro contestuale è un filtro che accetta un oggetto [api:Latte\Runtime\FilterInfo] come primo parametro, seguito da altri parametri come nel caso dei filtri classici. Viene registrato allo stesso modo, Latte stesso riconosce che il filtro è contestuale:
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('foo', function (FilterInfo $info, string $str): string {
+	// ...
+});
+```
+
+I filtri contestuali possono rilevare e modificare il tipo di contenuto che ricevono nella variabile `$info->contentType`. Se il filtro viene chiamato classicamente su una variabile (ad esempio `{$var|foo}`), `$info->contentType` conterrà null.
+
+Il filtro deve innanzitutto verificare se il tipo di contenuto della stringa in ingresso è supportato. Può anche modificarlo. Esempio di filtro che accetta testo (o null) e restituisce HTML:
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('money', function (FilterInfo $info, float $amount): string {
+	// per prima cosa controlliamo se il tipo di contenuto dell'input è text
+	if (!in_array($info->contentType, [null, ContentType::Text])) {
+		throw new Exception("Filtro |money usato in un tipo di contenuto incompatibile $info->contentType.");
+	}
+
+	// cambia il tipo di contenuto in HTML
+	$info->contentType = ContentType::Html;
+	return "<i>$num Kč</i>";
+});
+```
+
+.[note]
+In questo caso, il filtro deve garantire il corretto escape dei dati.
+
+Tutti i filtri che vengono utilizzati sopra i [blocchi |tags#block] (ad esempio come `{block|foo}...{/block}`) devono essere contestuali.
+
+
+Funzioni .[#toc-functions]
+==========================
+
+Per impostazione predefinita, tutte le funzioni native di PHP possono essere utilizzate in Latte, a meno che la sandbox non le disabiliti. Ma è anche possibile definire le proprie funzioni. Queste possono sovrascrivere le funzioni native.
+
+Creare una funzione registrando il suo nome e qualsiasi callable PHP:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFunction('random', function (...$args) {
+	return $args[array_rand($args)];
+});
+```
+
+L'uso è quindi lo stesso di quando si chiama la funzione PHP:
+
+```latte
+{random(apple, orange, lemon)} // prints for example: apple
+```
+
+
+Funzioni che utilizzano la classe .[#toc-functions-using-the-class]
+-------------------------------------------------------------------
+
+Il secondo modo per definire una funzione è quello di [usare la classe |develop#Parameters as a class]. Creiamo un metodo con l'attributo `TemplateFunction`:
+
+```php
+class TemplateParameters
+{
+	public function __construct(
+		// parametri
+	) {}
+
+	#[Latte\Attributes\TemplateFunction]
+	public function random(...$args)
+	{
+		return $args[array_rand($args)];
+	}
+}
+
+$params = new TemplateParameters(/* ... */);
+$latte->render('template.latte', $params);
+```
+
+Se si utilizza PHP 7.x e Latte 2.x, utilizzare l'annotazione `/** @function */` invece dell'attributo.
+
+
+Caricatori .[#toc-loaders]
+==========================
+
+I caricatori sono responsabili del caricamento dei template da una fonte, come un file system. Vengono impostati con il metodo `setLoader()`:
+
+```php
+$latte->setLoader(new MyLoader);
+```
+
+I caricatori incorporati sono:
+
+
+FileLoader .[#toc-fileloader]
+-----------------------------
+
+Caricatore predefinito. Carica i modelli dal filesystem.
+
+L'accesso ai file può essere limitato impostando la directory di base:
+
+```php
+$latte->setLoader(new Latte\Loaders\FileLoader($templateDir));
+$latte->render('test.latte');
+```
+
+
+StringLoader .[#toc-stringloader]
+---------------------------------
+
+Carica i modelli dalle stringhe. Questo caricatore è molto utile per i test unitari. Può anche essere usato per piccoli progetti in cui può avere senso memorizzare tutti i template in un singolo file PHP.
+
+```php
+$latte->setLoader(new Latte\Loaders\StringLoader([
+	'main.file' => '{include other.file}',
+	'other.file' => '{if true} {$var} {/if}',
+]));
+
+$latte->render('main.file');
+```
+
+Utilizzo semplificato:
+
+```php
+$template = '{if true} {$var} {/if}';
+$latte->setLoader(new Latte\Loaders\StringLoader);
+$latte->render($template);
+```
+
+
+Creare un caricatore personalizzato .[#toc-creating-a-custom-loader]
+--------------------------------------------------------------------
+
+Loader è una classe che implementa l'interfaccia [api:Latte\Loader].
+
+
+Tag .[#toc-tags]
+================
+
+Una delle caratteristiche più interessanti del motore di template è la possibilità di definire nuovi costrutti linguistici usando i tag. È anche una funzionalità più complessa ed è necessario capire come funziona internamente Latte.
+
+Nella maggior parte dei casi, tuttavia, il tag non è necessario:
+- se deve generare un output, usare invece [function |#functions]
+- se deve modificare un input e restituirlo, usare il [filtro |#filters]
+- se deve modificare un'area di testo, avvolgerla con un tag [`{block}` |tags#block] e usare un [filtro |#Contextual Filters]
+- se non deve generare alcun output, ma solo richiamare una funzione, chiamarla con [`{do}` |tags#do]
+
+Se si vuole ancora creare un tag, bene! Tutti gli elementi essenziali si trovano in [Creare un'estensione |creating-extension].
+
+
+Passaggi del compilatore .[#toc-compiler-passes]
+================================================
+
+I passi del compilatore sono funzioni che modificano gli AST o raccolgono informazioni in essi. In Latte, per esempio, una sandbox è implementata in questo modo: attraversa tutti i nodi di un AST, trova le chiamate a funzioni e metodi e le sostituisce con chiamate controllate.
+
+Come per i tag, si tratta di una funzionalità più complessa e occorre capire come funziona Latte sotto il cofano. Tutti gli elementi essenziali si trovano nel capitolo [Creare un'estensione |creating-extension].

@@ -1,0 +1,449 @@
+Cache
+*****
+<div class=perex>
+
+
+Pamięć podręczna `[keš]` przyspiesza działanie aplikacji poprzez przechowywanie raz zużytych danych do przyszłego wykorzystania. Zobaczymy:
+
+- jak korzystać z pamięci podręcznej
+- jak zmienić sposób przechowywania
+- jak prawidłowo unieważnić pamięć podręczną
+
+</div>
+
+Używanie cachingu jest w Nette bardzo proste, a jednocześnie pokrywa bardzo zaawansowane potrzeby. Został zaprojektowany z myślą o wydajności i 100% odporności. Baza zawiera adaptery dla większości popularnych pamięci masowych backend. Pozwala na unieważnienie oparte na tagach, wygaśnięcie czasu, ma ochronę przed cache stampede, itp.
+
+
+Instalacja .[#toc-installation]
+===============================
+
+Pobierz i zainstaluj bibliotekę za pomocą [Composera |best-practices:composer]:
+
+```shell
+composer require nette/caching
+```
+
+
+Podstawowe zastosowanie .[#toc-basic-usage]
+===========================================
+
+Obiekt [api:Nette\Caching\Cache] jest centrum pracy z pamięcią podręczną lub cache. Tworzymy jego instancję i przekazujemy tzw. storage jako parametr do konstruktora. Jest to obiekt reprezentujący miejsce, gdzie dane będą fizycznie przechowywane (baza danych, Memcached, pliki na dysku, ...). Aby dostać się do magazynu, przekazujesz go za pomocą [dependency injection |dependency-injection:passing-dependencies] z typem `Nette\Caching\Storage`. Wszystkiego ważnego dowiesz się w sekcji [Storage |#User-Storage].
+
+.[warning]
+W wersji 3.0 interfejs miał jeszcze prefiks `I`, takže název byl `Nette\Caching\IStorage`. Również stałe klasy `Cache` były pisane wielką literą, więc na przykład `Cache::EXPIRE` zamiast `Cache::Expire`.
+
+Dla poniższych przykładów załóżmy, że utworzyliśmy alias `Cache` oraz zmienną składową `$storage`.
+
+```php
+use Nette\Caching\Cache;
+
+$storage = /* ... */; // instancja Nette\Caching\Storage
+```
+
+Cache jest tak naprawdę *key-value store*, więc czytamy i zapisujemy dane pod kluczami tak jak w przypadku tablic asocjacyjnych. Aplikacje składają się z wielu niezależnych części i jeśli wszystkie korzystają z tej samej pamięci masowej (wyobraźmy sobie jeden katalog na dysku), prędzej czy później doszłoby do kolizji kluczy. Nette Framework rozwiązuje ten problem poprzez podział całej przestrzeni na przestrzenie nazw (podkatalogi). Każda część programu korzysta wtedy z własnej przestrzeni o unikalnej nazwie i nie może już dojść do kolizji.
+
+Nazwa przestrzeni nazw podawana jest jako drugi parametr konstruktora klasy Cache:
+
+```php
+$cache = new Cache($storage, 'Full Html Pages');
+```
+
+Teraz możemy użyć obiektu `$cache` do odczytu z i zapisu do cache. Metoda `load()` służy do wykonania obu tych czynności. Pierwszym argumentem jest klucz, a drugim jest wywołanie zwrotne PHP, które jest wywoływane, gdy klucz nie zostanie znaleziony w pamięci podręcznej. Callback generuje wartość, zwraca ją i przechowuje w pamięci podręcznej:
+
+```php
+$value = $cache->load($key, function () use ($key) {
+	$computedValue = /* ... */; // náročný výpočet
+	return $computedValue;
+});
+```
+
+Jeśli drugi argument nie określa `$value = $cache->load($key)`, `null` zostanie zwrócony, jeśli element nie jest w pamięci podręcznej.
+
+.[tip]
+Miłą rzeczą jest to, że każda serializowalna struktura może być buforowana, nie muszą to być ciągi. I to samo dotyczy nawet kluczy.
+
+Możemy wyczyścić element z pamięci podręcznej za pomocą metody `remove()`:
+
+```php
+$cache->remove($key);
+```
+
+Możesz również buforować element za pomocą metody `$cache->save($key, $value, array $dependencies = [])`. Jednak preferowaną metodą powyżej jest użycie `load()`.
+
+
+Memoizacja .[#toc-memoization]
+==============================
+
+Memoization oznacza buforowanie wyniku wywołania funkcji lub metody, aby można było użyć go następnym razem bez obliczania tego samego w kółko.
+
+Możesz wywołać metody i funkcje w sposób memoized za pomocą `call(callable $callback, ...$args)`:
+
+```php
+$result = $cache->call('gethostbyaddr', $ip);
+```
+
+Funkcja `gethostbyaddr()` jest wywoływana tylko raz dla każdego parametru `$ip` i następnym razem wartość jest zwracana z pamięci podręcznej.
+
+Możliwe jest również utworzenie memoized wrapper nad metodą lub funkcją, która może zostać wywołana później:
+
+```php
+function factorial($num)
+{
+	return /* ... */;
+}
+
+$memoizedFactorial = $cache->wrap('factorial');
+
+$result = $memoizedFactorial(5); // oblicza po raz pierwszy
+$result = $memoizedFactorial(5); // drugi raz z pamięci podręcznej
+```
+
+
+Wygaśnięcie i unieważnienie .[#toc-expiration-invalidation]
+===========================================================
+
+W przypadku buforowania musisz zająć się kwestią, kiedy wcześniej zbuforowane dane stają się nieważne. Nette Framework zapewnia mechanizm ograniczania ważności danych lub ich usuwania w kontrolowany sposób (w terminologii frameworka - "invalidate").
+
+Ważność danych jest ustawiana w momencie przechowywania za pomocą trzeciego parametru metody `save()`, np:
+
+```php
+$cache->save($key, $value, [
+	$cache::Expire => '20 minutes',
+]);
+```
+
+Lub używając parametru `$dependencies` przekazanego przez odniesienie do callbacku metody `load()`, np:
+
+```php
+$value = $cache->load($key, function (&$dependencies) {
+	$dependencies[Cache::Expire] = '20 minutes';
+	return /* ... */;
+});
+```
+
+Lub poprzez 3. parametr w metodzie `load()`, np:
+
+```php
+$value = $cache->load($key, function () {
+	return ...;
+}, [Cache::Expire => '20 minutes']);
+```
+
+W kolejnych przykładach będziemy zakładać drugą opcję, a więc istnienie zmiennej `$dependencies`.
+
+
+Wygaśnięcie .[#toc-expiration]
+------------------------------
+
+Najprostszym wygaszeniem jest timeout. W ten sposób buforujemy dane o ważności 20 minut:
+
+```php
+// akceptuje również liczbę sekund lub UNIX-owy timestamp
+$dependencies[Cache::Expire] = '20 minutes';
+```
+
+Gdybyśmy chcieli wydłużyć czas wygaśnięcia przy każdym odczycie, można to zrobić w następujący sposób, ale należy pamiętać, że wzrośnie narzut pamięci podręcznej:
+
+```php
+$dependencies[Cache::Sliding] = true;
+```
+
+Poręczną funkcją jest możliwość wyodrębnienia danych w momencie zmiany pliku lub jednego z kilku plików. Można to wykorzystać np. przy buforowaniu danych powstałych w wyniku przetwarzania tych plików. Użyj ścieżek bezwzględnych.
+
+```php
+$dependencies[Cache::Files] = '/path/to/data.yaml';
+// nebo
+$dependencies[Cache::Files] = ['/path/to/data1.yaml', '/path/to/data2.yaml'];
+```
+
+Możemy pozwolić, aby zbuforowany element był eksmitowany, gdy inny element (lub jeden z kilku innych) jest eksmitowany. Można to wykorzystać, gdy buforujemy np. całą stronę HTML i jej fragmenty pod różnymi kluczami. Gdy fragment się zmieni, cała strona zostaje unieważniona. Jeśli fragmenty są buforowane pod kluczami takimi jak `frag1` i `frag2`, używamy:
+
+```php
+$dependencies[Cache::Items] = ['frag1', 'frag2'];
+```
+
+Wygaśnięcie może być również kontrolowane za pomocą funkcji niestandardowych lub metod statycznych, które zawsze decydują o odczytaniu, czy element jest nadal ważny. W ten sposób, na przykład, możemy mieć element wygasający przy każdej zmianie wersji PHP. Tworzymy funkcję, która porównuje aktualną wersję z parametrem, a przy zapisie dodajemy pole pomiędzy zależnościami w formularzu `[nazev funkce, ...argumenty]`:
+
+```php
+function checkPhpVersion($ver): bool
+{
+	return $ver === PHP_VERSION_ID;
+}
+
+$dependencies[Cache::Callbacks] = [
+	['checkPhpVersion', PHP_VERSION_ID] // expiruj když checkPhpVersion(...) === false
+];
+```
+
+Oczywiście wszystkie kryteria można łączyć. Następnie cache wygasa, jeśli przynajmniej jedno kryterium nie zostanie spełnione.
+
+```php
+$dependencies[Cache::Expire] = '20 minutes';
+$dependencies[Cache::Files] = '/path/to/data.yaml';
+```
+
+
+Unieważnienie znacznika .[#toc-invalidation-using-tags]
+-------------------------------------------------------
+
+Tagi są bardzo przydatnym narzędziem unieważniania. Każdemu elementowi w cache można przypisać listę tagów, które są dowolnymi ciągami znaków. Dla przykładu, miejmy stronę HTML z artykułem i komentarzami, którą będziemy buforować. Podczas buforowania określamy tagi:
+
+```php
+$dependencies[Cache::Tags] = ["article/$articleId", "comments/$articleId"];
+```
+
+Przejdźmy teraz do administracji. Tutaj znajdziemy formularz do edycji artykułu. Wraz z zapisaniem artykułu do bazy danych wywołamy polecenie `clean()`, które usunie zbuforowane artykuły zgodnie ze znacznikiem:
+
+```php
+$cache->clean([
+	$cache::Tags => ["article/$articleId"],
+]);
+```
+
+W ten sam sposób, dodając nowy komentarz (lub edytując komentarz), nie zapomnij unieważnić odpowiedniego tagu:
+
+```php
+$cache->clean([
+	$cache::Tags => ["comments/$articleId"],
+]);
+```
+
+Co udało nam się osiągnąć? Że nasz cache HTML zostanie unieważniony (usunięty) przy każdej zmianie artykułu lub komentarzy. Kiedy artykuł o ID = 10 jest edytowany, znacznik `article/10` jest przymusowo unieważniany, a strona HTML, która nosi ten znacznik, jest usuwana z pamięci podręcznej. Podobnie dzieje się w przypadku wstawienia nowego komentarza pod artykułem.
+
+.[note]
+Tagi wymagają tak zwanego [Dziennika |#Journal].
+
+
+Unieważnienie według priorytetu .[#toc-invalidation-by-priority]
+----------------------------------------------------------------
+
+Możesz ustawić priorytet dla poszczególnych elementów w pamięci podręcznej, co pozwoli na ich usunięcie, jeśli pamięć podręczna przekroczy określony rozmiar:
+
+```php
+$dependencies[Cache::Priority] = 50;
+```
+
+Usuń wszystkie elementy o priorytecie równym lub mniejszym niż 100:
+
+```php
+$cache->clean([
+	$cache::Priority => 100,
+]);
+```
+
+.[note]
+Priorytety wymagają tzw. [dziennika |#Journal].
+
+
+Usuwanie pamięci podręcznej .[#toc-clear-cache]
+-----------------------------------------------
+
+Parametr `Cache::All` usuwa wszystko:
+
+```php
+$cache->clean([
+	$cache::All => true,
+]);
+```
+
+
+Masowe czytanie .[#toc-bulk-reading]
+====================================
+
+Do masowego odczytu i zapisu do cache'u służy metoda `bulkLoad()`, która przekazuje tablicę kluczy i otrzymuje tablicę wartości:
+
+```php
+$values = $cache->bulkLoad($keys);
+```
+
+Metoda `bulkLoad()` działa podobnie jak `load()` z drugim parametrem callback, któremu przekazywany jest klucz wygenerowanego elementu:
+
+```php
+$values = $cache->bulkLoad($keys, function ($key, &$dependencies) {
+	$computedValue = /* ... */; // náročný výpočet
+	return $computedValue;
+});
+```
+
+
+Buforowanie wyjścia .[#toc-output-caching]
+==========================================
+
+Możesz przechwytywać i buforować dane wyjściowe bardzo elegancko:
+
+```php
+if ($capture = $cache->capture($key)) {
+
+	echo ... // zrzucanie danych
+
+	$capture->end(); // buforowanie wyjścia
+}
+```
+
+Jeśli wyjście jest już zbuforowane, metoda `capture()` wydrukuje je i zwróci `null`, więc warunek nie zostanie wykonany. W przeciwnym razie rozpoczyna przechwytywanie danych wyjściowych i zwraca obiekt `$capture`, który jest używany do ostatecznego buforowania danych wyjściowych.
+
+.[note]
+W wersji 3.0 metoda ta nosiła nazwę `$cache->start()`.
+
+
+Buforowanie w Latte .[#toc-caching-in-latte]
+============================================
+
+Buforowanie w szablonach [Latte |latte:] jest bardzo proste, wystarczy owinąć część szablonu tagami `{cache}...{/cache}`. Cache jest automatycznie unieważniany w momencie zmiany szablonu źródłowego (włączając w to wszelkie inlined szablony wewnątrz bloku cache). Znaczniki `{cache}` mogą być zagnieżdżone wewnątrz siebie, a kiedy zagnieżdżony blok zostanie unieważniony (na przykład przez znacznik), blok nadrzędny również zostanie unieważniony.
+
+W tagu można określić klucze, z którymi będzie związany cache (tutaj zmienna `$id`) oraz ustawić [znaczniki |#Invalidation-Using-Tags] wygaśnięcia i [unieważnienia |#Invalidation-Using-Tags]
+
+```latte
+{cache $id, expire: '20 minutes', tags: [tag1, tag2]}
+	...
+{/cache}
+```
+
+Wszystkie elementy są opcjonalne, więc nie musimy określać wygaśnięcia, tagów, czy wreszcie kluczy.
+
+Użycie cachingu może być również uwarunkowane przy użyciu `if` - zawartość będzie wtedy buforowana tylko wtedy, gdy warunek zostanie spełniony:
+
+```latte
+{cache $id, if: !$form->isSubmitted()}
+	{$form}
+{/cache}
+```
+
+
+Przechowywanie .[#toc-storages]
+===============================
+
+Repozytorium to obiekt reprezentujący miejsce, w którym dane są fizycznie przechowywane. Możemy wykorzystać bazę danych, serwer Memcached lub najbardziej dostępny storage, jakim są pliki na dysku.
+
+|-----------------
+| Pamięć masowa | Opis
+|-----------------
+| [FileStorage |#FileStorage] | domyślny magazyn z przechowywaniem plików na dysku
+| [MemcachedStorage |#MemcachedStorage] | używa serwera `Memcached`
+| [PamięćZapasowa |#MemoryStorage] | dane są tymczasowo w pamięci
+| [SQLiteStorage |#SQLiteStorage] | dane są przechowywane w bazie danych SQLite
+| [DevNullStorage |#DevNullStorage] | dane nie są przechowywane, nadają się do testowania
+
+Możesz uzyskać dostęp do obiektu storage, przekazując go przez [dependency injection |dependency-injection:passing-dependencies] z typem `Nette\Caching\Storage`. Jako domyślny magazyn, Nette dostarcza obiekt FileStorage, który przechowuje dane w podfolderze `cache` katalogu [plików tymczasowych |application:bootstrap#Temporary-Files].
+
+Możesz zmienić repozytorium w konfiguracji:
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\DevNullStorage
+```
+
+
+FileStorage .[#toc-filestorage]
+-------------------------------
+
+Zapisuje cache do plików na dysku. Repozytorium `Nette\Caching\Storages\FileStorage` jest bardzo dobrze zoptymalizowane pod kątem wydajności i co najważniejsze zapewnia pełną atomowość operacji. Co to oznacza? Że podczas korzystania z cache nie może się zdarzyć, że czytasz plik, który nie jest jeszcze do końca napisany przez inny wątek, albo że ktoś "spod ręki" go skasuje. Tak więc korzystanie z pamięci podręcznej jest całkowicie bezpieczne.
+
+Ta pamięć masowa ma również ważną wbudowaną funkcję, która zapobiega ekstremalnym skokom zużycia procesora, gdy pamięć podręczna jest usuwana lub jeszcze nie rozgrzana (tj. Utworzona). Jest to profilaktyka przed "stemplem pamięci podręcznej":https://en.wikipedia.org/wiki/Cache_stampede.
+Dzieje się tak, że w jednym momencie zbiera się duża liczba współbieżnych żądań, które chcą tego samego z cache'u (np. wyniku drogiego zapytania SQL), a ponieważ nie ma cache'u, wszystkie procesy zaczynają wykonywać to samo zapytanie SQL.
+Obciążenie mnoży się i może się nawet zdarzyć, że żaden wątek nie będzie w stanie odpowiedzieć w wyznaczonym czasie, pamięć podręczna nie zostanie utworzona i aplikacja się zawiesi.
+Na szczęście cache w Nette działa w taki sposób, że gdy jest wiele współbieżnych żądań dla jednego elementu, tylko pierwszy wątek go generuje, pozostałe czekają, a następnie używają wygenerowanego wyniku.
+
+Przykład tworzenia FileStorage:
+
+```php
+// repozytorium będzie katalog '/path/to/temp' na dysku
+$storage = new Nette\Caching\Storages\FileStorage('/path/to/temp');
+```
+
+
+MemcachedStorage .[#toc-memcachedstorage]
+-----------------------------------------
+
+Serwer [Memcached |https://memcached.org] jest wysokowydajnym systemem rozproszonego składowania, którego adapterem jest `Nette\Caching\Storages\MemcachedStorage`. W konfiguracji należy podać adres IP i port, jeśli różni się od standardowego 11211.
+
+.[caution]
+Wymaga on rozszerzenia PHP `memcached`.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\MemcachedStorage('10.0.0.5')
+```
+
+
+MemoryStorage .[#toc-memorystorage]
+-----------------------------------
+
+`Nette\Caching\Storages\MemoryStorage` jest repozytorium, które przechowuje dane w tablicy PHP, a zatem jest tracone po zakończeniu żądania.
+
+
+SQLiteStorage .[#toc-sqlitestorage]
+-----------------------------------
+
+Baza danych SQLite i adapter `Nette\Caching\Storages\SQLiteStorage` oferuje sposób przechowywania pamięci podręcznej w pojedynczym pliku na dysku. W konfiguracji podajemy ścieżkę do tego pliku.
+
+.[caution]
+Wymaga on rozszerzeń PHP `pdo` i `pdo_sqlite`.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\SQLiteStorage('%tempDir%/cache.db')
+```
+
+
+DevNullStorage .[#toc-devnullstorage]
+-------------------------------------
+
+Specjalną implementacją repozytorium jest `Nette\Caching\Storages\DevNullStorage`, która w rzeczywistości w ogóle nie przechowuje danych. Dzięki temu nadaje się do testów, gdy chcemy wyeliminować efekt buforowania.
+
+
+Używanie cache w kodzie .[#toc-using-cache-in-code]
+===================================================
+
+Stosując caching w kodzie, mamy do dyspozycji dwa sposoby. Pierwszy polega na tym, że przekazujemy do repozytorium [dependency injection |dependency-injection:passing-dependencies] i tworzymy obiekt `Cache`:
+
+```php
+use Nette;
+
+class ClassOne
+{
+	private Nette\Caching\Cache $cache;
+
+	public function __construct(Nette\Caching\Storage $storage)
+	{
+		$this->cache = new Nette\Caching\Cache($storage, 'my-namespace');
+	}
+}
+```
+
+Drugi polega na tym, że każemy im przekazać bezpośrednio obiekt `Cache`:
+
+```php
+class ClassTwo
+{
+	private Nette\Caching\Cache $cache;
+
+	public function __construct(Nette\Caching\Cache $cache)
+	{
+		$this->cache = $cache;
+	}
+}
+```
+
+Obiekt `Cache` jest w ten sposób tworzony bezpośrednio w konfiguracji:
+
+```neon
+services:
+	- ClassTwo( Nette\Caching\Cache(namespace: 'my-namespace') )
+```
+
+
+Dziennik .[#toc-journal]
+========================
+
+Nette przechowuje tagi i priorytety w dzienniku. Domyślnie używany jest do tego SQLite i plik `journal.s3db`, a ** wymagane są rozszerzenia PHP `pdo` i `pdo_sqlite`.**
+
+Dziennik można zmienić w konfiguracji:
+
+```neon
+services:
+	cache.journal: MyJournal
+```
+
+
+{{leftbar: nette:@menu-topics}}

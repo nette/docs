@@ -1,0 +1,181 @@
+Autenticación
+*************
+
+Nette le proporciona directrices sobre cómo programar la autenticación en su página, pero no le obliga a hacerlo de ninguna manera en particular. La implementación depende de ti. Nette tiene una interfaz `Nette\Security\Authenticator` que te obliga a implementar un único método llamado `authenticate`, que encuentra al usuario como tú quieras.
+
+Hay muchas formas de autenticar a un usuario. La forma más común es la *autenticación basada en contraseña* (el usuario proporciona su nombre o correo electrónico y una contraseña), pero también hay otros medios. Puede que estés familiarizado con los botones "Iniciar sesión con Facebook" de muchos sitios web, o iniciar sesión a través de Google/Twitter/GitHub o cualquier otro sitio. Con Nette, puedes tener el método de autenticación que quieras, o puedes combinarlos. Tú decides.
+
+Normalmente escribirías tu propio autenticador, pero para este sencillo blog usaremos el autenticador integrado, que autentica basándose en una contraseña y un nombre de usuario almacenados en un archivo de configuración. Es bueno para propósitos de prueba. Así que añadiremos la siguiente sección *security* al archivo de configuración `config/common.neon`:
+
+
+```neon .{file:config/common.neon}
+security:
+	users:
+		admin: secret  # user 'admin', password 'secret'
+```
+
+
+Nette creará automáticamente un servicio en el contenedor DI.
+
+
+Formulario de registro .[#toc-sign-in-form]
+===========================================
+
+Ya tenemos lista la parte backend de la autenticación y necesitamos proporcionar una interfaz de usuario, a través de la cual el usuario iniciaría sesión. Vamos a crear un nuevo presentador llamado *SignPresenter*, que será
+
+- mostrará un formulario de inicio de sesión (solicitando nombre de usuario y contraseña)
+- autenticará al usuario cuando envíe el formulario
+- proporcionará una acción de cierre de sesión
+
+Empecemos con el formulario de inicio de sesión. Ya sabes cómo funcionan los formularios en un presentador. Crea el `SignPresenter` y el método `createComponentSignInForm`. Debería tener este aspecto:
+
+```php .{file:app/Presenters/SignPresenter.php}
+<?php
+namespace App\Presenters;
+
+use Nette;
+use Nette\Application\UI\Form;
+
+final class SignPresenter extends Nette\Application\UI\Presenter
+{
+	protected function createComponentSignInForm(): Form
+	{
+		$form = new Form;
+		$form->addText('username', 'Username:')
+			->setRequired('Please enter your username.');
+
+		$form->addPassword('password', 'Password:')
+			->setRequired('Please enter your password.');
+
+		$form->addSubmit('send', 'Sign in');
+
+		$form->onSuccess[] = [$this, 'signInFormSucceeded'];
+		return $form;
+	}
+}
+```
+
+Hay una entrada para el nombre de usuario y la contraseña.
+
+
+Plantilla .[#toc-template]
+--------------------------
+
+El formulario se mostrará en la plantilla `in.latte`
+
+```latte .{file:app/Presenters/templates/Sign/in.latte}
+{block content}
+<h1 n:block=title>Sign in</h1>
+
+{control signInForm}
+```
+
+
+Controlador de inicio de sesión .[#toc-login-handler]
+-----------------------------------------------------
+
+Añadimos también un *form handler* para registrar al usuario, que es invocado justo después de que el formulario es enviado.
+
+El manejador tomará el nombre de usuario y la contraseña introducidos por el usuario y los pasará al autenticador definido anteriormente. Después de que el usuario haya iniciado sesión, lo redirigiremos a la página de inicio.
+
+```php .{file:app/Presenters/SignPresenter.php}
+public function signInFormSucceeded(Form $form, \stdClass $data): void
+{
+	try {
+		$this->getUser()->login($data->username, $data->password);
+		$this->redirect('Homepage:');
+
+	} catch (Nette\Security\AuthenticationException $e) {
+		$form->addError('Incorrect username or password.');
+	}
+}
+```
+
+El método [User::login() |api:Nette\Security\User::login()] debería lanzar una excepción cuando el nombre de usuario o la contraseña no coincidan con los que hemos definido anteriormente. Como ya sabemos, eso resultaría en una pantalla roja de [Tracy |tracy:], o, en modo producción, en un mensaje informando de un error interno del servidor. Eso no nos gustaría. Por eso capturamos la excepción y añadimos un bonito y amigable mensaje de error al formulario.
+
+Cuando se produce el error en el formulario, la página con el formulario se vuelve a mostrar, y encima del formulario, habrá un mensaje agradable, informando al usuario de que ha introducido un nombre de usuario o contraseña incorrectos.
+
+
+Seguridad de los presentadores .[#toc-security-of-presenters]
+=============================================================
+
+Aseguraremos un formulario para añadir y editar entradas. Está definido en el presentador `EditPresenter`. El objetivo es evitar que los usuarios que no hayan iniciado sesión accedan a la página.
+
+Creamos un método `startup()` que se inicia inmediatamente al principio del [ciclo de vida |application:presenters#life-cycle-of-presenter] del presentador. Esto redirige a los usuarios que no han iniciado sesión al formulario de inicio de sesión.
+
+```php .{file:app/Presenters/EditPresenter.php}
+public function startup(): void
+{
+	parent::startup();
+
+	if (!$this->getUser()->isLoggedIn()) {
+		$this->redirect('Sign:in');
+	}
+}
+```
+
+
+Ocultar enlaces .[#toc-hide-links]
+----------------------------------
+
+Un usuario no autentificado ya no puede ver la página *crear* ni *editar*, pero todavía puede ver los enlaces que apuntan a ellas. Ocultémoslos también. Uno de esos enlaces está en `app/Presenters/templates/Homepage/default.latte`, y debería ser visible sólo si el usuario ha iniciado sesión.
+
+Podemos ocultarlo usando un *n:attribute* llamado `n:if`. Si la declaración que contiene es `false`, toda la etiqueta `<a>` y su contenido no se mostrarán:
+
+```latte
+<a n:href="Edit:create" n:if="$user->isLoggedIn()">Create post</a>
+```
+
+(no confundir con `tag-if`):
+
+```latte
+{if $user->isLoggedIn()}<a n:href="Edit:create">Create post</a>{/if}
+```
+
+Debe ocultar el enlace de edición situado en `app/Presenters/templates/Post/show.latte` de forma similar.
+
+
+Enlace al formulario de inicio de sesión .[#toc-login-form-link]
+================================================================
+
+Hola, pero ¿cómo llegamos a la página de inicio de sesión? No hay ningún enlace que apunte a ella. Vamos a añadir uno en el archivo de plantilla `@layout.latte`. Intenta encontrar un buen lugar, puede ser donde más te guste.
+
+```latte .{file:app/Presenters/templates/@layout.latte}
+...
+<ul class="navig">
+	<li><a n:href="Homepage:">Homepage</a></li>
+	{if $user->isLoggedIn()}
+		<li><a n:href="Sign:out">Sign out</a></li>
+	{else}
+		<li><a n:href="Sign:in">Sign in</a></li>
+	{/if}
+</ul>
+...
+```
+
+Si el usuario aún no ha iniciado sesión, mostraremos el enlace "Iniciar sesión". En caso contrario, mostraremos el enlace "Cerrar sesión". Añadimos esa acción en SignPresenter.
+
+La acción de cierre de sesión tiene este aspecto, y como redirigimos al usuario inmediatamente, no hay necesidad de una plantilla de vista.
+
+```php .{file:app/Presenters/SignPresenter.php}
+public function actionOut(): void
+{
+	$this->getUser()->logout();
+	$this->flashMessage('You have been signed out.');
+	$this->redirect('Homepage:');
+}
+```
+
+Simplemente llama al método `logout()` y luego muestra un bonito mensaje al usuario.
+
+
+Resumen .[#toc-summary]
+=======================
+
+Tenemos un enlace para iniciar sesión y también para cerrar la sesión del usuario. Hemos utilizado el autenticador incorporado para la autenticación y los detalles de inicio de sesión están en el archivo de configuración, ya que esta es una simple aplicación de prueba. También hemos asegurado los formularios de edición para que sólo los usuarios registrados puedan añadir y editar mensajes.
+
+.[note]
+Aquí puedes leer más sobre [login |security:authentication] y [autorización |security:authorization] de usuarios.
+
+{{priority: -1}}
+{{sitename: Nette Quickstart}}

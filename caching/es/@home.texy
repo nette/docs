@@ -1,0 +1,446 @@
+Almacenamiento en caché
+***********************
+<div class=perex>
+
+
+La caché acelera tu aplicación almacenando datos -una vez recuperados con dificultad- para su uso futuro. Se lo mostraremos:
+
+- Cómo utilizar la caché
+- Cómo cambiar el almacenamiento en caché
+- Cómo invalidar correctamente la caché
+
+</div>
+
+Utilizar la caché es muy fácil en Nette, a la vez que cubre necesidades de caché muy avanzadas. Está diseñado para ofrecer rendimiento y durabilidad al 100%. Básicamente, encontrará adaptadores para los almacenamientos backend más comunes. Permite la invalidación basada en etiquetas, protección de estampida de caché, expiración de tiempo, etc.
+
+
+Instalación .[#toc-installation]
+================================
+
+Descargue e instale el paquete utilizando [Composer |best-practices:composer]:
+
+```shell
+composer require nette/caching
+```
+
+
+Uso básico .[#toc-basic-usage]
+==============================
+
+El centro de trabajo con la caché es el objeto [api:Nette\Caching\Cache]. Creamos su instancia y pasamos al constructor como parámetro el llamado storage. Que es un objeto que representa el lugar donde se almacenarán físicamente los datos (base de datos, Memcached, ficheros en disco, ...). El objeto storage se obtiene pasándolo mediante [inyección de dependencia |dependency-injection:passing-dependencies] con el tipo `Nette\Caching\Storage`. Encontrarás todo lo esencial en [la sección Storage |#Storages].
+
+Para los siguientes ejemplos, supongamos que tenemos un alias `Cache` y un almacenamiento en la variable `$storage`.
+
+```php
+use Nette\Caching\Cache;
+
+$storage = /* ... */; // instance of Nette\Caching\Storage
+```
+
+La caché es en realidad un *almacenamiento clave-valor*, por lo que leemos y escribimos datos bajo claves como si fueran matrices asociativas. Las aplicaciones constan de varias partes independientes, y si todas ellas utilizaran un mismo almacenamiento (por ejemplo: un directorio en un disco), tarde o temprano se produciría una colisión de claves. Nette Framework resuelve el problema dividiendo todo el espacio en espacios de nombres (subdirectorios). Así, cada parte del programa utiliza su propio espacio con un nombre único y no pueden producirse colisiones.
+
+El nombre del espacio se especifica como segundo parámetro del constructor de la clase Cache:
+
+```php
+$cache = new Cache($storage, 'Full Html Pages');
+```
+
+Ahora podemos utilizar el objeto `$cache` para leer y escribir desde la caché. El método `load()` se utiliza para ambas cosas. El primer argumento es la clave y el segundo es el callback de PHP, que se llama cuando la clave no se encuentra en la caché. El callback genera un valor, lo devuelve y lo almacena en caché:
+
+```php
+$value = $cache->load($key, function () use ($key) {
+	$computedValue = /* ... */; // cálculos pesados
+	return $computedValue;
+});
+```
+
+Si no se especifica el segundo parámetro `$value = $cache->load($key)`, se devuelve `null` si el elemento no se encuentra en la caché.
+
+.[tip]
+Lo bueno es que se puede almacenar en caché cualquier estructura serializable, no sólo cadenas. Y lo mismo se aplica a las claves.
+
+El elemento se borra de la caché utilizando el método `remove()`:
+
+```php
+$cache->remove($key);
+```
+
+También puede almacenar un elemento en caché utilizando el método `$cache->save($key, $value, array $dependencies = [])`. Sin embargo, es preferible utilizar el método `load()`.
+
+
+Memoización .[#toc-memoization]
+===============================
+
+Memoización significa almacenar en caché el resultado de una función o método para poder utilizarlo la próxima vez en lugar de calcular lo mismo una y otra vez.
+
+Métodos y funciones pueden ser llamados memoized usando `call(callable $callback, ...$args)`:
+
+```php
+$result = $cache->call('gethostbyaddr', $ip);
+```
+
+La función `gethostbyaddr()` se llama una sola vez para cada parámetro `$ip` y la próxima vez se devolverá el valor de la caché.
+
+También es posible crear una envoltura memoized para un método o función que puede ser llamado más tarde:
+
+```php
+function factorial($num)
+{
+	return /* ... */;
+}
+
+$memoizedFactorial = $cache->wrap('factorial');
+
+$result = $memoizedFactorial(5); // lo cuenta
+$result = $memoizedFactorial(5); // lo devuelve de la caché
+```
+
+
+Expiración e invalidación .[#toc-expiration-invalidation]
+=========================================================
+
+Con el almacenamiento en caché, es necesario abordar la cuestión de que algunos de los datos previamente guardados pierdan validez con el tiempo. Nette Framework proporciona un mecanismo, cómo limitar la validez de los datos y cómo borrarlos de forma controlada ("invalidarlos", utilizando la terminología del framework).
+
+La validez de los datos se establece en el momento de guardarlos mediante el tercer parámetro del método `save()`, p. ej:
+
+```php
+$cache->save($key, $value, [
+	$cache::Expire => '20 minutes',
+]);
+```
+
+O utilizando el parámetro `$dependencies` pasado por referencia a la llamada de retorno en el método `load()`, por ejemplo:
+
+```php
+$value = $cache->load($key, function (&$dependencies) {
+	$dependencies[Cache::Expire] = '20 minutes';
+	return /* ... */;
+});
+```
+
+O utilizando el 3er parámetro en el método `load()`, ej:
+
+```php
+$value = $cache->load($key, function () {
+	return ...;
+}, [Cache::Expire => '20 minutes']);
+```
+
+En los siguientes ejemplos, supondremos la segunda variante y, por tanto, la existencia de una variable `$dependencies`.
+
+
+Vencimiento .[#toc-expiration]
+------------------------------
+
+La expiración más sencilla es la de tiempo. He aquí cómo almacenar en caché datos válidos durante 20 minutos:
+
+```php
+// también acepta el número de segundos o la marca de tiempo UNIX
+$dependencies[Cache::Expire] = '20 minutes';
+```
+
+Si queremos extender el período de validez con cada lectura, se puede lograr de esta manera, pero cuidado, esto aumentará la sobrecarga de la caché:
+
+```php
+$dependencies[Cache::Sliding] = true;
+```
+
+La opción más práctica es la posibilidad de dejar que los datos caduquen cuando se modifica un fichero en particular o uno de varios ficheros. Esto se puede utilizar, por ejemplo, para almacenar en caché los datos resultantes de la procesión de estos archivos. Utilizar rutas absolutas.
+
+```php
+$dependencies[Cache::Files] = '/path/to/data.yaml';
+// or
+$dependencies[Cache::Files] = ['/path/to/data1.yaml', '/path/to/data2.yaml'];
+```
+
+Podemos dejar que un elemento de la caché caduque cuando caduque otro elemento (o uno de varios). Esto puede utilizarse cuando almacenamos en caché la página HTML completa y fragmentos de ella bajo otras claves. Una vez que el fragmento cambia, toda la página deja de ser válida. Si tenemos fragmentos almacenados bajo claves como `frag1` y `frag2`, utilizaremos:
+
+```php
+$dependencies[Cache::Items] = ['frag1', 'frag2'];
+```
+
+La expiración también puede controlarse usando funciones personalizadas o métodos estáticos, que siempre deciden al leer si el elemento sigue siendo válido. Por ejemplo, podemos dejar que el elemento expire cada vez que cambie la versión de PHP. Crearemos una función que compare la versión actual con el parámetro, y al guardar añadiremos un array de la forma `[function name, ...arguments]` a las dependencias:
+
+```php
+function checkPhpVersion($ver): bool
+{
+	return $ver === PHP_VERSION_ID;
+}
+
+$dependencies[Cache::Callbacks] = [
+	['checkPhpVersion', PHP_VERSION_ID] // expiran cuando checkPhpVersion(...) === false
+];
+```
+
+Por supuesto, se pueden combinar todos los criterios. La caché expira entonces cuando no se cumple al menos un criterio.
+
+```php
+$dependencies[Cache::Expire] = '20 minutes';
+$dependencies[Cache::Files] = '/path/to/data.yaml';
+```
+
+
+Invalidación mediante etiquetas .[#toc-invalidation-using-tags]
+---------------------------------------------------------------
+
+Las etiquetas son una herramienta de invalidación muy útil. Podemos asignar una lista de etiquetas, que son cadenas arbitrarias, a cada elemento almacenado en la caché. Por ejemplo, supongamos que tenemos una página HTML con un artículo y comentarios, que queremos guardar en caché. Entonces especificamos las etiquetas al guardar en la caché:
+
+```php
+$dependencies[Cache::Tags] = ["article/$articleId", "comments/$articleId"];
+```
+
+Ahora, pasemos a la administración. Aquí tenemos un formulario para la edición de artículos. Junto con guardar el artículo en una base de datos, llamamos al comando `clean()`, que borrará los artículos en caché por etiqueta:
+
+```php
+$cache->clean([
+	$cache::Tags => ["article/$articleId"],
+]);
+```
+
+Asimismo, en el lugar de añadir un nuevo comentario (o editar un comentario), no olvidaremos invalidar la etiqueta correspondiente:
+
+```php
+$cache->clean([
+	$cache::Tags => ["comments/$articleId"],
+]);
+```
+
+¿Qué hemos conseguido? Que nuestra caché HTML será invalidada (borrada) cada vez que el artículo o los comentarios cambien. Al editar un artículo con ID = 10, se fuerza la invalidación de la etiqueta `article/10` y la página HTML que lleva la etiqueta se borra de la caché. Lo mismo ocurre al insertar un nuevo comentario en el artículo correspondiente.
+
+.[note]
+Las etiquetas requieren [Journal |#Journal].
+
+
+Invalidación por prioridad .[#toc-invalidation-by-priority]
+-----------------------------------------------------------
+
+Podemos establecer la prioridad para elementos individuales de la caché, y será posible eliminarlos de forma controlada cuando, por ejemplo, la caché supere un determinado tamaño:
+
+```php
+$dependencies[Cache::Priority] = 50;
+```
+
+Borrar todos los elementos con una prioridad igual o inferior a 100:
+
+```php
+$cache->clean([
+	$cache::Priority => 100,
+]);
+```
+
+.[note]
+Las prioridades requieren el llamado [Diario |#Journal].
+
+
+Borrar caché .[#toc-clear-cache]
+--------------------------------
+
+El parámetro `Cache::All` borra todo:
+
+```php
+$cache->clean([
+	$cache::All => true,
+]);
+```
+
+
+Lectura masiva .[#toc-bulk-reading]
+===================================
+
+Para la lectura y escritura masiva en la caché, se utiliza el método `bulkLoad()`, donde pasamos un array de claves y obtenemos un array de valores:
+
+```php
+$values = $cache->bulkLoad($keys);
+```
+
+El método `bulkLoad()` funciona de forma similar a `load()` con el segundo parámetro de callback, al que se le pasa la clave del elemento generado:
+
+```php
+$values = $cache->bulkLoad($keys, function ($key, &$dependencies) {
+	$computedValue = /* ... */; // cálculos pesados
+	return $computedValue;
+});
+```
+
+
+Caché de salida .[#toc-output-caching]
+======================================
+
+La salida puede capturarse y almacenarse en caché de forma muy elegante:
+
+```php
+if ($capture = $cache->capture($key)) {
+
+	echo ... // imprimir algunos datos
+
+	$capture->end(); // guardar la salida en la caché
+}
+```
+
+En caso de que la salida ya esté presente en la caché, el método `capture()` la imprime y devuelve `null`, por lo que la condición no se ejecutará. En caso contrario, comienza a almacenar la salida y devuelve el objeto `$capture` con el que finalmente guardamos los datos en la caché.
+
+.[note]
+En la versión 3.0 el método se llamaba `$cache->start()`.
+
+
+Almacenamiento en caché en Latte .[#toc-caching-in-latte]
+=========================================================
+
+El almacenamiento en caché en las plantillas [Latte |latte:] es muy fácil, basta con envolver parte de la plantilla con etiquetas `{cache}...{/cache}`. La caché se invalida automáticamente cuando cambia la plantilla de origen (incluyendo cualquier plantilla incluida dentro de las etiquetas `{cache}` ). Las etiquetas `{cache}` pueden anidarse, y cuando un bloque anidado se invalida (por ejemplo, por una etiqueta), el bloque padre también se invalida.
+
+En la etiqueta es posible especificar las claves a las que se vinculará la caché (en este caso la variable `$id`) y establecer las [etiquetas de caducidad|#Invalidation using Tags] e [invalidación |#Invalidation using Tags]
+
+```latte
+{cache $id, expire: '20 minutes', tags: [tag1, tag2]}
+	...
+{/cache}
+```
+
+Todos los parámetros son opcionales, por lo que no es necesario especificar la caducidad, las etiquetas o las claves.
+
+El uso de la caché también puede condicionarse mediante `if` - el contenido se almacenará en caché sólo si se cumple la condición:
+
+```latte
+{cache $id, if: !$form->isSubmitted()}
+	{$form}
+{/cache}
+```
+
+
+Almacenes .[#toc-storages]
+==========================
+
+Un almacenamiento es un objeto que representa dónde se guardan físicamente los datos. Podemos utilizar una base de datos, un servidor Memcached, o el almacenamiento más disponible, que son archivos en disco.
+
+|----------------------
+| Almacenamiento | Descripción
+|----------------------
+| [FileStorage |#FileStorage] | Almacenamiento por defecto con guardado en ficheros en disco
+| [MemcachedStorage |#MemcachedStorage] | utiliza el servidor `Memcached`
+| [MemoryStorage |#MemoryStorage] | los datos se almacenan temporalmente en memoria.
+| [SQLiteStorage |#SQLiteStorage] | los datos se almacenan en una base de datos SQLite
+| [DevNullStorage |#DevNullStorage] | los datos no se almacenan, con fines de prueba.
+
+El objeto de almacenamiento se obtiene pasándolo mediante [inyección de dependencia |dependency-injection:passing-dependencies] con el tipo `Nette\Caching\Storage`. Por defecto, Nette proporciona un objeto FileStorage que almacena los datos en una subcarpeta `cache` en el directorio para [archivos |application:bootstrap#Temporary Files] temporales .
+
+Puede cambiar el almacenamiento en la configuración:
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\DevNullStorage
+```
+
+
+Almacenamiento de archivos .[#toc-filestorage]
+----------------------------------------------
+
+Escribe la caché en archivos del disco. El almacenamiento `Nette\Caching\Storages\FileStorage` está muy bien optimizado para el rendimiento y, sobre todo, garantiza la atomicidad total de las operaciones. ¿Qué significa esto? Que al utilizar la caché, no puede ocurrir que leamos un fichero que aún no haya sido completamente escrito por otro hilo, o que alguien lo borre "bajo sus manos". Por tanto, el uso de la caché es completamente seguro.
+
+Este almacenamiento también tiene una importante característica incorporada que evita un aumento extremo del uso de la CPU cuando la caché se borra o se enfría (es decir, no se crea). Se trata de la prevención de la "estampida de":https://en.wikipedia.org/wiki/Cache_stampede la caché.
+Ocurre que en un momento dado hay varias peticiones concurrentes que quieren lo mismo de la caché (por ejemplo, el resultado de una consulta SQL costosa) y, como no se almacena en caché, todos los procesos empiezan a ejecutar la misma consulta SQL.
+La carga del procesador se multiplica e incluso puede ocurrir que ningún proceso pueda responder dentro del tiempo límite, la caché no se cree y la aplicación se cuelgue.
+Afortunadamente, la caché en Nette funciona de tal manera que cuando hay varias peticiones concurrentes para un mismo elemento, sólo lo genera el primer hilo, los demás esperan y luego utilizan el resultado generado.
+
+Ejemplo de creación de un FileStorage:
+
+```php
+// el almacenamiento será el directorio '/ruta/a/temp' del disco
+$storage = new Nette\Caching\Storages\FileStorage('/path/to/temp');
+```
+
+
+MemcachedStorage .[#toc-memcachedstorage]
+-----------------------------------------
+
+El servidor [Memcached |https://memcached.org] es un sistema de almacenamiento distribuido de alto rendimiento cuyo adaptador es `Nette\Caching\Storages\MemcachedStorage`. En la configuración, especifique la dirección IP y el puerto si difiere del estándar 11211.
+
+.[caution]
+Requiere la extensión PHP `memcached`.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\MemcachedStorage('10.0.0.5')
+```
+
+
+MemoryStorage .[#toc-memorystorage]
+-----------------------------------
+
+`Nette\Caching\Storages\MemoryStorage` es un almacenamiento que guarda los datos en un array PHP y por lo tanto se pierde cuando se termina la petición.
+
+
+Almacenamiento SQLite .[#toc-sqlitestorage]
+-------------------------------------------
+
+La base de datos SQLite y el adaptador `Nette\Caching\Storages\SQLiteStorage` ofrecen una forma de almacenar en caché en un único archivo en disco. La configuración especificará la ruta a este archivo.
+
+.[caution]
+Requiere las extensiones PHP `pdo` y `pdo_sqlite`.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\SQLiteStorage('%tempDir%/cache.db')
+```
+
+
+DevNullStorage .[#toc-devnullstorage]
+-------------------------------------
+
+Una implementación especial de almacenamiento es `Nette\Caching\Storages\DevNullStorage`, que en realidad no almacena datos en absoluto. Por lo tanto, es adecuada para realizar pruebas si queremos eliminar el efecto de la caché.
+
+
+Uso de la caché en el código .[#toc-using-cache-in-code]
+========================================================
+
+Cuando se utiliza el almacenamiento en caché en el código, tienes dos maneras de cómo hacerlo. La primera es que obtengas el objeto de almacenamiento pasándolo mediante [inyección de dependencia |dependency-injection:passing-dependencies] y luego crees un objeto `Cache`:
+
+```php
+use Nette;
+
+class ClassOne
+{
+	private Nette\Caching\Cache $cache;
+
+	public function __construct(Nette\Caching\Storage $storage)
+	{
+		$this->cache = new Nette\Caching\Cache($storage, 'my-namespace');
+	}
+}
+```
+
+La segunda forma es que obtengas el objeto de almacenamiento `Cache`:
+
+```php
+class ClassTwo
+{
+	private Nette\Caching\Cache $cache;
+
+	public function __construct(Nette\Caching\Cache $cache)
+	{
+		$this->cache = $cache;
+	}
+}
+```
+
+El objeto `Cache` se crea entonces directamente en la configuración de la siguiente manera:
+
+```neon
+services:
+	- ClassTwo( Nette\Caching\Cache(namespace: 'my-namespace') )
+```
+
+
+Diario .[#toc-journal]
+======================
+
+Nette almacena las etiquetas y prioridades en un diario. Por defecto, se utiliza SQLite y el archivo `journal.s3db` para ello, y **se requieren las extensiones de PHP `pdo` y `pdo_sqlite`.**
+
+Puede cambiar el diario en la configuración:
+
+```neon
+services:
+	cache.journal: MyJournal
+```
+
+
+{{leftbar: nette:@menu-topics}}

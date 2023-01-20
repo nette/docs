@@ -1,0 +1,290 @@
+Kullanıcıların Kimliğini Doğrulama
+**********************************
+
+<div class=perex>
+
+Web uygulamalarının kullanıcı girişi veya kullanıcı ayrıcalıklarını kontrol etmek için herhangi bir mekanizmaya ihtiyacı yoktur. Bu bölümde, aşağıdakiler hakkında konuşacağız:
+
+- kullanıcı girişi ve çıkışı
+- özel doğrulayıcılar ve yetkilendiriciler
+
+</div>
+
+→ [Kurulum ve gereksinimler |@home#Installation]
+
+Örneklerde, mevcut kullanıcıyı temsil eden ve [bağımlılık enjeksiyonu |dependency-injection:passing-dependencies] kullanarak geçirerek elde ettiğiniz [api:Nette\Security\User] sınıfından bir nesne kullanacağız. Sunucularda `$user = $this->getUser()` adresini çağırmanız yeterlidir.
+
+
+Kimlik Doğrulama .[#toc-authentication]
+=======================================
+
+Kimlik doğrulama, **kullanıcı girişi**, yani bir kullanıcının kimliğinin doğrulandığı süreç anlamına gelir. Kullanıcı genellikle kullanıcı adı ve parola kullanarak kendini tanıtır. Doğrulama, sözde kimlik [doğrulayıcı |#authenticator] tarafından gerçekleştirilir. Oturum açma başarısız olursa, `Nette\Security\AuthenticationException` atar.
+
+```php
+try {
+	$user->login($username, $password);
+} catch (Nette\Security\AuthenticationException $e) {
+	$this->flashMessage('The username or password you entered is incorrect.');
+}
+```
+
+Kullanıcının oturumu bu şekilde kapatılır:
+
+```php
+$user->logout();
+```
+
+Ve kullanıcının oturum açıp açmadığını kontrol eder:
+
+```php
+echo $user->isLoggedIn() ? 'yes' : 'no';
+```
+
+Basit, değil mi? Ve tüm güvenlik hususları sizin için Nette tarafından ele alınır.
+
+Presenter'da, `startup()` yönteminde oturum açmayı doğrulayabilir ve oturum açmamış bir kullanıcıyı oturum açma sayfasına yönlendirebilirsiniz.
+
+```php
+protected function startup()
+{
+	parent::startup();
+	if (!$this->getUser()->isLoggedIn()) {
+		$this->redirect('Sign:in');
+	}
+}
+```
+
+
+Son kullanma tarihi .[#toc-expiration]
+======================================
+
+Kullanıcı oturumu, genellikle bir oturum olan [deponun |#Storage for Logged User] sona ermesiyle birlikte sona erer ( [oturum |http:configuration#session] sona erme ayarına bakın).
+Ancak, kullanıcının oturumunun kapatılacağı daha kısa bir zaman aralığı da belirleyebilirsiniz. Bu amaçla `login()` adresinden önce çağrılan `setExpiration()` yöntemi kullanılır. Parametre olarak göreli zaman içeren bir dize girin:
+
+```php
+// oturum açma 30 dakika işlem yapılmadığında sona erer
+$user->setExpiration('30 minutes');
+
+// setin sona ermesini iptal et
+$user->setExpiration(null);
+```
+
+`$user->getLogoutReason()` yöntemi, zaman aralığı sona erdiği için kullanıcının oturumunun kapatılıp kapatılmadığını belirtir. Süre dolmuşsa `Nette\Security\UserStorage::LogoutInactivity` sabitini veya `logout()` yöntemi çağrıldığında `UserStorage::LogoutManual` sabitini döndürür.
+
+
+Kimlik Doğrulayıcı .[#toc-authenticator]
+========================================
+
+Oturum açma verilerini, yani genellikle ad ve parolayı doğrulayan bir nesnedir. Önemsiz uygulama, [yapılandırmada |configuration] tanımlanabilen [api:Nette\Security\SimpleAuthenticator] sınıfıdır:
+
+```neon
+security:
+	users:
+		# name: password
+		johndoe: secret123
+		kathy: evenmoresecretpassword
+```
+
+Bu çözüm test amaçları için daha uygundur. Size bir veritabanı tablosuna karşı kimlik bilgilerini doğrulayacak bir kimlik doğrulayıcının nasıl oluşturulacağını göstereceğiz.
+
+Kimlik doğrulayıcı, [api:Nette\Security\Authenticator] arayüzünü `authenticate()` yöntemiyle uygulayan bir nesnedir. Görevi ya sözde [kimliği |#identity] döndürmek ya da bir istisna fırlatmaktır `Nette\Security\AuthenticationException`. Ayrıca `Authenticator::IdentityNotFound` veya `Authenticator::InvalidCredential` ince taneli bir hata kodu sağlamak da mümkün olabilir.
+
+```php
+use Nette;
+use Nette\Security\SimpleIdentity;
+
+class MyAuthenticator implements Nette\Security\Authenticator
+{
+	public function __construct(
+		private Nette\Database\Explorer $database,
+		private Nette\Security\Passwords $passwords,
+	) {
+	}
+
+	public function authenticate(string $username, string $password): SimpleIdentity
+	{
+		$row = $this->database->table('users')
+			->where('username', $username)
+			->fetch();
+
+		if (!$row) {
+			throw new Nette\Security\AuthenticationException('Kullanıcı bulunamadı.');
+		}
+
+		if (!$this->passwords->verify($password, $row->password)) {
+			throw new Nette\Security\AuthenticationException('Geçersiz şifre.');
+		}
+
+		return new SimpleIdentity(
+			$row->id,
+			$row->role, // veya rol dizisi
+			['name' => $row->username],
+		);
+	}
+}
+```
+
+MyAuthenticator sınıfı, [Nette Database Explorer |database:explorer] aracılığıyla veritabanı ile iletişim kurar ve `username` sütununun kullanıcının oturum açma adını ve `password` sütununun [hash'i |passwords] içerdiği `users` tablosu ile çalışır. Adı ve parolayı doğruladıktan sonra, kullanıcının kimliğini, [daha sonra |#roles] bahsedeceğimiz rolünü (tablodaki `role` sütunu) ve ek verileri içeren bir diziyi (bizim durumumuzda kullanıcı adı) döndürür.
+
+Kimlik doğrulayıcıyı DI konteynerinin [bir servisi olarak |dependency-injection:services] yapılandırmaya ekleyeceğiz:
+
+```neon
+services:
+	- MyAuthenticator
+```
+
+
+$onLoggedIn, $onLoggedOut Olayları
+----------------------------------
+
+Object `Nette\Security\User`, `$onLoggedIn` ve `$onLoggedOut`[olaylarına |nette:glossary#Events] sahiptir, böylece başarılı bir oturum açma işleminden sonra veya kullanıcı oturumu kapattıktan sonra tetiklenen geri aramalar ekleyebilirsiniz.
+
+
+```php
+$user->onLoggedIn[] = function () {
+	// kullanıcı yeni giriş yaptı
+};
+```
+
+
+Kimlik .[#toc-identity]
+=======================
+
+Kimlik, bir kullanıcı hakkında kimlik doğrulayıcı tarafından döndürülen ve daha sonra bir oturumda saklanan ve `$user->getIdentity()` kullanılarak alınan bir dizi bilgidir. Böylece kimlik doğrulayıcıda ilettiğimiz gibi kimliği, rolleri ve diğer kullanıcı verilerini alabiliriz:
+
+```php
+$user->getIdentity()->getId();
+// ayrıca $user->getId() kısayolu da çalışır;
+
+$user->getIdentity()->getRoles();
+
+// kullanıcı verilerine özellikler olarak erişilebilir
+// MyAuthenticator'da aktardığımız isim
+$user->getIdentity()->name;
+```
+
+Önemli olarak, kullanıcı `$user->logout()` adresini kullanarak oturumu kapattığında **kimlik silinmez** ve hala kullanılabilir durumdadır. Dolayısıyla, kimlik varsa, tek başına kullanıcının da oturum açmış olduğunu göstermez. Eğer kimliği açıkça silmek istiyorsak, `logout(true)` adresinden kullanıcının oturumunu kapatırız.
+
+Bu sayede, hangi kullanıcının bilgisayar başında olduğunu varsayabilir ve örneğin e-mağazada kişiselleştirilmiş teklifler görüntüleyebilirsiniz, ancak kişisel verilerini yalnızca oturum açtıktan sonra görüntüleyebilirsiniz.
+
+Identity, [api:Nette\Security\IIdentity] arayüzünü uygulayan bir nesnedir, varsayılan uygulama [api:Nette\Security\SimpleIdentity] şeklindedir. Ve belirtildiği gibi, kimlik oturumda saklanır, bu nedenle, örneğin, oturum açan kullanıcılardan bazılarının rolünü değiştirirsek, eski veriler tekrar oturum açana kadar kimlikte tutulur.
+
+
+Oturum Açan Kullanıcı için Depolama .[#toc-storage-for-logged-user]
+===================================================================
+
+Kullanıcı hakkındaki iki temel bilgi, yani oturum açıp açmadığı ve [kimliği |#identity], genellikle oturumda taşınır. Bu bilgiler değiştirilebilir. Bu bilgilerin saklanması için `Nette\Security\UserStorage` arayüzünü uygulayan bir nesne sorumludur. İki standart uygulama vardır; birincisi verileri bir oturumda, ikincisi ise bir çerezde iletir. Bunlar `Nette\Bridges\SecurityHttp\SessionStorage` ve `CookieStorage` sınıflarıdır. Depolamayı seçebilir ve [güvenlik › kimlik |configuration] doğrulama yapılandırmasında çok uygun bir şekilde yapılandırabilirsiniz.
+
+Ayrıca kimlik kaydetme (*uyku*) ve geri yüklemenin (*uyanma*) tam olarak nasıl gerçekleşeceğini de kontrol edebilirsiniz. İhtiyacınız olan tek şey kimlik doğrulayıcının `Nette\Security\IdentityHandler` arayüzünü uygulamasıdır. Bunun iki yöntemi vardır: `sleepIdentity()` kimlik depoya yazılmadan önce ve `wakeupIdentity()` kimlik okunduktan sonra çağrılır. Yöntemler kimliğin içeriğini değiştirebilir veya dönen yeni bir nesneyle değiştirebilir. `wakeupIdentity()` yöntemi, kullanıcının oturumunu kapatan `null` yöntemini bile döndürebilir.
+
+Örnek olarak, bir oturumdan geri yüklendikten hemen sonra kimlik rollerinin nasıl güncelleneceğine ilişkin yaygın bir soruya bir çözüm göstereceğiz. `wakeupIdentity()` yönteminde, örneğin veritabanından mevcut rolleri kimliğe aktarıyoruz:
+
+```php
+final class Authenticator implements
+	Nette\Security\Authenticator, Nette\Security\IdentityHandler
+{
+	public function sleepIdentity(IIdentity $identity): IIdentity
+	{
+		// burada oturum açtıktan sonra depolamadan önce kimliği değiştirebilirsiniz,
+		// ama şimdi buna ihtiyacımız yok
+		return $identity;
+	}
+
+	public function wakeupIdentity(IIdentity $identity): ?IIdentity
+	{
+		// kimlikteki rollerin güncellenmesi
+		$userId = $identity->getId();
+		$identity->setRoles($this->facade->getUserRoles($userId));
+		return $identity;
+	}
+```
+
+Ve şimdi çerez tabanlı depolamaya geri dönüyoruz. Oturum kullanmaya gerek kalmadan kullanıcıların giriş yapabileceği bir web sitesi oluşturmanızı sağlar. Yani diske yazmaya ihtiyaç duymaz. Sonuçta, forum da dahil olmak üzere şu anda okumakta olduğunuz web sitesi bu şekilde çalışmaktadır. Bu durumda, `IdentityHandler` uygulaması bir gerekliliktir. Sadece oturum açan kullanıcıyı temsil eden rastgele bir belirteci çerezde saklayacağız.
+
+Bu yüzden önce `security › authentication › storage: cookie` adresini kullanarak yapılandırmada istenen depolama alanını ayarlıyoruz.
+
+Veritabanına, her kullanıcının yeterli uzunlukta (en az 13 karakter) [tamamen rastgele, benzersiz ve tahmin edilemez |utils:random] bir dizeye sahip olacağı bir `authtoken` sütunu ekleyeceğiz. `CookieStorage` deposu çerezde yalnızca `$identity->getId()` değerini saklar, bu nedenle `sleepIdentity()` 'de orijinal kimliği kimlikte `authtoken` olan bir proxy ile değiştiririz, aksine `wakeupIdentity()` yönteminde authtoken'a göre veritabanından tüm kimliği geri yükleriz:
+
+```php
+final class Authenticator implements
+	Nette\Security\Authenticator, Nette\Security\IdentityHandler
+{
+	public function authenticate(string $username, string $password): SimpleIdentity
+	{
+		$row = $this->db->fetch('SELECT * FROM user WHERE username = ?', $username);
+		// şifreyi kontrol et
+		...
+		// veritabanındaki tüm verilerle birlikte kimliği döndürüyoruz
+		return new SimpleIdentity($row->id, null, (array) $row);
+	}
+
+	public function sleepIdentity(IIdentity $identity): SimpleIdentity
+	{
+		// ID'nin authtoken olduğu bir proxy kimliği döndürüyoruz
+		return new SimpleIdentity($identity->authtoken);
+	}
+
+	public function wakeupIdentity(IIdentity $identity): ?SimpleIdentity
+	{
+		// proxy kimliğini authenticate() işlevinde olduğu gibi tam kimlikle değiştirin
+		$row = $this->db->fetch('SELECT * FROM user WHERE authtoken = ?', $identity->getId());
+		return $row
+			? new SimpleIdentity($row->id, null, (array) $row)
+			: null;
+	}
+}
+```
+
+
+Çoklu Bağımsız Kimlik Doğrulama .[#toc-multiple-independent-authentications]
+============================================================================
+
+Bir site içinde birden fazla bağımsız oturum açmış kullanıcıya ve aynı anda bir oturuma sahip olmak mümkündür. Örneğin, ön uç ve arka uç için ayrı kimlik doğrulamasına sahip olmak istiyorsak, her biri için benzersiz bir oturum ad alanı ayarlayacağız:
+
+```php
+$user->getStorage()->setNamespace('backend');
+```
+
+Bunun aynı segmente ait tüm yerlerde ayarlanması gerektiğini akılda tutmak gerekir. Sunucuları kullanırken, isim alanını ortak atada ayarlayacağız - genellikle BasePresenter. Bunu yapmak için [checkRequirements() |api:Nette\Application\UI\Presenter::checkRequirements()] yöntemini genişleteceğiz:
+
+```php
+public function checkRequirements($element): void
+{
+	$this->getUser()->getStorage()->setNamespace('backend');
+	parent::checkRequirements($element);
+}
+```
+
+
+Çoklu Kimlik Doğrulayıcılar .[#toc-multiple-authenticators]
+-----------------------------------------------------------
+
+Bir uygulamayı bağımsız kimlik doğrulama ile segmentlere bölmek genellikle farklı kimlik doğrulayıcılar gerektirir. Ancak, Authenticator uygulayan iki sınıfı yapılandırma hizmetlerine kaydetmek bir hatayı tetikleyecektir çünkü Nette hangisinin `Nette\Security\User` nesnesine [otomatik |dependency-injection:autowiring] bağlanması gerektiğini bilemeyecektir. Bu nedenle, `autowired: self` ile otomatik bağlamayı sınırlamalıyız, böylece yalnızca sınıfları özellikle istendiğinde etkinleştirilir:
+
+```neon
+services:
+	-
+		create: FrontAuthenticator
+		autowired: self
+```
+
+```php
+class SignPresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private FrontAuthenticator $authenticator,
+	) {
+	}
+}
+```
+
+Yalnızca [login() |api:Nette\Security\User::login()] yöntemini çağırmadan önce kimlik doğrulayıcımızı User nesnesine ayarlamamız gerekir, bu da genellikle oturum açma formu geri aramasında anlamına gelir:
+
+```php
+$form->onSuccess[] = function (Form $form, \stdClass $data) {
+	$user = $this->getUser();
+	$user->setAuthenticator($this->authenticator);
+	$user->login($data->username, $data->password);
+	// ...
+};
+```

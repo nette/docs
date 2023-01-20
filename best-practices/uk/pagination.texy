@@ -1,0 +1,277 @@
+Пагінація результатів запиту до бази даних
+******************************************
+
+.[perex]
+Під час розробки веб-додатків ви часто стикаєтеся з вимогою виводити на сторінці обмежену кількість записів.
+
+Ми виходимо зі стану, коли перераховуємо всі дані без пагінації. Для вибору даних із бази даних у нас є клас ArticleRepository, який містить конструктор і метод `findPublishedArticles`, що повертає всі опубліковані статті, відсортовані за зменшенням дати публікації.
+
+```php
+namespace App\Model;
+
+use Nette;
+
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+
+	public function findPublishedArticles(): Nette\Database\ResultSet
+	{
+		return $this->database->query('
+			SELECT * FROM articles
+			WHERE created_at < ?
+			ORDER BY created_at DESC',
+			new \DateTime,
+		);
+	}
+}
+```
+
+Потім у презентері ми вводимо клас моделі і в методі `render` запитуємо опубліковані статті, які передаємо в шаблон:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(): void
+	{
+		$this->template->articles = $this->articleRepository->findPublishedArticles();
+	}
+}
+```
+
+У шаблоні ми подбаємо про виведення списку статей:
+
+```latte
+{block content}
+<h1>Статьи</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+```
+
+
+Таким чином, ми можемо написати всі статті, але це викличе проблеми, коли кількість статей зросте. У цей момент буде корисно реалізувати механізм пагінації.
+
+Це забезпечить розбиття всіх статей на кілька сторінок, і ми показуватимемо тільки статті однієї поточної сторінки. Загальна кількість сторінок і розподіл статей розраховується самим [Paginator |utils:Paginator], залежно від того, скільки статей у нас всього і скільки статей ми хочемо відобразити на сторінці.
+
+На першому етапі ми змінимо метод отримання статей у класі репозиторію, щоб він повертав тільки односторінкові статті. Ми також додамо новий метод для отримання загальної кількості статей у базі даних, який нам знадобиться для встановлення Paginator:
+
+```php
+namespace App\Model;
+
+use Nette;
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+
+	public function findPublishedArticles(int $limit, int $offset): Nette\Database\ResultSet
+	{
+		return $this->database->query('
+			SELECT * FROM articles
+			WHERE created_at < ?
+			ORDER BY created_at DESC
+			LIMIT ?
+			OFFSET ?',
+			new \DateTime, $limit, $offset,
+		);
+	}
+
+	/**
+	 * Returns the total number of published articles
+	 */
+	public function getPublishedArticlesCount(): int
+	{
+		return $this->database->fetchField('SELECT COUNT(*) FROM articles WHERE created_at < ?', new \DateTime);
+	}
+}
+```
+
+Наступним кроком буде редагування презентера. Ми передамо номер поточної відображуваної сторінки в метод `render`. У разі, якщо цей номер не є частиною URL, нам потрібно встановити значення за замовчуванням для першої сторінки.
+
+Ми також розширюємо метод `render` для отримання екземпляра Paginator, його налаштування та вибору потрібних статей для відображення в шаблоні. HomepagePresenter матиме такий вигляд:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(int $page = 1): void
+	{
+		// Знайдемо загальну кількість опублікованих статей
+		$articlesCount = $this->articleRepository->getPublishedArticlesCount();
+
+		// Ми створимо екземпляр Paginator і налаштуємо його
+		$paginator = new Nette\Utils\Paginator;
+		$paginator->setItemCount($articlesCount); // total articles count
+		$paginator->setItemsPerPage(10); // items per page
+		$paginator->setPage($page); // фактичний номер сторінки
+
+		// Ми знайдемо обмежений набір статей із бази даних на основі розрахунків Paginator
+		$articles = $this->articleRepository->findPublishedArticles($paginator->getLength(), $paginator->getOffset());
+
+		// який ми передаємо в шаблон
+		$this->template->articles = $articles;
+		// а також сам Paginator для відображення опцій пагінації
+		$this->template->paginator = $paginator;
+	}
+}
+```
+
+Шаблон уже ітерує статті на одній сторінці, просто додайте посилання пагінації:
+
+```latte
+{block content}
+<h1>Articles</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+
+<div class="pagination">
+	{if !$paginator->isFirst()}
+		<a n:href="default, 1">Первая</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->page-1">Предыдущая</a>
+		&nbsp;|&nbsp;
+	{/if}
+
+	Страница {$paginator->getPage()} из {$paginator->getPageCount()}
+
+	{if !$paginator->isLast()}
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->getPage() + 1">Следующая</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->getPageCount()">Последняя</a>
+	{/if}
+</div>
+```
+
+
+Ось як ми додали пагінацію за допомогою Paginator. Якщо замість [Nette Database Explorer |database:explorer] як шар бази даних використовується [Nette Database Core |database:core], ми можемо реалізувати підкачку навіть без Paginator. Клас `Nette\Database\Table\Selection` містить метод [page |api:Nette\Database\Table\Selection::_ page] з логікою пагінації, взятою з Paginator.
+
+Репозиторій матиме такий вигляд:
+
+```php
+namespace App\Model;
+
+use Nette;
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Explorer $database,
+	) {
+	}
+
+
+	public function findPublishedArticles(): Nette\Database\Table\Selection
+	{
+		return $this->database->table('articles')
+			->where('created_at < ', new \DateTime)
+			->order('created_at DESC');
+	}
+}
+```
+
+Нам не потрібно створювати Paginator у презентері, натомість ми використовуватимемо метод об'єкта `Selection`, який повертає сховище:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(int $page = 1): void
+	{
+		// Знайдемо опубліковані статті
+		$articles = $this->articleRepository->findPublishedArticles();
+
+		// і їхню частину, обмежену обчисленням методу page, яку ми передамо в шаблон
+		$lastPage = 0;
+		$this->template->articles = $articles->page($page, 10, $lastPage);
+
+		// а також необхідні дані для відображення опцій пагінації
+		$this->template->page = $page;
+		$this->template->lastPage = $lastPage;
+	}
+}
+```
+
+Оскільки ми не використовуємо Paginator, нам потрібно відредагувати розділ, що показує посилання пагінації:
+
+```latte
+{block content}
+<h1>Статьи</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+
+<div class="pagination">
+	{if $page > 1}
+		<a n:href="default, 1">Первая</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $page - 1">Предыдущая</a>
+		&nbsp;|&nbsp;
+	{/if}
+
+	Страница {$page} из {$lastPage}
+
+	{if $page < $lastPage}
+		&nbsp;|&nbsp;
+		<a n:href="default, $page + 1">Следующая</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $lastPage">Последняя</a>
+	{/if}
+</div>
+```
+
+Таким чином, ми реалізували механізм пагінації без використання пагінатора.
+
+{{priority: -1}}
+{{sitename: Найкращі практики}}

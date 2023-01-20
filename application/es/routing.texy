@@ -1,0 +1,701 @@
+Enrutamiento
+************
+<div class=perex>
+
+
+El enrutador se encarga de todo lo relacionado con las URL para que no tengas que pensar más en ellas. Se lo mostraremos:
+
+- cómo configurar el router para que las URLs sean como tú quieres
+- algunas notas sobre la redirección SEO
+- y le mostraremos cómo escribir su propio enrutador
+
+</div>
+
+
+Las URLs más humanas (o URLs chulas o bonitas) son más usables, más memorables y contribuyen positivamente al SEO. Nette tiene esto en mente y satisface plenamente los deseos de los desarrolladores. Puedes diseñar la estructura de URL de tu aplicación exactamente como quieras.
+Incluso puede diseñarla después de que la aplicación esté lista, ya que puede hacerse sin ningún cambio de código o plantilla. Se define de forma elegante en [un único lugar |#Integration], en el enrutador, y no está dispersa en forma de anotaciones en todos los presentadores.
+
+El enrutador en Nette es especial porque es **bidireccional**, puede tanto decodificar URLs de peticiones HTTP como crear enlaces. Así que juega un papel vital en la [aplicación |how-it-works#Nette Application] de Nette, porque decide qué presentador y qué acción ejecutarán la solicitud actual, y también se utiliza para la [generación de URL |creating-links] en la plantilla, etc.
+
+Sin embargo, el enrutador no se limita a este uso, puede utilizarlo en aplicaciones donde los presentadores no se utilizan en absoluto, para las API REST, etc. Más en la sección [uso separado |#separated usage].
+
+
+Colección de rutas .[#toc-route-collection]
+===========================================
+
+La forma más agradable de definir las direcciones URL en la aplicación es a través de la clase [api:Nette\Application\Routers\RouteList]. La definición consiste en una lista de las llamadas rutas, es decir, máscaras de direcciones URL y sus presentadores y acciones asociadas mediante una API sencilla. No es necesario dar nombre a las rutas.
+
+```php
+$router = new Nette\Application\Routers\RouteList;
+$router->addRoute('rss.xml', 'Feed:rss');
+$router->addRoute('article/<id>', 'Article:view');
+// ...
+```
+
+El ejemplo dice que si abrimos `https://any-domain.com/rss.xml` con la acción `rss`, si `https://domain.com/article/12` con la acción `view`, etc. Si no se encuentra una ruta adecuada, Nette Application responde lanzando una excepción [BadRequestException |api:Nette\Application\BadRequestException], que aparece al usuario como una página de error 404 Not Found.
+
+
+Orden de las rutas .[#toc-order-of-routes]
+------------------------------------------
+
+El orden en que se enumeran las rutas es **muy importante** porque se evalúan secuencialmente de arriba a abajo. La regla es que declaremos las rutas **de específica a general**:
+
+```php
+// INCORRECTO: <rss.xml> coincide con la primera ruta y la malinterpreta como <slug>.
+$router->addRoute('<slug>', 'Article:view');
+$router->addRoute('rss.xml', 'Feed:rss');
+
+// BUENO
+$router->addRoute('rss.xml', 'Feed:rss');
+$router->addRoute('<slug>', 'Article:view');
+```
+
+Las rutas también se evalúan de arriba a abajo cuando se generan los enlaces:
+
+```php
+// INCORRECTO: genera un enlace a 'Feed:rss' como 'admin/feed/rss'
+$router->addRoute('admin/<presenter>/<action>', 'Admin:default');
+$router->addRoute('rss.xml', 'Feed:rss');
+
+// BUENO
+$router->addRoute('rss.xml', 'Feed:rss');
+$router->addRoute('admin/<presenter>/<action>', 'Admin:default');
+```
+
+No le ocultaremos que se necesita cierta habilidad para construir una lista correctamente. Hasta que te pongas a ello, el [panel de en |#Debugging Router] rutamiento será una herramienta útil.
+
+
+Máscara y parámetros .[#toc-mask-and-parameters]
+------------------------------------------------
+
+La máscara describe la ruta relativa basada en la raíz del sitio. La máscara más simple es una URL estática:
+
+```php
+$router->addRoute('products', 'Products:default');
+```
+
+A menudo, las máscaras contienen los llamados **parámetros**. Van entre corchetes angulares (por ejemplo `<year>`) y se pasan al presentador de destino, por ejemplo al método `renderShow(int $year)` o al parámetro persistente `$year`:
+
+```php
+$router->addRoute('chronicle/<year>', 'History:show');
+```
+
+El ejemplo dice que si abrimos `https://any-domain.com/chronicle/2020` y la acción `show` con el parámetro `year: 2020`.
+
+Podemos especificar un valor por defecto para los parámetros directamente en la máscara y así se convierte en opcional:
+
+```php
+$router->addRoute('chronicle/<year=2020>', 'History:show');
+```
+
+La ruta aceptará ahora la URL `https://any-domain.com/chronicle/` con el parámetro `year: 2020`.
+
+Por supuesto, el nombre del presentador y la acción también pueden ser un parámetro. Por ejemplo:
+
+```php
+$router->addRoute('<presenter>/<action>', 'Homepage:default');
+```
+
+Esta ruta acepta, por ejemplo, una URL de la forma `/article/edit` resp. `/catalog/list` y las traduce a presentadores y acciones `Article:edit` resp. `Catalog:list`.
+
+También da a los parámetros `presenter` y `action` valores por defecto`Homepage` y `default` y, por tanto, son opcionales. Así, la ruta también acepta una URL `/article` y la traduce como `Article:default`. O viceversa, un enlace a `Product:default` genera una ruta `/product`, un enlace al valor por defecto `Homepage:default` genera una ruta `/`.
+
+La máscara puede describir no sólo la ruta relativa basada en la raíz del sitio, sino también la ruta absoluta cuando comienza con una barra, o incluso toda la URL absoluta cuando comienza con dos barras:
+
+```php
+// ruta relativa a la raíz del documento de la aplicación
+$router->addRoute('<presenter>/<action>', /* ... */);
+
+// ruta absoluta, relativa al nombre del servidor
+$router->addRoute('/<presenter>/<action>', /* ... */);
+
+// URL absoluta incluyendo nombre de host (pero relativa al esquema)
+$router->addRoute('//<lang>.example.com/<presenter>/<action>', /* ... */);
+
+// URL absoluta incluyendo esquema
+$router->addRoute('https://<lang>.example.com/<presenter>/<action>', /* ... */);
+```
+
+
+Expresiones de validación .[#toc-validation-expressions]
+--------------------------------------------------------
+
+Se puede especificar una condición de validación para cada parámetro utilizando una expresión [regular |https://www.php.net/manual/en/reference.pcre.pattern.syntax.php]. Por ejemplo, establezcamos que `id` sea sólo numérico, utilizando `\d+` regexp:
+
+```php
+$router->addRoute('<presenter>/<action>[/<id \d+>]', /* ... */);
+```
+
+La expresión regular por defecto para todos los parámetros es `[^/]+`es decir, todo excepto la barra. Si un parámetro también debe coincidir con una barra oblicua, la expresión regular será `.+`.
+
+```php
+// acepta https://example.com/a/b/c, la ruta es 'a/b/c'
+$router->addRoute('<path .+>', /* ... */);
+```
+
+
+Secuencias opcionales .[#toc-optional-sequences]
+------------------------------------------------
+
+Los corchetes indican las partes opcionales de la máscara. Cualquier parte de la máscara puede ser opcional, incluidas las que contienen parámetros:
+
+```php
+$router->addRoute('[<lang [a-z]{2}>/]<name>', /* ... */);
+
+// URL aceptadas:      Parámetros:
+//   /en/download        lang => en, name => download
+//   /download           lang => null, name => download
+```
+
+Por supuesto, cuando un parámetro forma parte de una secuencia opcional, también se convierte en opcional. Si no tiene un valor por defecto, será nulo.
+
+Las secciones opcionales también pueden estar en el dominio:
+
+```php
+$router->addRoute('//[<lang=en>.]example.com/<presenter>/<action>', /* ... */);
+```
+
+Las secuencias pueden anidarse y combinarse libremente:
+
+```php
+$router->addRoute(
+	'[<lang [a-z]{2}>[-<sublang>]/]<name>[/page-<page=0>]',
+	'Homepage:default',
+);
+
+// URL aceptadas:
+//   /en/hello
+//   /en-us/hello
+//   /hello
+//   /hello/page-12
+```
+
+El generador de URL intenta que la URL sea lo más corta posible, por lo que se omite lo que se puede omitir. Así, por ejemplo, una ruta `index[.html]` genera una ruta `/index`. Puede invertir este comportamiento escribiendo un signo de exclamación después del corchete izquierdo:
+
+```php
+// acepta tanto /hello como /hello.html, genera /hello
+$router->addRoute('<name>[.html]', /* ... */);
+
+// acepta tanto /hello como /hello.html, genera /hello.html
+$router->addRoute('<name>[!.html]', /* ... */);
+```
+
+Los parámetros opcionales (es decir, los parámetros que tienen un valor por defecto) sin corchetes se comportan como si estuvieran envueltos de esta manera:
+
+```php
+$router->addRoute('<presenter=Homepage>/<action=default>/<id=>', /* ... */);
+
+// igual a:
+$router->addRoute('[<presenter=Homepage>/[<action=default>/[<id>]]]', /* ... */);
+```
+
+Para cambiar cómo se genera la barra más a la derecha, es decir, en lugar de `/homepage/` obtener un `/homepage`, ajustar la ruta de esta manera:
+
+```php
+$router->addRoute('[<presenter=Homepage>[/<action=default>[/<id>]]]', /* ... */);
+```
+
+
+Comodines .[#toc-wildcards]
+---------------------------
+
+En la máscara de ruta absoluta, podemos utilizar los siguientes comodines para evitar, por ejemplo, la necesidad de escribir un dominio en la máscara, que puede diferir en el entorno de desarrollo y de producción:
+
+- `%tld%` = dominio de primer nivel, por ejemplo `com` o `org`
+- `%sld%` = dominio de segundo nivel, por ejemplo `example`
+- `%domain%` = dominio sin subdominios, p. ej. `example.com`
+- `%host%` = host completo, por ejemplo `www.example.com`
+- `%basePath%` = ruta al directorio raíz
+
+```php
+$router->addRoute('//www.%domain%/%basePath%/<presenter>/<action>', /* ... */);
+$router->addRoute('//www.%sld%.%tld%/%basePath%/<presenter>/<action', /* ... */);
+```
+
+
+Notación avanzada .[#toc-advanced-notation]
+-------------------------------------------
+
+El segundo parámetro de la ruta, que a menudo escribimos en el formato `Presenter:action`, es una abreviatura, que también podemos escribir en forma de campo, donde indicamos directamente los valores (por defecto) de los parámetros individuales:
+
+```php
+$router->addRoute('<presenter>/<action>[/<id \d+>]', [
+	'presenter' => 'Homepage',
+	'action' => 'default',
+]);
+```
+
+O podemos utilizar esta forma, observe la reescritura de la expresión regular de validación:
+
+```php
+use Nette\Routing\Route;
+
+$router->addRoute('<presenter>/<action>[/<id>]', [
+	'presenter' => [
+		Route::Value => 'Homepage',
+	],
+	'action' => [
+		Route::Value => 'default',
+	],
+	'id' => [
+		Route::Pattern => '\d+',
+	],
+]);
+```
+
+Estos formatos más locuaces son útiles para añadir otros metadatos.
+
+
+Filtros y traducciones .[#toc-filters-and-translations]
+-------------------------------------------------------
+
+Es una buena práctica escribir el código fuente en inglés, pero ¿qué pasa si necesitas que tu sitio web tenga la URL traducida a otro idioma? Rutas simples como:
+
+```php
+$router->addRoute('<presenter>/<action>', 'Homepage:default');
+```
+
+generarán URL en inglés, como `/product/123` o `/cart`. Si queremos que los presentadores y las acciones de la URL se traduzcan al alemán (por ejemplo, `/produkt/123` o `/einkaufswagen`), podemos utilizar un diccionario de traducción. Para añadirlo, ya necesitamos una variante "más locuaz" del segundo parámetro:
+
+```php
+use Nette\Routing\Route;
+
+$router->addRoute('<presenter>/<action>', [
+	'presenter' => [
+		Route::Value => 'Homepage',
+		Route::FilterTable => [
+			// cadena en URL => presentador
+			'produkt' => 'Product',
+			'einkaufswagen' => 'Cart',
+			'katalog' => 'Catalog',
+		],
+	],
+	'action' => [
+		Route::Value => 'default',
+		Route::FilterTable => [
+			'liste' => 'list',
+		],
+	],
+]);
+```
+
+Se pueden utilizar varias claves de diccionario para el mismo presentador. Se crearán varios alias para él. La última clave se considera la variante canónica (es decir, la que aparecerá en la URL generada).
+
+De este modo, la tabla de traducción puede aplicarse a cualquier parámetro. Sin embargo, si la traducción no existe, se toma el valor original. Podemos cambiar este comportamiento añadiendo `Route::FilterStrict => true` y la ruta rechazará entonces la URL si el valor no está en el diccionario.
+
+Además del diccionario de traducción en forma de array, es posible establecer funciones de traducción propias:
+
+```php
+use Nette\Routing\Route;
+
+$router->addRoute('<presenter>/<action>/<id>', [
+	'presenter' => [
+		Route::Value => 'Homepage',
+		Route::FilterIn => function (string $s): string { /* ... */ },
+		Route::FilterOut => function (string $s): string { /* ... */ },
+	],
+	'action' => 'default',
+	'id' => null,
+]);
+```
+
+La función `Route::FilterIn` convierte entre el parámetro en la URL y la cadena, que luego se pasa al presentador, la función `FilterOut` asegura la conversión en la dirección opuesta.
+
+Los parámetros `presenter`, `action` y `module` ya tienen filtros predefinidos que convierten entre el estilo PascalCase resp. camelCase y kebab-case utilizado en la URL. El valor por defecto de los parámetros ya está escrito en la forma transformada, por lo que, por ejemplo, en el caso de un presentador, escribimos `<presenter=ProductEdit>` en lugar de `<presenter=product-edit>`.
+
+
+Filtros generales .[#toc-general-filters]
+-----------------------------------------
+
+Además de filtros para parámetros específicos, también puede definir filtros generales que reciben una matriz asociativa de todos los parámetros que pueden modificar de cualquier manera y luego devolver. Los filtros generales se definen con la tecla `null`.
+
+```php
+use Nette\Routing\Route;
+
+$router->addRoute('<presenter>/<action>', [
+	'presenter' => 'Homepage',
+	'action' => 'default',
+	null => [
+		Route::FilterIn => function (array $params): array { /* ... */ },
+		Route::FilterOut => function (array $params): array { /* ... */ },
+	],
+]);
+```
+
+Los filtros generales le dan la posibilidad de ajustar el comportamiento de la ruta de absolutamente cualquier manera. Podemos utilizarlos, por ejemplo, para modificar parámetros en función de otros parámetros. Por ejemplo, la traducción `<presenter>` y `<action>` en función del valor actual del parámetro `<lang>`.
+
+Si un parámetro tiene definido un filtro personalizado y existe al mismo tiempo un filtro general, el personalizado `FilterIn` se ejecuta antes que el general y viceversa el general `FilterOut` se ejecuta antes que el personalizado. Así, dentro del filtro general están los valores de los parámetros `presenter` resp. `action` escritos en estilo PascalCase resp. camelCase.
+
+
+Indicador unidireccional .[#toc-oneway-flag]
+--------------------------------------------
+
+Las rutas unidireccionales se utilizan para preservar la funcionalidad de las URL antiguas que la aplicación ya no genera pero que aún acepta. Las marcamos con `OneWay`:
+
+```php
+// antigua URL /product-info?id=123
+$router->addRoute('product-info', 'Product:detail', $router::ONE_WAY);
+// nueva URL /producto/123
+$router->addRoute('product/<id>', 'Product:detail');
+```
+
+Al acceder a la URL antigua, el presentador redirige automáticamente a la URL nueva para que los motores de búsqueda no indexen estas páginas dos veces (véase [SEO y canonización |#SEO and canonization]).
+
+
+Módulos .[#toc-modules]
+-----------------------
+
+Si tenemos más rutas que pertenecen a un [módulo |modules], podemos utilizar `withModule()` para agruparlas:
+
+```php
+$router = new RouteList;
+$router->withModule('Forum') // los siguientes routers forman parte del módulo Forum
+	->addRoute('rss', 'Feed:rss') // el presentador es Forum:Feed
+	->addRoute('<presenter>/<action>')
+
+	->withModule('Admin') // los siguientes routers forman parte del módulo Forum:Admin
+		->addRoute('sign:in', 'Sign:in');
+```
+
+Una alternativa es utilizar el parámetro `module`:
+
+```php
+// URL manage/dashboard/default se asigna al presentador Admin:Dashboard
+$router->addRoute('manage/<presenter>/<action>', [
+	'module' => 'Admin',
+]);
+```
+
+
+Subdominios .[#toc-subdomains]
+------------------------------
+
+Las colecciones de rutas pueden agruparse por subdominios:
+
+```php
+$router = new RouteList;
+$router->withDomain('example.com')
+	->addRoute('rss', 'Feed:rss')
+	->addRoute('<presenter>/<action>');
+```
+
+También puede utilizar [comodines |#wildcards] en su nombre de dominio:
+
+```php
+$router = new RouteList;
+$router->withDomain('example.%tld%')
+	// ...
+```
+
+
+Prefijo de ruta .[#toc-path-prefix]
+-----------------------------------
+
+Las colecciones de rutas pueden agruparse por ruta en la URL:
+
+```php
+$router = new RouteList;
+$router->withPath('eshop')
+	->addRoute('rss', 'Feed:rss') // coincide con URL /eshop/rss
+	->addRoute('<presenter>/<action>'); // coincide con la URL /eshop/<presentador>/<acción>
+```
+
+
+Combinaciones .[#toc-combinations]
+----------------------------------
+
+Los usos anteriores pueden combinarse:
+
+```php
+$router = (new RouteList)
+	->withDomain('admin.example.com')
+		->withModule('Admin')
+			->addRoute(/* ... */)
+			->addRoute(/* ... */)
+		->end()
+		->withModule('Images')
+			->addRoute(/* ... */)
+		->end()
+	->end()
+	->withDomain('example.com')
+		->withPath('export')
+			->addRoute(/* ... */)
+			// ...
+```
+
+
+Parámetros de consulta .[#toc-query-parameters]
+-----------------------------------------------
+
+Las máscaras también pueden contener parámetros de consulta (parámetros después del signo de interrogación en la URL). No pueden definir una expresión de validación, pero pueden cambiar el nombre con el que se pasan al presentador:
+
+```php
+// utilizar el parámetro de consulta 'cat' como 'categoryId' en la aplicación
+$router->addRoute('product ? id=<productId> & cat=<categoryId>', /* ... */);
+```
+
+
+Parámetros Foo .[#toc-foo-parameters]
+-------------------------------------
+
+Ahora vamos más a fondo. Los parámetros Foo son básicamente parámetros sin nombre que permiten coincidir con una expresión regular. La siguiente ruta coincide con `/index`, `/index.html`, `/index.htm` y `/index.php`:
+
+```php
+$router->addRoute('index<? \.html?|\.php|>', /* ... */);
+```
+
+También es posible definir explícitamente una cadena que se utilizará para generar la URL. La cadena debe colocarse directamente después del signo de interrogación. La siguiente ruta es similar a la anterior, pero genera `/index.html` en lugar de `/index` porque la cadena `.html` está configurada como "valor generado".
+
+```php
+$router->addRoute('index<?.html \.html?|\.php|>', /* ... */);
+```
+
+
+Integración .[#toc-integration]
+===============================
+
+Para conectar nuestro router a la aplicación, debemos informar al contenedor DI sobre él. La forma más sencilla es preparar la fábrica que construirá el objeto router y decirle a la configuración del contenedor que lo utilice. Digamos que escribimos un método para este propósito `App\Router\RouterFactory::createRouter()`:
+
+```php
+namespace App\Router;
+
+use Nette\Application\Routers\RouteList;
+
+class RouterFactory
+{
+	public static function createRouter(): RouteList
+	{
+		$router = new RouteList;
+		$router->addRoute(/* ... */);
+		return $router;
+	}
+}
+```
+
+Luego escribimos en [configuración |dependency-injection:services]:
+
+```neon
+services:
+	- App\Router\RouterFactory::createRouter
+```
+
+Cualquier dependencia, como una conexión de base de datos, etc., se pasa al método de fábrica como sus parámetros utilizando [autowiring |dependency-injection:autowiring]:
+
+```php
+public static function createRouter(Nette\Database\Connection $db): RouteList
+{
+	// ...
+}
+```
+
+
+SimpleRouter .[#toc-simplerouter]
+=================================
+
+Un enrutador mucho más simple que Route Collection es [SimpleRouter |api:Nette\Application\Routers\SimpleRouter]. Se puede utilizar cuando no hay necesidad de un formato de URL específico, cuando `mod_rewrite` (o alternativas) no está disponible o cuando simplemente no queremos molestarnos con URLs fáciles de usar todavía.
+
+Genera direcciones más o menos de esta forma:
+
+```
+http://example.com/?presenter=Product&action=detail&id=123
+```
+
+El parámetro del constructor `SimpleRouter` es un presentador y una acción por defecto, es decir, la acción que se ejecutará si abrimos, por ejemplo, `http://example.com/` sin parámetros adicionales.
+
+```php
+// por defecto el presentador es 'Homepage' y la acción es 'default
+$router = new Nette\Application\Routers\SimpleRouter('Homepage:default');
+```
+
+Recomendamos definir SimpleRouter directamente en la [configuración |dependency-injection:services]:
+
+```neon
+services:
+	- Nette\Application\Routers\SimpleRouter('Homepage:default')
+```
+
+
+SEO y Canonización .[#toc-seo-and-canonization]
+===============================================
+
+El framework aumenta el SEO (optimización para motores de búsqueda) al evitar la duplicación de contenidos en distintas URL. Si varias direcciones enlazan a un mismo destino, por ejemplo `/index` y `/index.html`, el framework determina la primera como primaria (canónica) y redirige las demás a ella utilizando el código HTTP 301. Gracias a esto, los motores de búsqueda no indexarán las páginas dos veces y no romperán su page rank. .
+
+Este proceso se denomina canonización. La URL canónica es la generada por el enrutador, es decir, por la primera ruta coincidente de la [colección |#route-collection] sin la bandera OneWay. Por lo tanto, en la colección, enumeramos primero las **rutas primarias**.
+
+La canonización la realiza el presentador, más en el capítulo [canonización |presenters#Canonization].
+
+
+HTTPS .[#toc-https]
+===================
+
+Para utilizar el protocolo HTTPS, es necesario activarlo en el alojamiento y configurar el servidor.
+
+La redirección de todo el sitio a HTTPS debe realizarse a nivel de servidor, por ejemplo utilizando el archivo .htaccess en el directorio raíz de nuestra aplicación, con código HTTP 301. La configuración puede variar dependiendo del hosting y tiene un aspecto similar a este:
+
+```
+<IfModule mod_rewrite.c>
+	RewriteEngine On
+	...
+	RewriteCond %{HTTPS} off
+	RewriteRule .* https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+	...
+</IfModule>
+```
+
+El router genera una URL con el mismo protocolo con el que se cargó la página, por lo que no es necesario configurar nada más.
+
+Sin embargo, si excepcionalmente necesitamos que diferentes rutas se ejecuten bajo diferentes protocolos, lo pondremos en la máscara de ruta:
+
+```php
+// Generará una dirección HTTP
+$router->addRoute('http://%host%/<presenter>/<action>', /* ... */);
+
+// Generará una dirección HTTPS
+$router->addRoute('https://%host%/<presenter>/<action>', /* ... */);
+```
+
+
+Debugging Router .[#toc-debugging-router]
+=========================================
+
+La barra de enrutamiento mostrada en [Tracy Bar |tracy:] es una herramienta útil que muestra una lista de rutas y también los parámetros que el enrutador ha obtenido de la URL.
+
+La barra verde con el símbolo ✓ representa la ruta que coincide con la URL actual, las barras azules con los símbolos ≈ indican las rutas que también coincidirían con la URL si el verde no las superara. Vemos más adelante el presentador actual y la acción.
+
+[* routing-debugger.webp *]
+
+Al mismo tiempo, si hay una redirección inesperada debido a [la canonicalización |#SEO and Canonization], es útil mirar en la barra *redirect* para ver cómo entendió originalmente el enrutador la URL y por qué redirigió.
+
+.[note]
+Al depurar el enrutador, se recomienda abrir Herramientas de desarrollo en el navegador (Ctrl+Mayús+I o Cmd+Opción+I) y desactivar la caché en el panel Red para que las redirecciones no se almacenen en ella.
+
+
+Rendimiento .[#toc-performance]
+===============================
+
+El número de rutas afecta a la velocidad del router. Su número no debería exceder de unas pocas docenas. Si su sitio tiene una estructura de URL demasiado complicada, puede escribir un enrutador [personalizado |#custom router].
+
+Si el enrutador no tiene dependencias, como en una base de datos, y su fábrica no tiene argumentos, podemos serializar su forma compilada directamente en un contenedor DI y así hacer la aplicación ligeramente más rápida.
+
+```neon
+routing:
+	cache: true
+```
+
+
+Enrutador personalizado .[#toc-custom-router]
+=============================================
+
+Las siguientes líneas están pensadas para usuarios muy avanzados. Puedes crear tu propio enrutador y, naturalmente, añadirlo a tu colección de rutas. El enrutador es una implementación de la interfaz [api:Nette\Routing\Router] con dos métodos:
+
+```php
+use Nette\Http\IRequest as HttpRequest;
+use Nette\Http\UrlScript;
+
+class MyRouter implements Nette\Routing\Router
+{
+	public function match(HttpRequest $httpRequest): ?array
+	{
+		// ...
+	}
+
+	public function constructUrl(array $params, UrlScript $refUrl): ?string
+	{
+		// ...
+	}
+}
+```
+
+El método `match` procesa la [$httpRequest |http:request] actual, de la que se puede recuperar no sólo la URL, sino también las cabeceras, etc., en un array que contiene el nombre del presentador y sus parámetros. Si no puede procesar la petición, devuelve null.
+Al procesar la solicitud, debemos devolver al menos el presentador y la acción. El nombre del presentador está completo e incluye cualquier módulo:
+
+```php
+[
+	'presenter' => 'Front:Homepage',
+	'action' => 'default',
+]
+```
+
+El método `constructUrl`, por otro lado, genera una URL absoluta a partir de la matriz de parámetros. Puede utilizar la información del parámetro `$refUrl`, que es la URL actual.
+
+Para añadir un enrutador personalizado a la colección de rutas, utilice `add()`:
+
+```php
+$myRouter = new MyRouter; // o podemos obtenerlo mediante inyección de dependencia
+$router = new Nette\Application\Routers\RouteList;
+$router->add($myRouter);
+$router->addRoute(/* ... */);
+// ...
+```
+
+
+Uso separado .[#toc-separated-usage]
+====================================
+
+Por uso separado, nos referimos al uso de las capacidades del router en una aplicación que no utiliza Nette Application y presentadores. Casi todo lo que hemos mostrado en este capítulo se aplica a ella, con las siguientes diferencias:
+
+- para las colecciones de rutas utilizamos la clase [api:Nette\Routing\RouteList]
+- como clase de enrutador simple [api:Nette\Routing\SimpleRouter]
+- como no existe el par `Presenter:action`, utilizamos [la notación Advanced |#Advanced notation]
+
+Así que de nuevo crearemos un método que construirá un enrutador, por ejemplo
+
+```php
+namespace App\Router;
+
+use Nette\Routing\RouteList;
+
+class RouterFactory
+{
+	public static function createRouter(): RouteList
+	{
+		$router = new RouteList;
+		$router->addRoute('rss.xml', [
+			'controller' => 'RssFeedController',
+		]);
+		$router->addRoute('article/<id \d+>', [
+			'controller' => 'ArticleController',
+		]);
+		// ...
+		return $router;
+	}
+}
+```
+
+Si usas un contenedor DI, que es lo que recomendamos, añade de nuevo el método a la configuración y luego obtén el router junto con la petición HTTP del contenedor:
+
+```php
+$router = $container->getByType(Nette\Routing\Router::class);
+$httpRequest = $container->getByType(Nette\Http\IRequest::class);
+```
+
+O crearemos los objetos directamente:
+
+```php
+$router = App\Router\RouterFactory::createRouter();
+$httpRequest = (new Nette\Http\RequestFactory)->fromGlobals();
+```
+
+Ahora tenemos que dejar que el router para trabajar:
+
+```php
+$params = $router->match($httpRequest);
+if ($params === null) {
+	// no se encuentra ninguna ruta coincidente, enviaremos un error 404
+	exit;
+}
+
+// procesamos los parámetros recibidos
+$controller = $params['controller'];
+// ...
+```
+
+Y viceversa, usaremos el router para crear el enlace:
+
+```php
+$params = ['controller' => 'ArticleController', 'id' => 123];
+$url = $router->constructUrl($params, $httpRequest->getUrl());
+```
+
+
+{{composer: nette/router}}

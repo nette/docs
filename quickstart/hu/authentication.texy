@@ -1,0 +1,181 @@
+Hitelesítés
+***********
+
+A Nette iránymutatást ad arra vonatkozóan, hogyan programozd be a hitelesítést az oldaladon, de nem kényszerít arra, hogy ezt egy bizonyos módon tedd. A megvalósítás az Önre van bízva. A Nette rendelkezik egy `Nette\Security\Authenticator` interfésszel, amely arra kényszerít, hogy csak egyetlen metódust valósítson meg, a `authenticate` metódust, amely úgy találja meg a felhasználót, ahogyan csak akarja.
+
+Sokféleképpen lehet egy felhasználó hitelesíteni magát. A leggyakoribb módszer a *jelszó alapú hitelesítés* (a felhasználó megadja a nevét vagy e-mail címét és egy jelszót), de vannak más módszerek is. Talán ismerősek a "Login with Facebook" gombok számos weboldalon, vagy a Google/Twitter/GitHub vagy bármely más oldalon történő bejelentkezés. A Nette segítségével bármilyen hitelesítési módszerrel rendelkezhet, vagy kombinálhatja őket. Ez csak rajtad múlik.
+
+Normális esetben saját autentikátort írnál, de ehhez az egyszerű kis bloghoz a beépített autentikátort fogjuk használni, amely egy konfigurációs fájlban tárolt jelszó és felhasználónév alapján hitelesíti a felhasználót. Ez jó tesztelési célokra. Tehát a következő *security* szakaszt adjuk hozzá a `config/common.neon` konfigurációs fájlhoz:
+
+
+```neon .{file:config/common.neon}
+security:
+	users:
+		admin: secret # user 'admin', password 'secret'
+```
+
+
+A Nette automatikusan létrehoz egy szolgáltatást a DI konténerben.
+
+
+Bejelentkezési űrlap .[#toc-sign-in-form]
+=========================================
+
+Most már készen áll a hitelesítés backend része, és meg kell adnunk egy felhasználói felületet, amelyen keresztül a felhasználó bejelentkezik. Hozzunk létre egy új bemutatót *SignPresenter* néven, amely a következő lesz
+
+- megjelenít egy bejelentkezési űrlapot (felhasználónév és jelszó megadásával)
+- az űrlap elküldésekor hitelesíti a felhasználót
+- kijelentkezési műveletet biztosít
+
+Kezdjük a bejelentkezési űrlappal. Azt már tudjuk, hogyan működnek az űrlapok a prezenterben. Hozzuk létre a `SignPresenter` és a `createComponentSignInForm` metódust. Ennek így kell kinéznie:
+
+```php .{file:app/Presenters/SignPresenter.php}
+<?php
+namespace App\Presenters;
+
+use Nette;
+use Nette\Application\UI\Form;
+
+final class SignPresenter extends Nette\Application\UI\Presenter
+{
+	protected function createComponentSignInForm(): Form
+	{
+		$form = new Form;
+		$form->addText('username', 'Username:')
+			->setRequired('Please enter your username.');
+
+		$form->addPassword('password', 'Password:')
+			->setRequired('Please enter your password.');
+
+		$form->addSubmit('send', 'Sign in');
+
+		$form->onSuccess[] = [$this, 'signInFormSucceeded'];
+		return $form;
+	}
+}
+```
+
+A felhasználónév és a jelszó megadására van lehetőség.
+
+
+Sablon .[#toc-template]
+-----------------------
+
+Az űrlap a sablonban lesz megjelenítve `in.latte`
+
+```latte .{file:app/Presenters/templates/Sign/in.latte}
+{block content}
+<h1 n:block=title>Sign in</h1>
+
+{control signInForm}
+```
+
+
+Bejelentkezés kezelő .[#toc-login-handler]
+------------------------------------------
+
+Hozzáadunk egy *űrlapkezelőt* is a felhasználó bejelentkezéséhez, amely az űrlap elküldése után azonnal meghívásra kerül.
+
+A kezelő csak a felhasználó által megadott felhasználónevet és jelszót veszi át, és továbbítja a korábban definiált hitelesítőnek. Miután a felhasználó bejelentkezett, átirányítjuk őt a kezdőlapra.
+
+```php .{file:app/Presenters/SignPresenter.php}
+public function signInFormSucceeded(Form $form, \stdClass $data): void
+{
+	try {
+		$this->getUser()->login($data->username, $data->password);
+		$this->redirect('Homepage:');
+
+	} catch (Nette\Security\AuthenticationException $e) {
+		$form->addError('Incorrect username or password.');
+	}
+}
+```
+
+A [User::login() |api:Nette\Security\User::login()] metódusnak kivételt kell dobnia, ha a felhasználónév vagy a jelszó nem egyezik a korábban definiáltakkal. Mint már tudjuk, ez egy [Tracy |tracy:] red-screen-t eredményezne, vagy, termelési üzemmódban, egy belső szerverhibáról tájékoztató üzenetet. Ezt nem szeretnénk. Ezért elkapjuk a kivételt, és egy szép és barátságos hibaüzenetet adunk az űrlaphoz.
+
+Ha az űrlapon hiba lép fel, az űrlapot tartalmazó oldal újra megjelenik, és az űrlap felett egy kedves üzenet jelenik meg, amely tájékoztatja a felhasználót, hogy rossz felhasználónevet vagy jelszót adott meg.
+
+
+Az előadók biztonsága .[#toc-security-of-presenters]
+====================================================
+
+Biztosítani fogunk egy űrlapot a hozzászólások hozzáadásához és szerkesztéséhez. Ezt a prezenterben határozzuk meg `EditPresenter`. A cél az, hogy a nem bejelentkezett felhasználók ne férhessenek hozzá az oldalhoz.
+
+Létrehozunk egy `startup()` metódust, amely a [prezenter életciklusának |application:presenters#life-cycle-of-presenter] kezdetén azonnal elindul. Ez a nem bejelentkezett felhasználókat a bejelentkezési űrlapra irányítja át.
+
+```php .{file:app/Presenters/EditPresenter.php}
+public function startup(): void
+{
+	parent::startup();
+
+	if (!$this->getUser()->isLoggedIn()) {
+		$this->redirect('Sign:in');
+	}
+}
+```
+
+
+Linkek elrejtése .[#toc-hide-links]
+-----------------------------------
+
+Egy nem hitelesített felhasználó már nem láthatja sem a *készítés*, sem a *szerkesztés oldalt*, de a rájuk mutató linkeket továbbra is láthatja. Rejtsük el azokat is. Az egyik ilyen link a `app/Presenters/templates/Homepage/default.latte` oldalon található, és csak akkor legyen látható, ha a felhasználó bejelentkezett.
+
+Ezt a `n:if` nevű *n:attribútummal* tudjuk elrejteni. Ha a benne lévő utasítás a `false`, akkor az egész `<a>` tag és annak tartalma nem jelenik meg:
+
+```latte
+<a n:href="Edit:create" n:if="$user->isLoggedIn()">Create post</a>
+```
+
+Ez egy rövidítés (ne keverjük össze a `tag-if` címmel):
+
+```latte
+{if $user->isLoggedIn()}<a n:href="Edit:create">Create post</a>{/if}
+```
+
+Hasonló módon el kell rejtenie a `app/Presenters/templates/Post/show.latte` alatt található szerkesztési linket.
+
+
+Bejelentkezési űrlap link .[#toc-login-form-link]
+=================================================
+
+Szia, de hogyan jutunk el a bejelentkezési oldalra? Nincs rá mutató link. Adjunk hozzá egyet a `@layout.latte` sablonfájlban. Próbálj meg találni egy szép helyet, lehet bárhol, ahol a legjobban tetszik.
+
+```latte .{file:app/Presenters/templates/@layout.latte}
+...
+<ul class="navig">
+	<li><a n:href="Homepage:">Homepage</a></li>
+	{if $user->isLoggedIn()}
+		<li><a n:href="Sign:out">Sign out</a></li>
+	{else}
+		<li><a n:href="Sign:in">Sign in</a></li>
+	{/if}
+</ul>
+...
+```
+
+Ha a felhasználó még nincs bejelentkezve, akkor a "Sign in" linket fogjuk megjeleníteni. Ellenkező esetben a "Kijelentkezés" linket fogjuk megjeleníteni. Ezt a műveletet a SignPresenterben adjuk hozzá.
+
+A kijelentkezési művelet így néz ki, és mivel azonnal átirányítjuk a felhasználót, nincs szükség nézetsablonra.
+
+```php .{file:app/Presenters/SignPresenter.php}
+public function actionOut(): void
+{
+	$this->getUser()->logout();
+	$this->flashMessage('You have been signed out.');
+	$this->redirect('Homepage:');
+}
+```
+
+Csak meghívja a `logout()` metódust, majd egy szép üzenetet mutat a felhasználónak.
+
+
+Összefoglaló .[#toc-summary]
+============================
+
+Van egy linkünk a bejelentkezéshez és a felhasználó kijelentkezéséhez is. A hitelesítéshez a beépített hitelesítőt használtuk, a bejelentkezési adatok pedig a konfigurációs fájlban vannak, mivel ez egy egyszerű tesztalkalmazás. A szerkesztési űrlapokat is biztosítottuk, hogy csak a bejelentkezett felhasználók tudjanak hozzászólásokat hozzáadni és szerkeszteni.
+
+.[note]
+Itt olvashat bővebben a [felhasználói bejelentkezésről |security:authentication] és az [engedélyezésről |security:authorization].
+
+{{priority: -1}}
+{{sitename: Nette Quickstart}}

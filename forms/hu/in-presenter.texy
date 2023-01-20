@@ -1,0 +1,431 @@
+Formanyomtatványok az előadóknál
+********************************
+
+.[perex]
+A Nette Forms jelentősen megkönnyíti a webes űrlapok létrehozását és feldolgozását. Ebben a fejezetben megtanulja, hogyan használhatja az űrlapokat a prezentereken belül.
+
+Ha teljesen önállóan, a keretrendszer többi része nélkül szeretné használni őket, akkor van egy útmutató az [önálló űrlapokhoz |standalone].
+
+
+Első űrlap .[#toc-first-form]
+=============================
+
+Megpróbálunk írni egy egyszerű regisztrációs űrlapot. A kódja így fog kinézni:
+
+```php
+use Nette\Application\UI\Form;
+
+$form = new Form;
+$form->addText('name', 'Name:');
+$form->addPassword('password', 'Password:');
+$form->addSubmit('send', 'Sign up');
+$form->onSuccess[] = [$this, 'formSucceeded'];
+```
+
+A böngészőben az eredménynek így kell kinéznie:
+
+[* form-en.webp *]
+
+A prezenterben lévő űrlap a `Nette\Application\UI\Form` osztály objektuma, elődje a `Nette\Forms\Form` önálló használatra készült. Hozzáadtuk a név, a jelszó és a küldés gomb mezőit. Végül a `$form->onSuccess` sorban az áll, hogy a beküldés és a sikeres érvényesítés után a `$this->formSucceeded()` metódust kell meghívni.
+
+A bemutató szempontjából az űrlap egy közös komponens. Ezért komponensként kezeljük, és a [factory metódus |application:components#Factory Methods] segítségével beépítjük a prezentálóba. Ez így fog kinézni:
+
+```php .{file:app/Presenters/HomepagePresenter.php}
+use Nette;
+use Nette\Application\UI\Form;
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	protected function createComponentRegistrationForm(): Form
+	{
+		$form = new Form;
+		$form->addText('name', 'Név:');
+		$form->addPassword('password', 'Jelszó:');
+		$form->addSubmit('send', 'Regisztrálj');
+		$form->onSuccess[] = [$this, 'formSucceeded'];
+		return $form;
+	}
+
+	public function formSucceeded(Form $form, $data): void
+	{
+		// itt fogjuk feldolgozni az űrlap által küldött adatokat.
+		// $data->name tartalmazza a nevet
+		// $data->password tartalmazza a jelszót
+		$this->flashMessage('Sikeresen regisztrált.');
+		$this->redirect('Homepage:');
+	}
+}
+```
+
+A sablonban történő megjelenítés pedig a `{control}` tag használatával történik:
+
+```latte .{file:app/Presenters/templates/Homepage/default.latte}
+<h1>Registration</h1>
+
+{control registrationForm}
+```
+
+És ez minden :-) Van egy működőképes és tökéletesen [biztonságos |#Vulnerability Protection] űrlapunk.
+
+Most valószínűleg azt gondolod, hogy ez túl gyors volt, és azon tűnődsz, hogy hogyan lehetséges, hogy a `formSucceeded()` metódus meghívásra kerül, és milyen paramétereket kap. Persze, igazad van, ez megérdemel egy magyarázatot.
+
+Nette klassz mechanizmussal állt elő, amit [hollywoodi stílusnak |application:components#Hollywood style] nevezünk. Ahelyett, hogy állandóan kérdezgetni kellene, hogy történt-e valami ("elküldték-e az űrlapot?", "érvényesen elküldték-e?" vagy "nem hamisították-e?"), azt mondod a keretrendszernek, hogy "ha az űrlap érvényesen kitöltött, hívd meg ezt a metódust", és hagyd rajta a további munkát. Ha JavaScriptben programozol, akkor ismered ezt a programozási stílust. Olyan függvényeket írsz, amelyeket akkor hívsz meg, amikor egy bizonyos [esemény |nette:glossary#Events] bekövetkezik. A nyelv pedig átadja nekik a megfelelő argumentumokat.
+
+Így épül fel a fenti prezenter kódja. A `$form->onSuccess` array a PHP visszahívások listáját jelenti, amelyeket a Nette akkor hív meg, ha az űrlapot elküldték és helyesen kitöltötték.
+A [prezenter életciklusán |application:presenters#Life Cycle of Presenter] belül ez egy úgynevezett szignál, tehát a `action*` metódus után és a `render*` metódus előtt hívódnak meg.
+És minden callbacknek átadja magát az űrlapot az első paraméterben, és a beküldött adatokat [ArrayHash |utils:arrays#ArrayHash] objektumként a másodikban. Az első paramétert elhagyhatjuk, ha nincs szükségünk a form objektumra. A második paraméter még hasznosabb lehet, de erről [később |#Mapping to Classes].
+
+A `$data` objektum tartalmazza a `name` és `password` tulajdonságokat a felhasználó által megadott adatokkal. Általában az adatokat közvetlenül elküldjük további feldolgozásra, ami lehet például az adatbázisba való beillesztés. A feldolgozás során azonban előfordulhat hiba, például a felhasználónév már foglalt. Ebben az esetben a `addError()` segítségével visszaadjuk a hibát az űrlapnak, és hagyjuk, hogy újra kirajzolódjon, hibaüzenettel:
+
+```php
+$form->addError('Sorry, username is already in use.');
+```
+
+A `onSuccess` mellett létezik a `onSubmit` is : a visszahívások mindig az űrlap elküldése után hívódnak meg, még akkor is, ha az űrlap nem lett helyesen kitöltve. És végül a `onError`: a callbackek csak akkor hívódnak meg, ha a beküldés nem érvényes. Ezek még akkor is meghívódnak, ha a `onSuccess` vagy a `onSubmit` segítségével érvénytelenítjük az űrlapot a `addError()` segítségével.
+
+Az űrlap feldolgozása után átirányítjuk a következő oldalra. Ez megakadályozza, hogy az űrlapot véletlenül újra beküldjék a *frissítés*, *vissza* gombra kattintva, vagy a böngésző előzményeit mozgatva.
+
+Próbáljon meg több [űrlapvezérlőt |controls] hozzáadni.
+
+
+Hozzáférés a vezérlőkhöz .[#toc-access-to-controls]
+===================================================
+
+Az űrlap a prezenter egyik komponense, esetünkben a `registrationForm` névvel (a `createComponentRegistrationForm` gyári metódus neve után), így a prezenterben bárhol elérhetjük az űrlapot a következővel:
+
+```php
+$form = $this->getComponent('registrationForm');
+// alternatív szintaxis: $form = $this['registrationForm'];
+```
+
+Az egyes űrlapvezérlők is komponensek, így ugyanígy elérhetjük őket:
+
+```php
+$input = $form->getComponent('name'); // vagy $input = $form['name'];
+$button = $form->getComponent('send'); // vagy $button = $form['send'];
+```
+
+A vezérlőelemek eltávolítása az unset használatával történik:
+
+```php
+unset($form['name']);
+```
+
+
+Érvényesítési szabályok .[#toc-validation-rules]
+================================================
+
+Az *érvényes* szót többször használták, de az űrlapnak még nincsenek érvényesítési szabályai. Javítsuk ki.
+
+A név kötelező lesz, ezért jelöljük meg a `setRequired()` metódussal, amelynek argumentuma a hibaüzenet szövege, amely akkor jelenik meg, ha a felhasználó nem tölti ki. Ha nem adunk meg argumentumot, akkor az alapértelmezett hibaüzenetet használjuk.
+
+```php
+$form->addText('name', 'Name:')
+	->setRequired('Please fill your name.');
+```
+
+Próbáljuk meg elküldeni az űrlapot a név kitöltése nélkül, és látni fogjuk, hogy hibaüzenet jelenik meg, és a böngésző vagy a szerver elutasítja a kitöltésig.
+
+Ugyanakkor nem fogja tudni becsapni a rendszert azzal, hogy például csak szóközöket ír be a beviteli mezőbe. Szó sem lehet róla. A Nette automatikusan levágja a bal és jobb oldali szóközöket. Próbálja ki! Ezt mindig meg kellene tennie minden egysoros bevitelnél, de gyakran elfelejtik. A Nette automatikusan elvégzi. (Megpróbálhatja becsapni az űrlapokat, és többsoros karakterláncot küldhet névként. A Nette még ebben az esetben sem fog becsapni, és a sortörések szóközökre változnak).
+
+Az űrlap mindig a szerveroldalon validálódik, de a JavaScript validáció is generálódik, ami gyors, és a felhasználó azonnal értesül a hibáról, anélkül, hogy az űrlapot a szerverre kellene küldeni. Ezt a `netteForms.js` szkript kezeli.
+Ezt illessze be az elrendezési sablonba:
+
+```latte
+<script src="https://nette.github.io/resources/js/3/netteForms.min.js"></script>
+```
+
+Ha megnézi az űrlapot tartalmazó oldal forráskódját, észreveheti, hogy a Nette a szükséges mezőket a `required` CSS osztályú elemekbe illeszti be. Próbálja meg a következő stílust hozzáadni a sablonhoz, és a "Név" felirat piros lesz. Elegánsan jelöljük a kötelező mezőket a felhasználók számára:
+
+```latte
+<style>
+.required label { color: maroon }
+</style>
+```
+
+További érvényesítési szabályokat a `addRule()` módszerrel adunk hozzá. Az első paraméter a szabály, a második ismét a hibaüzenet szövege, és az opcionális érvényesítési szabály argumentum következhet. Mit jelent ez?
+
+Az űrlap kap egy másik opcionális bemenetet *életkor* azzal a feltétellel, hogy annak számnak kell lennie (`addInteger()`) és bizonyos határok között (`$form::Range`). És itt fogjuk használni a `addRule()` harmadik argumentumát , magát a tartományt:
+
+```php
+$form->addInteger('age', 'Age:')
+	->addRule($form::Range, 'You must be older 18 years and be under 120.', [18, 120]);
+```
+
+.[tip]
+Ha a felhasználó nem tölti ki a mezőt, az érvényesítési szabályok nem lesznek ellenőrizve, mivel a mező opcionális.
+
+Nyilvánvalóan van hely egy kis refaktorálásra. A hibaüzenetben és a harmadik paraméterben a számok duplikáltan szerepelnek, ami nem ideális. Ha [többnyelvű űrlapot |best-practices:translations] hoznánk létre, és a számokat tartalmazó üzenetet több nyelvre kellene lefordítani, ez megnehezítené az értékek módosítását. Emiatt a `%d` helyettesítő karakterek használhatók:
+
+```php
+	->addRule($form::Range, 'You must be older %d years and be under %d.', [18, 120]);
+```
+
+Térjünk vissza a *jelszó* mezőhöz, tegyük *követelményessé*, és ellenőrizzük a minimális jelszóhosszúságot (`$form::MinLength`), ismét az üzenetben szereplő helyettesítő karakterek segítségével:
+
+```php
+$form->addPassword('password', 'Password:')
+	->setRequired('Pick a password')
+	->addRule($form::MinLength, 'Your password has to be at least %d long', 8);
+```
+
+Adjunk hozzá egy `passwordVerify` mezőt az űrlaphoz, ahol a felhasználó újra beírja a jelszót, az ellenőrzéshez. Érvényesítési szabályok segítségével ellenőrizzük, hogy mindkét jelszó azonos-e (`$form::Equal`). Érvként pedig szögletes [zárójelek |#Access to Controls] segítségével megadjuk az első jelszóra való hivatkozást:
+
+```php
+$form->addPassword('passwordVerify', 'Password again:')
+	->setRequired('Fill your password again to check for typo')
+	->addRule($form::Equal, 'Password mismatch', $form['password'])
+	->setOmitted();
+```
+
+A `setOmitted()` segítségével egy olyan elemet jelöltünk meg, amelynek értéke nem igazán érdekel minket, és amely csak az érvényesítés miatt létezik. Az értékét nem adjuk át a `$data`.
+
+Egy teljesen működőképes űrlapunk van, PHP és JavaScript validációval. A Nette validálási lehetőségei sokkal szélesebb körűek, létrehozhatunk feltételeket, megjeleníthetjük és elrejthetjük az oldal egyes részeit ezek alapján, stb. Mindent megtudhat az [űrlapok validálásáról |validation] szóló fejezetben.
+
+
+Alapértelmezett értékek .[#toc-default-values]
+==============================================
+
+Gyakran állítunk be alapértelmezett értékeket űrlapvezérlőkhöz:
+
+```php
+$form->addEmail('email', 'Email')
+	->setDefaultValue($lastUsedEmail);
+```
+
+Gyakran hasznos, ha egyszerre állítjuk be az összes vezérlőelem alapértelmezett értékeit. Például amikor az űrlapot rekordok szerkesztésére használjuk. Beolvassuk a rekordot az adatbázisból, és beállítjuk az alapértelmezett értékeket:
+
+```php
+//$row = ['name' => 'John', 'age' => '33', /* ... */];
+$form->setDefaults($row);
+```
+
+A vezérlőelemek definiálása után hívjuk meg a `setDefaults()` címet.
+
+
+Az űrlap megjelenítése .[#toc-rendering-the-form]
+=================================================
+
+Az űrlap alapértelmezés szerint táblázatként jelenik meg. Az egyes vezérlőelemek az alapvető webes hozzáférhetőségi irányelveket követik. Minden címke `<label>` elemként jön létre, és a bemenetükhöz kapcsolódik, a címkére kattintva a kurzor a bemenetre kerül.
+
+Az egyes elemekhez bármilyen HTML-attribútumot beállíthatunk. Például adjunk hozzá egy helyőrzőt:
+
+```php
+$form->addInteger('age', 'Age:')
+	->setHtmlAttribute('placeholder', 'Please fill in the age');
+```
+
+Valóban sokféleképpen lehet megjeleníteni egy űrlapot, ezért ez egy külön [fejezet a megjelenítésről |rendering].
+
+
+Osztályok leképezése .[#toc-mapping-to-classes]
+===============================================
+
+Térjünk vissza a `formSucceeded()` metódushoz, amelynek második paraméterében a `$data` a `ArrayHash` objektumként kapja meg az elküldött adatokat. Mivel ez egy általános osztály, valami olyasmi, mint a `stdClass`, hiányozni fog néhány kényelmi funkció a vele való munka során, például a tulajdonságok kódkiegészítése a szerkesztőkben vagy a statikus kódelemzésben. Ezt úgy lehetne megoldani, hogy minden egyes űrlaphoz külön osztályunk van, amelynek tulajdonságai az egyes vezérlőelemeket képviselik. Pl:
+
+```php
+class RegistrationFormData
+{
+	public string $name;
+	public int $age;
+	public string $password;
+}
+```
+
+A PHP 8.0-tól kezdve használhatja ezt az elegáns jelölést, amely egy konstruktort használ:
+
+```php
+class RegistrationFormData
+{
+	public function __construct(
+		public string $name,
+		public int $age,
+		public string $password,
+	) {
+	}
+}
+```
+
+Hogyan mondhatjuk meg a Nette-nek, hogy az adatokat ennek az osztálynak az objektumaiként adja vissza? Könnyebb, mint gondolnád. Mindössze annyit kell tennie, hogy a kezelőben a `$data` paraméter típusaként megadja az osztályt:
+
+```php
+public function formSucceeded(Form $form, RegistrationFormData $data): void
+{
+	// $name is instance of RegistrationFormData
+	$name = $data->name;
+	// ...
+}
+```
+
+Megadhatja a `array` típust is, és akkor az adatokat tömbként adja át.
+
+Hasonló módon használhatjuk a `getValues()` metódust is, amelynek paramétereként átadjuk az osztály nevét vagy a hidratálandó objektumot:
+
+```php
+$data = $form->getValues(RegistrationFormData::class);
+$name = $data->name;
+```
+
+Ha az űrlapok konténerekből álló többszintű struktúrából állnak, hozzunk létre mindegyikhez külön osztályt:
+
+```php
+$form = new Form;
+$person = $form->addContainer('person');
+$person->addText('firstName');
+/* ... */
+
+class PersonFormData
+{
+	public string $firstName;
+	public string $lastName;
+}
+
+class RegistrationFormData
+{
+	public PersonFormData $person;
+	public int $age;
+	public string $password;
+}
+```
+
+A leképezés ekkor a `$person` tulajdonságtípusból tudja, hogy a konténert a `PersonFormData` osztályhoz kell leképeznie. Ha a tulajdonság tárolók tömbjét tartalmazná, adja meg a `array` típust, és adja át a leképezendő osztályt közvetlenül a tárolóhoz:
+
+```php
+$person->setMappedType(PersonFormData::class);
+```
+
+
+Többszörös beküldőgombok .[#toc-multiple-submit-buttons]
+========================================================
+
+Ha az űrlapon egynél több gomb van, általában meg kell különböztetnünk, hogy melyiket nyomta meg. Minden egyes gombhoz létrehozhatunk saját függvényt. Állítsuk be kezelőként a `onClick` [eseményhez |nette:glossary#Events]:
+
+```php
+$form->addSubmit('save', 'Save')
+	->onClick[] = [$this, 'saveButtonPressed'];
+
+$form->addSubmit('delete', 'Delete')
+	->onClick[] = [$this, 'deleteButtonPressed'];
+```
+
+Ezek a kezelők is csak abban az esetben hívódnak meg, ha az űrlap érvényes, mint a `onSuccess` esemény esetében. A különbség az, hogy az első paraméter a megadott típustól függően az űrlap helyett a submit gomb objektuma lehet:
+
+```php
+public function saveButtonPressed(Nette\Forms\Controls\Button $button, $data)
+{
+	$form = $button->getForm();
+	// ...
+}
+```
+
+Ha egy űrlapot az <kbd>Enter</kbd> billentyűvel küldünk el, a rendszer úgy kezeli, mintha az első gombbal küldtük volna el.
+
+
+Esemény onAnchor .[#toc-event-onanchor]
+=======================================
+
+Amikor egy űrlapot egy gyári metódusban (például a `createComponentRegistrationForm`) építünk fel, még nem tudja, hogy elküldték-e, vagy hogy milyen adatokkal küldték el. Vannak azonban olyan esetek, amikor tudnunk kell a beküldött értékeket, esetleg tőlük függ, hogy milyen lesz az űrlap kinézete, vagy függő selectboxokhoz használjuk őket, stb.
+
+Ezért lehet, hogy az űrlapot felépítő kódot akkor hívjuk meg, amikor lehorgonyzott, azaz már kapcsolódik a prezenterhez, és ismeri a beküldött adatokat. Az ilyen kódot a `$onAnchor` tömbbe fogjuk elhelyezni:
+
+```php
+$country = $form->addSelect('country', 'Country:', $this->model->getCountries());
+$city = $form->addSelect('city', 'City:');
+
+$form->onAnchor[] = function () use ($country, $city) {
+	// ez a függvény akkor hívódik meg, ha az űrlap ismeri a beküldött adatokat.
+	// így használhatja a getValue() metódust.
+	$val = $country->getValue();
+	$city->setItems($val ? $this->model->getCities($val) : []);
+};
+```
+
+
+Sebezhetőségi védelem .[#toc-vulnerability-protection]
+======================================================
+
+A Nette Framework nagy erőfeszítéseket tesz a biztonság érdekében, és mivel az űrlapok a leggyakoribb felhasználói bevitel, a Nette űrlapok szinte áthatolhatatlanok. Mindent dinamikusan és átláthatóan tart fenn, semmit sem kell manuálisan beállítani.
+
+Amellett, hogy megvédi az űrlapokat az olyan jól ismert sebezhetőségekre irányuló támadások ellen, mint a [Cross-Site Scripting (XSS |nette:glossary#cross-site-scripting-xss] ) és a [Cross-Site Request Forgery (CSRF |nette:glossary#cross-site-request-forgery-csrf]), rengeteg apró biztonsági feladatot is elvégez, amelyekre már nem kell gondolnia.
+
+Például kiszűri az összes vezérlő karaktert a bemenetekből, és ellenőrzi az UTF-8 kódolás érvényességét, így az űrlapból származó adatok mindig tiszták lesznek. A kiválasztó dobozok és rádiólisták esetében ellenőrzi, hogy a kiválasztott elemek valóban a felkínáltak közül kerültek-e ki, és nem történt-e hamisítás. Már említettük, hogy az egysoros szövegbevitel esetében eltávolítja a sor végi karaktereket, amelyeket egy támadó oda küldhet. Többsoros bevitel esetén normalizálja a sor végi karaktereket. És így tovább.
+
+A Nette olyan biztonsági réseket is kijavít az Ön számára, amelyekről a legtöbb programozónak fogalma sincs, hogy léteznek.
+
+Az említett CSRF-támadás lényege, hogy a támadó egy olyan oldal meglátogatására csábítja az áldozatot, amely némán végrehajt egy kérést az áldozat böngészőjében a szerver felé, ahol az áldozat éppen bejelentkezve van, és a szerver azt hiszi, hogy a kérést az áldozat akaratából tette. Ezért a Nette megakadályozza, hogy az űrlapot egy másik tartományból POST-on keresztül küldjék el. Ha valamilyen oknál fogva ki akarja kapcsolni a védelmet, és engedélyezni szeretné, hogy az űrlapot egy másik tartományból küldjék el, használja a következőt:
+
+```php
+$form->allowCrossOrigin(); // FIGYELEM! Kikapcsolja a védelmet!
+```
+
+Ez a védelem a `_nss` nevű SameSite cookie-t használja. A SameSite cookie-védelem nem biztos, hogy 100%-ig megbízható, ezért érdemes bekapcsolni a token-védelmet:
+
+```php
+$form->addProtection();
+```
+
+Erősen ajánlott ezt a védelmet alkalmazni az alkalmazás adminisztrációs részében lévő, érzékeny adatokat módosító űrlapokra. A keretrendszer a CSRF-támadás ellen a munkamenetben tárolt hitelesítési token generálásával és érvényesítésével védekezik (az érv a token lejárta esetén megjelenő hibaüzenet). Ezért szükséges, hogy az űrlap megjelenítése előtt elinduljon egy munkamenet. A webhely adminisztrációs részében a munkamenet általában már elindult, a felhasználó bejelentkezése miatt.
+Ellenkező esetben a munkamenetet a `Nette\Http\Session::start()` metódussal kell elindítani.
+
+
+Egy űrlap használata több bemutatóban .[#toc-using-one-form-in-multiple-presenters]
+===================================================================================
+
+Ha egy űrlapot több prezenterben kell használnia, javasoljuk, hogy hozzon létre egy gyárat, amelyet aztán átad a prezenternek. Egy ilyen osztály megfelelő helye például a `app/Forms` könyvtár.
+
+A gyári osztály így nézhet ki:
+
+```php
+use Nette\Application\UI\Form;
+
+class SignInFormFactory
+{
+	public function create(): Form
+	{
+		$form = new Form;
+		$form->addText('name', 'Name:');
+		$form->addSubmit('send', 'Log in');
+		return $form;
+	}
+}
+```
+
+A gyári metódusban az osztálytól azt kérjük, hogy állítsa elő az űrlapot a prezenterben lévő komponensek számára:
+
+```php
+public function __construct(
+	private SignInFormFactory $formFactory,
+) {
+}
+
+protected function createComponentSignInForm(): Form
+{
+	$form = $this->formFactory->create();
+	// megváltoztathatjuk az űrlapot, itt például a gomb címkéjét változtatjuk meg.
+	$form['login']->setCaption('Continue');
+	$form->onSuccess[] = [$this, 'signInFormSubmitted']; // és hozzáadjuk a kezelőt.
+	return $form;
+}
+```
+
+Az űrlapfeldolgozás kezelője is a gyárból szállítható:
+
+```php
+use Nette\Application\UI\Form;
+
+class SignInFormFactory
+{
+	public function create(): Form
+	{
+		$form = new Form;
+		$form->addText('name', 'Név:');
+		$form->addSubmit('send', 'Bejelentkezés');
+		$form->onSuccess[] = function (Form $form, $data): void {
+			// itt feldolgozzuk a beküldött űrlapunkat
+		};
+		return $form;
+	}
+}
+```
+
+Tehát, van egy gyors bevezetés az űrlapok Nette-ben. További inspirációért próbáljon meg szétnézni a disztribúcióban található [példák |https://github.com/nette/forms/tree/master/examples] könyvtárában.

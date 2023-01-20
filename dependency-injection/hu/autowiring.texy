@@ -1,0 +1,260 @@
+Autowiring
+**********
+
+.[perex]
+Az autowiring egy nagyszerű funkció, amely automatikusan átadhatja a szolgáltatásokat a konstruktornak és más metódusoknak, így egyáltalán nem kell megírnunk őket. Ezzel rengeteg időt spórolhatunk meg.
+
+Ez lehetővé teszi, hogy a szolgáltatásdefiníciók írásakor az argumentumok túlnyomó többségét kihagyjuk. Ahelyett:
+
+```neon
+services:
+	articles: Model\ArticleRepository(@database, @cache.storage)
+```
+
+Just write:
+
+```neon
+services:
+	articles: Model\ArticleRepository
+```
+
+Az autowiringet a típusok vezérlik, ezért a `ArticleRepository` osztályt a következőképpen kell definiálni:
+
+```php
+namespace Model;
+
+class ArticleRepository
+{
+	public function __construct(\PDO $db, \Nette\Caching\Storage $storage)
+	{}
+}
+```
+
+Az autowiring használatához **csak egy szolgáltatásnak** kell lennie minden egyes típushoz a konténerben. Ha több lenne, az autowiring nem tudná, hogy melyiket kell átadni, és kivételt dobna:
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+	tempDb: PDO('sqlite::memory:')
+	articles: Model\ArticleRepository # THROWS EXCEPTION, mind a mainDb, mind a tempDb egyezik.
+```
+
+A megoldás az autowiring megkerülése és a szolgáltatás nevének explicit megadása lenne (pl. `articles: Model\ArticleRepository(@mainDb)`). Kényelmesebb azonban az autowiring [letiltása |#Disabled autowiring] egy szolgáltatásnál, vagy [inkább |#Preferred Autowiring] az első szolgáltatásnál.
+
+
+Letiltott autowiring .[#toc-disabled-autowiring]
+------------------------------------------------
+
+A `autowired: no` opcióval letilthatja a szolgáltatás automatikus bekötését:
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+		autowired: false # eltávolítja a tempDb-t az autowiringből.
+
+	articles: # ezért átadja a mainDb-t a konstruktornak.
+```
+
+A `articles` szolgáltatás nem dobja ki azt a kivételt, hogy a konstruktornak átadható két megfelelő `PDO` típusú szolgáltatás (azaz `mainDb` és `tempDb`), mert csak a `mainDb` szolgáltatást látja.
+
+.[note]
+Az autowiring beállítása a Nette-ben másképp működik, mint a Symfony-ban, ahol a `autowire: false` opció azt mondja ki, hogy az autowiring nem használható a szolgáltatáskonstruktor argumentumaihoz.
+A Nette-ben az autowiring mindig használatos, akár a konstruktor, akár bármely más metódus argumentumaira. A `autowired: false` opció azt mondja ki, hogy a szolgáltatáspéldányt nem szabad sehol autowiring használatával átadni.
+
+
+Előnyben részesített autowiring .[#toc-preferred-autowiring]
+------------------------------------------------------------
+
+Ha több azonos típusú szolgáltatásunk van, és az egyikben van a `autowired` opció, akkor ez a szolgáltatás lesz az előnyben részesített:
+
+```neon
+services:
+	mainDb:
+		create: PDO(%dsn%, %user%, %password%)
+		autowired: PDO # előnyben részesíti
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+
+	articles: Model\ArticleRepository
+```
+
+A `articles` szolgáltatás nem dobja ki a kivételt, hogy két egyező `PDO` szolgáltatás van (azaz `mainDb` és `tempDb`), hanem az előnyben részesített szolgáltatást, azaz a `mainDb` szolgáltatást használja.
+
+
+Szolgáltatások gyűjteménye .[#toc-collection-of-services]
+---------------------------------------------------------
+
+Az autowiring egy adott típusú szolgáltatások tömbjét is átadhatja. Mivel a PHP nem tudja natívan jelölni a tömbelemek típusát, a `array` típus mellett egy phpDoc kommentárt is hozzá kell adni az elem típusával, mint például a `ClassName[]`:
+
+```php
+namespace Model;
+
+class ShipManager
+{
+	/**
+	 * @param Shipper[] $shippers
+	 */
+	public function __construct(array $shippers)
+	{}
+}
+```
+
+A DI konténer ekkor automatikusan átadja a megadott típusnak megfelelő szolgáltatások tömbjét. Kihagyja azokat a szolgáltatásokat, amelyeknél az automatikus kapcsolás ki van kapcsolva.
+
+Ha nem tudja ellenőrizni a phpDoc megjegyzés formáját, akkor közvetlenül a konfigurációban is átadhatja a szolgáltatások tömbjét a következővel [`typed()` |services#Special Functions].
+
+
+Skaláris argumentumok .[#toc-scalar-arguments]
+----------------------------------------------
+
+Az autowiring csak objektumokat és objektumok tömbjeit adhatja át. A skalár argumentumok (pl. karakterláncok, számok, boolék) [a konfigurációban írhatók |services#Arguments].
+Alternatív megoldás egy olyan [settings-objektum |best-practices:passing-settings-to-presenters] létrehozása, amely objektumként egy skalár értéket (vagy több értéket) foglal magába, amelyet aztán újra át lehet adni az autowiring segítségével.
+
+```php
+class MySettings
+{
+	public function __construct(
+		// readonly a PHP 8.1 óta használható.
+		public readonly bool $value,
+	)
+	{}
+}
+```
+
+Egy szolgáltatást úgy hozunk létre, hogy hozzáadjuk a konfigurációhoz:
+
+```neon
+services:
+	- MySettings('any value')
+```
+
+Ezt követően minden osztály automatikus bekötés útján fogja kérni.
+
+
+Az autowiring szűkítése .[#toc-narrowing-of-autowiring]
+-------------------------------------------------------
+
+Az egyes szolgáltatások esetében az autowiring szűkíthető bizonyos osztályokra vagy interfészekre.
+
+Normális esetben az autowiring minden olyan metódusparaméterhez átadja a szolgáltatást, amelynek típusának a szolgáltatás megfelel. A szűkítés azt jelenti, hogy megadjuk azokat a feltételeket, amelyeknek a metódusparaméterekhez megadott típusoknak meg kell felelniük ahhoz, hogy a szolgáltatás átadásra kerüljön hozzájuk.
+
+Vegyünk egy példát:
+
+```php
+class ParentClass
+{}
+
+class ChildClass extends ParentClass
+{}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+Ha az összeset szolgáltatásként regisztrálnánk, az autowiring nem sikerülne:
+
+```neon
+services:
+	parent: ParentClass
+	child: ChildClass
+	parentDep:  # THROWS EXCEPTION, mind a szülő, mind a gyermek egyezik
+	childDep: ChildDependent # átadja a 'child' szolgáltatást a konstruktornak.
+```
+
+A `parentDep` szolgáltatás a `Multiple services of type ParentClass found: parent, child` kivételt dobja, mert a `parent` és a `child` is belefér a konstruktorába, és az autowiring nem tudja eldönteni, hogy melyiket válassza.
+
+A `child` szolgáltatás esetében ezért az autowiringet a `ChildClass` szolgáltatásra tudjuk leszűkíteni:
+
+```neon
+services:
+	parent: ParentClass
+	child:
+		create: ChildClass
+		autowired: ChildClass   # alternatíva: 'autowired: self'
+
+	parentDep: ParentDependent  # THROWS EXCEPTION, a 'child' nem lehet autowired
+	childDep: ChildDependent    # átadja a 'child' szolgáltatást a konstruktornak.
+```
+
+A `parentDep` szolgáltatást most átadjuk a `parentDep` szolgáltatás konstruktorának, mivel ez az egyetlen megfelelő objektum. A `child` szolgáltatást már nem adjuk át autowiringgel. Igen, a `child` szolgáltatás még mindig a `ParentClass` típusú, de a paramétertípusra megadott szűkítő feltétel már nem érvényes, azaz már nem igaz, hogy a `ParentClass` *a `ChildClass` szupertípusa*.
+
+A `child` esetében a `autowired: ChildClass` -t írhatnánk `autowired: self` -nek, mivel a `self` az aktuális szolgáltatás típusát jelenti.
+
+A `autowired` kulcs több osztályt és interfészt is tartalmazhat tömbként:
+
+```neon
+autowired: [BarClass, FooInterface]
+```
+
+Próbáljuk meg hozzáadni interfészeket a példához:
+
+```php
+interface FooInterface
+{}
+
+interface BarInterface
+{}
+
+class ParentClass implements FooInterface
+{}
+
+class ChildClass extends ParentClass implements BarInterface
+{}
+
+class FooDependent
+{
+	function __construct(FooInterface $obj)
+	{}
+}
+
+class BarDependent
+{
+	function __construct(BarInterface $obj)
+	{}
+}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+Ha nem korlátozzuk a `child` szolgáltatást, akkor az összes `FooDependent`, `BarDependent`, `ParentDependent` és `ChildDependent` osztály konstruktorába befér, és az autowiring átadja azt.
+
+Ha azonban az autowiringjét a `ChildClass` -ra szűkítjük a `autowired: ChildClass` (vagy a `self`) segítségével, az autowiring csak a `ChildDependent` konstruktorába passzolja, mert az `ChildClass` típusú argumentumot igényel, és a `ChildClass` *típusú* `ChildClass`. A többi paraméterhez megadott típus nem a `ChildClass` szuperhalmaza, így a szolgáltatás nem kerül átadásra.
+
+Ha a `ParentClass` -ra korlátozzuk a `autowired: ParentClass` segítségével, akkor az autowiring ismét átadja a `ChildDependent` konstruktornak (mivel a szükséges típus `ChildClass` a `ParentClass` szuperszettje ) és a `ParentDependent` konstruktornak is, mivel a szükséges típus `ParentClass` szintén megfelel.
+
+Ha a `FooInterface`-ra korlátozzuk, akkor is autowire-elni fog a `ParentDependent` (a szükséges típus `ParentClass` a `FooInterface` szupertípusa ) és a `ChildDependent`, de ezen kívül a `FooDependent` konstruktornak is, de a `BarDependent`-nak nem, mivel a `BarInterface` nem szupertípusa a `FooInterface`-nak.
+
+```neon
+services:
+	child:
+		create: ChildClass
+		autowired: FooInterface
+
+	fooDep: FooDependent       # átadja a szolgáltatás gyermekét a konstruktornak
+	barDep: BarDependent       # THROWS EXCEPTION, nincs szolgáltatás átadása.
+	parentDep: ParentDependent # átadja a szolgáltatás gyermekét a konstruktornak.
+	childDep: ChildDependent   # átadja a szolgáltatás gyermekét a konstruktornak.
+```

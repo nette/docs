@@ -1,0 +1,446 @@
+Schema: Adatérvényesítés
+************************
+
+.[perex]
+Egy praktikus könyvtár az adatstruktúrák érvényesítésére és normalizálására egy adott séma alapján, intelligens és könnyen érthető API-val.
+
+Telepítés:
+
+```shell
+composer require nette/schema
+```
+
+
+Alapvető használat .[#toc-basic-usage]
+--------------------------------------
+
+A `$schema` változóban van egy érvényesítési séma (hogy ez pontosan mit jelent és hogyan kell létrehozni, arról később szólunk), a `$data` változóban pedig egy adatszerkezet, amelyet érvényesíteni és normalizálni szeretnénk. Ez lehet például a felhasználó által egy API-n keresztül küldött adat, konfigurációs fájl stb.
+
+A feladatot a [api:Nette\Schema\Processor] osztály látja el, amely feldolgozza a bemenetet, és vagy normalizált adatokat ad vissza, vagy hiba esetén egy [api:Nette\Schema\ValidationException] kivételt dob.
+
+```php
+$processor = new Nette\Schema\Processor;
+
+try {
+	$normalized = $processor->process($schema, $data);
+} catch (Nette\Schema\ValidationException $e) {
+	echo 'Data is invalid: ' . $e->getMessage();
+}
+```
+
+A `$e->getMessages()` módszer az összes üzenetsorozat tömbjét adja vissza, a `$e->getMessageObjects()` pedig az összes üzenetet "Nette\Schema\Message":https://api.nette.org/schema/master/Nette/Schema/Message.html objektumként adja vissza.
+
+
+Séma definiálása .[#toc-defining-schema]
+----------------------------------------
+
+És most hozzunk létre egy sémát. Ennek definiálására a [api:Nette\Schema\Expect] osztályt használjuk, tulajdonképpen elvárásokat határozunk meg arra vonatkozóan, hogy az adatoknak hogyan kell kinézniük. Tegyük fel, hogy a bemeneti adatnak egy struktúrának (pl. egy tömbnek) kell lennie, amely `processRefund` típusú bool és `refundAmount` típusú int típusú elemeket tartalmaz.
+
+```php
+use Nette\Schema\Expect;
+
+$schema = Expect::structure([
+	'processRefund' => Expect::bool(),
+	'refundAmount' => Expect::int(),
+]);
+```
+
+Úgy gondoljuk, hogy a sémadefiníció egyértelműnek tűnik, még akkor is, ha először látjuk.
+
+Küldjük el a következő adatokat érvényesítésre:
+
+```php
+$data = [
+	'processRefund' => true,
+	'refundAmount' => 17,
+];
+
+$normalized = $processor->process($schema, $data); // OK, átment.
+```
+
+A kimenet, azaz a `$normalized` érték a `stdClass` objektum. Ha azt akarjuk, hogy a kimenet egy tömb legyen, akkor a sémához egy castot adunk hozzá `Expect::structure([...])->castTo('array')`.
+
+A struktúra minden eleme opcionális, és alapértelmezett értéke `null`. Példa:
+
+```php
+$data = [
+	'refundAmount' => 17,
+];
+
+$normalized = $processor->process($schema, $data); // OK, átment.
+// $normalized = {'processRefund' => null, 'refundAmount' => 17}
+```
+
+Az a tény, hogy az alapértelmezett érték `null`, nem jelenti azt, hogy a bemeneti adatokban elfogadható lenne `'processRefund' => null`. Nem, a bemeneti adatnak boolean-nak kell lennie, azaz csak `true` vagy `false`. A `null` -t kifejezetten engedélyeznünk kellene a `Expect::bool()->nullable()`-on keresztül.
+
+Egy elemet a `Expect::bool()->required()` segítségével lehet kötelezővé tenni. Az alapértelmezett értéket a `false` segítségével `Expect::bool()->default(false)` vagy röviden a `Expect::bool(false)` segítségével -ra változtatjuk.
+
+És mi lenne, ha a booleans mellett a `1` and `0` -t is el akarnánk fogadni? Akkor felsoroljuk a megengedett értékeket, amelyeket szintén booleanra normalizálunk:
+
+```php
+$schema = Expect::structure([
+	'processRefund' => Expect::anyOf(true, false, 1, 0)->castTo('bool'),
+	'refundAmount' => Expect::int(),
+]);
+
+$normalized = $processor->process($schema, $data);
+is_bool($normalized->processRefund); // true
+```
+
+Most már ismered az alapokat, hogyan definiálódik a séma, és hogyan viselkednek a struktúra egyes elemei. Most megmutatjuk, hogy a séma definiálásakor milyen egyéb elemeket lehet használni.
+
+
+Adattípusok: type() .[#toc-data-types-type]
+-------------------------------------------
+
+Az összes szabványos PHP adattípus felsorolható a sémában:
+
+```php
+Expect::string($default = null)
+Expect::int($default = null)
+Expect::float($default = null)
+Expect::bool($default = null)
+Expect::null()
+Expect::array($default = [])
+```
+
+És ezután az összes típus [által támogatott validátorok |utils:validators#Expected Types] keresztül `Expect::type('scalar')` vagy rövidített `Expect::scalar()`. Az osztály- vagy interfésznevek is elfogadottak, pl. `Expect::type('AddressEntity')`.
+
+Használhatjuk az union jelölést is:
+
+```php
+Expect::type('bool|string|array')
+```
+
+Az alapértelmezett érték mindig `null`, kivéve a `array` és `list`, ahol ez egy üres tömb. (A lista a nullától kezdve a numerikus kulcsok növekvő sorrendjében indexelt tömb, azaz nem asszociatív tömb).
+
+
+Értékek tömbje: arrayOf() listOf() .[#toc-array-of-values-arrayof-listof]
+-------------------------------------------------------------------------
+
+A tömb túl általános struktúra, célszerűbb pontosan megadni, hogy milyen elemeket tartalmazhat. Például egy olyan tömb, amelynek elemei csak karakterláncok lehetnek:
+
+```php
+$schema = Expect::arrayOf('string');
+
+$processor->process($schema, ['hello', 'world']); // OK
+$processor->process($schema, ['a' => 'hello', 'b' => 'world']); // OK
+$processor->process($schema, ['key' => 123]); // HIBA: 123 nem karakterlánc.
+```
+
+A második paraméterrel megadhatjuk a kulcsokat (az 1.2-es verzió óta):
+
+```php
+$schema = Expect::arrayOf('string', 'int');
+
+$processor->process($schema, ['hello', 'world']); // OK
+$processor->process($schema, ['a' => 'hello']); // ERROR: 'a' nem int
+```
+
+A lista egy indexelt tömb:
+
+```php
+$schema = Expect::listOf('string');
+
+$processor->process($schema, ['a', 'b']); // OK
+$processor->process($schema, ['a', 123]); // HIBA: 123 nem karakterlánc.
+$processor->process($schema, ['key' => 'a']); // HIBA: nem lista
+$processor->process($schema, [1 => 'a', 0 => 'b']); // HIBA: nem lista.
+```
+
+A paraméter lehet egy séma is, így leírhatjuk:
+
+```php
+Expect::arrayOf(Expect::bool())
+```
+
+Az alapértelmezett érték egy üres tömb. Ha megadjuk az alapértelmezett értéket, akkor az összeolvad az átadott adatokkal. Ez kikapcsolható a `mergeDefaults(false)` segítségével (az 1.1-es verzió óta).
+
+
+Felsorolás: anyOf() .[#toc-enumeration-anyof]
+---------------------------------------------
+
+`anyOf()` azoknak az értékeknek vagy sémáknak a halmaza, amelyek egy érték lehet. Íme, hogyan írjunk egy olyan elemekből álló tömböt, amely lehet `'a'`, `true` vagy `null`:
+
+```php
+$schema = Expect::listOf(
+	Expect::anyOf('a', true, null),
+);
+
+$processor->process($schema, ['a', true, null, 'a']); // OK
+$processor->process($schema, ['a', false]); // ERROR: false nem tartozik oda
+```
+
+A felsorolás elemei lehetnek sémák is:
+
+```php
+$schema = Expect::listOf(
+	Expect::anyOf(Expect::string(), true, null),
+);
+
+$processor->process($schema, ['foo', true, null, 'bar']); // OK
+$processor->process($schema, [123]); // HIBA
+```
+
+A `anyOf()` módszer a variánsokat egyéni paraméterként fogadja el, nem tömbként. Ha értékekből álló tömböt akarunk átadni neki, használjuk a `anyOf(...$variants)` kicsomagoló operátort.
+
+Az alapértelmezett érték a `null`. A `firstIsDefault()` módszerrel az első elemet teheti alapértelmezetté:
+
+```php
+// alapértelmezett a 'hello'
+Expect::anyOf(Expect::string('hello'), true, null)->firstIsDefault();
+```
+
+
+Struktúrák .[#toc-structures]
+-----------------------------
+
+A struktúrák meghatározott kulcsokkal rendelkező objektumok. A kulcs => érték párok mindegyikét "tulajdonságnak" nevezzük:
+
+A struktúrák tömböket és objektumokat fogadnak el, és objektumokat adnak vissza `stdClass` (hacsak nem változtatjuk meg a `castTo('array')`, stb. segítségével).
+
+Alapértelmezés szerint minden tulajdonság opcionális, és alapértelmezett értéke `null`. Kötelező tulajdonságokat a `required()` segítségével lehet definiálni:
+
+```php
+$schema = Expect::structure([
+	'required' => Expect::string()->required(),
+	'optional' => Expect::string(), // az alapértelmezett érték null
+]);
+
+$processor->process($schema, ['optional' => '']);
+// ERROR: az 'required' opció hiányzik.
+
+$processor->process($schema, ['required' => 'foo']);
+// OK, visszatér {'required' => 'foo', 'optional' => null}
+```
+
+Ha nem szeretne csak alapértelmezett értékkel rendelkező tulajdonságokat kiadni, használja a `skipDefaults()`:
+
+```php
+$schema = Expect::structure([
+	'required' => Expect::string()->required(),
+	'optional' => Expect::string(),
+])->skipDefaults();
+
+$processor->process($schema, ['required' => 'foo']);
+// OK, visszatér {'required' => 'foo'}
+```
+
+Bár a `null` a `optional` tulajdonság alapértelmezett értéke, a bemeneti adatokban nem megengedett (az értéknek egy karakterláncnak kell lennie). A `null` -t elfogadó tulajdonságok a `nullable()` használatával kerülnek definiálásra:
+
+```php
+$schema = Expect::structure([
+	'optional' => Expect::string(),
+	'nullable' => Expect::string()->nullable(),
+]);
+
+$processor->process($schema, ['optional' => null]);
+// ERROR: 'optional' elvárja, hogy string legyen, null megadva.
+
+$processor->process($schema, ['nullable' => null]);
+// OK, visszatér {'optional' => null, 'nullable' => null}
+```
+
+Alapértelmezés szerint a bemeneti adatokban nem lehetnek extra elemek:
+
+```php
+$schema = Expect::structure([
+	'key' => Expect::string(),
+]);
+
+$processor->process($schema, ['additional' => 1]);
+// ERROR: Váratlan 'additional' elem
+```
+
+Amit a `otherItems()` segítségével megváltoztathatunk. Paraméterként megadjuk az egyes extra elemek sémáját:
+
+```php
+$schema = Expect::structure([
+	'key' => Expect::string(),
+])->otherItems(Expect::int());
+
+$processor->process($schema, ['additional' => 1]); // OK
+$processor->process($schema, ['additional' => true]); // HIBA
+```
+
+
+Deprecations .[#toc-deprecations]
+---------------------------------
+
+A tulajdonságokat a `deprecated([string $message])` módszerrel. A visszavonásról szóló értesítéseket a `$processor->getWarnings()` adja vissza:
+
+```php
+$schema = Expect::structure([
+	'old' => Expect::int()->deprecated('The item %path% is deprecated'),
+]);
+
+$processor->process($schema, ['old' => 1]); // OK
+$processor->getWarnings(); // ["The item 'old' is deprecated"]
+```
+
+
+Tartományok: min() max() .[#toc-ranges-min-max]
+-----------------------------------------------
+
+A `min()` és a `max()` használatával korlátozhatja a tömbök elemeinek számát:
+
+```php
+// tömb, legalább 10 elem, legfeljebb 20 elem
+Expect::array()->min(10)->max(20);
+```
+
+A karakterláncok esetében korlátozza a hosszukat:
+
+```php
+// legalább 10, legfeljebb 20 karakter hosszúságú karakterlánc
+Expect::string()->min(10)->max(20);
+```
+
+Számok esetében korlátozza az értéküket:
+
+```php
+// egész szám, 10 és 20 között
+Expect::int()->min(10)->max(20);
+```
+
+Természetesen lehetséges, hogy csak a `min()`, vagy csak a `max()`:
+
+```php
+// string, maximum 20 karakter
+Expect::string()->max(20);
+```
+
+
+Szabályos kifejezések: pattern() .[#toc-regular-expressions-pattern]
+--------------------------------------------------------------------
+
+A `pattern()` segítségével megadhatunk egy olyan reguláris kifejezést, amelynek a **összes** bemeneti karakterláncnak meg kell felelnie (azaz mintha a `^` a `$` karakterekbe lenne csomagolva):
+
+```php
+// csak 9 számjegy
+Expect::string()->pattern('\d{9}');
+```
+
+
+assert() .[#toc-custom-assertions-assert]
+-----------------------------------------
+
+Bármilyen más korlátozást is hozzáadhat a `assert(callable $fn)` segítségével.
+
+```php
+$countIsEven = fn($v) => count($v) % 2 === 0;
+
+$schema = Expect::arrayOf('string')
+	->assert($countIsEven); // a számlálásnak párosnak kell lennie
+
+$processor->process($schema, ['a', 'b']); // OK
+$processor->process($schema, ['a', 'b', 'c']); // ERROR: 3 nem páros
+```
+
+Vagy a
+
+```php
+Expect::string()->assert('is_file'); // a fájlnak léteznie kell
+```
+
+Minden egyes állításhoz saját leírást adhat. Ez a hibaüzenet része lesz.
+
+```php
+$schema = Expect::arrayOf('string')
+	->assert($countIsEven, 'Páros elemek a tömbben');
+
+$processor->process($schema, ['a', 'b', 'c']);
+// Sikertelen "Páros elemek a tömbben" állítás a tömb értékű elemre.
+```
+
+A metódus ismételten meghívható további állítások hozzáadásához.
+
+
+Objektumokra való leképezés: from() .[#toc-mapping-to-objects-from]
+-------------------------------------------------------------------
+
+Az osztályból struktúra sémát generálhatunk. Példa:
+
+```php
+class Config
+{
+	public string $name;
+	public string|null $password;
+	public bool $admin = false;
+}
+
+$schema = Expect::from(new Config);
+
+$data = [
+	'name' => 'jeff',
+];
+
+$normalized = $processor->process($schema, $data);
+// $normalized instanceof Config
+// $normalized = {'name' => 'jeff', 'password' => null, 'admin' => false}
+```
+
+Ha a PHP 7.4 vagy magasabb verziószámú PHP-t használ, használhat natív típusokat:
+
+```php
+class Config
+{
+	public string $name;
+	public ?string $password;
+	public bool $admin = false;
+}
+
+$schema = Expect::from(new Config);
+```
+
+A névtelen osztályok is támogatottak:
+
+```php
+$schema = Expect::from(new class {
+	public string $name;
+	public ?string $password;
+	public bool $admin = false;
+});
+```
+
+A második paraméterrel egyéni sémát adhat az elemekhez, mivel az osztálydefinícióból kapott információ nem feltétlenül elegendő:
+
+```php
+$schema = Expect::from(new Config, [
+	'name' => Expect::string()->pattern('\w:.*'),
+]);
+```
+
+
+Casting: castTo() .[#toc-casting-castto]
+----------------------------------------
+
+Sikeresen érvényesített adatok önthetők:
+
+```php
+Expect::scalar()->castTo('string');
+```
+
+A natív PHP-típusok mellett osztályokba is átvihetők:
+
+```php
+Expect::scalar()->castTo('AddressEntity');
+```
+
+
+Normalizálás: before() .[#toc-normalization-before]
+---------------------------------------------------
+
+Magát az érvényesítést megelőzően az adatok normalizálhatók a `before()` módszerrel. Példaként legyen egy olyan elemünk, amelynek egy stringekből álló tömbnek kell lennie (pl. `['a', 'b', 'c']`), de a bemenetet egy karakterlánc formájában kapja meg `a b c`:
+
+```php
+$explode = fn($v) => explode(' ', $v);
+
+$schema = Expect::arrayOf('string')
+	->before($explode);
+
+$normalized = $processor->process($schema, 'a b c');
+// OK, visszaadja ['a', 'b', 'c']
+```
+
+{{leftbar: nette:@menu-topics}}

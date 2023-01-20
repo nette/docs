@@ -1,0 +1,174 @@
+Dinamikus snippetek
+*******************
+
+Az alkalmazásfejlesztés során gyakran van szükség AJAX műveletek elvégzésére, például egy táblázat vagy lista egyes soraiban. Példaként választhatjuk, hogy cikkeket listázunk, lehetővé téve a bejelentkezett felhasználó számára, hogy mindegyikhez "tetszik/nem tetszik" minősítést válasszon. A bemutató és a megfelelő sablon kódja AJAX nélkül valahogy így fog kinézni (a legfontosabb részleteket sorolom fel, a kód feltételezi egy szolgáltatás meglétét az értékelések jelölésére és a cikkek gyűjteményének kinyerésére - a konkrét megvalósítás nem fontos a bemutató szempontjából):
+
+```php
+public function handleLike(int $articleId): void
+{
+	$this->ratingService->saveLike($articleId, $this->user->id);
+	$this->redirect('this');
+}
+
+public function handleUnlike(int $articleId): void
+{
+	$this->ratingService->removeLike($articleId, $this->user->id);
+	$this->redirect('this');
+}
+```
+
+Template:
+
+```latte
+<article n:foreach="$articles as $article">
+	<h2>{$article->title}</h2>
+	<div class="content">{$article->content}</div>
+	{if !$article->liked}
+		<a n:href="like! $article->id" class=ajax>I like it</a>
+	{else}
+		<a n:href="unlike! $article->id" class=ajax>I don't like it anymore</a>
+	{/if}
+</article>
+```
+
+
+Ajaxization .[#toc-ajaxization]
+===============================
+
+Vigyük most az AJAX-ot ebbe az egyszerű alkalmazásba. Egy cikk értékelésének megváltoztatása nem elég fontos ahhoz, hogy HTTP-kérést igényeljen átirányítással, így ideális esetben ezt AJAX-szel kell elvégezni a háttérben. Használni fogjuk a [kezelőszkriptet a kiegészítésekből |https://componette.org/vojtech-dobes/nette.ajax.js/] a szokásos konvencióval, hogy az AJAX linkek CSS osztálya a `ajax`.
+
+Azonban hogyan kell ezt konkrétan megtenni? A Nette 2 módszert kínál: a dinamikus snippet módot és a komponens módot. Mindkettőnek megvannak az előnyei és hátrányai, ezért egyenként mutatjuk be őket.
+
+
+A dinamikus snippetek módja .[#toc-the-dynamic-snippets-way]
+============================================================
+
+A Latte terminológiában a dinamikus snippet a `{snippet}` címke egy speciális felhasználási esete, ahol egy változót használunk a snippet nevében. Egy ilyen snippet nem található meg akárhol a sablonban - egy statikus snippetbe, azaz egy szabályos snippetbe, vagy egy `{snippetArea}` belsejébe kell csomagolni. A sablonunkat a következőképpen módosíthatjuk.
+
+
+```latte
+{snippet articlesContainer}
+	<article n:foreach="$articles as $article">
+		<h2>{$article->title}</h2>
+		<div class="content">{$article->content}</div>
+		{snippet article-$article->id}
+			{if !$article->liked}
+				<a n:href="like! $article->id" class=ajax>I like it</a>
+			{else}
+				<a n:href="unlike! $article->id" class=ajax>I don't like it anymore</a>
+			{/if}
+		{/snippet}
+	</article>
+{/snippet}
+```
+
+Minden cikk mostantól egyetlen snippetet definiál, amelynek a címében szerepel a cikk azonosítója. Ezek a snippetek ezután egyetlen snippetbe vannak csomagolva, melynek neve `articlesContainer`. Ha kihagyjuk ezt a csomagoló snippetet, a Latte egy kivétellel figyelmeztet minket.
+
+Már csak az újrarajzolás hozzáadása van hátra a prezentálóhoz - csak a statikus wrappert kell újrarajzolni.
+
+```php
+public function handleLike(int $articleId): void
+{
+	$this->ratingService->saveLike($articleId, $this->user->id);
+	if ($this->isAjax()) {
+		$this->redrawControl('articlesContainer');
+		// $this->redrawControl('article-' . $articleId); -- není potřeba
+	} else {
+		$this->redirect('this');
+	}
+}
+```
+
+Módosítsuk ugyanígy a `handleUnlike()` testvérmetódust, és máris kész az AJAX!
+
+A megoldásnak azonban van egy hátránya. Ha jobban beleássuk magunkat az AJAX-kérés működésébe, kiderül, hogy bár az alkalmazás látszólag hatékony (egy adott cikkhez csak egyetlen részletet ad vissza), valójában az összes részletet megjeleníti a szerveren. A kívánt snippetet elhelyezte a payloadunkban, a többit pedig elvetette (tehát teljesen feleslegesen azokat is lekérte az adatbázisból).
+
+Ahhoz, hogy ezt a folyamatot optimalizáljuk, olyan műveletet kell végrehajtanunk, ahol a `$articles` gyűjteményt átadjuk a sablonhoz (mondjuk a `renderDefault()` metódusban). Ki fogjuk használni azt a tényt, hogy a jelfeldolgozás a jelfeldolgozás előtt történik. `render<Something>` módszerek előtt:
+
+```php
+public function handleLike(int $articleId): void
+{
+	// ...
+	if ($this->isAjax()) {
+		// ...
+		$this->template->articles = [
+			$this->connection->table('articles')->get($articleId),
+		];
+	} else {
+		// ...
+}
+
+public function renderDefault(): void
+{
+	if (!isset($this->template->articles)) {
+		$this->template->articles = $this->connection->table('articles');
+	}
+}
+```
+
+Most, amikor a jel feldolgozása során az összes cikket tartalmazó gyűjtemény helyett csak egy tömböt adunk át a sablonhoz, amely egyetlen cikket tartalmaz - azt, amelyet renderelni és payloadként elküldeni szeretnénk a böngészőnek. Így a `{foreach}` csak egyszer fog megtörténni, és nem lesz renderelve semmilyen extra snippet.
+
+
+Komponens módja .[#toc-component-way]
+=====================================
+
+Egy teljesen más megoldás más megközelítést használ a dinamikus snippetek elkerülésére. A trükk az, hogy az összes logikát egy különálló komponensbe költöztetjük - innentől kezdve nem egy prezenter gondoskodik az értékelés beviteléről, hanem egy dedikált `LikeControl`. Az osztály a következőképpen fog kinézni (emellett tartalmazza majd a `render`, `handleUnlike`, stb. metódusokat is):
+
+```php
+class LikeControl extends Nette\Application\UI\Control
+{
+	public function __construct(
+		private Article $article,
+	) {
+	}
+
+	public function handleLike(): void
+	{
+		$this->ratingService->saveLike($this->article->id, $this->presenter->user->id);
+		if ($this->presenter->isAjax()) {
+			$this->redrawControl();
+		} else {
+			$this->presenter->redirect('this');
+		}
+	}
+}
+```
+
+A komponens sablonja:
+
+```latte
+{snippet}
+	{if !$article->liked}
+		<a n:href="like!" class=ajax>I like it</a>
+	{else}
+		<a n:href="unlike!" class=ajax>I don't like it anymore</a>
+	{/if}
+{/snippet}
+```
+
+Természetesen meg fogjuk változtatni a nézetsablont, és hozzá kell adnunk egy gyárat a prezentálóhoz. Mivel a komponenst annyiszor fogjuk létrehozni, ahány cikket kapunk az adatbázisból, ezért az [Multiplier |application:Multiplier] osztályt fogjuk használni a "sokszorosításhoz".
+
+```php
+protected function createComponentLikeControl()
+{
+	$articles = $this->connection->table('articles');
+	return new Nette\Application\UI\Multiplier(function (int $articleId) use ($articles) {
+		return new LikeControl($articles[$articleId]);
+	});
+}
+```
+
+A sablon nézetet a szükséges minimumra csökkentjük (és teljesen mentesítjük a snippetektől!):
+
+```latte
+<article n:foreach="$articles as $article">
+	<h2>{$article->title}</h2>
+	<div class="content">{$article->content}</div>
+	{control "likeControl-$article->id"}
+</article>
+```
+
+Majdnem készen vagyunk: az alkalmazás mostantól AJAX-ben fog működni. Itt is optimalizálnunk kell az alkalmazást, mert a Nette adatbázis használata miatt a jelfeldolgozás feleslegesen fogja betölteni az összes cikket az adatbázisból egy helyett. Előnye viszont, hogy nem lesz renderelés, mert valójában csak a mi komponensünk kerül renderelésre.
+
+{{priority: -1}}
+{{sitename: Legjobb gyakorlatok}}

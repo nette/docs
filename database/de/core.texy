@@ -1,0 +1,350 @@
+Datenbank-Kern
+**************
+
+.[perex]
+Nette Database Core ist eine Datenbankabstraktionsschicht und bietet Kernfunktionen.
+
+
+Installation .[#toc-installation]
+=================================
+
+Laden Sie das Paket herunter und installieren Sie es mit [Composer |best-practices:composer]:
+
+```shell
+composer require nette/database
+```
+
+
+Verbindung und Konfiguration .[#toc-connection-and-configuration]
+=================================================================
+
+Um eine Verbindung zur Datenbank herzustellen, erstellen Sie einfach eine Instanz der Klasse [api:Nette\Database\Connection]:
+
+```php
+$database = new Nette\Database\Connection($dsn, $user, $password);
+```
+
+Der Parameter `$dsn` (Name der Datenquelle) ist [derselbe, der auch von PDO verwendet wird |https://www.php.net/manual/en/pdo.construct.php#refsect1-pdo.construct-parameters], z. B. `host=127.0.0.1;dbname=test`. Im Falle eines Fehlers wird `Nette\Database\ConnectionException` ausgelöst.
+
+Eine anspruchsvollere Methode bietet jedoch die [Anwendungskonfiguration |configuration]. Wir fügen einen Abschnitt `database` hinzu, der die erforderlichen Objekte und ein Datenbank-Panel in der [Tracy-Leiste |tracy:] erstellt.
+
+```neon
+database:
+	dsn: 'mysql:host=127.0.0.1;dbname=test'
+	user: root
+	password: password
+```
+
+Das Verbindungsobjekt [erhalten wir z. B. als Dienst von einem DI-Container |dependency-injection:passing-dependencies]:
+
+```php
+class Model
+{
+	// übergibt Nette\Database\Explorer, um mit der Datenbank-Explorer-Schicht zu arbeiten
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+}
+```
+
+Weitere Informationen finden Sie unter [Datenbankkonfiguration |configuration].
+
+
+Abfragen .[#toc-queries]
+========================
+
+Für Datenbankabfragen verwenden Sie die Methode `query()`, die ein [ResultSet |api:Nette\Database\ResultSet] zurückgibt.
+
+```php
+$result = $database->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+}
+
+echo $result->getRowCount(); // gibt die Anzahl der Zeilen zurück, wenn diese bekannt ist
+```
+
+.[note]
+Über die `ResultSet` ist es möglich, nur einmal zu iterieren, wenn wir mehrere Male iterieren müssen, ist es notwendig, das Ergebnis in das Array über `fetchAll()` Methode zu konvertieren.
+
+Sie können der Abfrage einfach Parameter hinzufügen, beachten Sie das Fragezeichen:
+
+```php
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+$database->query('SELECT * FROM users WHERE name = ? AND active = ?', $name, $active);
+
+$database->query('SELECT * FROM users WHERE id IN (?)', $ids); // $ids ist array
+```
+<div class=warning>
+
+WARNUNG, verketten Sie niemals Zeichenketten, um eine [SQL-Injection-Schwachstelle |https://en.wikipedia.org/wiki/SQL_injection] zu vermeiden!
+/--
+$db->query('SELECT * FROM users WHERE name = ' . $name); // WRONG!!!
+\--
+</div>
+
+Im Falle eines Fehlers löst `query()` entweder `Nette\Database\DriverException` oder einen seiner Abkömmlinge aus:
+
+- [ConstraintViolationException |api:Nette\Database\ConstraintViolationException] - Verletzung einer Beschränkung
+- [ForeignKeyConstraintViolationException |api:Nette\Database\ForeignKeyConstraintViolationException] - ungültiger Fremdschlüssel
+- [NotNullConstraintViolationException |api:Nette\Database\NotNullConstraintViolationException] - Verstoß gegen die NOT NULL-Bedingung
+- [UniqueConstraintViolationException |api:Nette\Database\UniqueConstraintViolationException] - Konflikt eines eindeutigen Index
+
+Zusätzlich zu `query()` gibt es weitere nützliche Methoden:
+
+```php
+// gibt das assoziative Array id => name zurück
+$pairs = $database->fetchPairs('SELECT id, name FROM users');
+
+// gibt alle Zeilen als Array zurück
+$rows = $database->fetchAll('SELECT * FROM users');
+
+// gibt einzelne Zeile zurück
+$row = $database->fetch('SELECT * FROM users WHERE id = ?', $id);
+
+// gibt einzelnes Feld zurück
+$name = $database->fetchField('SELECT name FROM users WHERE id = ?', $id);
+```
+
+Im Falle eines Fehlers werfen alle diese Methoden `Nette\Database\DriverException.`
+
+
+Einfügen, Aktualisieren & Löschen .[#toc-insert-update-delete]
+==============================================================
+
+Der Parameter, den wir in die SQL-Abfrage einfügen, kann auch das Array sein (in diesem Fall ist es möglich, die Platzhalteranweisung `?`), which may be useful for the `INSERT` zu überspringen:
+
+```php
+$database->query('INSERT INTO users ?', [ // hier kann das Fragezeichen weggelassen werden
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978)
+
+$id = $database->getInsertId(); // gibt das automatische Inkrement der eingefügten Zeile zurück
+
+$id = $database->getInsertId($sequence); // oder Sequenzwert
+```
+
+Mehrfaches Einfügen:
+
+```php
+$database->query('INSERT INTO users', [
+	[
+		'name' => 'Jim',
+		'year' => 1978,
+	], [
+		'name' => 'Jack',
+		'year' => 1987,
+	],
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978), ('Jack', 1987)
+```
+
+Wir können auch Dateien, DateTime-Objekte oder [Aufzählungen |https://www.php.net/enumerations] übergeben:
+
+```php
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'created' => new DateTime, // oder $datenbank::literal('NOW()')
+	'avatar' => fopen('image.gif', 'r'), // fügt Dateiinhalt ein
+	'status' => State::New, // enum State
+]);
+```
+
+Zeilen aktualisieren:
+
+```php
+$result = $database->query('UPDATE users SET', [
+	'name' => $name,
+	'year' => $year,
+], 'WHERE id = ?', $id);
+// UPDATE users SET `name` = 'Jim', `year` = 1978 WHERE id = 123
+
+echo $result->getRowCount(); // gibt die Anzahl der betroffenen Zeilen zurück
+```
+
+Für UPDATE können wir die Operatoren `+=` und `-=` verwenden:
+
+```php
+$database->query('UPDATE users SET', [
+	'age+=' => 1, // note +=
+], 'WHERE id = ?', $id);
+// UPDATE users SET `age` = `age` + 1
+```
+
+Löschen:
+
+```php
+$result = $database->query('DELETE FROM users WHERE id = ?', $id);
+echo $result->getRowCount(); // gibt die Anzahl der betroffenen Zeilen zurück
+```
+
+
+Erweiterte Abfragen .[#toc-advanced-queries]
+============================================
+
+Einfügen oder Aktualisieren, wenn sie bereits existiert:
+
+```php
+$database->query('INSERT INTO users', [
+	'id' => $id,
+	'name' => $name,
+	'year' => $year,
+], 'ON DUPLICATE KEY UPDATE', [
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`id`, `name`, `year`) VALUES (123, 'Jim', 1978)
+//   ON DUPLICATE KEY UPDATE `name` = 'Jim', `year` = 1978
+```
+
+Beachten Sie, dass Nette Database den SQL-Kontext erkennt, in den der Array-Parameter eingefügt wird, und den SQL-Code entsprechend aufbaut. So erzeugt er aus dem ersten Array `(id, name, year) VALUES (123, 'Jim', 1978)`, während der zweite in `name = 'Jim', year = 1978` umgewandelt wird.
+
+Wir können auch die Sortierung mit Hilfe eines Arrays beschreiben, wobei die Schlüssel Spaltennamen und die Werte Boolesche Werte sind, die festlegen, ob in aufsteigender Reihenfolge sortiert werden soll:
+
+```php
+$database->query('SELECT id FROM author ORDER BY', [
+	'id' => true, // aufsteigend
+	'name' => false, // absteigend
+]);
+// SELECT id FROM author ORDER BY `id`, `name` DESC
+```
+
+Wenn die Erkennung nicht funktioniert hat, können Sie die Form der Baugruppe mit einem Platzhalter `?` gefolgt von einem Hinweis angeben. Diese Hinweise werden unterstützt:
+
+| ?values | (key1, key2, ...) VALUES (value1, value2, ...)
+| ?set | key1 = wert1, key2 = wert2, ...
+| ?and | Schlüssel1 = Wert1 AND Schlüssel2 = Wert2 ...
+| ?or | key1 = value1 OR key2 = value2 ...
+| ?order | key1 ASC, key2 DESC
+
+Die WHERE-Klausel verwendet den Operator `?and`, so dass die Bedingungen durch `AND` verknüpft werden:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND `year` = 1978
+```
+
+Das kann leicht in `OR` geändert werden, indem man den Platzhalter `?or` verwendet:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE ?or', [
+	'name' => $name,
+	'year' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' OR `year` = 1978
+```
+
+Wir können Operatoren in Bedingungen verwenden:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name <>' => $name,
+	'year >' => $year,
+]);
+// SELECT * FROM users WHERE `name` <> 'Jim' AND `year` > 1978
+```
+
+Und auch Aufzählungen:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => ['Jim', 'Jack'],
+	'role NOT IN' => ['admin', 'owner'], // Aufzählung + Operator NOT IN
+]);
+// SELECT * FROM users WHERE
+//   `name` IN ('Jim', 'Jack') AND `role` NOT IN ('admin', 'owner')
+```
+
+Wir können auch ein Stück benutzerdefinierten SQL-Code einfügen, indem wir das so genannte SQL-Literal verwenden:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year >' => $database::literal('YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (`year` > YEAR())
+```
+
+Alternativ dazu:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (year > YEAR())
+```
+
+SQL-Literal kann auch seine Parameter haben:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > ? AND year < ?', $min, $max),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (year > 1978 AND year < 2017)
+```
+
+Dadurch können wir interessante Kombinationen erstellen:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('?or', [
+		'active' => true,
+		'role' => $role,
+	]),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (`active` = 1 OR `role` = 'admin')
+```
+
+
+Variable Name .[#toc-variable-name]
+===================================
+
+Es gibt einen `?name` Platzhalter, den Sie verwenden, wenn der Tabellen- oder Spaltenname eine Variable ist. (Achtung, erlauben Sie dem Benutzer nicht, den Inhalt einer solchen Variablen zu manipulieren):
+
+```php
+$table = 'blog.users';
+$column = 'name';
+$database->query('SELECT * FROM ?name WHERE ?name = ?', $table, $column, $name);
+// SELECT * FROM `blog`.`users` WHERE `name` = 'Jim'
+```
+
+
+Vorgänge .[#toc-transactions]
+=============================
+
+Es gibt drei Methoden für den Umgang mit Transaktionen:
+
+```php
+$database->beginTransaction();
+
+$database->commit();
+
+$database->rollback();
+```
+
+Einen eleganten Weg bietet die Methode `transaction()`. Sie übergeben den Callback, der in der Transaktion ausgeführt wird. Wenn während der Ausführung eine Ausnahme auftritt, wird die Transaktion abgebrochen, wenn alles gut geht, wird die Transaktion bestätigt.
+
+```php
+$id = $database->transaction(function ($database) {
+	$database->query('DELETE FROM ...');
+	$database->query('INSERT INTO ...');
+	// ...
+	return $database->getInsertId();
+});
+```
+
+Wie Sie sehen können, gibt die Methode `transaction()` den Rückgabewert des Callbacks zurück.
+
+Die Transaktion() kann auch verschachtelt werden, was die Implementierung unabhängiger Repositories vereinfacht.

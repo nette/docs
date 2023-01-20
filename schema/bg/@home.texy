@@ -1,0 +1,446 @@
+Schema: валидиране на данни
+***************************
+
+.[perex]
+Практична библиотека за проверка и нормализиране на структури от данни в съответствие с дадена схема, с интелигентен и лесен за разбиране API.
+
+Инсталация:
+
+```shell
+composer require nette/schema
+```
+
+
+Използване на .[#toc-ispol-zovanie]
+-----------------------------------
+
+В променливата `$schema` имаме схема за валидиране (какво точно означава тя и как да я създадем, ще обясним по-късно), а в променливата `$data` имаме структура от данни, която искаме да валидираме и нормализираме. Това могат да бъдат например данни, изпратени от потребителя чрез API, конфигурационен файл и т.н.
+
+Задачата се изпълнява от класа [api:Nette\Schema\Processor], който обработва входните данни и връща нормализирани данни или при грешка хвърля изключение [api:Nette\Schema\ValidationException].
+
+```php
+$processor = new Nette\Schema\Processor;
+
+try {
+	$normalized = $processor->process($schema, $data);
+} catch (Nette\Schema\ValidationException $e) {
+	echo 'Data is invalid: ' . $e->getMessage();
+}
+```
+
+Методът `$e->getMessages()` връща масив от всички низове на съобщенията, а `$e->getMessageObjects()` връща всички съобщения като обекти "Nette\Schema\Message":https://api.nette.org/schema/master/Nette/Schema/Message.html.
+
+
+Определяне на схема .[#toc-opredelenie-shemy]
+---------------------------------------------
+
+Сега нека създадем схема. С класа [api:Nette\Schema\Expect] всъщност определяме как трябва да изглеждат данните. Да предположим, че входните данни трябва да са структура (например масив), съдържаща елементите `processRefund` от тип bool и `refundAmount` от тип int.
+
+```php
+use Nette\Schema\Expect;
+
+$schema = Expect::structure([
+	'processRefund' => Expect::bool(),
+	'refundAmount' => Expect::int(),
+]);
+```
+
+Смятаме, че дефиницията на схемата изглежда ясна, дори ако я виждате за първи път.
+
+Ще изпратим следните данни за проверка:
+
+```php
+$data = [
+	'processRefund' => true,
+	'refundAmount' => 17,
+];
+
+$normalized = $processor->process($schema, $data); // OK, проходит
+```
+
+Изходът, т.е. стойността `$normalized`, е обектът `stdClass`. Ако искаме резултатът да бъде масив, добавяме преобразуване на схемата `Expect::structure([...])->castTo('array')`.
+
+Всички елементи на структурата са незадължителни и имат стойност по подразбиране `null`. Пример:
+
+```php
+$data = [
+	'refundAmount' => 17,
+];
+
+$normalized = $processor->process($schema, $data); // OK, проходит
+// $normalized = {'processRefund' => null, 'refundAmount' => 17}
+```
+
+Фактът, че стойността по подразбиране е `null`, не означава, че тя ще бъде приета във входните данни `'processRefund' => null`. Не, входните данни трябва да са булеви, т.е. само `true` или `false`. Ще трябва изрично да разрешим `null` чрез `Expect::bool()->nullable()`.
+
+Елементът може да бъде направен задължителен с помощта на `Expect::bool()->required()`. Променяме стойността по подразбиране на `false`, като използваме `Expect::bool()->default(false)` или за кратко `Expect::bool(false)`.
+
+Но какво ще стане, ако искаме да приемаме `1` и `0` в допълнение към булевите числа? Нека изброим валидните стойности, които също нормализираме в булеви:
+
+```php
+$schema = Expect::structure([
+	'processRefund' => Expect::anyOf(true, false, 1, 0)->castTo('bool'),
+	'refundAmount' => Expect::int(),
+]);
+
+$normalized = $processor->process($schema, $data);
+is_bool($normalized->processRefund); // true
+```
+
+Вече знаете основите на това как се дефинира една схема и как се държат отделните елементи на структурата. Сега ще ви покажем какви други елементи могат да се използват при дефинирането на схемата.
+
+
+Типове данни: type() .[#toc-tipy-dannyh-type]
+---------------------------------------------
+
+Всички стандартни типове данни на PHP могат да бъдат изброени в схемата:
+
+```php
+Expect::string($default = null)
+Expect::int($default = null)
+Expect::float($default = null)
+Expect::bool($default = null)
+Expect::null()
+Expect::array($default = [])
+```
+
+И след това всички типове, [поддържани от валидаторите |utils:validators#Expected-Types] чрез `Expect::type('scalar')` или съкратено `Expect::scalar()`. Приемат се и имена на класове или интерфейси, например: `Expect::type('AddressEntity')`.
+
+Можете също така да използвате запис на съюз:
+
+```php
+Expect::type('bool|string|array')
+```
+
+Стойността по подразбиране винаги е `null`, с изключение на `array` и `list`, където тя е празен масив. (Списъкът е масив, индексиран във възходящ числов ред на ключовете от нула, т.е. неасоциативен масив).
+
+
+Масив от стойности: arrayOf() listOf() .[#toc-massiv-znacenij-arrayof-listof]
+-----------------------------------------------------------------------------
+
+Масивът е твърде обща структура, по-полезно е да се посочи точно кои елементи може да съдържа. Например масив, чиито елементи могат да бъдат само низове:
+
+```php
+$schema = Expect::arrayOf('string');
+
+$processor->process($schema, ['hello', 'world']); // OK
+$processor->process($schema, ['a' => 'hello', 'b' => 'world']); // OK
+$processor->process($schema, ['key' => 123]); // ОШИБКА: 123 не строка
+```
+
+Вторият параметър може да се използва за задаване на ключове (от версия 1.2):
+
+```php
+$schema = Expect::arrayOf('string', 'int');
+
+$processor->process($schema, ['hello', 'world']); // OK
+$processor->process($schema, ['a' => 'hello']); // ОШИБКА: 'a' не int
+```
+
+Списъкът е индексиран масив:
+
+```php
+$schema = Expect::listOf('string');
+
+$processor->process($schema, ['a', 'b']); // OK
+$processor->process($schema, ['a', 123]); // ОШИБКА: 123 не строка
+$processor->process($schema, ['key' => 'a']); // ОШИБКА: не список
+$processor->process($schema, [1 => 'a', 0 => 'b']); // ОШИБКА: не список
+```
+
+Параметърът може да бъде и схема, така че можем да напишем
+
+```php
+Expect::arrayOf(Expect::bool())
+```
+
+Стойността по подразбиране е празен масив. Ако посочите стойност по подразбиране, тя ще бъде обединена с предадените данни. Това може да бъде деактивирано с `mergeDefaults(false)` (от версия 1.1 нататък).
+
+
+Изброяване: anyOf() .[#toc-perecislenie-anyof]
+----------------------------------------------
+
+`anyOf()` - е набор от стойности или модели, които могат да бъдат стойност. Ето как да запишете масив от елементи, които могат да бъдат или `'a'`, или `true`, или `null`:
+
+```php
+$schema = Expect::listOf(
+	Expect::anyOf('a', true, null),
+);
+
+$processor->process($schema, ['a', true, null, 'a']); // OK
+$processor->process($schema, ['a', false]); // ОШИБКА: false тут не место
+```
+
+Елементите на изброяване могат да бъдат и схеми:
+
+```php
+$schema = Expect::listOf(
+	Expect::anyOf(Expect::string(), true, null),
+);
+
+$processor->process($schema, ['foo', true, null, 'bar']); // OK
+$processor->process($schema, [123]); // ОШИБКА
+```
+
+Методът `anyOf()` приема варианти като отделни параметри, а не като масив. За да му предадете масив от стойности, използвайте оператора за разопаковане `anyOf(...$variants)`.
+
+Стойността по подразбиране е `null`. Използвайте метода `firstIsDefault()`, за да направите първия елемент по подразбиране:
+
+```php
+// по подразбиране е 'hello'
+Expect::anyOf(Expect::string('hello'), true, null)->firstIsDefault();
+```
+
+
+Структури .[#toc-struktury]
+---------------------------
+
+Структурите са обекти с определени ключове. Всяка от тези двойки ключ => стойност се нарича "свойство":
+
+Структурите приемат масиви и обекти и връщат обекти `stdClass` (освен ако не ги промените с `castTo('array')` и т.н.).
+
+По подразбиране всички свойства са незадължителни и имат стойност по подразбиране `null`. Можете да дефинирате задължителни свойства, като използвате `required()`:
+
+```php
+$schema = Expect::structure([
+	'required' => Expect::string()->required(),
+	'optional' => Expect::string(), // стойността по подразбиране е null
+]);
+
+$processor->process($schema, ['optional' => '']);
+// Грешка: липсва опцията 'required'
+
+$processor->process($schema, ['required' => 'foo']);
+// ОК, връща {'required' => 'foo', 'optional' => null}
+```
+
+Ако не искате да извеждате свойствата само със стойността по подразбиране, използвайте `skipDefaults()`:
+
+```php
+$schema = Expect::structure([
+	'required' => Expect::string()->required(),
+	'optional' => Expect::string(),
+])->skipDefaults();
+
+$processor->process($schema, ['required' => 'foo']);
+// OK, возвращает {'required' => 'foo'}
+```
+
+Въпреки че `null` е стойността по подразбиране на свойството `optional`, тя не е разрешена във входа (стойността трябва да бъде низ). Свойствата, приемащи стойността `null`, се дефинират с помощта на `nullable()`:
+
+```php
+$schema = Expect::structure([
+	'optional' => Expect::string(),
+	'nullable' => Expect::string()->nullable(),
+]);
+
+$processor->process($schema, ['optional' => null]);
+// ГРЕШКА: очаква се 'optional' да бъде низ, но е предоставен null.
+
+$processor->process($schema, ['nullable' => null]);
+// ОК, връща {'optional' => null, 'nullable' => null}
+```
+
+По подразбиране във входните данни не може да има допълнителни елементи:
+
+```php
+$schema = Expect::structure([
+	'key' => Expect::string(),
+]);
+
+$processor->process($schema, ['additional' => 1]);
+// ERROR: Неочакван елемент 'additional'
+```
+
+Променяйте подобни елементи с `otherItems()`. Ще посочим схемата за всеки допълнителен елемент като параметър:
+
+```php
+$schema = Expect::structure([
+	'key' => Expect::string(),
+])->otherItems(Expect::int());
+
+$processor->process($schema, ['additional' => 1]); // OK
+$processor->process($schema, ['additional' => true]); // ОШИБКА
+```
+
+
+Остарели елементи .[#toc-ustarevsie-elementy]
+---------------------------------------------
+
+Можете да обявите дадено свойство за неактуално с помощта на `deprecated([string $message])`. Остарелите известия се връщат с помощта на `$processor->getWarnings()`:
+
+```php
+$schema = Expect::structure([
+	'old' => Expect::int()->deprecated('Элемент %path% устарел'),
+]);
+
+$processor->process($schema, ['old' => 1]); // OK
+$processor->getWarnings(); // ["Элемент 'old' устарел"]
+```
+
+
+Обхвати: min() max() .[#toc-diapazony-min-max]
+----------------------------------------------
+
+Използвайте `min()` и `max()`, за да ограничите броя на елементите в масивите:
+
+```php
+// масив, минимум 10 елемента, максимум 20 елемента
+Expect::array()->min(10)->max(20);
+```
+
+За низове ограничете дължината им:
+
+```php
+// низ, дълъг най-малко 10 символа, максимум 20 символа
+Expect::string()->min(10)->max(20);
+```
+
+За числата ограничете тяхната стойност:
+
+```php
+// цяло число, от 10 до 20 включително
+Expect::int()->min(10)->max(20);
+```
+
+Разбира се, можете да споменете само `min()`, или само `max()`:
+
+```php
+// низ, максимум 20 символа
+Expect::string()->max(20);
+```
+
+
+Редовни изрази: pattern() .[#toc-regulyarnye-vyrazeniya-pattern]
+----------------------------------------------------------------
+
+С помощта на `pattern()`, можете да зададете регулярен израз, който да съвпада с **всички** от входния низ (т.е. все едно е обвит в `^` a `$` символи):
+
+```php
+// само 9 цифри
+Expect::string()->pattern('\d{9}');
+```
+
+
+Потребителски оператори: assert() .[#toc-pol-zovatel-skie-utverzdeniya-assert]
+------------------------------------------------------------------------------
+
+Можете да добавите други ограничения, като използвате `assert(callable $fn)`.
+
+```php
+$countIsEven = fn($v) => count($v) % 2 === 0;
+
+$schema = Expect::arrayOf('string')
+	->assert($countIsEven); // числото трябва да е четно
+
+$processor->process($schema, ['a', 'b']); // OK
+$processor->process($schema, ['a', 'b', 'c']); // ERROR: 3 - нечетно число
+```
+
+Или
+
+```php
+Expect::string()->assert('is_file'); // файлът трябва да съществува
+```
+
+Можете да добавите собствено описание за всяко твърдение. Това ще бъде част от съобщението за грешка.
+
+```php
+$schema = Expect::arrayOf('string')
+	->assert($countIsEven, 'Even elements in array');
+
+$processor->process($schema, ['a', 'b', 'c']);
+// Неуспешно изпълнение на командата "Дори елементи в масив" за елемент с масив от стойности.
+```
+
+Този метод може да бъде извикан многократно за добавяне на нови твърдения.
+
+
+Съпоставяне с обекти: from() .[#toc-sopostavlenie-s-ob-ektami-from]
+-------------------------------------------------------------------
+
+От класа може да се генерира структурна схема. Пример:
+
+```php
+class Config
+{
+	public string $name;
+	public string|null $password;
+	public bool $admin = false;
+}
+
+$schema = Expect::from(new Config);
+
+$data = [
+	'name' => 'jeff',
+];
+
+$normalized = $processor->process($schema, $data);
+// $normalized instanceof Config
+// $normalized = {'name' => 'jeff', 'password' => null, 'admin' => false}
+```
+
+Ако използвате PHP 7.4 или по-нова версия, можете да използвате вградените типове:
+
+```php
+class Config
+{
+	public string $name;
+	public ?string $password;
+	public bool $admin = false;
+}
+
+$schema = Expect::from(new Config);
+```
+
+Поддържат се и анонимни класове:
+
+```php
+$schema = Expect::from(new class {
+	public string $name;
+	public ?string $password;
+	public bool $admin = false;
+});
+```
+
+Тъй като информацията от дефиницията на класа може да не е достатъчна, можете да добавите потребителска схема за елементите с втори параметър:
+
+```php
+$schema = Expect::from(new Config, [
+	'name' => Expect::string()->pattern('\w:.*'),
+]);
+```
+
+
+Заличаване: castTo() .[#toc-privedenie-castto]
+----------------------------------------------
+
+Успешно тестваните данни могат да бъдат изхвърлени:
+
+```php
+Expect::scalar()->castTo('string');
+```
+
+В допълнение към собствените типове на PHP можете също така да се обръщате към класове:
+
+```php
+Expect::scalar()->castTo('AddressEntity');
+```
+
+
+Нормализация: преди() .[#toc-normalizaciya-before]
+--------------------------------------------------
+
+Преди самото валидиране данните могат да бъдат нормализирани с помощта на метода `before()`. Като пример, нека има елемент, който трябва да бъде масив от низове (напр, `['a', 'b', 'c']`), но получава вход като низ `a b c`:
+
+```php
+$explode = fn($v) => explode(' ', $v);
+
+$schema = Expect::arrayOf('string')
+	->before($explode);
+
+$normalized = $processor->process($schema, 'a b c');
+// OK, возвращает ['a', 'b', 'c']
+```
+
+{{leftbar: nette:@menu-topics}}

@@ -1,0 +1,260 @@
+Cablagem automática
+*******************
+
+.[perex]
+A fiação automática é uma grande característica que pode passar automaticamente os serviços para o construtor e outros métodos, portanto, não precisamos escrevê-los de forma alguma. Isso economiza muito tempo.
+
+Isto nos permite saltar a grande maioria dos argumentos ao escrever definições de serviços. Ao invés de:
+
+```neon
+services:
+	articles: Model\ArticleRepository(@database, @cache.storage)
+```
+
+Basta escrever:
+
+```neon
+services:
+	articles: Model\ArticleRepository
+```
+
+A fiação automática é feita por tipos, portanto `ArticleRepository` classe deve ser definida como segue:
+
+```php
+namespace Model;
+
+class ArticleRepository
+{
+	public function __construct(\PDO $db, \Nette\Caching\Storage $storage)
+	{}
+}
+```
+
+Para utilizar a fiação automática, deve haver ** apenas um serviço** para cada tipo no contêiner. Se houvesse mais, o cabeamento automático não saberia qual deles passar e jogar fora uma exceção:
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+	tempDb: PDO('sqlite::memory:')
+	articles: Model\ArticleRepository  # EXCEPÇÃO, tanto a mainDb como a tempDb combinam
+```
+
+A solução seria contornar a fiação automática e declarar explicitamente o nome do serviço (ou seja, `articles: Model\ArticleRepository(@mainDb)`). Entretanto, é mais conveniente [desativar |#Disabled autowiring] a fiação automática de um serviço, ou o primeiro serviço [prefere |#Preferred Autowiring].
+
+
+Desligamento automático .[#toc-disabled-autowiring]
+---------------------------------------------------
+
+Você pode desativar o serviço de cabeamento automático usando a opção `autowired: no`:
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+		autowired: false # remove a tempDb da autowiring
+
+	articles: Model\ArticleRepository    # portanto passa o mainDb para o construtor
+```
+
+O serviço `articles` não lança a exceção de que existem dois serviços correspondentes do tipo `PDO` (ou seja, `mainDb` e `tempDb`) que podem ser passados ao construtor, pois ele só vê o serviço `mainDb`.
+
+.[note]
+A configuração da fiação automática em Nette funciona de forma diferente da Symfony, onde a opção `autowire: false` diz que a fiação automática não deve ser usada para argumentos de construção de serviços.
+Em Nette, a fiação automática é sempre usada, seja para argumentos do construtor ou para qualquer outro método. A opção `autowired: false` diz que a instância de serviço não deve ser aprovada em nenhum lugar usando a fiação automática.
+
+
+Fiação automática preferencial .[#toc-preferred-autowiring]
+-----------------------------------------------------------
+
+Se tivermos mais serviços do mesmo tipo e um deles tiver a opção `autowired`, este serviço se torna o preferido:
+
+```neon
+services:
+	mainDb:
+		create: PDO(%dsn%, %user%, %password%)
+		autowired: PDO    # faz com que seja preferível
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+
+	articles: Model\ArticleRepository
+```
+
+O serviço `articles` não lança a exceção de que existem dois serviços correspondentes `PDO` (ou seja, `mainDb` e `tempDb`), mas utiliza o serviço preferido, ou seja, `mainDb`.
+
+
+Coleção de serviços .[#toc-collection-of-services]
+--------------------------------------------------
+
+A fiação automática também pode passar uma série de serviços de um determinado tipo. Uma vez que o PHP não pode nativamente anotar o tipo de itens de array, além do tipo `array`, um comentário phpDoc com o tipo de item como `ClassName[]` deve ser adicionado:
+
+```php
+namespace Model;
+
+class ShipManager
+{
+	/**
+	 * @param Shipper[] $shippers
+	 */
+	public function __construct(array $shippers)
+	{}
+}
+```
+
+O recipiente DI passa então automaticamente uma série de serviços que correspondem ao tipo dado. Ele irá omitir serviços que tenham a fiação automática desligada.
+
+Se você não pode controlar a forma do comentário phpDoc, você pode passar uma série de serviços diretamente na configuração usando [`typed()` |services#Special Functions].
+
+
+Argumentos escalares .[#toc-scalar-arguments]
+---------------------------------------------
+
+A cablagem automática só pode passar objetos e matrizes de objetos. Argumentos escalares (por exemplo, cordas, números, booleanos) [escrevem em configuração |services#Arguments].
+Uma alternativa é criar um [objeto-objeto de configuração |best-practices:passing-settings-to-presenters] que encapsula um valor escalar (ou múltiplos valores) como um objeto, que pode então ser passado novamente usando a fiação automática.
+
+```php
+class MySettings
+{
+	public function __construct(
+		// somente leitura pode ser usado desde PHP 8.1
+		public readonly bool $value,
+	)
+	{}
+}
+```
+
+Você cria um serviço ao adicioná-lo à configuração:
+
+```neon
+services:
+	- MySettings('any value')
+```
+
+Todas as classes o solicitarão então por meio de fiação automática.
+
+
+Estreitamento da fiação automática .[#toc-narrowing-of-autowiring]
+------------------------------------------------------------------
+
+Para serviços individuais, a fiação automática pode ser restringida a classes ou interfaces específicas.
+
+Normalmente, a cablagem automática passa o serviço para cada parâmetro do método a cujo tipo o serviço corresponde. Estreitamento significa que especificamos as condições que os tipos especificados para os parâmetros do método devem satisfazer para que o serviço lhes seja passado.
+
+Vejamos um exemplo:
+
+```php
+class ParentClass
+{}
+
+class ChildClass extends ParentClass
+{}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+Se todos eles fossem registrados como serviços, a fiação automática falharia:
+
+```neon
+services:
+	parent: ParentClass
+	child: ChildClass
+	parentDep: ParentDependent  # THROWS EXCEPTION, both parent and child matches
+	childDep: ChildDependent    # passa o serviço 'criança' para o construtor
+```
+
+O serviço `parentDep` lança a exceção `Multiple services of type ParentClass found: parent, child` porque tanto `parent` quanto `child` cabem em seu construtor e a fiação automática não pode tomar uma decisão sobre qual escolher.
+
+Para o serviço `child`, podemos, portanto, reduzir sua fiação automática para `ChildClass`:
+
+```neon
+services:
+	parent: ParentClass
+	child:
+		create: ChildClass
+		autowired: ChildClass  # alternativa para a classe infantil: 'autowired: autowired'
+
+	paiDep: ParentDependent    # THROWS EXCEPTION, the 'child' can not be autowired
+	childDep: ChildDependent   # passa o serviço 'criança' para o construtor
+```
+
+O serviço `parentDep` é agora passado para o construtor de serviços `parentDep`, uma vez que agora é o único objeto correspondente. O serviço `child` não é mais passado por auto-cablagem. Sim, o serviço `child` ainda é do tipo `ParentClass`, mas a condição de estreitamento dada para o tipo de parâmetro não se aplica mais, ou seja, não é mais verdade que `ParentClass` * é um supertipo* de `ChildClass`.
+
+No caso do `child`, `autowired: ChildClass` poderia ser escrito como `autowired: self`, pois o `self` significa tipo de serviço atual.
+
+A chave `autowired` pode incluir várias classes e interfaces como matriz:
+
+```neon
+autowired: [BarClass, FooInterface]
+```
+
+Vamos tentar acrescentar interfaces ao exemplo:
+
+```php
+interface FooInterface
+{}
+
+interface BarInterface
+{}
+
+class ParentClass implements FooInterface
+{}
+
+class ChildClass extends ParentClass implements BarInterface
+{}
+
+class FooDependent
+{
+	function __construct(FooInterface $obj)
+	{}
+}
+
+class BarDependent
+{
+	function __construct(BarInterface $obj)
+	{}
+}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+Quando não limitarmos o serviço `child`, ele caberá nos construtores de todas as classes `FooDependent`, `BarDependent`, `ParentDependent` e `ChildDependent` e a fiação automática o passará por lá.
+
+No entanto, se limitarmos sua fiação automática a `ChildClass` usando `autowired: ChildClass` (ou `self`), a fiação automática só passa para o construtor `ChildDependent`, pois requer um argumento do tipo `ChildClass` e `ChildClass` *é do tipo* `ChildClass`. Nenhum outro tipo especificado para os outros parâmetros é um superconjunto de `ChildClass`, portanto, o serviço não é passado.
+
+Se restringirmos a `ParentClass` usando `autowired: ParentClass`, a fiação automática passará novamente para o construtor `ChildDependent` (já que o tipo requerido `ChildClass` é um superconjunto de `ParentClass`) e para o construtor `ParentDependent` também, já que o tipo requerido de `ParentClass` também é compatível.
+
+Se o restringirmos a `FooInterface`, ele ainda fará a ligação automática para `ParentDependent` (o tipo exigido `ParentClass` é um supertipo de `FooInterface`) e `ChildDependent`, mas além do construtor `FooDependent`, mas não para `BarDependent`, já que `BarInterface` não é um supertipo de `FooInterface`.
+
+```neon
+services:
+	child:
+		create: ChildClass
+		autowired: FooInterface
+
+	fooDep: FooDependent        # passa a criança de serviço para o construtor
+	barDep: BarDependent        # EXCEPÇÃO DE GARANTIAS, nenhum serviço passaria
+	parentDep: ParentDependent  # passa a criança de serviço para o construtor
+	childDep: ChildDependent    # passa a criança de serviço para o construtor
+```

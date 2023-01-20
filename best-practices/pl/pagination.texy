@@ -1,0 +1,277 @@
+Paginacja wyników bazy danych
+*****************************
+
+.[perex]
+Podczas tworzenia aplikacji internetowych często spotkasz się z wymogiem ograniczenia liczby elementów wyszczególnionych na stronie.
+
+Zaczynamy od stanu, w którym wypisujemy wszystkie dane bez paginacji. Do wybierania danych z bazy mamy klasę ArticleRepository, która oprócz konstruktora zawiera metodę `findPublishedArticles`, która zwraca wszystkie opublikowane artykuły posortowane w porządku malejącym według daty publikacji.
+
+```php
+namespace App\Model;
+
+use Nette;
+
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+
+	public function findPublishedArticles(): Nette\Database\ResultSet
+	{
+		return $this->database->query('
+			SELECT * FROM articles
+			WHERE created_at < ?
+			ORDER BY created_at DESC',
+			new \DateTime,
+		);
+	}
+}
+```
+
+Następnie wstrzykujemy klasę modelu w prezenterze i w metodzie render żądamy opublikowanych artykułów do przekazania do szablonu:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(): void
+	{
+		$this->template->articles = $this->articleRepository->findPublishedArticles();
+	}
+}
+```
+
+W szablonie zajmujemy się następnie wyszczególnieniem artykułów:
+
+```latte
+{block content}
+<h1>Články</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+```
+
+
+W ten sposób możemy wymienić wszystkie artykuły, ale spowoduje to problemy, gdy liczba artykułów wzrośnie. Wtedy właśnie przydaje się implementacja mechanizmu paginacji.
+
+Dzięki temu wszystkie artykuły zostaną podzielone na wiele stron, a my wyświetlimy tylko artykuły z jednej bieżącej strony. [Paginator |utils:Paginator] sam obliczy całkowitą liczbę stron i podział artykułów, w zależności od tego ile mamy artykułów w sumie i ile artykułów na stronę chcemy wyświetlić.
+
+W pierwszym kroku modyfikujemy metodę pobierania artykułów w klasie repozytorium tak, aby zwracała ona artykuły tylko dla jednej strony. Dodamy też metodę, która pozwoli nam uzyskać całkowitą liczbę artykułów w bazie, co będzie nam potrzebne do skonfigurowania Paginatora:
+
+```php
+namespace App\Model;
+
+use Nette;
+
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+
+	public function findPublishedArticles(int $limit, int $offset): Nette\Database\ResultSet
+	{
+		return $this->database->query('
+			SELECT * FROM articles
+			WHERE created_at < ?
+			ORDER BY created_at DESC
+			LIMIT ?
+			OFFSET ?',
+			new \DateTime, $limit, $offset,
+		);
+	}
+
+	/**
+	 * Vrací celkový počet publikovaných článků
+	 */
+	public function getPublishedArticlesCount(): int
+	{
+		return $this->database->fetchField('SELECT COUNT(*) FROM articles WHERE created_at < ?', new \DateTime);
+	}
+}
+```
+
+Następnie zabierzemy się do pracy nad modyfikacją prezentera. Do metody render przekażemy numer aktualnie wyświetlanej strony. W przypadku, gdy ten numer nie jest częścią adresu URL, ustawimy domyślną wartość pierwszej strony.
+
+Następnie rozszerzymy również metodę render, aby uzyskać instancję Paginatora, skonfigurować ją i wybrać odpowiednie artykuły do wyświetlenia w szablonie. HomepagePresenter po modyfikacjach będzie wyglądał tak:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(int $page = 1): void
+	{
+		// Uzyskaj całkowitą liczbę opublikowanych artykułów
+		$articlesCount = $this->articleRepository->getPublishedArticlesCount();
+
+		// Utwórz instancję Paginatora i skonfiguruj ją
+		$paginator = new Nette\Utils\Paginator;
+		$paginator->setItemCount($articlesCount); // całkowita liczba artykułów
+		$paginator->setItemsPerPage(10); // ilość elementów na stronie
+		$paginator->setPage($page); // aktualny numer strony
+
+		// Wyciągamy z bazy ograniczony zestaw artykułów według obliczeń Paginatora
+		$articles = $this->articleRepository->findPublishedArticles($paginator->getLength(), $paginator->getOffset());
+
+		// które przekażemy do szablonu
+		$this->template->articles = $articles;
+		// a także sam Paginator, aby wyświetlić opcje paginacji
+		$this->template->paginator = $paginator;
+	}
+}
+```
+
+Szablon już iteruje po tylko artykułach jednej strony, musimy tylko dodać linki paginacji:
+
+```latte
+{block content}
+<h1>Články</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+
+<div class="pagination">
+	{if !$paginator->isFirst()}
+		<a n:href="default, 1">První</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->page-1">Předchozí</a>
+		&nbsp;|&nbsp;
+	{/if}
+
+	Stránka {$paginator->getPage()} z {$paginator->getPageCount()}
+
+	{if !$paginator->isLast()}
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->getPage() + 1">Další</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->getPageCount()">Poslední</a>
+	{/if}
+</div>
+```
+
+
+W ten sposób dodaliśmy do strony paginację Paginator. W przypadku, gdy jako warstwy bazy danych użyjemy [Nette |database:core] Database [Explorer |database:explorer] zamiast [Nette Database Core |database:core], jesteśmy w stanie zaimplementować paginację bez użycia Paginatora. Klasa `Nette\Database\Table\Selection` zawiera metodę [page |api:Nette\Database\Table\Selection::_page] z logiką paginacji zaczerpniętą z Paginatora.
+
+Repozytorium będzie wyglądać tak z tą implementacją:
+
+```php
+namespace App\Model;
+
+use Nette;
+
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Explorer $database,
+	) {
+	}
+
+
+	public function findPublishedArticles(): Nette\Database\Table\Selection
+	{
+		return $this->database->table('articles')
+			->where('created_at < ', new \DateTime)
+			->order('created_at DESC');
+	}
+}
+```
+
+Nie musimy tworzyć Paginatora w prezenterze, zamiast tego używamy metody klasy `Selection` zwracanej przez repozytorium:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(int $page = 1): void
+	{
+		// Vytáhneme si publikované články
+		$articles = $this->articleRepository->findPublishedArticles();
+
+		// i przesłać do szablonu tylko tę ich część, która jest ograniczona przez obliczenie metody strony
+		$lastPage = 0;
+		$this->template->articles = $articles->page($page, 10, $lastPage);
+
+		// a także dane niezbędne do wyświetlenia opcji paginacji
+		$this->template->page = $page;
+		$this->template->lastPage = $lastPage;
+	}
+}
+```
+
+Ponieważ nie wysyłamy teraz Paginatora do szablonu, wyedytujemy część pokazującą linki paginacji:
+
+```latte
+{block content}
+<h1>Články</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+
+<div class="pagination">
+	{if $page > 1}
+		<a n:href="default, 1">První</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $page - 1">Předchozí</a>
+		&nbsp;|&nbsp;
+	{/if}
+
+	Stránka {$page} z {$lastPage}
+
+	{if $page < $lastPage}
+		&nbsp;|&nbsp;
+		<a n:href="default, $page + 1">Další</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $lastPage">Poslední</a>
+	{/if}
+</div>
+```
+
+W ten sposób zaimplementowaliśmy mechanizm paginacji bez użycia Paginatora.
+
+{{priority: -1}}
+{{sitename: Najlepsze praktyki}}

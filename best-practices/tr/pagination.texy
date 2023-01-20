@@ -1,0 +1,277 @@
+Veritabanı Sonuçlarını Sayfalandırma
+************************************
+
+.[perex]
+Web uygulamaları geliştirirken, genellikle bir sayfada sınırlı sayıda kayıt yazdırma gereksinimiyle karşılaşırsınız.
+
+Tüm verileri sayfalama yapmadan listelediğimizde durumdan çıkarız. Veritabanından veri seçmek için, yapıcı ve yayınlanma tarihine göre azalan sırada sıralanmış tüm yayınlanmış makaleleri döndüren `findPublishedArticles` yöntemini içeren ArticleRepository sınıfımız var.
+
+```php
+namespace App\Model;
+
+use Nette;
+
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+
+	public function findPublishedArticles(): Nette\Database\ResultSet
+	{
+		return $this->database->query('
+			SELECT * FROM articles
+			WHERE created_at < ?
+			ORDER BY created_at DESC',
+			new \DateTime,
+		);
+	}
+}
+```
+
+Presenter'da daha sonra model sınıfını enjekte edeceğiz ve render yönteminde şablona aktardığımız yayınlanmış makaleleri isteyeceğiz:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(): void
+	{
+		$this->template->articles = $this->articleRepository->findPublishedArticles();
+	}
+}
+```
+
+Şablonda, bir makale listesi oluşturmaya özen göstereceğiz:
+
+```latte
+{block content}
+<h1>Articles</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+```
+
+
+Bu şekilde tüm makaleleri yazabiliriz, ancak makale sayısı arttığında bu sorunlara neden olacaktır. O noktada sayfalama mekanizmasını uygulamak faydalı olacaktır.
+
+Bu, tüm makalelerin birkaç sayfaya bölünmesini ve yalnızca geçerli bir sayfanın makalelerini göstermemizi sağlayacaktır. Toplam sayfa sayısı ve makalelerin dağılımı, toplam kaç makalemiz olduğuna ve sayfada kaç makale görüntülemek istediğimize bağlı olarak [Paginator |utils:Paginator] tarafından hesaplanır.
+
+İlk adımda, repository sınıfındaki makaleleri alma yöntemini yalnızca tek sayfalık makaleleri döndürecek şekilde değiştireceğiz. Ayrıca, veritabanındaki toplam makale sayısını almak için yeni bir yöntem ekleyeceğiz, bu da bir Paginator ayarlamamız gerekecek:
+
+```php
+namespace App\Model;
+
+use Nette;
+
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+
+	public function findPublishedArticles(int $limit, int $offset): Nette\Database\ResultSet
+	{
+		return $this->database->query('
+			SELECT * FROM articles
+			WHERE created_at < ?
+			ORDER BY created_at DESC
+			LIMIT ?
+			OFFSET ?',
+			new \DateTime, $limit, $offset,
+		);
+	}
+
+	/**
+	 * Returns the total number of published articles
+	 */
+	public function getPublishedArticlesCount(): int
+	{
+		return $this->database->fetchField('SELECT COUNT(*) FROM articles WHERE created_at < ?', new \DateTime);
+	}
+}
+```
+
+Bir sonraki adım sunucuyu düzenlemektir. Şu anda görüntülenen sayfanın numarasını render yöntemine ileteceğiz. Bu numaranın URL'nin bir parçası olmaması durumunda, varsayılan değeri ilk sayfaya ayarlamamız gerekir.
+
+Ayrıca Paginator örneğini almak, ayarlamak ve şablonda görüntülenecek doğru makaleleri seçmek için render yöntemini genişletiyoruz. HomepagePresenter şu şekilde görünecektir:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(int $page = 1): void
+	{
+		// Yayınlanan toplam makale sayısını bulacağız
+		$articlesCount = $this->articleRepository->getPublishedArticlesCount();
+
+		// Paginator örneğini oluşturacağız ve ayarlayacağız
+		$paginator = new Nette\Utils\Paginator;
+		$paginator->setItemCount($articlesCount); // toplam makale sayısı
+		$paginator->setItemsPerPage(10); // sayfa başına öğe
+		$paginator->setPage($page); // gerçek sayfa numarası
+
+		// Paginator'ın hesaplamalarına dayanarak veritabanından sınırlı sayıda makale bulacağız
+		$articles = $this->articleRepository->findPublishedArticles($paginator->getLength(), $paginator->getOffset());
+
+		// şablona aktardığımız
+		$this->template->articles = $articles;
+		// ve ayrıca sayfalama seçeneklerini görüntülemek için Paginator'ın kendisi
+		$this->template->paginator = $paginator;
+	}
+}
+```
+
+Şablon zaten bir sayfadaki makaleleri yineliyor, sadece sayfalama bağlantıları ekleyin:
+
+```latte
+{block content}
+<h1>Articles</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+
+<div class="pagination">
+	{if !$paginator->isFirst()}
+		<a n:href="default, 1">First</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->page-1">Previous</a>
+		&nbsp;|&nbsp;
+	{/if}
+
+	Page {$paginator->getPage()} of {$paginator->getPageCount()}
+
+	{if !$paginator->isLast()}
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->getPage() + 1">Next</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->getPageCount()">Last</a>
+	{/if}
+</div>
+```
+
+
+Paginator kullanarak sayfalamayı bu şekilde ekledik. Veritabanı katmanı olarak Nette Database [Core |database:core] yerine Nette [Database Explorer |database:explorer] kullanılırsa, Paginator olmadan da sayfalama uygulayabiliriz. `Nette\Database\Table\Selection` sınıfı, Paginator'dan alınan sayfalama mantığı ile [sayfa |api:Nette\Database\Table\Selection::_ page] yöntemini içerir.
+
+Depo şu şekilde görünecektir:
+
+```php
+namespace App\Model;
+
+use Nette;
+
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Explorer $database,
+	) {
+	}
+
+
+	public function findPublishedArticles(): Nette\Database\Table\Selection
+	{
+		return $this->database->table('articles')
+			->where('created_at < ', new \DateTime)
+			->order('created_at DESC');
+	}
+}
+```
+
+Presenter'da Paginator oluşturmak zorunda değiliz, bunun yerine repository tarafından döndürülen `Selection` nesnesinin yöntemini kullanacağız:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(int $page = 1): void
+	{
+		// Yayınlanmış makaleler bulacağız
+		$articles = $this->articleRepository->findPublishedArticles();
+
+		// ve bunların şablona aktaracağımız sayfa yöntemi hesaplamasıyla sınırlı kısmı
+		$lastPage = 0;
+		$this->template->articles = $articles->page($page, 10, $lastPage);
+
+		// ve sayfalama seçeneklerini de görüntülemek için gerekli veriler
+		$this->template->page = $page;
+		$this->template->lastPage = $lastPage;
+	}
+}
+```
+
+Paginator kullanmadığımız için sayfalama linklerini gösteren bölümü düzenlememiz gerekiyor:
+
+```latte
+{block content}
+<h1>Articles</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+
+<div class="pagination">
+	{if $page > 1}
+		<a n:href="default, 1">First</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $page - 1">Previous</a>
+		&nbsp;|&nbsp;
+	{/if}
+
+	Page {$page} of {$lastPage}
+
+	{if $page < $lastPage}
+		&nbsp;|&nbsp;
+		<a n:href="default, $page + 1">Next</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $lastPage">Last</a>
+	{/if}
+</div>
+```
+
+Bu şekilde, Paginator kullanmadan bir sayfalama mekanizması uyguladık.
+
+{{priority: -1}}
+{{sitename: En İyi Uygulamalar}}

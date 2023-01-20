@@ -1,0 +1,371 @@
+A latte a biztonság szinonimája
+*******************************
+<div class=perex>
+
+
+A Latte az egyetlen PHP templating rendszer, amely hatékony védelmet nyújt a kritikus Cross-site Scripting (XSS) sebezhetőség ellen. Ez az úgynevezett kontextusérzékeny escapingnek köszönhető. Beszéljünk róla!
+
+- mi az XSS sebezhetőség elve és miért olyan veszélyes ez a sebezhetőség
+- mitől olyan hatékony a Latte az XSS elleni védekezésben
+- miért lehet a Twig, a Blade és más sablonok könnyen kompromittálhatóak
+
+</div>
+
+
+Cross-Site Scripting (XSS) .[#toc-cross-site-scripting-xss]
+===========================================================
+
+A Cross-site Scripting (röviden XSS) az egyik leggyakoribb sebezhetőség a weboldalakon, méghozzá nagyon veszélyes. Lehetővé teszi a támadó számára, hogy rosszindulatú szkriptet (úgynevezett malware-t) illesszen be egy idegen webhelyre, amely a gyanútlan felhasználó böngészőjében végrehajtódik.
+
+Mire képes egy ilyen szkript? Például tetszőleges tartalmat küldhet a veszélyeztetett webhelyről a támadónak, beleértve a bejelentkezés után megjelenített érzékeny adatokat is. Módosíthatja az oldalt, vagy egyéb kéréseket intézhet a felhasználó nevében.
+Ha például webmailről lenne szó, akkor elolvashatná az érzékeny üzeneteket, módosíthatná a megjelenített tartalmat, vagy megváltoztathatná a beállításokat, például bekapcsolhatná az összes üzenet másolatának továbbítását a támadó címére, hogy hozzáférjen a jövőbeli e-mailekhez.
+
+Ez az oka annak is, hogy az XSS vezeti a legveszélyesebb sebezhetőségek listáját. Ha egy weboldalon sebezhetőséget fedeznek fel, azt a lehető leghamarabb el kell távolítani a kihasználás megakadályozása érdekében.
+
+
+Hogyan keletkezik a sebezhetőség? .[#toc-how-does-the-vulnerability-arise]
+--------------------------------------------------------------------------
+
+A hiba ott jelentkezik, ahol a weblap generálása és a változók kinyomtatása történik. Képzeljük el, hogy létrehozunk egy keresőoldalt, és az elején lesz egy bekezdés a kereső kifejezéssel a formában:
+
+```php
+echo '<p>Search results for <em>' . $search . '</em></p>';
+```
+
+A támadó bármilyen karakterláncot írhat, beleértve a HTML kódot is, mint például `<script>alert("Hacked!")</script>`, a keresőmezőbe és így a `$search` változóba. Mivel a kimenet nincs semmilyen módon szanálva, a megjelenített oldal részévé válik:
+
+```html
+<p>Search results for <em><script>alert("Hacked!")</script></em></p>
+```
+
+A keresési karakterlánc kiadása helyett a böngésző JavaScriptet hajt végre. És így a támadó átveszi az oldal irányítását.
+
+Lehet azzal érvelni, hogy a kódnak egy változóba való beírása valóban végrehajtja a JavaScriptet, de csak a támadó böngészőjében. Hogyan jut el az áldozathoz? Ebből a szempontból többféle XSS-típust különböztethetünk meg. A keresőoldali példánkban *reflected XSS*-ről beszélünk.
+Ebben az esetben az áldozatot arra kell rávenni, hogy kattintson egy olyan linkre, amelynek paraméterében rosszindulatú kód van:
+
+```
+https://example.com/?search=<script>alert("Hacked!")</script>
+```
+
+Bár némi social engineeringre van szükség ahhoz, hogy a felhasználó rávegye magát a linkre, ez nem nehéz. A felhasználók különösebb gondolkodás nélkül kattintanak a linkekre, akár e-mailekben, akár a közösségi médiában. Az pedig, hogy a címben valami gyanús dolog van, az URL-rövidítővel elfedhető, így a felhasználó csak a `bit.ly/xxx` címet látja.
+
+Létezik azonban egy második, sokkal veszélyesebb támadási forma, az úgynevezett *stored XSS* vagy *persistent XSS*, amikor a támadónak sikerül rosszindulatú kódot tárolnia a szerveren, hogy az automatikusan beilleszkedjen bizonyos oldalakba.
+
+Erre példa az olyan weboldalak, ahol a felhasználók hozzászólásokat tesznek közzé. A támadó elküld egy kódot tartalmazó hozzászólást, és az elmentésre kerül a szerveren. Ha az oldal nem elég biztonságos, akkor ez a kód minden látogató böngészőjében lefut.
+
+Úgy tűnik, hogy a támadás lényege az, hogy a `<script>` karakterláncot az oldalba. Valójában "a JavaScript beágyazásának számos módja:https://cheatsheetseries.owasp.org/cheatsheets/XSS_Filter_Evasion_Cheat_Sheet.html van".
+Vegyünk egy példát a HTML-attribútummal történő beágyazásra. Legyen egy fotógalériánk, ahol a képekhez beilleszthetünk egy feliratot, amely a `alt` attribútumban jelenik meg:
+
+```php
+echo '<img src="' . $imageFile . '" alt="' . $imageAlt . '">';
+```
+
+Egy támadónak csak be kell illesztenie egy ügyesen felépített sztringet `" onload="alert('Hacked!')` címként, és ha a kimenet nincs szanitizálva, az eredményül kapott kód így fog kinézni:
+
+```html
+<img src="photo0145.webp" alt="" onload="alert('Hacked!')">
+```
+
+A hamis `onload` attribútum most az oldal részévé válik. A böngésző a benne lévő kódot fogja végrehajtani, amint a kép letöltődik. Feltörték!
+
+
+Hogyan védekezzünk az XSS ellen? .[#toc-how-to-defend-against-xss]
+------------------------------------------------------------------
+
+Bármilyen támadás észlelésére irányuló kísérlet egy feketelista segítségével, például a `<script>` karakterláncot stb. nem elegendő. A működőképes védelem alapja az oldalon belül kiírt összes adat **következetes szanálása**.
+
+Ez mindenekelőtt azt jelenti, hogy minden különleges jelentéssel rendelkező karaktert más, megfelelő szekvenciákkal helyettesítünk, amit a szlengben **escaping**-nek nevezünk (a szekvencia első karakterét nevezzük escape-karakternek, innen a név).
+Például a HTML-szövegben a `<` has a special meaning, which, if it is not to be interpreted as the beginning of a tag, must be replaced by a visually corresponding sequence, the so-called HTML entity `&lt;`.
+A böngésző pedig kiír egy karaktert.
+
+**Nagyon fontos megkülönböztetni, hogy milyen kontextusban történik a kimenet**. A különböző kontextusok ugyanis másképp szanálják a karakterláncokat. A különböző karakterek különböző kontextusokban speciális jelentéssel bírnak.
+Például a HTML-szövegben, a HTML-attribútumokban, néhány speciális elemen belül stb. eltérő az escaping. Ezt egy pillanat múlva részletesen tárgyaljuk.
+
+A legjobb, ha az escapinget közvetlenül akkor végezzük el, amikor a karakterlánc kiírásra kerül az oldalon, biztosítva, hogy ez valóban megtörténjen, és csak egyszer. A legjobb, ha a feldolgozást **automatikusan** közvetlenül a templating rendszer kezeli.
+Mert ha a kezelés nem automatikusan történik, a programozó elfelejtheti. Egyetlen mulasztás pedig azt jelenti, hogy az oldal sebezhetővé válik.
+
+Az XSS azonban nem csak a sablonok adatainak kimenetét érinti, hanem az alkalmazás más részeit is, amelyeknek megfelelően kell kezelniük a nem megbízható adatokat. Például az alkalmazásban a JavaScript nem használhatja a `innerHTML` címet velük együtt, hanem csak a `innerText` vagy a `textContent` címet.
+Különös gondot kell fordítani a karakterláncokat kiértékelő függvényekre, mint például a JavaScript, amely a `eval()`, de a `setTimeout()` is, vagy a `setAttribute()` használata az eseményattribútumokkal, mint például a `onload`, stb. Ez azonban túlmutat a sablonok által lefedett területen.
+
+Az **ideális 3 pontos védelem:**
+
+1) Ismerje fel a kontextust, amelyben az adatok kikerülnek.
+2) Az adatokat az adott kontextus szabályai szerint szanálja (azaz "kontextustudatos").
+3) ezt automatikusan végzi
+
+
+Kontextus-tudatos menekülés .[#toc-context-aware-escaping]
+==========================================================
+
+Mit jelent pontosan a kontextus szó? A dokumentum egy olyan helyét, amely saját szabályokkal rendelkezik a kiadandó adatok kezelésére. Ez a dokumentum típusától függ (HTML, XML, CSS, JavaScript, sima szöveg, ...), és a dokumentum egyes részein változhat.
+Például egy HTML-dokumentumban sok ilyen hely (kontextus) van, ahol nagyon különböző szabályok érvényesek. Meglepődhet, hogy mennyi van belőlük. Íme az első négy:
+
+```html
+<p>#text</p>
+<img src="#attribute">
+<textarea>#rawtext</textarea>
+<!-- #comment -->
+```
+
+A HTML-oldal kezdeti és alapvető kontextusa a HTML-szöveg. Mik itt a szabályok? A `<` and `&` különleges jelentésű karakterek egy tag vagy entitás kezdetét jelölik, ezért ezeket a HTML-entitással (`<` with `&lt;`, `&` with `&amp`) helyettesítve kell kikerülnünk.
+
+A második leggyakoribb szövegkörnyezet egy HTML-attribútum értéke. Ez annyiban különbözik a szövegtől, hogy a különleges jelentés itt az attribútumot határoló idézőjelre `"` or `'` vonatkozik. Ezt entitásként kell megírni, hogy ne az attribútum végének tekintsék.
+Másrészt a `&lt;` karakter nyugodtan használható egy attribútumban, mert itt nincs különleges jelentése; nem értelmezhető egy tag vagy megjegyzés kezdetének.
+De vigyázat, a HTML-ben az attribútumértékeket idézőjelek nélkül is írhatjuk, ilyenkor egy egész sor karakter különleges jelentéssel bír, tehát ez egy másik, külön kontextus.
+
+Talán meglepő, de a `<textarea>` és a `<title>` elemekben, ahol a `<` character need not (but can) be escaped unless followed by `/`. De ez inkább csak érdekesség.
+
+Érdekes a HTML-kommentárok belsejében. Itt a HTML-egységek nem használnak escapinget. Nincs olyan specifikáció, amely még azt is előírja, hogy hogyan kell escaping a megjegyzésekben.
+Csak követni kell a kissé "furcsa szabályokat":https://html.spec.whatwg.org/multipage/syntax.html#comments, és kerülni kell bennük bizonyos karakterkombinációkat.
+
+A kontextusok is lehetnek rétegzettek, ami akkor történik, amikor JavaScriptet vagy CSS-t ágyazunk be a HTML-be. Ez kétféleképpen történhet, elemenként vagy attribútumonként:
+
+```html
+<script>#js-element</script>
+<img onclick="#js-attribute">
+
+<style>#css-element</style>
+<p style="#css-attribute"></p>
+```
+
+Kétféleképpen és kétféleképpen lehet az adatokat elszkanderezni. A `<script>` és a `<style>` elemeken belül, mint a HTML-kommentárok esetében, a HTML-egységek használatával történő eszkábálás nem történik meg. Az ilyen elemeken belül az adatok eszkábálásakor csak egy szabály van: a szöveg nem tartalmazhatja a `</script`, illetve a `</style` szekvenciát.
+
+A `style` és a `on***` attribútumokat viszont HTML-egységek segítségével kell szkanderezni.
+
+És természetesen a beágyazott JavaScript vagy CSS elemeken belül az adott nyelvek escaping szabályai érvényesek. Tehát egy olyan attribútumban lévő karakterláncot, mint a `onload`, először a JS-szabályok, majd a HTML-attribútum szabályai szerint eszkábáljuk.
+
+Ugh... Mint látható, a HTML egy nagyon összetett dokumentum, kontextusok rétegeivel, és anélkül, hogy pontosan tudnám, hol adom ki az adatokat (azaz milyen kontextusban), nem lehet megmondani, hogyan csináljam helyesen.
+
+
+Szeretne egy példát? .[#toc-do-you-want-an-example]
+---------------------------------------------------
+
+Legyen egy string `Rock'n'Roll`.
+
+Ha HTML-szövegként adjuk ki, ebben az esetben nem kell semmilyen helyettesítést végeznünk, mert a karakterlánc nem tartalmaz semmilyen különleges jelentésű karaktert. Más a helyzet, ha egy szimpla idézőjelek közé zárt HTML-attribútumon belül írjuk ki. Ebben az esetben az idézőjeleket HTML-egységekké kell szednie:
+
+```html
+<div title='Rock&apos;n&apos;Roll'></div>
+```
+
+Ez egyszerű volt. Sokkal érdekesebb helyzet áll elő, ha a kontextus rétegzett, például ha a karakterlánc része a JavaScript.
+
+Tehát először kiírjuk magába a JavaScriptbe. Vagyis idézőjelekbe csomagoljuk, és egyúttal a benne lévő idézőjeleket a `\` karakterrel eszkábáljuk:
+
+```js
+'Rock\'n\'Roll'
+```
+
+Hozzáadhatunk egy függvényhívást, hogy a kód csináljon valamit:
+
+```js
+alert('Rock\'n\'Roll');
+```
+
+Ha ezt a kódot beillesztjük egy HTML-dokumentumba a következővel `<script>`, nem kell semmi mást módosítanunk, mert a tiltott `</script` szekvencia nincs jelen:
+
+```html
+<script> alert('Rock\'n\'Roll'); </script>
+```
+
+Ha azonban be akarjuk illeszteni egy HTML-attribútumba, akkor továbbra is szükségünk van az idézőjelek HTML-egységekbe történő szedésére:
+
+```html
+<div onclick='alert(&apos;Rock\&apos;n\&apos;Roll&apos;)'></div>
+```
+
+A beágyazott kontextusnak azonban nem csak JS-nek vagy CSS-nek kell lennie. Ez általában egy URL is. Az URL-ekben szereplő paramétereket a speciális karakterek `%` kezdetű szekvenciákká alakításával szüntetjük meg. Példa:
+
+```
+https://example.org/?a=Jazz&b=Rock%27n%27Roll
+```
+
+Amikor pedig ezt a karakterláncot egy attribútumban adjuk ki, akkor is a kontextusnak megfelelően alkalmazzuk az escapinget, és a `&` with `&amp` helyébe a :
+
+```html
+<a href="https://example.org/?a=Jazz&amp;b=Rock%27n%27Roll">
+```
+
+Ha idáig elolvastad, gratulálok, kimerítő volt. Most már van egy jó elképzelésed arról, hogy mi a kontextus és az escaping. És nem kell aggódnod amiatt, hogy bonyolult. A Latte ezt automatikusan megteszi helyetted.
+
+
+Latte vs. Naiv rendszerek .[#toc-latte-vs-naive-systems]
+========================================================
+
+Megmutattuk, hogyan kell megfelelően eszkábálni egy HTML dokumentumban, és hogy mennyire fontos ismerni a kontextust, azaz azt, hogy hol adjuk ki az adatokat. Más szóval, hogyan működik a kontextusérzékeny escaping.
+Bár ez előfeltétele a funkcionális XSS-védelemnek, **a **Latte az egyetlen olyan PHP templating rendszer, amely ezt megteszi.**
+
+Hogyan lehetséges ez, amikor manapság minden rendszer azt állítja, hogy automatikus escapinggel rendelkezik?
+Az automatikus menekítés a kontextus ismerete nélkül egy kis baromság, amely **hamis biztonságérzetet kelt**.
+
+Az olyan sablonkészítő rendszerek, mint a Twig, Laravel Blade és mások nem látnak semmilyen HTML struktúrát a sablonban. Ezért nem látják a kontextusokat sem. A Latte-hoz képest vakok és naivak. Csak a saját markupjukat kezelik, minden más egy irreleváns karakterfolyam számukra:
+
+<div class="juxtapose juxtapose--dark-handle" data-startingposition="80" data-animation="juxtapose-wiper">
+
+```twig .{file:Twig template as seen by Twig himself}
+░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░
+░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░{{ text }}░░░░
+```
+
+```twig .{file:Twig template as the designer sees it}
+- in text: <span>{{ text }}</span>
+- in tag: <span {{ text }} ></span>
+- in attribute: <span title='{{ text }}'></span>
+- in unquoted attribute: <span title={{ text }}></span>
+- in attribute containing URL: <a href="{{ text }}"></a>
+- in attribute containing JavaScript: <img onload="{{ text }}">
+- in attribute containing CSS: <span style="{{ text }}"></span>
+- in JavaScriptu: <script>var = {{ text }}</script>
+- in CSS: <style>body { content: {{ text }}; }</style>
+- in comment: <!-- {{ text }} -->
+```
+
+</div>
+
+A naiv rendszerek egyszerűen mechanikusan konvertálják a `< > & ' "` karaktereket HTML-egységekké, ami a legtöbb felhasználásnál érvényes módja az escapingnek, de messze nem mindig. Így nem képesek felismerni vagy megelőzni a különböző biztonsági réseket, amint azt az alábbiakban bemutatjuk.
+
+A Latte ugyanúgy látja a sablont, mint te. Érti a HTML-t, az XML-t, felismeri a címkéket, attribútumokat stb. És ennek köszönhetően különbséget tesz a kontextusok között, és ennek megfelelően kezeli az adatokat. Így valóban hatékony védelmet nyújt a kritikus Cross-site Scripting sebezhetőség ellen.
+
+
+Élő bemutató .[#toc-live-demonstration]
+=======================================
+
+Balra látható a sablon a Latte-ban, jobbra pedig a generált HTML kód. A `$text` változó többször is kikerül, minden alkalommal kissé eltérő kontextusban. És ezért egy kicsit másképp is eszkábálódik. A sablon kódját maga is szerkesztheti, például megváltoztathatja a változó tartalmát stb. Próbálja ki:
+
+<div class="grid fiddle wiki-expanded">
+<div class="contains-pre">
+
+``` .{file:template.latte; min-height: 14em}[fiddle-source]
+{* TRY TO EDIT THIS TEMPLATE *}
+{var $text = "Rock'n'Roll"}
+- <span>{$text}</span>
+- <span title='{$text}'></span>
+- <span title={$text}></span>
+- <img onload="{$text}">
+- <script>var = {$text}</script>
+- <!-- {$text} -->
+```
+
+</div>
+
+<div class="contains-pre">
+
+``` .{file:view-source:...; min-height: 14em}[fiddle-output]
+- <span>Rock'n'Roll</span>
+- <span title='Rock&apos;n&apos;Roll'></span>
+- <span title="Rock&apos;n&apos;Roll"></span>
+- <img onload="&quot;Rock&apos;n&apos;Roll&quot;">
+- <script>var = "Rock'n'Roll"</script>
+- <!-- Rock'n'Roll -->
+```
+
+</div>
+</div>
+
+Hát nem nagyszerű! A Latte automatikusan elvégzi a kontextusfüggő eszkópálást, így a programozó:
+
+- nem kell gondolkodnia, vagy tudnia, hogyan kell az adatokat kikerülni.
+- nem tévedhet
+- nem tud róla megfeledkezni
+
+Ezek még csak nem is az összes olyan kontextus, amelyet a Latte megkülönböztet a kiadáskor, és amelyre testre szabja az adatok kezelését. Most további érdekes eseteket fogunk végigvenni.
+
+
+Hogyan hackeljük meg a naiv rendszereket .[#toc-how-to-hack-naive-systems]
+==========================================================================
+
+Néhány gyakorlati példán keresztül mutatjuk be, hogy mennyire fontos a kontextus megkülönböztetés, és hogy a naiv templating rendszerek miért nem nyújtanak elegendő védelmet az XSS ellen, ellentétben a Latte-val.
+A példákban a Twig-et fogjuk használni egy naiv rendszer képviselőjeként, de ugyanez vonatkozik más rendszerekre is.
+
+
+Attribútum sebezhetőség .[#toc-attribute-vulnerability]
+-------------------------------------------------------
+
+Próbáljunk meg rosszindulatú kódot bejuttatni az oldalba a HTML attribútum segítségével, ahogy azt [fentebb bemutattuk |#How does the vulnerability arise]. Legyen egy Twig sablonunk, amely egy képet jelenít meg:
+
+```twig .{file:Twig}
+<img src={{ imageFile }} alt={{ imageAlt }}>
+```
+
+Vegyük észre, hogy az attribútum értékei körül nincsenek idézőjelek. A kódoló talán elfelejtette őket, ami csak úgy megtörténik. A Reactban például a kódot így, idézőjelek nélkül írják, és egy nyelvváltás közbeni kódoló könnyen elfelejtheti az idézőjeleket.
+
+A támadó egy ügyesen felépített sztringet illeszt be `foo onload=alert('Hacked!')` képaláírásként. Azt már tudjuk, hogy a Twig nem tudja megmondani, hogy egy változót egy HTML-szövegfolyamban, egy attribútumon belül, egy HTML-kommentárban stb. ír ki; röviden, nem tesz különbséget a kontextusok között. És csak mechanikusan konvertálja a `< > & ' "` karaktereket HTML-egységekké.
+Így az eredményül kapott kód így fog kinézni:
+
+```html
+<img src=photo0145.webp alt=foo onload=alert(&#039;Hacked!&#039;)>
+```
+
+**Egy biztonsági rés keletkezett!**
+
+Egy hamis `onload` attribútum az oldal részévé vált, és a böngésző a kép letöltése után azonnal végrehajtja azt.
+
+Most nézzük meg, hogyan kezeli a Latte ugyanazt a sablont:
+
+```latte .{file:Latte}
+<img src={$imageFile} alt={$imageAlt}>
+```
+
+Latte ugyanúgy látja a sablont, mint te. A Twiggel ellentétben megérti a HTML-t, és tudja, hogy egy változó olyan attribútumértékként kerül kiírásra, amely nincs idézőjelben. Ezért adja hozzá őket. Ha egy támadó beilleszti ugyanazt a feliratot, a kapott kód így fog kinézni:
+
+```html
+<img src="photo0145.webp" alt="foo onload=alert(&apos;Hacked!&apos;)">
+```
+
+**Sikeresen megakadályozta az XSS-t.**
+
+
+Változó nyomtatása JavaScriptben .[#toc-printing-a-variable-in-javascript]
+--------------------------------------------------------------------------
+
+A kontextusérzékeny eszkópolásnak köszönhetően a PHP-változókat natívan használhatjuk JavaScriptben.
+
+```latte
+<p onclick="alert({$movie})">{$movie}</p>
+
+<script>var movie = {$movie};</script>
+```
+
+Ha a `$movie` változó a `'Amarcord & 8 1/2'` karakterláncot tárolja, a következő kimenetet generálja. Figyeljük meg a HTML-ben és a JavaScriptben, valamint a `onclick` attribútumban használt eltérő eszkópálást:
+
+```latte
+<p onclick="alert(&quot;Amarcord &amp; 8 1\/2&quot;)">Amarcord &amp; 8 1/2</p>
+
+<script>var movie = "Amarcord & 8 1\/2";</script>
+```
+
+
+Linkellenőrzés .[#toc-link-checking]
+------------------------------------
+
+A Latte automatikusan ellenőrzi, hogy a `src` vagy a `href` attribútumban használt változó tartalmaz-e webes URL-t (azaz HTTP protokollt), és megakadályozza a biztonsági kockázatot jelentő linkek írását.
+
+```latte
+{var $link = 'javascript:attack()'}
+
+<a href="{$link}">click here</a>
+```
+
+Írja:
+
+```latte
+<a href="">click here</a>
+```
+
+Az ellenőrzés kikapcsolható a [nocheck |filters#nocheck] szűrővel.
+
+
+A Latte határai .[#toc-limits-of-latte]
+=======================================
+
+A Latte nem nyújt teljes XSS-védelmet az egész alkalmazás számára. Nem örülnénk, ha a Latte használatakor nem gondolna a biztonságra.
+A Latte célja annak biztosítása, hogy egy támadó ne tudja megváltoztatni az oldal szerkezetét, nem tudja manipulálni a HTML elemeket vagy attribútumokat. De nem ellenőrzi a kimenő adatok tartalmi helyességét. Vagy a JavaScript viselkedés helyességét.
+Ez túlmutat a templating rendszer hatáskörén. Az adatok helyességének ellenőrzése, különösen a felhasználó által bevitt és így nem megbízható adatoké, a programozó fontos feladata.

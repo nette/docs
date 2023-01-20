@@ -1,0 +1,194 @@
+Bővítmények létrehozása a Nette DI számára
+******************************************
+
+.[perex]
+A DI konténer generálása a konfigurációs fájlok mellett az úgynevezett *bővítményekre* is hatással van. Ezeket a konfigurációs fájlban a `extensions` szakaszban aktiváljuk.
+
+Így adjuk hozzá a `BlogExtension` osztály által képviselt kiterjesztést a `blog` névvel:
+
+```neon
+extensions:
+	blog: BlogExtension
+```
+
+Minden fordítóbővítmény a [api:Nette\DI\CompilerExtension] osztályból örököl, és a következő metódusokat tudja megvalósítani, amelyeket a DI-fordítás során hívunk meg:
+
+1. getConfigSchema()
+2. loadConfiguration()
+3. beforeCompile()
+4. afterCompile()
+
+
+getConfigSchema() .[method]
+===========================
+
+Ezt a módszert hívjuk meg először. Meghatározza a konfigurációs paraméterek érvényesítésére használt sémát.
+
+A kiterjesztések konfigurálása egy olyan szakaszban történik, amelynek neve megegyezik azzal, amelyik alatt a kiterjesztést hozzáadták, pl. `blog`.
+
+```neon
+# ugyanaz a név, mint a kiterjesztésem
+blog:
+	postsPerPage: 10
+	comments: false
+```
+
+Meghatározunk egy sémát, amely leírja az összes konfigurációs opciót, beleértve azok típusait, elfogadott értékeit és esetlegesen alapértelmezett értékeit:
+
+```php
+use Nette\Schema\Expect;
+
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function getConfigSchema(): Nette\Schema\Schema
+	{
+		return Expect::structure([
+			'postsPerPage' => Expect::int(),
+			'allowComments' => Expect::bool()->default(true),
+		]);
+	}
+}
+```
+
+Lásd a dokumentációt a [sémában |schema:]. Ezen kívül a `dynamic()` segítségével megadhatjuk, hogy mely opciók lehetnek [dinamikusak |application:bootstrap#Dynamic Parameters], például a `Expect::int()->dynamic()` segítségével.
+
+A konfigurációhoz a `$this->config` segítségével férünk hozzá, amely a `stdClass` objektum:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		$num = $this->config->postPerPage;
+		if ($this->config->allowComments) {
+			// ...
+		}
+	}
+}
+```
+
+
+loadConfiguration() .[method]
+=============================
+
+Ezt a metódust arra használjuk, hogy szolgáltatásokat adjunk hozzá a konténerhez. Ez a [api:Nette\DI\ContainerBuilder] segítségével történik:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		$builder = $this->getContainerBuilder();
+		$builder->addDefinition($this->prefix('articles'))
+			->setFactory(App\Model\HomepageArticles::class, ['@connection']) // vagy setCreator()
+			->addSetup('setLogger', ['@logger']);
+	}
+}
+```
+
+A konvenció az, hogy a kiterjesztés által hozzáadott szolgáltatásokat a saját nevükkel előtagozzák, hogy ne alakuljanak ki névkonfliktusok. Ezt a `prefix()` teszi, így ha a kiterjesztés neve "blog", akkor a szolgáltatás neve `blog.articles` lesz.
+
+Ha át kell neveznünk egy szolgáltatást, akkor a visszafelé kompatibilitás fenntartása érdekében létrehozhatunk egy aliast az eredeti névvel. Hasonlóképpen ezt teszi a Nette pl. a `routing.router`, amely a korábbi `router` néven is elérhető.
+
+```php
+$builder->addAlias('router', 'routing.router');
+```
+
+
+Szolgáltatások lekérdezése egy fájlból .[#toc-retrieve-services-from-a-file]
+----------------------------------------------------------------------------
+
+Szolgáltatásokat a ContainerBuilder API segítségével hozhatunk létre, de a már ismert NEON konfigurációs fájlon és annak `services` szakaszán keresztül is hozzáadhatunk szolgáltatásokat. A `@extension` előtag az aktuális kiterjesztést jelöli.
+
+```neon
+services:
+	articles:
+		create: MyBlog\ArticlesModel(@connection)
+
+	comments:
+		create: MyBlog\CommentsModel(@connection, @extension.articles)
+
+	articlesList:
+		create: MyBlog\Components\ArticlesList(@extension.articles)
+```
+
+Mi így fogunk szolgáltatásokat hozzáadni:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		$builder = $this->getContainerBuilder();
+
+		// a kiterjesztés konfigurációs fájljának betöltése
+		$this->compiler->loadDefinitionsFromConfig(
+			$this->loadFromFile(__DIR__ . '/blog.neon')['services'],
+		);
+	}
+}
+```
+
+
+beforeCompile() .[method]
+=========================
+
+A metódus akkor hívódik meg, amikor a konténer tartalmazza a `loadConfiguration` metódusban az egyes bővítmények által hozzáadott összes szolgáltatást, valamint a felhasználói konfigurációs fájlokat. Az összerakás ezen fázisában aztán módosíthatjuk a szolgáltatásdefiníciókat, vagy hozzáadhatunk linkeket közöttük. A `findByTag()` metódus segítségével címkék alapján kereshetünk szolgáltatásokat, a `findByType()` metódus segítségével pedig osztály vagy interfész alapján.
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function beforeCompile()
+	{
+		$builder = $this->getContainerBuilder();
+
+		foreach ($builder->findByTag('logaware') as $serviceName => $tagValue) {
+			$builder->getDefinition($serviceName)->addSetup('setLogger');
+		}
+	}
+}
+```
+
+
+afterCompile() .[method]
+========================
+
+Ebben a fázisban a konténer osztály már [ClassType |php-generator:#classes] objektumként generálódik, tartalmazza az összes metódust, amelyet a szolgáltatás létrehoz, és PHP fájlként készen áll a gyorsítótárazásra. A keletkező osztály kódját ezen a ponton még szerkeszthetjük.
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function afterCompile(Nette\PhpGenerator\ClassType $class)
+	{
+		$method = $class->getMethod('__construct');
+		// ...
+	}
+}
+```
+
+
+$inicializálás .[wiki-method]
+=============================
+
+A konfigurátor a [konténer létrehozása |application:bootstrap#index.php] után hívja meg az inicializálási kódot, amely a `$this->initialization` objektumba való írással jön létre az [addBody() metódus |php-generator:#method-and-function-body] segítségével.
+
+Mutatunk egy példát arra, hogyan indíthatunk el egy munkamenetet vagy indíthatunk el szolgáltatásokat, amelyek a `run` címkével rendelkeznek az inicializálási kód segítségével:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		// automatikus munkamenet indítás
+		if ($this->config->session->autoStart) {
+			$this->initialization->addBody('$this->getService("session")->start()');
+		}
+
+		// a 'run' címkével ellátott szolgáltatásokat a konténer példányosítása után kell létrehozni.
+		$builder = $this->getContainerBuilder();
+		foreach ($builder->findByTag('run') as $name => $foo) {
+			$this->initialization->addBody('$this->getService(?);', [$name]);
+		}
+	}
+}
+```

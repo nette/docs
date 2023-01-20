@@ -1,0 +1,292 @@
+Hozzáférés-szabályozás (engedélyezés)
+*************************************
+
+.[perex]
+Az engedélyezés határozza meg, hogy egy felhasználó rendelkezik-e elegendő jogosultsággal például egy adott erőforrás eléréséhez vagy egy művelet végrehajtásához. Az engedélyezés feltételezi a korábbi sikeres hitelesítést, azaz azt, hogy a felhasználó be van jelentkezve.
+
+→ [Telepítés és követelmények |@home#Installation]
+
+A példákban egy [api:Nette\Security\User] osztályú objektumot fogunk használni, amely az aktuális felhasználót reprezentálja, és amelyet [függőségi injektálással |dependency-injection:passing-dependencies] történő átadással kapunk meg. A prezenterekben egyszerűen hívjuk meg a `$user = $this->getUser()`.
+
+Nagyon egyszerű adminisztrációval rendelkező weboldalak esetében, ahol nem különböztetünk meg felhasználói jogokat, a már ismert `isLoggedIn()` módszert használhatjuk jogosultsági kritériumként. Más szóval: ha egy felhasználó egyszer bejelentkezett, akkor minden művelethez rendelkezik jogosultsággal, és fordítva.
+
+```php
+if ($user->isLoggedIn()) { // be van jelentkezve a felhasználó?
+	deleteItem(); // ha igen, akkor törölhet egy elemet.
+}
+```
+
+
+Szerepkörök .[#toc-roles]
+-------------------------
+
+A szerepek célja, hogy pontosabb jogosultságkezelést biztosítsanak, és függetlenek maradjanak a felhasználónévtől. Amint a felhasználó bejelentkezik, egy vagy több szerepet kap. Maguk a szerepkörök egyszerű karakterláncok lehetnek, például `admin`, `member`, `guest`, stb. Ezeket a `SimpleIdentity` konstruktor második argumentumában kell megadni, akár sztringként, akár tömbként.
+
+Engedélyezési kritériumként most a `isInRole()` metódust fogjuk használni, amely ellenőrzi, hogy a felhasználó a megadott szerepkörben van-e:
+
+```php
+if ($user->isInRole('admin')) { // admin szerepkör van a felhasználóhoz rendelve?
+	deleteItem(); // ha igen, akkor törölhet egy elemet.
+}
+```
+
+Mint már tudjuk, a felhasználó kijelentkezése nem törli a személyazonosságát. Így a `getIdentity()` metódus továbbra is a `SimpleIdentity` objektumot adja vissza, beleértve az összes megadott szerepet. A Nette Framework a "kevesebb kód, több biztonság" elvét követi, így a szerepek ellenőrzése során nem kell ellenőrizni, hogy a felhasználó be van-e jelentkezve is. A `isInRole()` módszer **hatékony szerepekkel** dolgozik, azaz ha a felhasználó be van jelentkezve, akkor az identitáshoz rendelt szerepek kerülnek felhasználásra, ha nincs bejelentkezve, akkor egy automatikus speciális szerepkör, a `guest` kerül felhasználásra.
+
+
+Engedélyező .[#toc-authorizator]
+--------------------------------
+
+A szerepek mellett bevezetjük az erőforrás és a művelet fogalmakat is:
+
+- A **szerep** egy felhasználói attribútum - például moderátor, szerkesztő, látogató, regisztrált felhasználó, adminisztrátor, ...
+- **forrás** az alkalmazás logikai egysége - cikk, oldal, felhasználó, menüpont, szavazás, előadó, ...
+- **művelet** az a konkrét tevékenység, amelyet a felhasználó a *forrással* végezhet vagy nem végezhet - megtekintés, szerkesztés, törlés, szavazás, ...
+
+Az engedélyező egy olyan objektum, amely eldönti, hogy egy adott *szerep* jogosult-e egy bizonyos *művelet* végrehajtására egy adott *forrással*. Ez egy olyan objektum, amely a [api:Nette\Security\Authorizator] interfészt valósítja meg, egyetlen metódussal: `isAllowed()`:
+
+```php
+class MyAuthorizator implements Nette\Security\Authorizator
+{
+	public function isAllowed($role, $resource, $operation): bool
+	{
+		if ($role === 'admin') {
+			return true;
+		}
+		if ($role === 'user' && $resource === 'article') {
+			return true;
+		}
+
+		// ...
+
+		return false;
+	}
+}
+```
+
+Az authorizátort a DI konténer [szolgáltatásaként |dependency-injection:services] adjuk hozzá a konfigurációhoz:
+
+```neon
+services:
+	- MyAuthorizator
+```
+
+És a következő egy példa a használatra. Vegyük észre, hogy ezúttal nem az engedélyező, hanem a `Nette\Security\User::isAllowed()` metódust hívjuk meg, így nincs első paramétere a `$role`. Ez a metódus a `MyAuthorizator::isAllowed()` metódust hívja meg szekvenciálisan az összes felhasználói szerepkörre, és igazat ad vissza, ha legalább az egyiküknek van jogosultsága.
+
+```php
+if ($user->isAllowed('file')) { // a felhasználó mindent megtehet a 'file' erőforrással?
+	useFile();
+}
+
+if ($user->isAllowed('file', 'delete')) { // a felhasználó törölheti a 'file' erőforrást?
+	deleteFile();
+}
+```
+
+Mindkét argumentum opcionális, és alapértelmezett értékük *mindent* jelent.
+
+
+Engedély ACL .[#toc-permission-acl]
+-----------------------------------
+
+A Nette az engedélyező beépített implementációjával, a [api:Nette\Security\Permission] osztállyal rendelkezik, amely egy könnyű és rugalmas ACL (Access Control List) réteget kínál az engedélyezéshez és a hozzáférés-szabályozáshoz. Amikor ezzel az osztállyal dolgozunk, szerepeket, erőforrásokat és egyedi jogosultságokat definiálunk. A szerepek és erőforrások pedig hierarchiákat alkothatnak. A magyarázathoz egy webes alkalmazás példáját mutatjuk be:
+
+- `guest`: bejelentkezés nélküli látogató, aki olvashatja és böngészheti a web nyilvános részét, azaz cikkeket olvashat, kommentálhat és szavazhat szavazásokon.
+- `registered`: bejelentkezett felhasználó, aki ezen felül hozzászólásokat is írhat.
+- `admin`: cikkeket, hozzászólásokat és szavazásokat kezelhet.
+
+Meghatároztunk tehát bizonyos szerepköröket (`guest`, `registered` és `admin`) és megemlítettük azokat az erőforrásokat (`article`, `comments`, `poll`), amelyekhez a felhasználók hozzáférhetnek, illetve amelyeken műveleteket végezhetnek (`view`, `vote`, `add`, `edit`).
+
+Létrehozunk egy példányt az Permission osztályból, és definiáljuk a **szerepeket**. Lehetőség van a szerepek öröklődésének használatára, ami biztosítja, hogy például a `admin` szerepkörrel rendelkező felhasználó megtehesse azt, amit egy közönséges honlaplátogató (és persze többet is).
+
+```php
+$acl = new Nette\Security\Permission;
+
+$acl->addRole('guest');
+$acl->addRole('registered', 'guest'); // 'registered' örökölte a 'guest'-től
+$acl->addRole('admin', 'registered'); // és az 'admin' örököl a 'registered'-ből.
+```
+
+Most definiáljuk a **források** listáját, amelyekhez a felhasználók hozzáférhetnek:
+
+```php
+$acl->addResource('article');
+$acl->addResource('comment');
+$acl->addResource('poll');
+```
+
+Az erőforrások is használhatnak öröklődést, például hozzáadhatjuk a `$acl->addResource('perex', 'article')`.
+
+És most a legfontosabb dolog. Meghatározzuk közöttük a **szabályokat**, amelyek meghatározzák, hogy ki mit tehet:
+
+```php
+// most már mindent megtagadunk
+
+// engedd meg a vendégnek, hogy megnézze a cikkeket, hozzászólásokat és szavazásokat
+$acl->allow('guest', ['article', 'comment', 'poll'], 'view');
+// és szavazhat a szavazásokon is
+$acl->allow('guest', 'poll', 'vote');
+
+// a regisztrált örökli a guesta jogosultságait, a kommentelést is megengedjük neki.
+$acl->allow('registered', 'comment', 'add');
+
+// az adminisztrátor bármit megnézhet és szerkeszthet
+$acl->allow('admin', $acl::All, ['view', 'edit', 'add']);
+```
+
+Mi van akkor, ha meg akarjuk **akadályozni**, hogy valaki hozzáférjen egy erőforráshoz?
+
+```php
+// Az adminisztrátor nem szerkesztheti a szavazásokat, ez nem lenne tisztességes.
+$acl->deny('admin', 'poll', 'edit');
+```
+
+Most, hogy létrehoztuk a szabálykészletet, egyszerűen megkérdezhetjük az engedélyezési lekérdezéseket:
+
+```php
+// Vendégként is megtekintheti a cikkeket?
+$acl->isAllowed('guest', 'article', 'view'); // true
+
+// szerkeszthet-e a vendég cikket?
+$acl->isAllowed('guest', 'article', 'edit'); // false
+
+// szavazhat-e a vendég a szavazáson?
+$acl->isAllowed('guest', 'poll', 'vote'); // true
+
+// a vendég hozzáfűzhet kommenteket?
+$acl->isAllowed('guest', 'comment', 'add'); // false
+```
+
+Ugyanez vonatkozik a regisztrált felhasználóra is, de ő is megjegyzést tehet:
+
+```php
+$acl->isAllowed('registered', 'article', 'view'); // true
+$acl->isAllowed('registered', 'comment', 'add'); // true
+$acl->isAllowed('registered', 'comment', 'edit'); // false
+```
+
+A rendszergazda mindent szerkeszthet, kivéve a szavazásokat:
+
+```php
+$acl->isAllowed('admin', 'poll', 'vote'); // true
+$acl->isAllowed('admin', 'poll', 'edit'); // false
+$acl->isAllowed('admin', 'comment', 'edit'); // true
+```
+
+A jogosultságokat dinamikusan is ki lehet értékelni, és a döntést a saját callbackünkre bízhatjuk, amelynek minden paramétert átadunk:
+
+```php
+$assertion = function (Permission $acl, string $role, string $resource, string $privilege): bool {
+	return /* ... */;
+};
+
+$acl->allow('registered', 'comment', null, $assertion);
+```
+
+De hogyan oldjuk meg azt a helyzetet, amikor a szerepek és erőforrások nevei nem elegendőek, azaz szeretnénk definiálni, hogy például a `registered` szerepkör csak akkor szerkeszthet egy `article` erőforrást, ha ő a szerzője? Sztringek helyett objektumokat fogunk használni, a szerepkör lesz a [api:Nette\Security\Role] objektum és a forrás [api:Nette\Security\Resource]. A `getRoleId()` illetve `getResourceId()` metódusaik az eredeti karakterláncokat fogják visszaadni:
+
+```php
+class Registered implements Nette\Security\Role
+{
+	public $id;
+
+	public function getRoleId(): string
+	{
+		return 'registered';
+	}
+}
+
+
+class Article implements Nette\Security\Resource
+{
+	public $authorId;
+
+	public function getResourceId(): string
+	{
+		return 'article';
+	}
+}
+```
+
+És most hozzunk létre egy szabályt:
+
+```php
+$assertion = function (Permission $acl, string $role, string $resource, string $privilege): bool {
+	$role = $acl->getQueriedRole(); // objektum Registered
+	$resource = $acl->getQueriedResource(); // object Article
+	return $role->id === $resource->authorId;
+};
+
+$acl->allow('registered', 'article', 'edit', $assertion);
+```
+
+Az ACL-t objektumok átadásával kérdezzük le:
+
+```php
+$user = new Registered(/* ... */);
+$article = new Article(/* ... */);
+$acl->isAllowed($user, $article, 'edit');
+```
+
+Egy szerepkör egy vagy több más szerepkörből örökölhet. De mi történik akkor, ha az egyik ősnek engedélyezett egy bizonyos művelet, a másiknak pedig megtagadott? Ekkor a *szerep súlya* lép a játékba - az öröklendő szerepek sorában az utolsó szerepnek van a legnagyobb súlya, az elsőnek a legkisebb:
+
+```php
+$acl = new Nette\Security\Permission;
+$acl->addRole('admin');
+$acl->addRole('guest');
+
+$acl->addResource('backend');
+
+$acl->allow('admin', 'backend');
+$acl->deny('guest', 'backend');
+
+// A példa: az admin szerepnek kisebb a súlya, mint a guest szerepnek.
+$acl->addRole('john', ['admin', 'guest']);
+$acl->isAllowed('john', 'backend'); // false
+
+// B példa: az admin szerepnek nagyobb súlya van, mint a guest szerepnek.
+$acl->addRole('mary', ['guest', 'admin']);
+$acl->isAllowed('mary', 'backend'); // true
+```
+
+Szerepek és erőforrások is eltávolíthatók (`removeRole()`, `removeResource()`), szabályok is visszafordíthatók (`removeAllow()`, `removeDeny()`). Az összes közvetlen szülői szerepkör tömbje a `getRoleParents()` visszaadja. Az, hogy két entitás örököl-e egymástól, a `roleInheritsFrom()` és a `resourceInheritsFrom()` eredményt adja vissza.
+
+
+Hozzáadás szolgáltatásként .[#toc-add-as-a-service]
+---------------------------------------------------
+
+Az általunk létrehozott ACL-t szolgáltatásként kell hozzáadnunk a konfigurációhoz, hogy az objektum `$user`, vagyis hogy kódban használhassuk például a `$user->isAllowed('article', 'view')`. Ehhez írunk hozzá egy gyárat:
+
+```php
+namespace App\Model;
+
+class AuthorizatorFactory
+{
+	public static function create(): Nette\Security\Permission
+	{
+		$acl = new Nette\Security\Permission;
+		$acl->addRole(/* ... */);
+		$acl->addResource(/* ... */);
+		$acl->allow(/* ... */);
+		return $acl;
+	}
+}
+```
+
+És hozzáadjuk a konfigurációhoz:
+
+```neon
+services:
+	- App\Model\AuthorizatorFactory::create
+```
+
+A prezenterekben ezután ellenőrizheti a jogosultságokat például a `startup()` módszerben:
+
+```php
+protected function startup()
+{
+	parent::startup();
+	if (!$this->getUser()->isAllowed('backend')) {
+		$this->error('Forbidden', 403);
+	}
+}
+```

@@ -1,0 +1,579 @@
+Bővítmény létrehozása
+*********************
+
+.[perex]{data-version:3.0}
+A kiterjesztés egy újrafelhasználható osztály, amely egyéni címkéket, szűrőket, függvényeket, szolgáltatókat stb. definiálhat.
+
+Bővítményeket akkor hozunk létre, amikor a Latte testreszabásainkat különböző projektekben szeretnénk újra felhasználni, vagy megosztani másokkal.
+Az is hasznos, ha minden egyes webes projekthez létrehozunk egy bővítményt, amely tartalmazza az összes olyan egyedi címkét és szűrőt, amelyet a projekt sablonjaiban használni szeretnénk.
+
+
+Bővítmény osztály .[#toc-extension-class]
+=========================================
+
+A Extension egy osztály, amely a [api:Latte\Extension] osztályból származik. A Latte-ba a `addExtension()` segítségével (vagy a [konfigurációs fájlon |application:configuration#Latte] keresztül) regisztráljuk:
+
+```php
+$latte = new Latte\Engine;
+$latte->addExtension(new MyLatteExtension);
+```
+
+Ha több kiterjesztést regisztrál, és azok azonos nevű címkéket, szűrőket vagy függvényeket definiálnak, az utoljára hozzáadott kiterjesztés nyer. Ez azt is jelenti, hogy a kiterjesztések felülbírálhatják a natív címkéket/szűrőket/funkciókat.
+
+Amikor módosít egy osztályt, és az automatikus frissítés nincs kikapcsolva, a Latte automatikusan újrafordítja a sablonokat.
+
+Egy osztály a következő metódusok bármelyikét megvalósíthatja:
+
+```php
+abstract class Extension
+{
+	/**
+	 * Initializes before template is compiler.
+	 */
+	public function beforeCompile(Engine $engine): void;
+
+	/**
+	 * Returns a list of parsers for Latte tags.
+	 * @return array<string, callable>
+	 */
+	public function getTags(): array;
+
+	/**
+	 * Returns a list of compiler passes.
+	 * @return array<string, callable>
+	 */
+	public function getPasses(): array;
+
+	/**
+	 * Returns a list of |filters.
+	 * @return array<string, callable>
+	 */
+	public function getFilters(): array;
+
+	/**
+	 * Returns a list of functions used in templates.
+	 * @return array<string, callable>
+	 */
+	public function getFunctions(): array;
+
+	/**
+	 * Returns a list of providers.
+	 * @return array<mixed>
+	 */
+	public function getProviders(): array;
+
+	/**
+	 * Returns a value to distinguish multiple versions of the template.
+	 */
+	public function getCacheKey(Engine $engine): mixed;
+
+	/**
+	 * Initializes before template is rendered.
+	 */
+	public function beforeRender(Template $template): void;
+}
+```
+
+A kiterjesztés kinézetéről a beépített "CoreExtension:https://github.com/nette/latte/blob/master/src/Latte/Essential/CoreExtension.php"-t nézzük meg.
+
+
+beforeCompile(Latte\Engine $engine): void .[method]
+---------------------------------------------------
+
+A sablon lefordítása előtt hívódik. A metódus használható például a fordítással kapcsolatos inicializáláshoz.
+
+
+getTags(): array .[method]
+--------------------------
+
+A sablon fordításakor hívódik. Visszaad egy asszociatív tömböt *tag name => callable*, amelyek [tag elemző függvények |#Tag Parsing Function].
+
+```php
+public function getTags(): array
+{
+	return [
+		'foo' => [FooNode::class, 'create'],
+		'bar' => [BarNode::class, 'create'],
+		'n:baz' => [NBazNode::class, 'create'],
+		// ...
+	];
+}
+```
+
+A `n:baz` tag egy tiszta n:attribútumot képvisel, azaz egy olyan tag, amely csak attribútumként írható ki.
+
+A `foo` és `bar` címkék esetében a Latte automatikusan felismeri, hogy ezek párok-e, és ha igen, akkor automatikusan n:attribútumokkal írhatók, beleértve a `n:inner-foo` és `n:tag-foo` előtaggal ellátott változatokat is.
+
+Az ilyen n:attribútumok végrehajtási sorrendjét a `getTags()` által visszaadott tömbben elfoglalt sorrendjük határozza meg. Így a `n:foo` mindig a `n:bar` előtt kerül végrehajtásra, még akkor is, ha az attribútumok fordított sorrendben szerepelnek a HTML tagben, mint a `<div n:bar="..." n:foo="...">`.
+
+Ha az n:attribútumok sorrendjét több kiterjesztésen keresztül kell meghatározni, használja a `order()` segédmódszert, ahol a `before` xor `after` paraméter határozza meg, hogy melyik tag előtt vagy után kerül sorra.
+
+```php
+public function getTags(): array
+{
+	return [
+		'foo' => self::order([FooNode::class, 'create'], before: 'bar')]
+		'bar' => self::order([BarNode::class, 'create'], after: ['block', 'snippet'])]
+	];
+}
+```
+
+
+getPasses(): array .[method]
+----------------------------
+
+A sablon fordításakor hívódik meg. Visszaad egy asszociatív tömböt *name pass => callable*, amelyek úgynevezett [fordítói passzokat |#compiler passes] reprezentáló függvények, amelyek átjárják és módosítják az AST-et.
+
+Ismét használható a `order()` segédmódszer. A `before` vagy `after` paraméterek értéke `*` lehet, az összes előtt/után jelentéssel.
+
+```php
+public function getPasses(): array
+{
+	return [
+		'optimize' => [Passes::class, 'optimizePass'],
+		'sandbox' => self::order([$this, 'sandboxPass'], before: '*'),
+		// ...
+	];
+}
+```
+
+
+beforeRender(Latte\Engine $engine): void .[method]
+--------------------------------------------------
+
+Minden egyes sablon renderelés előtt meghívásra kerül. A metódus használható például a renderelés során használt változók inicializálására.
+
+
+getFilters(): array .[method]
+-----------------------------
+
+A sablon renderelése előtt hívódik meg. A [szűrőket |extending-latte#filters] asszociatív tömbként adja vissza *filter name => callable*.
+
+```php
+public function getFilters(): array
+{
+	return [
+		'batch' => [$this, 'batchFilter'],
+		'trim' => [$this, 'trimFilter'],
+		// ...
+	];
+}
+```
+
+
+getFunctions(): array .[method]
+-------------------------------
+
+A sablon renderelése előtt hívódik meg. A [függvényeket |extending-latte#functions] asszociatív tömbként adja vissza *funkció neve => hívható*.
+
+```php
+public function getFunctions(): array
+{
+	return [
+		'clamp' => [$this, 'clampFunction'],
+		'divisibleBy' => [$this, 'divisibleByFunction'],
+		// ...
+	];
+}
+```
+
+
+getProviders(): array .[method]
+-------------------------------
+
+A sablon renderelése előtt hívódik meg. Visszaadja a szolgáltatók tömbjét, amelyek általában olyan objektumok, amelyek futásidőben használnak címkéket. Hozzáférésük a `$this->global->...` címen keresztül történik.
+
+```php
+public function getProviders(): array
+{
+	return [
+		'myFoo' => $this->foo,
+		'myBar' => $this->bar,
+		// ...
+	];
+}
+```
+
+
+getCacheKey(Latte\Engine $engine): mixed .[method]
+--------------------------------------------------
+
+A sablon renderelése előtt hívódik meg. A visszatérési érték része lesz annak a kulcsnak, amelynek hash-ját a lefordított sablonfájl neve tartalmazza. Így különböző visszatérési értékek esetén a Latte különböző gyorsítótárfájlokat fog létrehozni.
+
+
+Hogyan működik a Latte? .[#toc-how-does-latte-work]
+===================================================
+
+Ahhoz, hogy megértsük, hogyan definiálhatunk egyéni címkéket vagy fordítói passzokat, elengedhetetlen, hogy megértsük, hogyan működik a Latte a motorháztető alatt.
+
+A sablonfordítás a Latte-ban leegyszerűsítve így működik:
+
+- Először a **lexer** a könnyebb feldolgozás érdekében a sablon forráskódját kis darabokra (tokenekre) bontja.
+- Ezután a **elemző** a tokenek folyamát egy értelmes csomópontfává (absztrakt szintaxisfa, AST) alakítja át.
+- Végül a fordító **generál** egy PHP-osztályt az AST-ből, amely megjeleníti a sablont, és gyorsítótárba helyezi.
+
+Valójában a fordítás egy kicsit bonyolultabb. A Latte-nak **kettő** lexere és elemzője van: egy a HTML sablonhoz és egy a címkéken belüli PHP-szerű kódhoz. Továbbá a parszing nem a tokenizálás után fut, hanem a lexer és a parser párhuzamosan fut két "szálban" és koordinál. Ez rakétatudomány :-)
+
+Továbbá minden tagnek saját elemző rutinja van. Amikor az elemző találkozik egy címkével, meghívja annak elemző függvényét (ez adja vissza a [Extension::getTags() |#getTags] függvényt).
+Feladatuk a tag argumentumainak és párosított tagek esetén a belső tartalom elemzése. Visszaad egy *csomópontot*, amely az AST részévé válik. Lásd a [Tag elemző funkciót |#Tag parsing function] a részletekért.
+
+Amikor az elemző befejezi a munkáját, egy teljes AST-vel rendelkezünk, amely a sablont reprezentálja. A gyökércsomópont a `Latte\Compiler\Nodes\TemplateNode`. A fán belüli egyes csomópontok ezután nem csak a címkéket, hanem a HTML-elemeket, azok attribútumait, a címkéken belül használt kifejezéseket stb. is reprezentálják.
+
+Ezek után jönnek az úgynevezett [Compiler pass-ok |#Compiler passes], amelyek olyan függvények (amelyeket az [Extension::getPasses() |#getPasses] ad vissza), amelyek módosítják az AST-et.
+
+Az egész folyamat, a sablon tartalmának betöltésétől kezdve a parsingon át a kapott fájl generálásáig, ezzel a kóddal szekvenálható, amivel kísérletezhetünk, és a köztes eredményeket kidobhatjuk:
+
+```php
+$latte = new Latte\Engine;
+$source = $latte->getLoader()->getContent($file);
+$ast = $latte->parse($source);
+$latte->applyPasses($ast);
+$code = $latte->generate($ast, $file);
+```
+
+
+Példa az AST-re .[#toc-example-of-ast]
+--------------------------------------
+
+Hogy jobban megismerjük az AST-et, adunk hozzá egy mintát. Ez a forrássablon:
+
+```latte
+{foreach $category->getItems() as $item}
+	<li>{$item->name|upper}</li>
+	{else}
+	no items found
+{/foreach}
+```
+
+Ez pedig az AST formájában való megjelenítése:
+
+/--pre
+Latte\Compiler\Nodes\<b>TemplateNode</b>(
+   Latte\Compiler\Nodes\<b>FragmentNode</b>(
+      - Latte\Essential\Nodes\<b>ForeachNode</b>(
+           expression: Latte\Compiler\Nodes\Php\Expression\<b>MethodCallNode</b>(
+              object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$category')
+              name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('getItems')
+           )
+           value: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+           content: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+              - Latte\Compiler\Nodes\<b>TextNode</b>('  ')
+              - Latte\Compiler\Nodes\<b>Html\ElementNode</b>('li')(
+                   content: Latte\Essential\Nodes\<b>PrintNode</b>(
+                      expression: Latte\Compiler\Nodes\Php\Expression\<b>PropertyFetchNode</b>(
+                         object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+                         name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('name')
+                      )
+                      modifier: Latte\Compiler\Nodes\Php\<b>ModifierNode</b>(
+                         filters:
+                            - Latte\Compiler\Nodes\Php\<b>FilterNode</b>('upper')
+                      )
+                   )
+                )
+            )
+            else: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+               - Latte\Compiler\Nodes\<b>TextNode</b>('no items found')
+            )
+        )
+   )
+)
+\--
+
+
+Egyéni címkék .[#toc-custom-tags]
+=================================
+
+Egy új címke definiálásához három lépésre van szükség:
+
+- [a címke elemző függvény |#tag parsing function] definiálása (felelős a címke csomóponttá történő elemzéséért)
+- csomópont osztály létrehozása (felelős a [PHP kód generálásáért |#generating PHP code] és az [AST átjárásáért |#AST traversing]).
+- a címke regisztrálása az [Extension::getTags() |#getTags] segítségével.
+
+
+Tag elemző funkció .[#toc-tag-parsing-function]
+-----------------------------------------------
+
+A címkék elemzése a saját elemző függvényével történik (az [Extension::getTags() |#getTags] által visszaadott függvény). Feladata a tagben lévő argumentumok elemzése és ellenőrzése (ehhez a TagParser-t használja).
+Továbbá, ha a tag egy pár, akkor megkéri a TemplateParsert, hogy elemezze és adja vissza a belső tartalmat.
+A függvény létrehoz és visszaad egy csomópontot, amely általában a `Latte\Compiler\Nodes\StatementNode` gyermeke, és ez az AST részévé válik.
+
+Minden csomóponthoz létrehozunk egy osztályt, amit most meg is teszünk, és elegánsan elhelyezzük benne a parsing függvényt, mint statikus gyárat. Példaként próbáljuk meg létrehozni az ismert `{foreach}` címkét:
+
+```php
+use Latte\Compiler\Nodes\StatementNode;
+
+class ForeachNode extends StatementNode
+{
+	// egy elemző függvény, amely egyelőre csak egy csomópontot hoz létre.
+	public static function create(Latte\Compiler\Tag $tag): self
+	{
+		$node = new self;
+		return $node;
+	}
+
+	public function print(Latte\Compiler\PrintContext $context): string
+	{
+		// a kódot később adjuk hozzá
+	}
+
+	public function &getIterator(): \Generator
+	{
+		// a kódot később adjuk hozzá
+	}
+}
+```
+
+A `create()` elemző függvénynek átadunk egy [api:Latte\Compiler\Tag] objektumot, amely alapvető információkat hordoz a tagről (hogy klasszikus tag vagy n:attribútum, milyen sorban van, stb.), és főként a `$tag->parser`-ban lévő [api:Latte\Compiler\TagParser] objektumhoz fér hozzá.
+
+Ha a címkének argumentumokkal kell rendelkeznie, akkor a `$tag->expectArguments()` meghívásával ellenőrzi azok meglétét. Ezek elemzésére a `$tag->parser` objektum metódusai állnak rendelkezésre:
+
+- `parseExpression(): ExpressionNode` egy PHP-szerű kifejezéshez (pl. `10 + 3`).
+- `parseUnquotedStringOrExpression(): ExpressionNode` kifejezés vagy idézőjel nélküli karakterlánc esetén.
+- `parseArguments(): ArrayNode` tömb tartalma (pl. `10, true, foo => bar`).
+- `parseModifier(): ModifierNode` egy módosítóhoz (pl. `|upper|truncate:10`).
+- `parseType(): expressionNode` a tipehintre (pl. `int|string` vagy `Foo\Bar[]`).
+
+és egy alacsony szintű [api:Latte\Compiler\TokenStream], amely közvetlenül tokenekkel dolgozik:
+
+- `$tag->parser->stream->consume(...): Token`
+- `$tag->parser->stream->tryConsume(...): ?Token`
+
+A Latte kis mértékben bővíti a PHP szintaxist, például módosítókkal, rövidített terner operátorokkal, vagy lehetővé teszi az egyszerű alfanumerikus karakterláncok idézőjelek nélküli írását. Ezért használjuk a PHP helyett a *PHP-szerű* kifejezést. Így például a `parseExpression()` módszer a `foo` -t `'foo'`-ként elemzi.
+Ezenkívül a *unquoted-string* egy speciális esete egy olyan karakterláncnak, amelyet szintén nem kell idézőjelbe tenni, ugyanakkor nem kell alfanumerikusnak lennie. Ez például egy fájl elérési útvonala a `{include ../file.latte}` címkében. A `parseUnquotedStringOrExpression()` módszerrel elemezhető.
+
+.[note]
+A Latte részét képező csomópontosztályok tanulmányozása a legjobb módja annak, hogy megismerjük a parsing folyamat minden apró részletét.
+
+Térjünk vissza a `{foreach}` címkéhez. Ebben a `expression + 'as' + second expression` formájú argumentumokat várunk, amelyeket a következőképpen elemzünk:
+
+```php
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\AreaNode;
+
+class ForeachNode extends StatementNode
+{
+	public ExpressionNode $expression;
+	public ExpressionNode $value;
+
+	public static function create(Latte\Compiler\Tag $tag): self
+	{
+		$tag->expectArguments();
+		$node = new self;
+		$node->expression = $tag->parser->parseExpression();
+		$tag->parser->stream->consume('as');
+		$node->value = $parser->parseExpression();
+		return $node;
+	}
+}
+```
+
+A `$expression` és `$value` változókba írt kifejezések alcsomópontokat jelentenek.
+
+.[tip]
+Az alcsomópontokkal rendelkező változókat **nyilvánosnak** definiáljuk, hogy szükség esetén a [további feldolgozási lépésekben |#Compiler Passes] módosíthatók legyenek. Szükséges továbbá, hogy **elérhetővé** tegyük őket a [bejáráshoz |#AST Traversing].
+
+A párosított címkék esetében, mint a miénk, a módszernek hagynia kell, hogy a TemplateParser elemezze a címke belső tartalmát is. Ezt a `yield` kezeli, amely egy ''[belső tartalom, végcímke]'' párt ad vissza. A belső tartalmat a `$node->content` változóban tároljuk.
+
+```php
+public AreaNode $content;
+
+public static function create(Latte\Compiler\Tag $tag): \Generator
+{
+	// ...
+	[$node->content, $endTag] = yield;
+	return $node;
+}
+```
+
+A `yield` kulcsszó hatására a `create()` metódus befejeződik, visszaadva a vezérlést a TemplateParser-nek, amely folytatja a tartalom elemzését, amíg el nem éri a végtagot. Ezután visszaadja a vezérlést a `create()`-nak, amely ott folytatja, ahol abbahagyta. A `yield`, metódus használata automatikusan visszaadja a `Generator` metódust.
+
+Átadhat egy olyan címkenevekből álló tömböt is a `yield` címsornak, amelyek elemzése leáll, ha a végcímke előtt fordulnak elő. Ez segít nekünk megvalósítani a `{foreach}...{else}...{/foreach}` konstrukciót. Ha a `{else}` előfordul, akkor az utána lévő tartalmat elemezzük a `$node->elseContent` címkébe:
+
+```php
+public AreaNode $content;
+public ?AreaNode $elseContent = null;
+
+public static function create(Latte\Compiler\Tag $tag): \Generator
+{
+	// ...
+	[$node->content, $nextTag] = yield ['else'];
+	if ($nextTag?->name === 'else') {
+		[$node->elseContent] = yield;
+	}
+
+	return $node;
+}
+```
+
+A visszatérő csomópont befejezi a címkék elemzését.
+
+
+PHP kód generálása .[#toc-generating-php-code]
+----------------------------------------------
+
+Minden csomópontnak implementálnia kell a `print()` metódust. Visszaadja a sablon adott részét megjelenítő PHP kódot (futásidejű kód). Paraméterként egy [api:Latte\Compiler\PrintContext] objektumot kap, amely rendelkezik egy hasznos `format()` metódussal, amely leegyszerűsíti a kapott kód összeállítását.
+
+A `format(string $mask, ...$args)` metódus a következő helyőrzőket fogadja el a maszkban:
+- `%node` prints Node
+- `%dump` exportálja az értéket PHP-be
+- `%raw` a szöveget közvetlenül, transzformáció nélkül beszúrja.
+- `%args` ArrayNode-ot nyomtat a függvényhívás argumentumaként.
+- `%line` egy sorszámmal ellátott megjegyzést nyomtat
+- `%escape(...)` escapes a tartalom
+- `%modify(...)` módosítót alkalmaz
+- `%modifyContent(...)` módosítót alkalmaz a blokkokra
+
+
+A `print()` függvényünk így nézhet ki (az egyszerűség kedvéért elhanyagoljuk a `else` ágat):
+
+```php
+public function print(Latte\Compiler\PrintContext $context): string
+{
+	return $context->format(
+		<<<'XX'
+			foreach (%node as %node) %line {
+				%node
+			}
+
+			XX,
+		$this->expression,
+		$this->value,
+		$this->position,
+		$this->content,
+	);
+}
+```
+
+A `$this->position` változót már definiálta a [api:Latte\Compiler\Node] osztály, és az elemző állítja be. Tartalmaz egy [api:Latte\Compiler\Position] objektumot, amely a tag pozícióját tartalmazza a forráskódban sor- és oszlopszám formájában.
+
+A futásidejű kód használhat segédváltozókat. A sablon által használt változókkal való ütközés elkerülése érdekében konvenció szerint a `$ʟ__` karaktereket kell eléjük illeszteni.
+
+A futásidőben tetszőleges értékeket is használhat, amelyeket a [Extension::getProviders() |#getProviders] metódus segítségével szolgáltatók formájában adunk át a sablonhoz. A `$this->global->...` segítségével fér hozzájuk.
+
+
+AST átszelés .[#toc-ast-traversing]
+-----------------------------------
+
+Ahhoz, hogy az AST fát mélységében bejárhassuk, a `getIterator()` metódust kell implementálni. Ez hozzáférést biztosít az alcsomópontokhoz:
+
+```php
+public function &getIterator(): \Generator
+{
+	yield $this->expression;
+	yield $this->value;
+	yield $this->content;
+	if ($this->elseContent) {
+		yield $this->elseContent;
+	}
+}
+```
+
+Vegyük észre, hogy a `getIterator()` egy hivatkozást ad vissza. Ez teszi lehetővé a csomópontok látogatóinak, hogy az egyes csomópontokat más csomópontokkal helyettesítsék.
+
+.[warning]
+Ha egy csomópontnak vannak alcsomópontjai, akkor ezt a metódust meg kell valósítani, és az összes alcsomópontot elérhetővé kell tenni. Ellenkező esetben biztonsági rés keletkezhet. Például a homokozó üzemmód nem tudná ellenőrizni az alcsomópontokat, és nem tudná biztosítani, hogy nem engedélyezett konstrukciókat ne hívjanak meg bennük.
+
+Mivel a `yield` kulcsszónak akkor is jelen kell lennie a metódus testében, ha nincsenek gyermekcsomópontjai, írjuk le a következőképpen:
+
+```php
+public function &getIterator(): \Generator
+{
+	if (false) {
+		yield;
+	}
+}
+```
+
+
+Compiler Passes .[#toc-compiler-passes]
+=======================================
+
+A Compiler Passes olyan függvények, amelyek módosítják az AST-eket vagy információt gyűjtenek bennük. Ezeket az [Extension::getPasses() |#getPasses] metódus adja vissza.
+
+
+Node Traverser .[#toc-node-traverser]
+-------------------------------------
+
+Az AST-vel való munka legáltalánosabb módja a [api:Latte\Compiler\NodeTraverser]:
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+
+$ast = (new NodeTraverser)->traverse(
+	$ast,
+	enter: fn(Node $node) => ...,
+	leave: fn(Node $node) => ...,
+);
+```
+
+A *enter* függvényt (azaz a látogatót) akkor hívjuk meg, amikor először találkozunk egy csomóponttal, mielőtt annak alcsomópontjait feldolgoznánk. A *leave* függvényt az összes alcsomópont meglátogatása után hívjuk meg.
+Gyakori minta, hogy a *enter* funkciót bizonyos információk összegyűjtésére használják, majd a *leave* funkció ezek alapján végez módosításokat. A *leave* meghívásának időpontjában a csomóponton belüli összes kódot már meglátogattuk, és begyűjtöttük a szükséges információkat.
+
+Hogyan módosítható az AST? A legegyszerűbb módja a csomópontok tulajdonságainak egyszerű módosítása. A második mód a csomópont teljes lecserélése egy új csomópont visszaadásával. Példa: a következő kód az AST-ben lévő összes egész számot karakterláncra változtatja (pl. a 42-es számot `'42'`).
+
+```php
+use Latte\Compiler\Nodes\Php;
+
+$ast = (new NodeTraverser)->traverse(
+	$ast,
+	leave: function (Node $node) {
+		if ($node instanceof Php\Scalar\IntegerNode) {
+            return new Php\Scalar\StringNode((string) $node->value);
+        }
+	},
+);
+```
+
+Egy AST könnyen tartalmazhat több ezer csomópontot, és az összes csomóponton való áthaladás lassú lehet. Bizonyos esetekben elkerülhető a teljes átszelés.
+
+Ha az összes `Html\ElementNode` címet keresi egy fában, akkor tudja, hogy ha már látta a `Php\ExpressionNode` címet, akkor nincs értelme az összes gyermekcsomópontját is ellenőrizni, mert a HTML nem lehet a kifejezéseken belül. Ebben az esetben utasíthatjuk a traverzert, hogy ne lépjen vissza az osztálycsomópontba:
+
+```php
+$ast = (new NodeTraverser)->traverse(
+	$ast,
+	enter: function (Node $node) {
+		if ($node instanceof Php\ExpressionNode) {
+			return NodeTraverser::DontTraverseChildren;
+        }
+        // ...
+	},
+);
+```
+
+Ha csak egy adott csomópontot keresünk, akkor lehetőség van arra is, hogy a megtalálása után teljesen megszakítsuk a traverzálást.
+
+```php
+$ast = (new NodeTraverser)->traverse(
+	$ast,
+	enter: function (Node $node) {
+		if ($node instanceof Nodes\ParametersNode) {
+			return NodeTraverser::StopTraversal;
+        }
+        // ...
+	},
+);
+```
+
+
+Csomópont-segédprogramok .[#toc-node-helpers]
+---------------------------------------------
+
+A [api:Latte\Compiler\NodeHelpers] osztály biztosít néhány metódust, amelyek képesek megtalálni azokat az AST csomópontokat, amelyek megfelelnek egy bizonyos visszahívásnak stb. Néhány példa látható:
+
+```php
+use Latte\Compiler\NodeHelpers;
+
+// megtalálja az összes HTML elem csomópontját
+$elements = NodeHelpers::find($ast, fn(Node $node) => $node instanceof Nodes\Html\ElementNode);
+
+// megtalálja az első szöveges csomópontot
+$text = NodeHelpers::findFirst($ast, fn(Node $node) => $node instanceof Nodes\TextNode);
+
+// PHP-érték csomópontot valós értékké alakítja át
+$value = NodeHelpers::toValue($node);
+
+// statikus szöveges csomópontot konvertál sztringgé
+$text = NodeHelpers::toText($node);
+```

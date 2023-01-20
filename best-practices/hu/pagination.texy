@@ -1,0 +1,277 @@
+Az adatbázis-eredmények lapozása
+********************************
+
+.[perex]
+Webalkalmazások fejlesztése során gyakran találkozunk azzal a követelménnyel, hogy egy oldalon korlátozott számú rekordot kell kinyomtatni.
+
+Ebből az állapotból akkor jövünk ki, ha az összes adatot lapozás nélkül listázzuk ki. Az adatbázisból való adatkiválasztáshoz rendelkezésünkre áll az ArticleRepository osztály, amely tartalmazza a konstruktort és a `findPublishedArticles` metódust, amely az összes megjelent cikket a megjelenés dátuma szerinti csökkenő sorrendben rendezve adja vissza.
+
+```php
+namespace App\Model;
+
+use Nette;
+
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+
+	public function findPublishedArticles(): Nette\Database\ResultSet
+	{
+		return $this->database->query('
+			SELECT * FROM articles
+			WHERE created_at < ?
+			ORDER BY created_at DESC',
+			new \DateTime,
+		);
+	}
+}
+```
+
+A Presenterben ezután befecskendezzük a modell osztályt, és a render metódusban lekérdezzük a publikált cikkeket, amelyeket átadunk a sablonhoz:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(): void
+	{
+		$this->template->articles = $this->articleRepository->findPublishedArticles();
+	}
+}
+```
+
+A sablonban gondoskodunk egy cikklista rendereléséről:
+
+```latte
+{block content}
+<h1>Articles</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+```
+
+
+Ez azonban problémákat okoz, ha a cikkek száma nő. Ekkor hasznos lesz a lapozási mechanizmus megvalósítása.
+
+Ez biztosítja, hogy az összes cikket több oldalra osztjuk, és csak az egyik aktuális oldal cikkeit fogjuk megjeleníteni. Az oldalak teljes számát és a cikkek elosztását maga az [Paginator |utils:Paginator] számítja ki, attól függően, hogy összesen hány cikkünk van és hány cikket szeretnénk megjeleníteni az oldalon.
+
+Első lépésben módosítjuk a cikkek kinyerésére szolgáló metódust a tároló osztályban, hogy csak egyoldalas cikkeket adjon vissza. Emellett hozzáadunk egy új metódust az adatbázisban lévő cikkek teljes számának lekérdezéséhez, amire szükségünk lesz a Paginator beállításához:
+
+```php
+namespace App\Model;
+
+use Nette;
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+
+	public function findPublishedArticles(int $limit, int $offset): Nette\Database\ResultSet
+	{
+		return $this->database->query('
+			SELECT * FROM articles
+			WHERE created_at < ?
+			ORDER BY created_at DESC
+			LIMIT ?
+			OFFSET ?',
+			new \DateTime, $limit, $offset,
+		);
+	}
+
+	/**
+	 * Returns the total number of published articles
+	 */
+	public function getPublishedArticlesCount(): int
+	{
+		return $this->database->fetchField('SELECT COUNT(*) FROM articles WHERE created_at < ?', new \DateTime);
+	}
+}
+```
+
+A következő lépés a bemutató szerkesztése. Az aktuálisan megjelenített oldal számát továbbítjuk a render metódusnak. Abban az esetben, ha ez a szám nem része az URL-nek, akkor az alapértelmezett értéket az első oldalra kell beállítanunk.
+
+A render metódust kibővítjük a Paginator példány megszerzésével, beállításával és a sablonban megjelenítendő megfelelő cikkek kiválasztásával is. A HomepagePresenter így fog kinézni:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(int $page = 1): void
+	{
+		// Megkeressük a közzétett cikkek teljes számát.
+		$articlesCount = $this->articleRepository->getPublishedArticlesCount();
+
+		// Elkészítjük a Paginator példányt és beállítjuk.
+		$paginator = new Nette\Utils\Paginator;
+		$paginator->setItemCount($articlesCount); // összes cikk száma
+		$paginator->setItemsPerPage(10); // cikkek oldalanként
+		$paginator->setPage($page); // tényleges oldalszám
+
+		// A Paginator számításai alapján megkeressük a cikkek egy korlátozott halmazát az adatbázisból.
+		$articles = $this->articleRepository->findPublishedArticles($paginator->getLength(), $paginator->getOffset());
+
+		// amit átadunk a sablonnak
+		$this->template->articles = $articles;
+		// és magának a Paginatornak is, hogy megjelenítse a lapozási opciókat.
+		$this->template->paginator = $paginator;
+	}
+}
+```
+
+A sablon már egy oldalon belül iterálja a cikkeket, csak a lapozási linkeket kell hozzáadni:
+
+```latte
+{block content}
+<h1>Articles</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+
+<div class="pagination">
+	{if !$paginator->isFirst()}
+		<a n:href="default, 1">First</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->page-1">Previous</a>
+		&nbsp;|&nbsp;
+	{/if}
+
+	Page {$paginator->getPage()} of {$paginator->getPageCount()}
+
+	{if !$paginator->isLast()}
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->getPage() + 1">Next</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->getPageCount()">Last</a>
+	{/if}
+</div>
+```
+
+
+Így adtunk hozzá oldalszámozást a Paginator segítségével. Ha a [Nette Database |database:explorer] [Core |database:core] [helyett a Nette Database Explorer-t |database:explorer] használjuk adatbázis-rétegként, akkor Paginator nélkül is képesek vagyunk a lapozás megvalósítására. A `Nette\Database\Table\Selection` osztály tartalmazza a [Paginatorból |api:Nette\Database\Table\Selection::_ page] átvett paginálási logikával rendelkező [page |api:Nette\Database\Table\Selection::_ page] metódust.
+
+A tároló így fog kinézni:
+
+```php
+namespace App\Model;
+
+use Nette;
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Explorer $database,
+	) {
+	}
+
+
+	public function findPublishedArticles(): Nette\Database\Table\Selection
+	{
+		return $this->database->table('articles')
+			->where('created_at < ', new \DateTime)
+			->order('created_at DESC');
+	}
+}
+```
+
+Nem kell Paginátort létrehoznunk a Presenterben, helyette az adattár által visszaadott `Selection` objektum metódusát fogjuk használni:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(int $page = 1): void
+	{
+		// Megkeressük a közzétett cikkeket
+		$articles = $this->articleRepository->findPublishedArticles();
+
+		// és az oldal által korlátozott részüket az oldal módszer számításával adjuk át a sablonnak.
+		$lastPage = 0;
+		$this->template->articles = $articles->page($page, 10, $lastPage);
+
+		// és a lapozási lehetőségek megjelenítéséhez szükséges adatokat is.
+		$this->template->page = $page;
+		$this->template->lastPage = $lastPage;
+	}
+}
+```
+
+Mivel nem használunk Paginator-t, meg kell szerkesztenünk a lapozási linkeket megjelenítő részt:
+
+```latte
+{block content}
+<h1>Articles</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+
+<div class="pagination">
+	{if $page > 1}
+		<a n:href="default, 1">First</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $page - 1">Previous</a>
+		&nbsp;|&nbsp;
+	{/if}
+
+	Page {$page} of {$lastPage}
+
+	{if $page < $lastPage}
+		&nbsp;|&nbsp;
+		<a n:href="default, $page + 1">Next</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $lastPage">Last</a>
+	{/if}
+</div>
+```
+
+Így Paginator használata nélkül valósítottunk meg egy lapozási mechanizmust.
+
+{{priority: -1}}
+{{sitename: Legjobb gyakorlatok}}

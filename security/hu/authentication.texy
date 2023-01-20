@@ -1,0 +1,290 @@
+Felhasználók hitelesítése
+*************************
+<div class=perex>
+
+
+A kevés vagy semmilyen webes alkalmazásoknak nincs szükségük a felhasználói bejelentkezéshez vagy a felhasználói jogosultságok ellenőrzéséhez szükséges mechanizmusra. Ebben a fejezetben a következőkről fogunk beszélni:
+
+- felhasználói bejelentkezés és kijelentkezés
+- egyéni hitelesítők és engedélyezők
+
+</div>
+
+→ [Telepítés és követelmények |@home#Installation]
+
+A példákban egy [api:Nette\Security\User] osztályú objektumot fogunk használni, amely az aktuális felhasználót képviseli, és amelyet [függőségi injektálással |dependency-injection:passing-dependencies] átadva kapunk meg. A prezenterekben egyszerűen hívjuk meg a `$user = $this->getUser()`.
+
+
+Hitelesítés .[#toc-authentication]
+==================================
+
+A hitelesítés a **felhasználó bejelentkezését** jelenti, azaz azt a folyamatot, amelynek során a felhasználó személyazonosságát ellenőrzik. A felhasználó általában felhasználónév és jelszó segítségével azonosítja magát. Az ellenőrzést az úgynevezett [hitelesítő |#authenticator] végzi. Ha a bejelentkezés sikertelen, akkor a `Nette\Security\AuthenticationException`.
+
+```php
+try {
+	$user->login($username, $password);
+} catch (Nette\Security\AuthenticationException $e) {
+	$this->flashMessage('The username or password you entered is incorrect.');
+}
+```
+
+Így jelentkezik ki a felhasználó:
+
+```php
+$user->logout();
+```
+
+És ellenőrzi, hogy a felhasználó be van-e jelentkezve:
+
+```php
+echo $user->isLoggedIn() ? 'yes' : 'no';
+```
+
+Egyszerű, igaz? És minden biztonsági szempontot a Nette kezel az Ön számára.
+
+A prezenterben a `startup()` módszerrel ellenőrizheti a bejelentkezést, és a be nem jelentkezett felhasználót átirányíthatja a bejelentkezési oldalra.
+
+```php
+protected function startup()
+{
+	parent::startup();
+	if (!$this->getUser()->isLoggedIn()) {
+		$this->redirect('Sign:in');
+	}
+}
+```
+
+
+Lejárat .[#toc-expiration]
+==========================
+
+A felhasználói bejelentkezés a [tároló lejáratával |#Storage for Logged User] együtt jár le, ami általában egy munkamenet (lásd a [munkamenet lejárati |http:configuration#session] beállítását).
+Beállíthat azonban rövidebb időintervallumot is, amely után a felhasználó kijelentkezik. Erre a célra a `setExpiration()` metódus szolgál, amelyet a `login()` előtt kell meghívni. Paraméterként egy relatív időt tartalmazó karakterláncot adjon meg:
+
+```php
+// a bejelentkezés 30 perc inaktivitás után lejár.
+$user->setExpiration('30 minutes');
+
+// törli a beállított lejáratot
+$user->setExpiration(null);
+```
+
+A `$user->getLogoutReason()` metódus megmondja, hogy a felhasználó kijelentkezett-e, mert az időintervallum lejárt. Vagy a `Nette\Security\UserStorage::LogoutInactivity` konstans értéket adja vissza, ha az idő lejárt, vagy a `UserStorage::LogoutManual` értéket, ha a `logout()` metódust hívta meg.
+
+
+Hitelesítő .[#toc-authenticator]
+================================
+
+Ez egy olyan objektum, amely ellenőrzi a bejelentkezési adatokat, azaz általában a nevet és a jelszót. A triviális megvalósítás a [api:Nette\Security\SimpleAuthenticator] osztály, amely a [konfigurációban |configuration] definiálható:
+
+```neon
+security:
+	users:
+		# name: password
+		johndoe: secret123
+		kathy: evenmoresecretpassword
+```
+
+Ez a megoldás inkább tesztelési célokra alkalmas. Megmutatjuk, hogyan hozzunk létre egy olyan hitelesítő eszközt, amely egy adatbázis-táblával szemben ellenőrzi a hitelesítő adatokat.
+
+A hitelesítő egy olyan objektum, amely a [api:Nette\Security\Authenticator] interfészt valósítja meg a `authenticate()` metódussal. Feladata vagy az úgynevezett [identitás |#identity] visszaadása, vagy egy kivétel dobása `Nette\Security\AuthenticationException`. Lehetséges lenne egy finomhangolt hibakódot is megadni `Authenticator::IdentityNotFound` vagy `Authenticator::InvalidCredential`.
+
+```php
+use Nette;
+use Nette\Security\SimpleIdentity;
+
+class MyAuthenticator implements Nette\Security\Authenticator
+{
+	public function __construct(
+		private Nette\Database\Explorer $database,
+		private Nette\Security\Passwords $passwords,
+	) {
+	}
+
+	public function authenticate(string $username, string $password): SimpleIdentity
+	{
+		$row = $this->database->table('users')
+			->where('username', $username)
+			->fetch();
+
+		if (!$row) {
+			throw new Nette\Security\AuthenticationException('Felhasználó nem található.');
+		}
+
+		if (!$this->passwords->verify($password, $row->password)) {
+			throw new Nette\Security\AuthenticationException('Érvénytelen jelszó.');
+		}
+
+		return new SimpleIdentity(
+			$row->id,
+			$row->role, // vagy szerepek tömbje.
+			['name' => $row->username],
+		);
+	}
+}
+```
+
+A MyAuthenticator osztály a [Nette Database Explorer-en |database:explorer] keresztül kommunikál az adatbázissal, és a `users` táblával dolgozik, ahol a `username` oszlop a felhasználó bejelentkezési nevét, a `password` oszlop pedig a [hash-t |passwords] tartalmazza. A név és a jelszó ellenőrzése után visszaadja az identitást a felhasználó azonosítójával, szerepével (a táblázat `role` oszlopa), amelyet [később |#roles] megemlítünk, és egy további adatokat (esetünkben a felhasználónevet) tartalmazó tömböt.
+
+A hitelesítőt a DI konténer [szolgáltatásaként |dependency-injection:services] adjuk hozzá a konfigurációhoz:
+
+```neon
+services:
+	- MyAuthenticator
+```
+
+
+$onLoggedIn, $onLoggedOut Események
+-----------------------------------
+
+A `Nette\Security\User` objektum rendelkezik `$onLoggedIn` és `$onLoggedOut`[eseményekkel |nette:glossary#Events], így olyan visszahívásokat adhat hozzá, amelyek a sikeres bejelentkezés vagy a felhasználó kijelentkezése után lépnek működésbe.
+
+
+```php
+$user->onLoggedIn[] = function () {
+	// a felhasználó épp most lépett be
+};
+```
+
+
+Identitás .[#toc-identity]
+==========================
+
+Az identitás a felhasználóra vonatkozó információk összessége, amelyet a hitelesítők visszaküldenek, majd egy munkamenetben tárolnak, és a `$user->getIdentity()` segítségével lekérdezhetők. Így megkaphatjuk az azonosítót, a szerepeket és más felhasználói adatokat, ahogyan azokat az autentikátorban átadtuk:
+
+```php
+$user->getIdentity()->getId();
+// működik a $user->getId() rövidítése is;
+
+$user->getIdentity()->getRoles();
+
+// a felhasználói adatokhoz tulajdonságokként is hozzáférhetünk
+// a MyAuthenticatorban átadott név
+$user->getIdentity()->name;
+```
+
+Fontos, hogy amikor a felhasználó a `$user->logout()` segítségével kijelentkezik, az **azonosság nem törlődik**, és továbbra is elérhető. Tehát, ha az identitás létezik, az önmagában nem biztosítja, hogy a felhasználó be is van jelentkezve. Ha kifejezetten törölni akarjuk az identitást, akkor a `logout(true)` segítségével jelentkezünk ki a felhasználóból.
+
+Ennek köszönhetően továbbra is feltételezhetjük, hogy melyik felhasználó van a számítógépen, és például személyre szabott ajánlatokat jeleníthetünk meg a webáruházban, azonban személyes adatait csak bejelentkezés után jeleníthetjük meg.
+
+Az Identity egy olyan objektum, amely megvalósítja a [api:Nette\Security\IIdentity] interfészt, az alapértelmezett megvalósítás a [api:Nette\Security\SimpleIdentity]. És mint említettük, az identitás a munkamenetben tárolódik, így ha például megváltoztatjuk valamelyik bejelentkezett felhasználó szerepét, a régi adatok az identitásban megmaradnak, amíg újra be nem jelentkezik.
+
+
+A bejelentkezett felhasználó tárolása .[#toc-storage-for-logged-user]
+=====================================================================
+
+A felhasználóra vonatkozó két alapvető információt, vagyis azt, hogy bejelentkezett-e, és a [személyazonosságát |#identity] általában a munkamenet hordozza. Amelyek megváltoztathatók. Ezen információk tárolásáért egy, a `Nette\Security\UserStorage` interfészt megvalósító objektum felelős. Két szabványos megvalósítás létezik, az első a munkamenetben, a második a cookie-ban továbbítja az adatokat. Ezek a `Nette\Bridges\SecurityHttp\SessionStorage` és a `CookieStorage` osztályok. A tárolást kiválaszthatja és nagyon kényelmesen konfigurálhatja a konfigurációban [security › authentication |configuration].
+
+Azt is pontosan szabályozhatjuk, hogy az identitás mentése (*sleep*) és visszaállítása (*wakeup*) hogyan történjen. Mindössze arra van szükség, hogy a hitelesítő implementálja a `Nette\Security\IdentityHandler` interfészt. Ennek két metódusa van: a `sleepIdentity()` az identitás tárolóba írása előtt, a `wakeupIdentity()` pedig az identitás beolvasása után hívódik. A metódusok módosíthatják az identitás tartalmát, vagy egy új objektummal helyettesíthetik azt, amely visszatér. A `wakeupIdentity()` metódus akár a `null` metódust is visszaadhatja, amely kijelentkezik a felhasználóból.
+
+Példaként egy gyakori kérdésre mutatunk megoldást, hogy hogyan lehet az identitás szerepeket frissíteni közvetlenül a munkamenetből való visszaállítás után. A `wakeupIdentity()` metódusban átadjuk az aktuális szerepeket az identitásnak, pl. az adatbázisból:
+
+```php
+final class Authenticator implements
+	Nette\Security\Authenticator, Nette\Security\IdentityHandler
+{
+	public function sleepIdentity(IIdentity $identity): IIdentity
+	{
+		// itt lehet megváltoztatni az identitást a bejelentkezés utáni tárolás előtt,
+		// de erre most nincs szükségünk.
+		return $identity;
+	}
+
+	public function wakeupIdentity(IIdentity $identity): ?IIdentity
+	{
+		// szerepek frissítése az identitásban
+		$userId = $identity->getId();
+		$identity->setRoles($this->facade->getUserRoles($userId));
+		return $identity;
+	}
+```
+
+És most visszatérünk a cookie-alapú tároláshoz. Ez lehetővé teszi egy olyan weboldal létrehozását, ahol a felhasználók bejelentkezhetnek anélkül, hogy munkameneteket kellene használniuk. Tehát nem kell a lemezre írni. Végül is így működik a weboldal, amit most olvasol, beleértve a fórumot is. Ebben az esetben a `IdentityHandler` megvalósítása szükségszerű. A cookie-ban csak egy véletlenszerű tokent fogunk tárolni, amely a bejelentkezett felhasználót képviseli.
+
+Tehát először a konfigurációban a `security › authentication › storage: cookie` segítségével állítjuk be a kívánt tárolást.
+
+Hozzáadunk egy `authtoken` oszlopot az adatbázisban, amelyben minden felhasználóhoz egy [teljesen véletlenszerű, egyedi és megfejthetetlen |utils:random], megfelelő hosszúságú (legalább 13 karakteres) karakterláncot fogunk létrehozni. A `CookieStorage` tároló csak a `$identity->getId()` értéket tárolja a cookie-ban, így a `sleepIdentity()` -ben az eredeti azonosítót egy proxyval helyettesítjük a `authtoken` azonosítóval, ezzel szemben a `wakeupIdentity()` módszerben az authtoken szerint a teljes azonosítót visszaállítjuk az adatbázisból:
+
+```php
+final class Authenticator implements
+	Nette\Security\Authenticator, Nette\Security\IdentityHandler
+{
+	public function authenticate(string $username, string $password): SimpleIdentity
+	{
+		$row = $this->db->fetch('SELECT * FROM user WHERE username = ?', $username);
+		// jelszó ellenőrzése
+		...
+		// visszaküldjük az identitást az adatbázisból származó összes adattal.
+		return new SimpleIdentity($row->id, null, (array) $row);
+	}
+
+	public function sleepIdentity(IIdentity $identity): SimpleIdentity
+	{
+		// egy proxy identitást adunk vissza, ahol az azonosító az authtoken.
+		return new SimpleIdentity($identity->authtoken);
+	}
+
+	public function wakeupIdentity(IIdentity $identity): ?SimpleIdentity
+	{
+		// a proxy azonosítót a teljes azonosítóval helyettesítjük, mint az authenticate() esetében.
+		$row = $this->db->fetch('SELECT * FROM user WHERE authtoken = ?', $identity->getId());
+		return $row
+			? new SimpleIdentity($row->id, null, (array) $row)
+			: null;
+	}
+}
+```
+
+
+Többszörös független hitelesítés .[#toc-multiple-independent-authentications]
+=============================================================================
+
+Lehetőség van arra, hogy egy webhelyen belül és egy munkamenetben több független bejelentkezett felhasználó legyen. Ha például külön hitelesítést szeretnénk a frontend és a backend számára, akkor csak beállítunk egy-egy egyedi munkamenet névteret mindkettőhöz:
+
+```php
+$user->getStorage()->setNamespace('backend');
+```
+
+Szükséges szem előtt tartani, hogy ezt minden, ugyanahhoz a szegmenshez tartozó helyen be kell állítani. Előadók használata esetén a névteret a közös ősben - általában a BasePresenterben - állítjuk be. Ehhez a [checkRequirements() |api:Nette\Application\UI\Presenter::checkRequirements()] metódust fogjuk kiterjeszteni:
+
+```php
+public function checkRequirements($element): void
+{
+	$this->getUser()->getStorage()->setNamespace('backend');
+	parent::checkRequirements($element);
+}
+```
+
+
+Több hitelesítő .[#toc-multiple-authenticators]
+-----------------------------------------------
+
+Egy alkalmazás független hitelesítéssel rendelkező szegmensekre való felosztása általában különböző hitelesítőket igényel. Azonban két Authenticator-t megvalósító osztály regisztrálása a konfigurációs szolgáltatásokba hibát váltana ki, mivel a Nette nem tudná, hogy melyiküknek kell [automatikusan bekötni |dependency-injection:autowiring] a `Nette\Security\User` objektumot. Ezért kell korlátozni az autowiringet számukra a `autowired: self` segítségével, hogy csak akkor aktiválódjon, ha az osztályukat kifejezetten kérik:
+
+```neon
+services:
+	-
+		create: FrontAuthenticator
+		autowired: self
+```
+
+```php
+class SignPresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private FrontAuthenticator $authenticator,
+	) {
+	}
+}
+```
+
+Csak a [login() |api:Nette\Security\User::login()] metódus hívása előtt kell beállítanunk a hitelesítőnket a User objektumra, ami jellemzően a bejelentkezési űrlap visszahívását jelenti:
+
+```php
+$form->onSuccess[] = function (Form $form, \stdClass $data) {
+	$user = $this->getUser();
+	$user->setAuthenticator($this->authenticator);
+	$user->login($data->username, $data->password);
+	// ...
+};
+```

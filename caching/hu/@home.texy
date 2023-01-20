@@ -1,0 +1,449 @@
+Caching
+*******
+<div class=perex>
+
+
+A gyorsítótár felgyorsítja az alkalmazást azáltal, hogy az egyszer már nehezen lekérdezett adatokat tárolja a későbbi felhasználásra. Megmutatjuk neked:
+
+- Hogyan használjuk a gyorsítótárat?
+- Hogyan változtathatja meg a gyorsítótár tárolását
+- Hogyan kell megfelelően érvényteleníteni a gyorsítótárat
+
+</div>
+
+A gyorsítótár használata nagyon egyszerű a Nette-ben, miközben nagyon fejlett gyorsítótárazási igényeket is lefed. Teljesítményre és 100%-os tartósságra tervezték. Alapvetően a leggyakoribb háttértárolókhoz talál adaptereket. Lehetővé teszi a címkén alapuló érvénytelenítést, a gyorsítótár stampedivédelmet, az időbeli lejáratot stb.
+
+
+Telepítés .[#toc-installation]
+==============================
+
+Töltse le és telepítse a csomagot a [Composer |best-practices:composer] segítségével:
+
+```shell
+composer require nette/caching
+```
+
+
+Alapvető használat .[#toc-basic-usage]
+======================================
+
+A gyorsítótárral végzett munka középpontjában a [api:Nette\Caching\Cache] objektum áll. Létrehozzuk a példányát, és paraméterként átadjuk a konstruktornak az úgynevezett tárolót. Ami egy olyan objektum, amely azt a helyet képviseli, ahol az adatokat fizikailag tárolni fogjuk (adatbázis, Memcached, fájlok a lemezen, ...). A tároló objektumot a `Nette\Caching\Storage` típusú [függőségi injektálással |dependency-injection:passing-dependencies] kapjuk meg a [függőségi injektálással |dependency-injection:passing-dependencies] történő átadással. Minden lényeges dolgot megtudhat a [Storage (tárolás |#Storages]) című részben.
+
+.[warning]
+A 3.0-ás verzióban az interfész még a `I` prefix, so the name was `Nette\Caching\IStorage`. Emellett a `Cache` osztály konstansait nagybetűvel írták, így például `Cache::EXPIRE` helyett `Cache::Expire`.
+
+A következő példákban tegyük fel, hogy van egy `Cache` aliasunk és egy tárolónk a `$storage` változóban.
+
+```php
+use Nette\Caching\Cache;
+
+$storage = /* ... */; // a Nette\Caching\Storage példánya
+```
+
+A gyorsítótár tulajdonképpen egy *kulcs-érték tároló*, tehát az adatokat kulcsok alatt olvassuk és írjuk, mint az asszociatív tömböknél. Az alkalmazások több független részből állnak, és ha ezek mind egy tárolót használnának (ötletként: egy könyvtárat a lemezen), előbb-utóbb kulcsütközésre kerülne sor. A Nette keretrendszer úgy oldja meg a problémát, hogy a teljes tárhelyet névterekre (alkönyvtárakra) osztja. Így a program minden egyes része a saját, egyedi névvel ellátott tárhelyét használja, és nem fordulhat elő ütközés.
+
+A névtér nevét a Cache osztály konstruktorának második paramétereként adjuk meg:
+
+```php
+$cache = new Cache($storage, 'Full Html Pages');
+```
+
+Most már használhatjuk a `$cache` objektumot a gyorsítótárból való olvasáshoz és íráshoz. Mindkettőhöz a `load()` metódust használjuk. Az első argumentum a kulcs, a második pedig a PHP callback, amelyet akkor hívunk meg, ha a kulcsot nem találjuk a gyorsítótárban. A callback generál egy értéket, visszaadja azt, és a gyorsítótárba helyezi:
+
+```php
+$value = $cache->load($key, function () use ($key) {
+	$computedValue = /* ... */; // nehéz számítások
+	return $computedValue;
+});
+```
+
+Ha a második paraméter nincs megadva: `$value = $cache->load($key)`, a `null` visszaadja, ha az elem nincs a gyorsítótárban.
+
+.[tip]
+A nagyszerű dolog az, hogy bármilyen szerializálható struktúrát lehet gyorsítótárba helyezni, nem csak stringeket. És ugyanez vonatkozik a kulcsokra is.
+
+Az elemet a `remove()` metódus segítségével töröljük a gyorsítótárból:
+
+```php
+$cache->remove($key);
+```
+
+Egy elemet a `$cache->save($key, $value, array $dependencies = [])` módszerrel is gyorsítótárba helyezhet. A fenti, `load()` módszer azonban előnyösebb.
+
+
+Memoization .[#toc-memoization]
+===============================
+
+A memoizálás egy függvény vagy metódus eredményének gyorsítótárazását jelenti, hogy legközelebb is használhassa azt, ahelyett, hogy újra és újra kiszámolná ugyanazt a dolgot.
+
+A módszereket és függvényeket a `call(callable $callback, ...$args)` segítségével lehet memoizálni:
+
+```php
+$result = $cache->call('gethostbyaddr', $ip);
+```
+
+A `gethostbyaddr()` függvényt csak egyszer hívjuk meg a `$ip` minden egyes paraméterére, és a következő alkalommal a gyorsítótárból származó értéket kapjuk vissza.
+
+Lehetőség van arra is, hogy egy memoizált burkolatot hozzunk létre egy metódushoz vagy függvényhez, amelyet később hívhatunk meg:
+
+```php
+function factorial($num)
+{
+	return /* ... */;
+}
+
+$memoizedFactorial = $cache->wrap('factorial');
+
+$result = $memoizedFactorial(5); // megszámolja.
+$result = $memoizedFactorial(5); // visszaadja a cache-ből
+```
+
+
+Lejárat és érvénytelenítés .[#toc-expiration-invalidation]
+==========================================================
+
+A gyorsítótárazással foglalkozni kell azzal a kérdéssel, hogy a korábban elmentett adatok egy része idővel érvénytelenné válik. A Nette keretrendszer biztosít egy mechanizmust, amellyel az adatok érvényességét korlátozni lehet, és az adatok ellenőrzött módon törölhetők ("érvényteleníthetők", a keretrendszer terminológiáját használva).
+
+Az adatok érvényességét a mentéskor a `save()` módszer harmadik paraméterével lehet beállítani, pl:
+
+```php
+$cache->save($key, $value, [
+	$cache::Expire => '20 minutes',
+]);
+```
+
+Vagy a `$dependencies` paraméter használatával, amelyet hivatkozással adunk át a `load()` metódus visszahívásának, pl:
+
+```php
+$value = $cache->load($key, function (&$dependencies) {
+	$dependencies[Cache::Expire] = '20 minutes';
+	return /* ... */;
+});
+```
+
+Vagy a `load()` módszer 3. paraméterének használatával, pl:
+
+```php
+$value = $cache->load($key, function () {
+	return ...;
+}, [Cache::Expire => '20 minutes']);
+```
+
+A következő példákban a második változatot és így a `$dependencies` változó létezését feltételezzük.
+
+
+Lejárat .[#toc-expiration]
+--------------------------
+
+A legegyszerűbb lejárat az időkorlát. Íme, hogyan lehet 20 percig érvényes adatokat gyorsítótárba helyezni:
+
+```php
+// elfogadja a másodpercek számát vagy a UNIX időbélyeget is.
+$dependencies[Cache::Expire] = '20 minutes';
+```
+
+Ha minden egyes olvasással meg akarjuk hosszabbítani az érvényességi időt, akkor ez így is megvalósítható, de vigyázat, ez növeli a cache overheadet:
+
+```php
+$dependencies[Cache::Sliding] = true;
+```
+
+A praktikus lehetőség, hogy egy adott fájl vagy több fájl közül az egyik módosításakor az adatok érvényessége lejárjon. Ez például az ilyen fájlok feldolgozásából származó adatok gyorsítótárazására használható. Abszolút elérési utak használata.
+
+```php
+$dependencies[Cache::Files] = '/path/to/data.yaml';
+// vagy
+$dependencies[Cache::Files] = ['/path/to/data1.yaml', '/path/to/data2.yaml'];
+```
+
+A gyorsítótár egy elemét akkor hagyhatjuk lejárni, amikor egy másik elem (vagy több másik közül valamelyik) lejár. Ezt akkor használhatjuk, ha a teljes HTML-oldalt és annak más kulcsok alatt lévő töredékeit is gyorsítótárba helyezzük. Amint a részlet megváltozik, az egész oldal érvénytelenné válik. Ha olyan kulcsok alatt tárolt töredékeink vannak, mint a `frag1` és a `frag2`, akkor használjuk:
+
+```php
+$dependencies[Cache::Items] = ['frag1', 'frag2'];
+```
+
+A lejáratot egyéni függvényekkel vagy statikus metódusokkal is szabályozhatjuk, amelyek mindig az olvasáskor döntenek arról, hogy az elem még érvényes-e még. Például hagyhatjuk, hogy az elem lejárjon, amikor a PHP verziója megváltozik. Létrehozunk egy függvényt, amely összehasonlítja az aktuális verziót a paraméterrel, és mentéskor hozzáadunk egy tömböt a következő formában `[function name, ...arguments]` a függőségekhez:
+
+```php
+function checkPhpVersion($ver): bool
+{
+	return $ver === PHP_VERSION_ID;
+}
+
+$dependencies[Cache::Callbacks] = [
+	['checkPhpVersion', PHP_VERSION_ID] // lejár, ha checkPhpVersion(...) === false
+];
+```
+
+Természetesen minden kritérium kombinálható. A gyorsítótár akkor jár le, ha legalább egy kritérium nem teljesül.
+
+```php
+$dependencies[Cache::Expire] = '20 minutes';
+$dependencies[Cache::Files] = '/path/to/data.yaml';
+```
+
+
+Érvénytelenítés címkékkel .[#toc-invalidation-using-tags]
+---------------------------------------------------------
+
+A címkék nagyon hasznos érvénytelenítési eszköz. A cache-ben tárolt minden egyes elemhez hozzárendelhetünk egy listát címkékből, amelyek tetszőleges karakterláncok. Tegyük fel például, hogy van egy HTML-oldalunk egy cikkel és kommentekkel, amelyet gyorsítótárba szeretnénk helyezni. Tehát címkéket adunk meg a gyorsítótárba mentéskor:
+
+```php
+$dependencies[Cache::Tags] = ["article/$articleId", "comments/$articleId"];
+```
+
+Most pedig térjünk át az adminisztrációra. Itt van egy űrlapunk a cikkek szerkesztéséhez. A cikk adatbázisba mentésével együtt hívjuk meg a `clean()` parancsot, amely címkék szerint törli a gyorsítótárazott elemeket:
+
+```php
+$cache->clean([
+	$cache::Tags => ["article/$articleId"],
+]);
+```
+
+Hasonlóképpen, egy új megjegyzés hozzáadása (vagy egy megjegyzés szerkesztése) helyén nem felejtjük el érvényteleníteni a vonatkozó taget:
+
+```php
+$cache->clean([
+	$cache::Tags => ["comments/$articleId"],
+]);
+```
+
+Mit értünk el? Azt, hogy a HTML-cache-ünk érvénytelenítve (törölve) lesz, amikor a cikk vagy a hozzászólások változnak. Egy ID = 10 azonosítóval rendelkező cikk szerkesztésekor a `article/10` címke érvénytelenítése kikényszerül, és a címkét tartalmazó HTML-oldal törlődik a gyorsítótárból. Ugyanez történik akkor is, ha új megjegyzést illesztünk be az adott cikk alá.
+
+.[note]
+A címkékhez [Journal |#Journal] szükséges.
+
+
+Érvénytelenítés prioritás szerint .[#toc-invalidation-by-priority]
+------------------------------------------------------------------
+
+A gyorsítótárban lévő egyes elemek prioritását beállíthatjuk, és lehetőségünk lesz arra, hogy ellenőrzött módon töröljük őket, amikor például a gyorsítótár meghalad egy bizonyos méretet:
+
+```php
+$dependencies[Cache::Priority] = 50;
+```
+
+Töröljük az összes olyan elemet, amelynek prioritása 100 vagy annál kisebb:
+
+```php
+$cache->clean([
+	$cache::Priority => 100,
+]);
+```
+
+.[note]
+A prioritásokhoz úgynevezett [Naplóra |#Journal] van szükség.
+
+
+Cache törlése .[#toc-clear-cache]
+---------------------------------
+
+A `Cache::All` paraméter mindent töröl:
+
+```php
+$cache->clean([
+	$cache::All => true,
+]);
+```
+
+
+Bulk Reading .[#toc-bulk-reading]
+=================================
+
+A gyorsítótárba történő tömeges olvasáshoz és íráshoz a `bulkLoad()` módszert használjuk, ahol átadunk egy kulcsokból álló tömböt, és megkapunk egy értékekből álló tömböt:
+
+```php
+$values = $cache->bulkLoad($keys);
+```
+
+A `bulkLoad()` módszer a `load()` módszerhez hasonlóan működik a második visszahívási paraméterrel, amelynek a generált elem kulcsát adjuk át:
+
+```php
+$values = $cache->bulkLoad($keys, function ($key, &$dependencies) {
+	$computedValue = /* ... */; // nehéz számítások
+	return $computedValue;
+});
+```
+
+
+Kimeneti gyorsítótárazás .[#toc-output-caching]
+===============================================
+
+A kimenet nagyon elegánsan rögzíthető és gyorsítótárazható:
+
+```php
+if ($capture = $cache->capture($key)) {
+
+	echo ... // néhány adat kiírása
+
+	$capture->end(); // a kimenet elmentése a gyorsítótárba
+}
+```
+
+Abban az esetben, ha a kimenet már a gyorsítótárban van, a `capture()` metódus kiírja azt, és visszaadja a `null` címet, így a feltétel nem kerül végrehajtásra. Ellenkező esetben elkezdi pufferelni a kimenetet, és visszaadja a `$capture` objektumot, amelynek segítségével végül elmentjük az adatokat a gyorsítótárba.
+
+.[note]
+A 3.0-s verzióban a metódus neve `$cache->start()` volt.
+
+
+Tárolás a Latte-ban .[#toc-caching-in-latte]
+============================================
+
+A [Latte |latte:] sablonokban a gyorsítótárazás nagyon egyszerű, csak csomagoljuk be a sablon egy részét címkékkel. `{cache}...{/cache}`. A gyorsítótár automatikusan érvénytelenítésre kerül, amikor a forrássablon megváltozik (beleértve a `{cache}` címkékben szereplő sablonokat is). A `{cache}` címkék egymásba ágyazhatók, és amikor egy egymásba ágyazott blokk érvénytelenítésre kerül (például egy címkével), a szülő blokk is érvénytelenítésre kerül.
+
+A címkében meg lehet adni azokat a kulcsokat, amelyekhez a gyorsítótárat kötni kell (itt a `$id` változót), és be lehet állítani a lejárati és [érvénytelenítési címkéket |#Invalidation using Tags].
+
+```latte
+{cache $id, expire: '20 minutes', tags: [tag1, tag2]}
+	...
+{/cache}
+```
+
+Minden paraméter opcionális, tehát nem kell megadni a lejáratot, a címkéket vagy a kulcsokat.
+
+A gyorsítótár használata a `if` segítségével feltételekhez is köthető - a tartalom ekkor csak akkor kerül gyorsítótárba, ha a feltétel teljesül:
+
+```latte
+{cache $id, if: !$form->isSubmitted()}
+	{$form}
+{/cache}
+```
+
+
+Tárolók .[#toc-storages]
+========================
+
+A tároló egy olyan objektum, amely az adatok fizikai tárolási helyét jelöli. Használhatunk adatbázist, Memcached kiszolgálót, vagy a legelérhetőbb tárolókat, amelyek a lemezen lévő fájlok.
+
+|----------------------
+| Tárolás | Leírás
+|----------------------
+| [FileStorage |#FileStorage] | alapértelmezett tároló a lemezen lévő fájlokba történő mentéssel
+| [MemcachedStorage |#MemcachedStorage] | a `Memcached` szervert használja.
+| [MemoryStorage |#MemoryStorage] | az adatok ideiglenesen a memóriában vannak.
+| [SQLiteStorage |#SQLiteStorage] | az adatok SQLite adatbázisban tárolódnak
+| [DevNullStorage |#DevNullStorage] | az adatok nincsenek tárolva - tesztelési célokra.
+
+A tárolási objektumot a `Nette\Caching\Storage` típus [függőségi injektálással |dependency-injection:passing-dependencies] történő átadásával kapja meg. Alapértelmezés szerint a Nette egy FileStorage objektumot biztosít, amely az adatokat az [ideiglenes fájlok |application:bootstrap#Temporary Files] könyvtárának `cache` almappájában tárolja .
+
+A tárolót a konfigurációban megváltoztathatja:
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\DevNullStorage
+```
+
+
+FileStorage .[#toc-filestorage]
+-------------------------------
+
+A gyorsítótárat a lemezen lévő fájlokra írja. A tároló `Nette\Caching\Storages\FileStorage` nagyon jól optimalizált a teljesítményre, és mindenekelőtt biztosítja a műveletek teljes atomicitását. Mit jelent ez? Azt, hogy a gyorsítótár használatakor nem fordulhat elő, hogy olyan fájlt olvassunk, amelyet egy másik szál még nem írt ki teljesen, vagy hogy valaki "kezünk alatt" törölné azt. A gyorsítótár használata tehát teljesen biztonságos.
+
+Ez a tároló rendelkezik egy fontos beépített funkcióval is, amely megakadályozza a CPU-használat extrém mértékű növekedését, amikor a gyorsítótár törlődik vagy hideg (azaz nem jön létre). Ez a "cache stampede":https://en.wikipedia.org/wiki/Cache_stampede megelőzése.
+Előfordul, hogy egy pillanatban több egyidejű kérés is van, amelyek ugyanazt a dolgot akarják a gyorsítótárból (pl. egy drága SQL-lekérdezés eredményét), és mivel az nincs gyorsítótárban, minden folyamat ugyanazt az SQL-lekérdezést kezdi végrehajtani.
+A processzorterhelés megsokszorozódik, és még az is előfordulhat, hogy egyetlen szál sem tud válaszolni az időkorláton belül, a gyorsítótár nem jön létre, és az alkalmazás összeomlik.
+Szerencsére a Nette-ben a gyorsítótár úgy működik, hogy ha egy elemre több egyidejű kérés érkezik, akkor azt csak az első szál generálja, a többiek várnak, majd használják a generált eredményt.
+
+Példa egy FileStorage létrehozására:
+
+```php
+// a tároló a lemezen lévő '/path/to/temp' könyvtár lesz.
+$storage = new Nette\Caching\Storages\FileStorage('/path/to/temp');
+```
+
+
+MemcachedStorage .[#toc-memcachedstorage]
+-----------------------------------------
+
+A [Memcached |https://memcached.org] kiszolgáló egy nagy teljesítményű elosztott tárolórendszer, amelynek adaptere a `Nette\Caching\Storages\MemcachedStorage`. A konfigurációban adja meg az IP-címet és a portot, ha az eltér a szabványos 11211-től.
+
+.[caution]
+PHP-bővítményt igényel `memcached`.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\MemcachedStorage('10.0.0.5')
+```
+
+
+MemoryStorage .[#toc-memorystorage]
+-----------------------------------
+
+`Nette\Caching\Storages\MemoryStorage` egy olyan tároló, amely az adatokat egy PHP tömbben tárolja, és így a kérés befejezésekor elveszik.
+
+
+SQLiteStorage .[#toc-sqlitestorage]
+-----------------------------------
+
+Az SQLite adatbázis és az adapter `Nette\Caching\Storages\SQLiteStorage` lehetőséget kínál a lemezen lévő egyetlen fájlban történő gyorsítótárazásra. A konfiguráció megadja ennek a fájlnak az elérési útvonalát.
+
+.[caution]
+Szükséges a `pdo` és a `pdo_sqlite` PHP-bővítményeket.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\SQLiteStorage('%tempDir%/cache.db')
+```
+
+
+DevNullStorage .[#toc-devnullstorage]
+-------------------------------------
+
+A tárolás egy speciális megvalósítása a `Nette\Caching\Storages\DevNullStorage`, amely valójában egyáltalán nem tárol adatokat. Ezért alkalmas tesztelésre, ha ki akarjuk küszöbölni a gyorsítótár hatását.
+
+
+A gyorsítótár használata a kódban .[#toc-using-cache-in-code]
+=============================================================
+
+A gyorsítótárazást a kódban kétféleképpen használhatjuk. Az első az, hogy a tárolási objektumot [függőségi injektálással |dependency-injection:passing-dependencies] átadva megkapja, majd létrehoz egy objektumot `Cache`:
+
+```php
+use Nette;
+
+class ClassOne
+{
+	private Nette\Caching\Cache $cache;
+
+	public function __construct(Nette\Caching\Storage $storage)
+	{
+		$this->cache = new Nette\Caching\Cache($storage, 'my-namespace');
+	}
+}
+```
+
+A második mód az, hogy megkapja a tárolási objektumot `Cache`:
+
+```php
+class ClassTwo
+{
+	private Nette\Caching\Cache $cache;
+
+	public function __construct(Nette\Caching\Cache $cache)
+	{
+		$this->cache = $cache;
+	}
+}
+```
+
+A `Cache` objektum ezután közvetlenül a konfigurációban jön létre a következőképpen:
+
+```neon
+services:
+	- ClassTwo( Nette\Caching\Cache(namespace: 'my-namespace') )
+```
+
+
+Folyóirat .[#toc-journal]
+=========================
+
+A Nette a címkéket és prioritásokat egy úgynevezett naplóban tárolja. Ehhez alapértelmezés szerint az SQLite és a `journal.s3db` fájlt használja, és **a `pdo` és a `pdo_sqlite` kiterjesztések szükségesek.**
+
+A naplót a konfigurációban megváltoztathatja:
+
+```neon
+services:
+	cache.journal: MyJournal
+```
+
+
+{{leftbar: nette:@menu-topics}}

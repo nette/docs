@@ -1,0 +1,350 @@
+Ядро на базата данни
+********************
+
+.[perex]
+Ядрото на базата данни на Nette е слой за абстракция на базата данни и осигурява основни функции.
+
+
+Инсталация .[#toc-installation]
+===============================
+
+Изтеглете и инсталирайте пакета с помощта на [Composer |best-practices:composer]:
+
+```shell
+composer require nette/database
+```
+
+
+Свързване и конфигуриране .[#toc-connection-and-configuration]
+==============================================================
+
+За да се свържете с базата данни, просто създайте инстанция на класа [api:Nette\Database\Connection]:
+
+```php
+$database = new Nette\Database\Connection($dsn, $user, $password);
+```
+
+Параметърът `$dsn` (име на източника на данни) е [същият, който се използва в PDO |https://www.php.net/manual/ru/pdo.construct.php#refsect1-pdo.construct-parameters], например `host=127.0.0.1;dbname=test`. Ако не успее, се изхвърля изключение `Nette\Database\ConnectionException`.
+
+[Конфигурацията на приложението |configuration] обаче предлага по-сложен начин. Ще добавим раздел `database`, а той ще създаде необходимите обекти и панел `Database` в панела за отстраняване на грешки на [Tracy |tracy:].
+
+```neon
+database:
+	dsn: 'mysql:host=127.0.0.1;dbname=test'
+	user: root
+	password: password
+```
+
+Обектът за връзка, който [получаваме като услуга от DI-контейнера |dependency-injection:passing-dependencies], напр:
+
+```php
+class Model
+{
+	// подайте Nette\Database\Explorer, за да работите със слоя Database Explorer
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+}
+```
+
+За повече информация вижте [Конфигурация на базата данни |configuration].
+
+
+Запитвания .[#toc-queries]
+==========================
+
+За да направите заявка към базата данни, използвайте метода `query()`, който връща [ResultSet |api:Nette\Database\ResultSet].
+
+```php
+$result = $database->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+}
+
+echo $result->getRowCount(); // връща броя на редовете, ако е известен
+```
+
+.[note]
+Можете да итерирате над `ResultSet` само веднъж, ако трябва да итерирате повече от веднъж, трябва да преобразувате резултата в масив, като използвате метода `fetchAll()`.
+
+Можете лесно да добавяте параметри към заявката, като обърнете внимание на въпросителния знак:
+
+```php
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+$database->query('SELECT * FROM users WHERE name = ? AND active = ?', $name, $active);
+
+$database->query('SELECT * FROM users WHERE id IN (?)', $ids); // $ids - массив
+```
+<div class=warning>
+
+ПРЕДУПРЕЖДЕНИЕ Никога не конкатенирайте низове, за да избегнете [уязвимост чрез SQL инжекция |https://ru.wikipedia.org/wiki/%D0%92%D0%BD%D0%B5%D0%B4%D1%80%D0%B5%D0%BD%D0%B8%D0%B5_SQL-%D0%BA%D0%BE%D0%B4%D0%B0]!
+/--
+$db->query('SELECT * FROM users WHERE name = ' . $name); // НЕПРАВИЛЬНО!!!
+\--
+</div>
+
+Ако не успее, `query()` изхвърля изключението `Nette\Database\DriverException` или някое от неговите подчинени изключения:
+
+- [ConstraintViolationException |api:Nette\Database\ConstraintViolationException] - нарушение на някое от условията
+- [ForeignKeyConstraintViolationException |api:Nette\Database\ForeignKeyConstraintViolationException] - невалиден чужд ключ
+- [NotNullConstraintViolationException |api:Nette\Database\NotNullConstraintViolationException] - нарушение на условие NOT NULL
+- [UniqueConstraintViolationException |api:Nette\Database\UniqueConstraintViolationException] - конфликт на уникален индекс
+
+Освен `query()`, има и други полезни методи:
+
+```php
+// Връща асоциативен масив id => name
+$pairs = $database->fetchPairs('SELECT id, name FROM users');
+
+//връщане на всички редове като масив
+$rows = $database->fetchAll('SELECT * FROM users');
+
+//връща един ред
+$row = $database->fetch('SELECT * FROM users WHERE id = ?', $id);
+
+// връщане на едно поле
+$name = $database->fetchField('SELECT name FROM users WHERE id = ?', $id);
+```
+
+При неуспешен опит всички тези методи хвърлят изключение `Nette\Database\DriverException`.
+
+
+Вмъкване, актуализиране и изтриване .[#toc-insert-update-delete]
+================================================================
+
+Параметърът, който вмъкваме в SQL заявката, може да бъде и масив (в този случай можем да пропуснем заместващия символ `?`), что может быть полезно для оператора `INSERT`:
+
+```php
+$database->query('INSERT INTO users ?', [ // тук може да се пропусне въпросителен знак
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978)
+
+$id = $database->getInsertId(); // връща автоматичното увеличение на вмъкнатия низ
+
+$id = $database->getInsertId($последователност); // или стойност на последователността
+```
+
+Вмъкване на няколко стойности:
+
+```php
+$database->query('INSERT INTO users', [
+	[
+		'name' => 'Jim',
+		'year' => 1978,
+	], [
+		'name' => 'Jack',
+		'year' => 1987,
+	],
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978), ('Jack', 1987)
+```
+
+Можем също така да предаваме файлове, обекти DateTime или [изброявания |https://www.php.net/enumerations]:
+
+```php
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'created' => new DateTime, // или $database::literal('NOW()')
+	'avatar' => fopen('image.gif', 'r'), // вмъква съдържанието на файла
+	'status' => State::New, // enum State
+]);
+```
+
+Струни за актуализация:
+
+```php
+$result = $database->query('UPDATE users SET', [
+	'name' => $name,
+	'year' => $year,
+], 'WHERE id = ?', $id);
+// UPDATE users SET `name` = 'Jim', `year` = 1978 WHERE id = 123
+
+echo $result->getRowCount(); // връща броя на засегнатите редове
+```
+
+За UPDATE можем да използваме операторите `+=` и `-=`:
+
+```php
+$database->query('UPDATE users SET', [
+	'age+=' => 1, // note +=
+], 'WHERE id = ?', $id);
+// UPDATE users SET `age` = `age` + 1
+```
+
+Изтриване:
+
+```php
+$result = $database->query('DELETE FROM users WHERE id = ?', $id);
+echo $result->getRowCount(); // връща броя на засегнатите редове
+```
+
+
+Разширени заявки .[#toc-advanced-queries]
+=========================================
+
+Вмъкнете или актуализирайте, ако даден запис вече съществува:
+
+```php
+$database->query('INSERT INTO users', [
+	'id' => $id,
+	'name' => $name,
+	'year' => $year,
+], 'ON DUPLICATE KEY UPDATE', [
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`id`, `name`, `year`) VALUES (123, 'Jim', 1978)
+//   ON DUPLICATE KEY UPDATE `name` = 'Jim', `year` = 1978
+```
+
+Обърнете внимание, че Nette Database разпознава SQL контекста, в който е вмъкнат параметърът на масива, и изгражда SQL кода по съответния начин. Така той генерира `(id, name, year) VALUES (123, 'Jim', 1978)` от първия масив и преобразува втория масив в `name = 'Jim', year = 1978`.
+
+Можем също така да опишем сортирането с помощта на масив, в който ключовете са имена на колони, а стойностите са булеви стойности, които определят дали да се сортират във възходящ ред:
+
+```php
+$database->query('SELECT id FROM author ORDER BY', [
+	'id' => true, // възходящо
+	'name' => false, // низходящо
+]);
+// SELECT id FROM author ORDER BY `id`, `name` DESC
+```
+
+Ако откриването е неуспешно, можете да посочите формата на асемблито, като използвате заместителя `?`, последван от подсказка. Поддържат се следните команди:
+
+| ?values | (key1, key2, ...) VALUES (value1, value2, ...)
+| ?set | key1 = value1, key2 = value2, ...
+| ?and | key1 = value1 AND key2 = value2 ...
+| ?or | ключ1 = стойност1 ИЛИ ключ2 = стойност2 ...
+| ?order | key1 ASC, key2 DESC
+
+В декларацията WHERE се използва операторът `?and`, така че условията са свързани `AND`:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND `year` = 1978
+```
+
+Което може лесно да се промени на `OR`, като се използва заместителният символ `?or`:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE ?or', [
+	'name' => $name,
+	'year' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' OR `year` = 1978
+```
+
+Можем да използваме оператори в условията:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name <>' => $name,
+	'year >' => $year,
+]);
+// SELECT * FROM users WHERE `name` <> 'Jim' AND `year` > 1978
+```
+
+както и трансфери:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => ['Jim', 'Jack'],
+	'role NOT IN' => ['admin', 'owner'], // изброяване + оператор NOT IN
+]);
+// SELECT * FROM users WHERE
+//   `name` IN ('Jim', 'Jack') AND `role` NOT IN ('admin', 'owner')
+```
+
+Можем също така да включим част от персонализирания SQL код, като използваме така наречения SQL литерал:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year >' => $database::literal('YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (`year` > YEAR())
+```
+
+Алтернативно:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (year > YEAR())
+```
+
+Литералът на SQL може да има и свои собствени параметри:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > ? AND year < ?', $min, $max),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (year > 1978 AND year < 2017)
+```
+
+Благодарение на това можем да създаваме интересни комбинации:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('?or', [
+		'active' => true,
+		'role' => $role,
+	]),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (`active` = 1 OR `role` = 'admin')
+```
+
+
+Име на променливата .[#toc-variable-name]
+=========================================
+
+Има заместващ символ `?name', който се използва, ако името на таблица или колона е променлива. (Внимавайте да не позволите на потребителя да манипулира съдържанието на такава променлива):
+
+```php
+$table = 'blog.users';
+$column = 'name';
+$database->query('SELECT * FROM ?name WHERE ?name = ?', $table, $column, $name);
+// SELECT * FROM `blog`.`users` WHERE `name` = 'Jim'
+```
+
+
+Транзакции .[#toc-transactions]
+===============================
+
+Съществуват три метода за обработка на транзакции:
+
+```php
+$database->beginTransaction();
+
+$database->commit();
+
+$database->rollback();
+```
+
+Един елегантен метод предлага методът `transaction()`. Предавате обратно извикване, което се изпълнява в транзакция. Ако по време на изпълнението възникне изключение, транзакцията се прекратява, а ако всичко е наред, транзакцията се предава.
+
+```php
+$id = $database->transaction(function ($database) {
+	$database->query('DELETE FROM ...');
+	$database->query('INSERT INTO ...');
+	// ...
+	return $database->getInsertId();
+});
+```
+
+Както можете да видите, методът `transaction()` връща стойността на обратната връзка.
+
+Функцията Transaction() също може да бъде вложена, което опростява прилагането на независими хранилища.

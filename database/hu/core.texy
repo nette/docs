@@ -1,0 +1,350 @@
+Adatbázis mag
+*************
+
+.[perex]
+A Nette Database Core az adatbázis absztrakciós rétege, és alapvető funkciókat biztosít.
+
+
+Telepítés .[#toc-installation]
+==============================
+
+Töltse le és telepítse a csomagot a [Composer |best-practices:composer] segítségével:
+
+```shell
+composer require nette/database
+```
+
+
+Csatlakozás és konfiguráció .[#toc-connection-and-configuration]
+================================================================
+
+Az adatbázishoz való csatlakozáshoz egyszerűen hozzon létre egy példányt a [api:Nette\Database\Connection] osztályból:
+
+```php
+$database = new Nette\Database\Connection($dsn, $user, $password);
+```
+
+A `$dsn` (adatforrás neve) paraméter [ugyanaz, mint amit a PDO használ |https://www.php.net/manual/en/pdo.construct.php#refsect1-pdo.construct-parameters], pl. `host=127.0.0.1;dbname=test`. Sikertelenség esetén a `Nette\Database\ConnectionException` dobja.
+
+Azonban egy kifinomultabb módot kínál az [alkalmazás konfigurálása |configuration]. Hozzáadunk egy `database` szakaszt, és ez létrehozza a szükséges objektumokat és egy adatbázis panelt a [Tracy |tracy:] sávban.
+
+```neon
+database:
+	dsn: 'mysql:host=127.0.0.1;dbname=test'
+	user: root
+	password: password
+```
+
+A kapcsolati objektumot például [egy DI konténertől kapjuk szolgáltatásként |dependency-injection:passing-dependencies]:
+
+```php
+class Model
+{
+	// Nette\Database\Explorer átadása az adatbázis-kutató réteggel való együttműködéshez.
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+}
+```
+
+További információért lásd: [adatbázis-konfiguráció |configuration].
+
+
+Lekérdezések .[#toc-queries]
+============================
+
+Az adatbázis lekérdezéséhez használja a `query()` módszert, amely [ResultSet-et |api:Nette\Database\ResultSet] ad vissza.
+
+```php
+$result = $database->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+}
+
+echo $result->getRowCount(); // visszaadja a sorok számát, ha ismert.
+```
+
+.[note]
+A `ResultSet` felett csak egyszer lehet iterálni, ha többször kell iterálni, akkor az eredményt a `fetchAll()` metódussal kell tömbre konvertálni.
+
+A lekérdezéshez könnyen adhatunk paramétereket, figyeljük meg a kérdőjelet:
+
+```php
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+$database->query('SELECT * FROM users WHERE name = ? AND active = ?', $name, $active);
+
+$database->query('SELECT * FROM users WHERE id IN (?)', $ids); // $ids egy tömb
+```
+<div class=warning>
+
+FIGYELMEZTETÉS, soha ne fűzzön össze karakterláncokat az [SQL injekciós sebezhetőség |https://en.wikipedia.org/wiki/SQL_injection] elkerülése érdekében!
+/--
+$db->query('SELECT * FROM users WHERE name = ' . $name); // WRONG!!!
+\--
+</div>
+
+Sikertelenség esetén a `query()` a `Nette\Database\DriverException` vagy valamelyik leszármazottját dobja:
+
+- [ConstraintViolationException |api:Nette\Database\ConstraintViolationException] - bármelyik megkötés megsértése.
+- [ForeignKeyConstraintViolationException |api:Nette\Database\ForeignKeyConstraintViolationException] - érvénytelen idegen kulcs.
+- [NotNullConstraintViolationException |api:Nette\Database\NotNullConstraintViolationException] - a NOT NULL feltétel megsértése.
+- [UniqueConstraintViolationException |api:Nette\Database\UniqueConstraintViolationException] - az egyedi index konfliktusa.
+
+A `query()` mellett vannak más hasznos módszerek is:
+
+```php
+// visszaadja az id => name asszociatív tömböt
+$pairs = $database->fetchPairs('SELECT id, name FROM users');
+
+// visszaadja az összes sort tömbként
+$rows = $database->fetchAll('SELECT * FROM users');
+
+// egyetlen sort ad vissza
+$row = $database->fetch('SELECT * FROM users WHERE id = ?', $id);
+
+// egyetlen mezőt ad vissza
+$name = $database->fetchField('SELECT name FROM users WHERE id = ?', $id);
+```
+
+Sikertelenség esetén ezek a módszerek mindegyike dobja a `Nette\Database\DriverException.`
+
+
+Beszúrás, frissítés és törlés .[#toc-insert-update-delete]
+==========================================================
+
+Az SQL-lekérdezésbe beszúrandó paraméter lehet a tömb is (ebben az esetben kihagyható a vadkártyás `?`), which may be useful for the `INSERT` utasítás:
+
+```php
+$database->query('INSERT INTO users ?', [ // itt kihagyható a kérdőjel
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978)
+
+$id = $database->getInsertId(); // visszaadja a beillesztett sor automatikus inkrementálását.
+
+$id = $database->getInsertId($sequence); // vagy a sor értéke
+```
+
+Többszörös beszúrás:
+
+```php
+$database->query('INSERT INTO users', [
+	[
+		'name' => 'Jim',
+		'year' => 1978,
+	], [
+		'name' => 'Jack',
+		'year' => 1987,
+	],
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978), ('Jack', 1987)
+```
+
+DateTime objektumokat vagy [felsorolásokat |https://www.php.net/enumerations] is átadhatunk:
+
+```php
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'created' => new DateTime, // vagy $database::literal('NOW()')
+	'avatar' => fopen('image.gif', 'r'), // a fájl tartalmának beszúrása.
+	'status' => State::New, // enum állapot
+]);
+```
+
+Sorok frissítése:
+
+```php
+$result = $database->query('UPDATE users SET', [
+	'name' => $name,
+	'year' => $year,
+], 'WHERE id = ?', $id);
+// UPDATE users SET `name` = 'Jim', `year` = 1978 WHERE id = 123
+
+echo $result->getRowCount(); // visszaadja az érintett sorok számát
+```
+
+UPDATE esetén a `+=` és a `-=` operátorokat használhatjuk:
+
+```php
+$database->query('UPDATE users SET', [
+	'age+=' => 1, // note +=
+], 'WHERE id = ?', $id);
+// UPDATE users SET `age` = `age` + 1
+```
+
+Törlés:
+
+```php
+$result = $database->query('DELETE FROM users WHERE id = ?', $id);
+echo $result->getRowCount(); // visszaadja az érintett sorok számát.
+```
+
+
+Speciális lekérdezések .[#toc-advanced-queries]
+===============================================
+
+Beszúrás vagy frissítés, ha már létezik:
+
+```php
+$database->query('INSERT INTO users', [
+	'id' => $id,
+	'name' => $name,
+	'year' => $year,
+], 'ON DUPLICATE KEY UPDATE', [
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`id`, `name`, `year`) VALUES (123, 'Jim', 1978)
+//   ON DUPLICATE KEY UPDATE `name` = 'Jim', `year` = 1978
+```
+
+Vegye figyelembe, hogy a Nette Database felismeri az SQL-kontextust, amelybe a tömbparamétert beillesztik, és ennek megfelelően építi fel az SQL-kódot. Így az első tömbből a `(id, name, year) VALUES (123, 'Jim', 1978)`, míg a másodikból a `name = 'Jim', year = 1978` címet alakítja át.
+
+A rendezést is leírhatjuk tömb használatával, a kulcsok az oszlopok nevei, az értékek pedig boolean értékek, amelyek meghatározzák, hogy növekvő sorrendbe rendezzük-e:
+
+```php
+$database->query('SELECT id FROM author ORDER BY', [
+	'id' => true, // felfelé növekvő
+	'name' => false, // csökkenő
+]);
+// SELECT id FROM author ORDER BY `id`, `name` DESC
+```
+
+Ha a felismerés nem működött, akkor az összeállítás formáját megadhatjuk a `?` jokerjelzéssel, amelyet egy utalás követ. Ezek a tippek támogatottak:
+
+| ?values | (kulcs1, kulcs2, ...) VALUES (érték1, érték2, ...)
+| ?set | kulcs1 = érték1, kulcs2 = érték2, ...
+| ?and | kulcs1 = érték1 ÉS kulcs2 = érték2 ...
+| ?or | kulcs1 = érték1 VAGY kulcs2 = érték2 ...
+| ?order | kulcs1 ASC, kulcs2 DESC
+
+A WHERE záradék a `?and` operátort használja, így a feltételeket a `AND` kapcsolja össze:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND `year` = 1978
+```
+
+Ami könnyen megváltoztatható `OR` -ra a `?or` joker használatával:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE ?or', [
+	'name' => $name,
+	'year' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' OR `year` = 1978
+```
+
+Használhatunk operátorokat a feltételekben:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name <>' => $name,
+	'year >' => $year,
+]);
+// SELECT * FROM users WHERE `name` <> 'Jim' AND `year` > 1978
+```
+
+És felsorolásokat is:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => ['Jim', 'Jack'],
+	'role NOT IN' => ['admin', 'owner'], // enumeration + operator NOT IN
+]);
+// SELECT * FROM users WHERE
+//   `name` IN ('Jim', 'Jack') AND `role` NOT IN ('admin', 'owner')
+```
+
+Az úgynevezett SQL literál segítségével egy darab egyéni SQL-kódot is beilleszthetünk:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year >' => $database::literal('YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (`year` > YEAR())
+```
+
+Alternatívaként:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (year > YEAR())
+```
+
+SQL literál is lehet a paraméterei:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > ? AND year < ?', $min, $max),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (year > 1978 AND year < 2017)
+```
+
+Ennek köszönhetően érdekes kombinációkat hozhatunk létre:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('?or', [
+		'active' => true,
+		'role' => $role,
+	]),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (`active` = 1 OR `role` = 'admin')
+```
+
+
+Változó neve .[#toc-variable-name]
+==================================
+
+Van egy `?name` joker, amelyet akkor használhat, ha a táblázat neve vagy az oszlop neve egy változó. (Vigyázat, ne engedje, hogy a felhasználó manipulálja egy ilyen változó tartalmát):
+
+```php
+$table = 'blog.users';
+$column = 'name';
+$database->query('SELECT * FROM ?name WHERE ?name = ?', $table, $column, $name);
+// SELECT * FROM `blog`.`users` WHERE `name` = 'Jim'
+```
+
+
+Tranzakciók .[#toc-transactions]
+================================
+
+A tranzakciók kezelésére három módszer áll rendelkezésre:
+
+```php
+$database->beginTransaction();
+
+$database->commit();
+
+$database->rollback();
+```
+
+A `transaction()` módszer elegáns megoldást kínál. Átadjuk a tranzakcióban végrehajtott visszahívást. Ha a végrehajtás során kivételt dobunk, a tranzakciót eldobjuk, ha minden rendben megy, a tranzakciót lekötjük.
+
+```php
+$id = $database->transaction(function ($database) {
+	$database->query('DELETE FROM ...');
+	$database->query('INSERT INTO ...');
+	// ...
+	return $database->getInsertId();
+});
+```
+
+Mint látható, a `transaction()` metódus a callback visszatérési értékét adja vissza.
+
+A tranzakció() is beágyazható, ami egyszerűsíti a független tárolók megvalósítását.

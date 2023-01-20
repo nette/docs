@@ -1,0 +1,175 @@
+Dynamische Schnipsel
+********************
+
+Bei der Anwendungsentwicklung besteht häufig die Notwendigkeit, AJAX-Operationen durchzuführen, z. B. in einzelnen Zeilen einer Tabelle oder in Listenelementen. So können wir beispielsweise Artikel auflisten und dem angemeldeten Benutzer die Möglichkeit geben, für jeden dieser Artikel eine "Gefällt mir"- oder "Gefällt mir nicht"-Bewertung auszuwählen. Der Code des Presenters und der entsprechenden Vorlage ohne AJAX sieht etwa so aus (ich führe die wichtigsten Schnipsel auf, der Code setzt die Existenz eines Dienstes zur Kennzeichnung der Bewertungen und zum Abrufen einer Sammlung von Artikeln voraus - die spezifische Implementierung ist für die Zwecke dieses Tutorials nicht wichtig):
+
+```php
+public function handleLike(int $articleId): void
+{
+	$this->ratingService->saveLike($articleId, $this->user->id);
+	$this->redirect('this');
+}
+
+public function handleUnlike(int $articleId): void
+{
+	$this->ratingService->removeLike($articleId, $this->user->id);
+	$this->redirect('this');
+}
+```
+
+Vorlage:
+
+```latte
+<article n:foreach="$articles as $article">
+	<h2>{$article->title}</h2>
+	<div class="content">{$article->content}</div>
+	{if !$article->liked}
+		<a n:href="like! $article->id" class=ajax>I like it</a>
+	{else}
+		<a n:href="unlike! $article->id" class=ajax>I don't like it anymore</a>
+	{/if}
+</article>
+```
+
+
+Ajaxisierung .[#toc-ajaxization]
+================================
+
+Bringen wir nun AJAX in diese einfache Anwendung. Das Ändern der Bewertung eines Artikels ist nicht wichtig genug, um eine HTTP-Anfrage mit Redirect zu erfordern, also sollte es idealerweise mit AJAX im Hintergrund geschehen. Wir werden das [Handler-Skript aus add-ons |https://componette.org/vojtech-dobes/nette.ajax.js/] verwenden, mit der üblichen Konvention, dass AJAX-Links die CSS-Klasse `ajax` haben.
+
+Aber wie macht man das konkret? Nette bietet 2 Wege an: den dynamischen Snippet-Weg und den Komponenten-Weg. Beide haben ihre Vor- und Nachteile, daher werden wir sie nacheinander vorstellen.
+
+
+Der Weg der dynamischen Snippets .[#toc-the-dynamic-snippets-way]
+=================================================================
+
+In der Latte-Terminologie ist ein dynamisches Snippet ein spezieller Anwendungsfall des `{snippet}` -Tags, bei dem eine Variable im Namen des Snippets verwendet wird. Ein solches Snippet kann nicht einfach irgendwo in der Vorlage gefunden werden - es muss von einem statischen Snippet, d. h. einem regulären Snippet, oder innerhalb einer `{snippetArea}` umschlossen werden. Wir könnten unsere Vorlage wie folgt ändern.
+
+
+```latte
+{snippet articlesContainer}
+	<article n:foreach="$articles as $article">
+		<h2>{$article->title}</h2>
+		<div class="content">{$article->content}</div>
+		{snippet article-$article->id}
+			{if !$article->liked}
+				<a n:href="like! $article->id" class=ajax>I like it</a>
+			{else}
+				<a n:href="unlike! $article->id" class=ajax>I don't like it anymore</a>
+			{/if}
+		{/snippet}
+	</article>
+{/snippet}
+```
+
+Jeder Artikel definiert nun ein einzelnes Snippet, das eine Artikel-ID im Titel hat. Alle diese Snippets werden dann in einem einzigen Snippet namens `articlesContainer` zusammengefasst. Wenn wir dieses Snippet weglassen, wird Latte uns mit einer Ausnahme warnen.
+
+Alles, was noch zu tun ist, ist, den Presenter neu zu zeichnen - einfach den statischen Wrapper neu zu zeichnen.
+
+```php
+public function handleLike(int $articleId): void
+{
+	$this->ratingService->saveLike($articleId, $this->user->id);
+	if ($this->isAjax()) {
+		$this->redrawControl('articlesContainer');
+		// $this->redrawControl('article-' . $articleId); -- není potřeba
+	} else {
+		$this->redirect('this');
+	}
+}
+```
+
+Ändern Sie die Schwestermethode `handleUnlike()` auf die gleiche Weise, und AJAX ist einsatzbereit!
+
+Die Lösung hat jedoch einen Nachteil. Wenn wir uns genauer ansehen, wie die AJAX-Anfrage funktioniert, stellen wir fest, dass die Anwendung zwar effizient aussieht (sie gibt nur ein einziges Snippet für einen bestimmten Artikel zurück), aber tatsächlich alle Snippets auf dem Server wiedergibt. Sie hat das gewünschte Snippet in unserem Payload platziert und die anderen verworfen (und damit unnötigerweise auch aus der Datenbank abgerufen).
+
+Um diesen Prozess zu optimieren, müssen wir die Sammlung `$articles` an die Vorlage übergeben (z. B. in der Methode `renderDefault()` ). Wir werden uns die Tatsache zunutze machen, dass die Signalverarbeitung vor den `render<Something>` Methoden:
+
+```php
+public function handleLike(int $articleId): void
+{
+	// ...
+	if ($this->isAjax()) {
+		// ...
+		$this->template->articles = [
+			$this->connection->table('articles')->get($articleId),
+		];
+	} else {
+		// ...
+}
+
+public function renderDefault(): void
+{
+	if (!isset($this->template->articles)) {
+		$this->template->articles = $this->connection->table('articles');
+	}
+}
+```
+
+Wenn das Signal verarbeitet wird, wird statt einer Sammlung mit allen Artikeln nur ein Array mit einem einzigen Artikel an die Vorlage übergeben - derjenige, den wir rendern und als Nutzlast an den Browser senden wollen. Somit wird `{foreach}` nur einmal ausgeführt und es werden keine zusätzlichen Snippets gerendert.
+
+
+Komponente Weg .[#toc-component-way]
+====================================
+
+Eine völlig andere Lösung verwendet einen anderen Ansatz, um dynamische Snippets zu vermeiden. Der Trick besteht darin, die gesamte Logik in eine separate Komponente zu verlagern - von nun an haben wir keinen Presenter mehr, der sich um die Eingabe der Bewertung kümmert, sondern eine eigene `LikeControl`. Die Klasse wird wie folgt aussehen (außerdem wird sie auch die Methoden `render`, `handleUnlike`, usw. enthalten):
+
+```php
+class LikeControl extends Nette\Application\UI\Control
+{
+	public function __construct(
+		private Article $article,
+	) {
+	}
+
+	public function handleLike(): void
+	{
+		$this->ratingService->saveLike($this->article->id, $this->presenter->user->id);
+		if ($this->presenter->isAjax()) {
+			$this->redrawControl();
+		} else {
+			$this->presenter->redirect('this');
+		}
+	}
+}
+```
+
+Vorlage der Komponente:
+
+```latte
+{snippet}
+	{if !$article->liked}
+		<a n:href="like!" class=ajax>I like it</a>
+	{else}
+		<a n:href="unlike!" class=ajax>I don't like it anymore</a>
+	{/if}
+{/snippet}
+```
+
+Natürlich werden wir die Ansichtsvorlage ändern und dem Präsentator eine Fabrik hinzufügen. Da wir die Komponente so oft erstellen werden, wie wir Artikel aus der Datenbank erhalten, werden wir die Klasse [application:Multiplier] verwenden, um sie zu "vervielfältigen".
+
+```php
+protected function createComponentLikeControl()
+{
+	$articles = $this->connection->table('articles');
+	return new Nette\Application\UI\Multiplier(function (int $articleId) use ($articles) {
+		return new LikeControl($articles[$articleId]);
+	});
+}
+```
+
+Die Template-Ansicht ist auf das notwendige Minimum reduziert (und völlig frei von Snippets!):
+
+```latte
+<article n:foreach="$articles as $article">
+	<h2>{$article->title}</h2>
+	<div class="content">{$article->content}</div>
+	{control "likeControl-$article->id"}
+</article>
+```
+
+Wir sind fast fertig: die Anwendung wird nun in AJAX funktionieren. Auch hier müssen wir die Anwendung optimieren, denn aufgrund der Verwendung der Nette-Datenbank wird die Signalverarbeitung unnötigerweise alle Artikel aus der Datenbank laden, anstatt nur einen. Der Vorteil ist jedoch, dass es kein Rendering gibt, da nur unsere Komponente tatsächlich gerendert wird.
+
+
+{{priority: -1}}
+{{sitename: Bewährte Praktiken}}

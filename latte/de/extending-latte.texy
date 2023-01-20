@@ -1,0 +1,287 @@
+Latte verlängern
+****************
+
+.[perex]
+Latte ist sehr flexibel und kann auf viele Arten erweitert werden: Sie können eigene Filter, Funktionen, Tags, Lader usw. hinzufügen. Wir zeigen Ihnen, wie Sie das tun können.
+
+Dieses Kapitel beschreibt die verschiedenen Möglichkeiten, Latte zu erweitern. Wenn Sie Ihre Änderungen in verschiedenen Projekten wiederverwenden oder mit anderen teilen wollen, sollten Sie [eine sogenannte Erweiterung erstellen |creating-extension].
+
+
+Wie viele Wege führen nach Rom? .[#toc-how-many-roads-lead-to-rome]
+===================================================================
+
+Da einige der Möglichkeiten, Latte zu erweitern, vermischt werden können, wollen wir zunächst versuchen, die Unterschiede zwischen ihnen zu erklären. Als Beispiel wollen wir versuchen, einen *Lorem ipsum*-Generator zu implementieren, dem die Anzahl der zu erzeugenden Wörter übergeben wird.
+
+Das wichtigste Konstrukt der Sprache Latte ist das Tag. Wir können einen Generator implementieren, indem wir Latte um einen neuen Tag erweitern:
+
+```latte
+{lipsum 40}
+```
+
+Das Tag wird gut funktionieren. Allerdings ist der Generator in Form eines Tags möglicherweise nicht flexibel genug, da er nicht in einem Ausdruck verwendet werden kann. In der Praxis müssen Sie übrigens nur selten Tags generieren, und das ist gut so, denn Tags sind eine kompliziertere Art der Erweiterung.
+
+Versuchen wir also, einen Filter statt eines Tags zu erstellen:
+
+```latte
+{=40|lipsum}
+```
+
+Auch das ist eine gültige Option. Aber der Filter sollte den übergebenen Wert in etwas anderes umwandeln. Hier verwenden wir den Wert `40`, der die Anzahl der erzeugten Wörter angibt, als Filterargument, nicht als den Wert, den wir umwandeln wollen.
+
+Versuchen wir es also mit function:
+
+```latte
+{lipsum(40)}
+```
+
+So geht's! Für dieses spezielle Beispiel ist die Erstellung einer Funktion der ideale Erweiterungspunkt. Sie können sie überall dort aufrufen, wo ein Ausdruck akzeptiert wird, zum Beispiel:
+
+```latte
+{var $text = lipsum(40)}
+```
+
+
+Filter .[#toc-filters]
+======================
+
+Erstellen Sie einen Filter, indem Sie seinen Namen und eine beliebige PHP-Aufrufbarkeit, wie z. B. eine Funktion, registrieren:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFilter('shortify', fn(string $s) => mb_substr($s, 0, 10)); // kürzt den Text auf 10 Zeichen
+```
+
+In diesem Fall wäre es besser, wenn der Filter einen zusätzlichen Parameter erhält:
+
+```php
+$latte->addFilter('shortify', function (string $s, int $len = 10): string {
+	return mb_substr($s, 0, $len);
+});
+```
+
+Wir verwenden ihn in einer Vorlage wie dieser:
+
+```latte
+<p>{$text|shortify}</p>
+<p>{$text|shortify:100}</p>
+```
+
+Wie Sie sehen können, erhält die Funktion die linke Seite des Filters vor der Pipe `|` as the first argument and the arguments passed to the filter after `:` als nächste Argumente.
+
+Natürlich kann die Funktion, die den Filter darstellt, eine beliebige Anzahl von Parametern annehmen, und auch variable Parameter werden unterstützt.
+
+
+Filter, die die Klasse .[#toc-filters-using-the-class]
+------------------------------------------------------
+
+Die zweite Möglichkeit, einen Filter zu definieren, ist die [Verwendung einer Klasse |develop#Parameters as a class]. Wir erstellen eine Methode mit dem Attribut `TemplateFilter`:
+
+```php
+class TemplateParameters
+{
+	public function __construct(
+		// parameters
+	) {}
+
+	#[Latte\Attributes\TemplateFilter]
+	public function shortify(string $s, int $len = 10): string
+	{
+		return mb_substr($s, 0, $len);
+	}
+}
+
+$params = new TemplateParameters(/* ... */);
+$latte->render('template.latte', $params);
+```
+
+Wenn Sie PHP 7.x und Latte 2.x verwenden, benutzen Sie die `/** @filter */` Annotation anstelle des Attributs.
+
+
+Filter-Lader .{data-version:2.10}[#toc-filter-loader]
+-----------------------------------------------------
+
+Anstatt einzelne Filter zu registrieren, können Sie einen so genannten Loader erstellen. Dabei handelt es sich um eine Funktion, die mit dem Filternamen als Argument aufgerufen wird und ihre PHP-Aufrufbarkeit oder null zurückgibt.
+
+```php
+$latte->addFilterLoader([new Filters, 'load']);
+
+
+class Filters
+{
+	public function load(string $filter): ?callable
+	{
+		if (in_array($filter, get_class_methods($this))) {
+			return [$this, $filter];
+		}
+		return null;
+	}
+
+	public function shortify($s, $len = 10)
+	{
+		return mb_substr($s, 0, $len);
+	}
+
+	// ...
+}
+```
+
+
+Kontextuelle Filter .[#toc-contextual-filters]
+----------------------------------------------
+
+Ein kontextbezogener Filter akzeptiert als ersten Parameter ein Objekt [api:Latte\Runtime\FilterInfo], gefolgt von weiteren Parametern wie bei klassischen Filtern. Er wird auf die gleiche Weise registriert, wobei Latte selbst erkennt, dass es sich um einen kontextuellen Filter handelt:
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('foo', function (FilterInfo $info, string $str): string {
+	// ...
+});
+```
+
+Kontextfilter können den Inhaltstyp erkennen und ändern, den sie in der Variable `$info->contentType` erhalten. Wird der Filter klassisch über eine Variable (z.B. `{$var|foo}`) aufgerufen, enthält `$info->contentType` null.
+
+Der Filter sollte zunächst prüfen, ob der Inhaltstyp der Eingabezeichenkette unterstützt wird. Er kann ihn auch ändern. Beispiel für einen Filter, der Text (oder Null) akzeptiert und HTML zurückgibt:
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('money', function (FilterInfo $info, float $amount): string {
+	// zuerst prüfen wir, ob der Inhaltstyp der Eingabe Text ist
+	if (!in_array($info->contentType, [null, ContentType::Text])) {
+		throw new Exception("Filter |money in inkompatiblem Inhaltstyp $info->contentType verwendet.");
+	}
+
+	// Inhaltstyp in HTML ändern
+	$info->contentType = ContentType::Html;
+	return "<i>$num Kč</i>";
+});
+```
+
+.[note]
+In diesem Fall muss der Filter das korrekte Escaping der Daten sicherstellen.
+
+Alle Filter, die über [Blöcke |tags#block] verwendet werden (z.B. als `{block|foo}...{/block}`) müssen kontextabhängig sein.
+
+
+Funktionen .{data-version:2.6}[#toc-functions]
+==============================================
+
+Standardmäßig können alle nativen PHP-Funktionen in Latte verwendet werden, es sei denn, die Sandbox schaltet sie ab. Sie können aber auch Ihre eigenen Funktionen definieren. Diese können die nativen Funktionen außer Kraft setzen.
+
+Erstellen Sie eine Funktion, indem Sie ihren Namen und eine beliebige PHP-Aufrufmöglichkeit registrieren:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFunction('random', function (...$args) {
+	return $args[array_rand($args)];
+});
+```
+
+Die Verwendung ist dann dieselbe wie beim Aufruf der PHP-Funktion:
+
+```latte
+{random(apple, orange, lemon)} // prints for example: apple
+```
+
+
+Funktionen, die die Klasse verwenden .[#toc-functions-using-the-class]
+----------------------------------------------------------------------
+
+Die zweite Möglichkeit, eine Funktion zu definieren, ist die [Verwendung der Klasse |develop#Parameters as a class]. Wir erstellen eine Methode mit dem Attribut `TemplateFunction`:
+
+```php
+class TemplateParameters
+{
+	public function __construct(
+		// parameters
+	) {}
+
+	#[Latte\Attributes\TemplateFunction]
+	public function random(...$args)
+	{
+		return $args[array_rand($args)];
+	}
+}
+
+$params = new TemplateParameters(/* ... */);
+$latte->render('template.latte', $params);
+```
+
+Wenn Sie PHP 7.x und Latte 2.x verwenden, benutzen Sie die `/** @function */` Annotation anstelle des Attributs.
+
+
+Lader .[#toc-loaders]
+=====================
+
+Loader sind für das Laden von Vorlagen aus einer Quelle, z. B. einem Dateisystem, zuständig. Sie werden mit der Methode `setLoader()` festgelegt:
+
+```php
+$latte->setLoader(new MyLoader);
+```
+
+Die eingebauten Lader sind:
+
+
+FileLoader .[#toc-fileloader]
+-----------------------------
+
+Standard-Lader. Lädt Vorlagen aus dem Dateisystem.
+
+Der Zugriff auf Dateien kann durch die Angabe des Basisverzeichnisses eingeschränkt werden:
+
+```php
+$latte->setLoader(new Latte\Loaders\FileLoader($templateDir));
+$latte->render('test.latte');
+```
+
+
+StringLoader .[#toc-stringloader]
+---------------------------------
+
+Lädt Vorlagen aus Strings. Dieser Lader ist sehr nützlich für Unit-Tests. Er kann auch für kleine Projekte verwendet werden, bei denen es sinnvoll sein kann, alle Vorlagen in einer einzigen PHP-Datei zu speichern.
+
+```php
+$latte->setLoader(new Latte\Loaders\StringLoader([
+	'main.file' => '{include other.file}',
+	'other.file' => '{if true} {$var} {/if}',
+]));
+
+$latte->render('main.file');
+```
+
+Vereinfachte Nutzung:
+
+```php
+$template = '{if true} {$var} {/if}';
+$latte->setLoader(new Latte\Loaders\StringLoader);
+$latte->render($template);
+```
+
+
+Erstellen eines Custom Loader .[#toc-creating-a-custom-loader]
+--------------------------------------------------------------
+
+Loader ist eine Klasse, die die Schnittstelle [api:Latte\Loader] implementiert.
+
+
+Tags .[#toc-tags]
+=================
+
+Eine der interessantesten Funktionen der Templating-Engine ist die Möglichkeit, neue Sprachkonstrukte mit Hilfe von Tags zu definieren. Es handelt sich dabei auch um eine komplexere Funktionalität und Sie müssen verstehen, wie Latte intern funktioniert.
+
+In den meisten Fällen wird das Tag jedoch nicht benötigt:
+- wenn es eine Ausgabe erzeugen soll, verwenden Sie stattdessen eine [Funktion |#functions]
+- wenn es eine Eingabe verändern und zurückgeben soll, verwenden Sie stattdessen [filter |#filters]
+- wenn ein Textbereich bearbeitet werden soll, umschließt man ihn mit einem [`{block}` |tags#block] Tag und verwende einen [Filter |#Contextual Filters]
+- wenn es nichts ausgeben soll, sondern nur eine Funktion aufrufen soll, rufen Sie sie mit [`{do}` |tags#do]
+
+Wenn Sie trotzdem ein Tag erstellen wollen, prima! Alles Wesentliche finden Sie unter [Erstellen einer Erweiterung |creating-extension].
+
+
+Compiler-Pässe .{data-version:3.0}[#toc-compiler-passes]
+========================================================
+
+Compiler-Passes sind Funktionen, die ASTs modifizieren oder Informationen in ihnen sammeln. In Latte ist zum Beispiel eine Sandbox auf diese Weise implementiert: Sie durchläuft alle Knoten eines AST, findet Funktions- und Methodenaufrufe und ersetzt sie durch kontrollierte Aufrufe.
+
+Wie bei den Tags handelt es sich hierbei um eine komplexere Funktionalität, und Sie müssen verstehen, wie Latte unter der Haube funktioniert. Alles Wesentliche dazu finden Sie im Kapitel [Erstellen einer Erweiterung |creating-extension].

@@ -1,0 +1,285 @@
+Ampliación de Latte
+*******************
+
+.[perex]
+Latte es muy flexible y se puede ampliar de muchas maneras: puede añadir filtros personalizados, funciones, etiquetas, cargadores, etc. Le mostraremos cómo hacerlo.
+
+Este capítulo describe las diferentes formas de extender Latte. Si quieres reutilizar tus cambios en diferentes proyectos o si quieres compartirlos con otros, entonces deberías [crear la llamada extensión |creating-extension].
+
+
+¿Cuántos caminos llevan a Roma? .[#toc-how-many-roads-lead-to-rome]
+===================================================================
+
+Dado que algunas de las formas de extender Latte pueden mezclarse, intentemos primero explicar las diferencias entre ellas. Como ejemplo, intentemos implementar un generador *Lorem ipsum*, al que se le pasa el número de palabras a generar.
+
+La principal construcción del lenguaje Latte es la etiqueta. Podemos implementar un generador extendiendo Latte con una nueva etiqueta:
+
+```latte
+{lipsum 40}
+```
+
+La etiqueta funcionará muy bien. Sin embargo, el generador en forma de etiqueta puede no ser lo suficientemente flexible porque no se puede utilizar en una expresión. Por cierto, en la práctica, rara vez necesitarás generar etiquetas; y eso es una buena noticia, porque las etiquetas son una forma más complicada de extender.
+
+Bien, intentemos crear un filtro en lugar de una etiqueta:
+
+```latte
+{=40|lipsum}
+```
+
+De nuevo, una opción válida. Pero el filtro debería transformar el valor pasado en otra cosa. Aquí usamos el valor `40`, que indica el número de palabras generadas, como argumento del filtro, no como el valor que queremos transformar.
+
+Así que intentemos usar la función
+
+```latte
+{lipsum(40)}
+```
+
+¡Eso es! Para este ejemplo en particular, crear una función es el punto de extensión ideal a utilizar. Puedes llamarla en cualquier lugar donde se acepte una expresión, por ejemplo:
+
+```latte
+{var $text = lipsum(40)}
+```
+
+
+Filtros .[#toc-filters]
+=======================
+
+Crea un filtro registrando su nombre y cualquier llamada PHP, como una función:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFilter('shortify', fn(string $s) => mb_substr($s, 0, 10)); // acorta el texto a 10 caracteres
+```
+
+En este caso sería mejor que el filtro recibiera un parámetro adicional:
+
+```php
+$latte->addFilter('shortify', fn(string $s, int $len = 10) => mb_substr($s, 0, $len));
+```
+
+Lo usamos en una plantilla como esta:
+
+```latte
+<p>{$text|shortify}</p>
+<p>{$text|shortify:100}</p>
+```
+
+Como puede ver, la función recibe la parte izquierda del filtro antes de la tubería `|` as the first argument and the arguments passed to the filter after `:` como los siguientes argumentos.
+
+Por supuesto, la función que representa el filtro puede aceptar cualquier número de parámetros, y también se admiten parámetros variádicos.
+
+
+Filtros que utilizan la clase .[#toc-filters-using-the-class]
+-------------------------------------------------------------
+
+La segunda forma de definir un filtro es [utilizar |develop#Parameters as a class] la clase. Creamos un método con el atributo `TemplateFilter`:
+
+```php
+class TemplateParameters
+{
+	public function __construct(
+		// parameters
+	) {}
+
+	#[Latte\Attributes\TemplateFilter]
+	public function shortify(string $s, int $len = 10): string
+	{
+		return mb_substr($s, 0, $len);
+	}
+}
+
+$params = new TemplateParameters(/* ... */);
+$latte->render('template.latte', $params);
+```
+
+Si utiliza PHP 7.x y Latte 2.x, utilice la anotación `/** @filter */` en lugar del atributo.
+
+
+Cargador de filtros .{data-version:2.10}[#toc-filter-loader]
+------------------------------------------------------------
+
+En lugar de registrar filtros individuales, puede crear un llamado cargador, que es una función que se llama con el nombre del filtro como argumento y devuelve su PHP callable, o null.
+
+```php
+$latte->addFilterLoader([new Filters, 'load']);
+
+
+class Filters
+{
+	public function load(string $filter): ?callable
+	{
+		if (in_array($filter, get_class_methods($this))) {
+			return [$this, $filter];
+		}
+		return null;
+	}
+
+	public function shortify($s, $len = 10)
+	{
+		return mb_substr($s, 0, $len);
+	}
+
+	// ...
+}
+```
+
+
+Filtros contextuales .[#toc-contextual-filters]
+-----------------------------------------------
+
+Un filtro contextual es aquel que acepta un objeto [api:Latte\Runtime\FilterInfo] en el primer parámetro, seguido de otros parámetros como en el caso de los filtros clásicos. Se registra de la misma manera, el propio Latte reconoce que el filtro es contextual:
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('foo', function (FilterInfo $info, string $str): string {
+	// ...
+});
+```
+
+Los filtros contextuales pueden detectar y cambiar el tipo de contenido que reciben en la variable `$info->contentType`. Si el filtro se llama clásicamente sobre una variable (por ejemplo `{$var|foo}`), el `$info->contentType` contendrá null.
+
+El filtro debe comprobar primero si el tipo de contenido de la cadena de entrada es compatible. También puede cambiarlo. Ejemplo de un filtro que acepta texto (o null) y devuelve HTML:
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('money', function (FilterInfo $info, float $amount): string {
+	// first we check if the input's content-type is text
+	if (!in_array($info->contentType, [null, ContentType::Text])) {
+		throw new Exception("Filter |money used in incompatible content type $info->contentType.");
+	}
+
+	// change content-type to HTML
+	$info->contentType = ContentType::Html;
+	return "<i>$num Kč</i>";
+});
+```
+
+.[note]
+En este caso, el filtro debe garantizar el correcto escapado de los datos.
+
+Todos los filtros que se utilicen sobre [bloques |tags#block] (por ejemplo, como `{block|foo}...{/block}`) deben ser contextuales.
+
+
+Funciones .{data-version:2.6}[#toc-functions]
+=============================================
+
+Por defecto, todas las funciones nativas de PHP pueden ser usadas en Latte, a menos que el sandbox lo deshabilite. Pero también puede definir sus propias funciones. Estas pueden sobreescribir las funciones nativas.
+
+Crear una función mediante el registro de su nombre y cualquier PHP callable:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFunction('random', function (...$args) {
+	return $args[array_rand($args)];
+});
+```
+
+El uso es entonces el mismo que cuando se llama a la función PHP:
+
+```latte
+{random(apple, orange, lemon)} // prints for example: apple
+```
+
+
+Funciones usando la clase .[#toc-functions-using-the-class]
+-----------------------------------------------------------
+
+La segunda forma de definir una función es [utilizar |develop#Parameters as a class] la clase. Creamos un método con el atributo `TemplateFunction`:
+
+```php
+class TemplateParameters
+{
+	public function __construct(
+		// parameters
+	) {}
+
+	#[Latte\Attributes\TemplateFunction]
+	public function random(...$args)
+	{
+		return $args[array_rand($args)];
+	}
+}
+
+$params = new TemplateParameters(/* ... */);
+$latte->render('template.latte', $params);
+```
+
+Si utiliza PHP 7.x y Latte 2.x, utilice la anotación `/** @function */` en lugar del atributo.
+
+
+Cargadores .[#toc-loaders]
+==========================
+
+Los cargadores se encargan de cargar plantillas desde una fuente, como un sistema de archivos. Se configuran utilizando el método `setLoader()`:
+
+```php
+$latte->setLoader(new MyLoader);
+```
+
+Los cargadores incorporados son:
+
+
+Cargador de archivos .[#toc-fileloader]
+---------------------------------------
+
+Cargador por defecto. Carga plantillas desde el sistema de archivos.
+
+El acceso a los archivos puede restringirse estableciendo el directorio base:
+
+```php
+$latte->setLoader(new Latte\Loaders\FileLoader($templateDir));
+$latte->render('test.latte');
+```
+
+
+StringLoader .[#toc-stringloader]
+---------------------------------
+
+Carga plantillas a partir de cadenas. Este cargador es muy útil para pruebas unitarias. También se puede utilizar para proyectos pequeños donde puede tener sentido almacenar todas las plantillas en un único archivo PHP.
+
+```php
+$latte->setLoader(new Latte\Loaders\StringLoader([
+	'main.file' => '{include other.file}',
+	'other.file' => '{if true} {$var} {/if}',
+]));
+
+$latte->render('main.file');
+```
+
+Uso simplificado:
+
+```php
+$template = '{if true} {$var} {/if}';
+$latte->setLoader(new Latte\Loaders\StringLoader);
+$latte->render($template);
+```
+
+
+Creación de un cargador personalizado .[#toc-creating-a-custom-loader]
+----------------------------------------------------------------------
+
+Loader es una clase que implementa la interfaz [api:Latte\Loader].
+
+
+Etiquetas .[#toc-tags]
+======================
+
+Una de las características más interesantes del motor de plantillas es la posibilidad de definir nuevas construcciones del lenguaje mediante etiquetas. También es una funcionalidad más compleja y es necesario entender cómo funciona internamente Latte.
+
+En la mayoría de los casos, sin embargo, la etiqueta no es necesaria:
+- si debe generar alguna salida, utilice [function |#functions] en su lugar
+- si fuera a modificar alguna entrada y devolverla, use [filtro |#filters] en su lugar
+- si fuera a editar un área de texto, envuélvalo con una etiqueta [`{block}` |tags#block] y utilice un [filtro |#Contextual Filters]
+- si no se supone que debe generar ninguna salida sino sólo llamar a una función, llámela con [`{do}` |tags#do]
+
+Si todavía quieres crear una etiqueta, ¡genial! Todo lo esencial se puede encontrar en [Creación de una Extensión |creating-extension].
+
+
+Pases de compilador .{data-version:3.0}[#toc-compiler-passes]
+=============================================================
+
+Los pases de compilador son funciones que modifican ASTs o recogen información en ellos. En Latte, por ejemplo, un sandbox se implementa de esta manera: recorre todos los nodos de un AST, encuentra llamadas a funciones y métodos, y los reemplaza por llamadas controladas.
+
+Al igual que con las etiquetas, se trata de una funcionalidad más compleja y es necesario entender cómo funciona Latte bajo el capó. Todo lo esencial se puede encontrar en el capítulo [Creación de una Extensión |creating-extension].

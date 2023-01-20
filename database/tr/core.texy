@@ -1,0 +1,350 @@
+Veritabanı Çekirdeği
+********************
+
+.[perex]
+Nette Database Core, veritabanı soyutlama katmanıdır ve temel işlevsellik sağlar.
+
+
+Kurulum .[#toc-installation]
+============================
+
+[Composer'ı |best-practices:composer] kullanarak paketi indirin ve yükleyin:
+
+```shell
+composer require nette/database
+```
+
+
+Bağlantı ve Yapılandırma .[#toc-connection-and-configuration]
+=============================================================
+
+Veritabanına bağlanmak için [api:Nette\Database\Connection] sınıfının bir örneğini oluşturmanız yeterlidir:
+
+```php
+$database = new Nette\Database\Connection($dsn, $user, $password);
+```
+
+`$dsn` (veri kaynağı adı) parametresi [PDO tarafından kullanılanla aynıdır |https://www.php.net/manual/en/pdo.construct.php#refsect1-pdo.construct-parameters], örneğin `host=127.0.0.1;dbname=test`. Başarısızlık durumunda `Nette\Database\ConnectionException` atar.
+
+Ancak, daha sofistike bir yol [uygulama yapılandırması |configuration] sunar. Bir `database` bölümü ekleyeceğiz ve [Tracy |tracy:] çubuğunda gerekli nesneleri ve bir veritabanı paneli oluşturacak.
+
+```neon
+database:
+	dsn: 'mysql:host=127.0.0.1;dbname=test'
+	user: root
+	password: password
+```
+
+Örneğin [bir DI konteynerinden servis olarak aldığımız |dependency-injection:passing-dependencies] bağlantı nesnesi:
+
+```php
+class Model
+{
+	// Veritabanı Gezgini katmanı ile çalışmak için Nette\Database\Explorer'ı geçirin
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+}
+```
+
+Daha fazla bilgi için, bkz. [veritabanı yapılandırması |configuration].
+
+
+Sorgular .[#toc-queries]
+========================
+
+Veritabanını sorgulamak için [ResultSet |api:Nette\Database\ResultSet] döndüren `query()` yöntemini kullanın.
+
+```php
+$result = $database->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+}
+
+echo $result->getRowCount(); // biliniyorsa satır sayısını döndürür
+```
+
+.[note]
+`ResultSet` üzerinden sadece bir kez yineleme yapmak mümkündür, birden fazla kez yineleme yapmamız gerekirse `fetchAll()` metodu ile sonucu diziye dönüştürmek gerekir.
+
+Sorguya kolayca parametre ekleyebilirsiniz, soru işaretine dikkat edin:
+
+```php
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+$database->query('SELECT * FROM users WHERE name = ? AND active = ?', $name, $active);
+
+$database->query('SELECT * FROM users WHERE id IN (?)', $ids); // $ids bir dizidir
+```
+<div class=warning>
+
+UYARI, [SQL enjeksiyonu açığından |https://en.wikipedia.org/wiki/SQL_injection] kaçınmak için asla dizeleri birleştirmeyin!
+/--
+$db->query('SELECT * FROM users WHERE name = ' . $name); // WRONG!!!
+\--
+</div>
+
+Başarısızlık durumunda `query()`, `Nette\Database\DriverException` ya da onun soyundan gelenlerden birini fırlatır:
+
+- [ConstraintViolationException |api:Nette\Database\ConstraintViolationException] - herhangi bir kısıtlamanın ihlali
+- [ForeignKeyConstraintViolationException |api:Nette\Database\ForeignKeyConstraintViolationException] - geçersiz yabancı anahtar
+- [NotNullConstraintViolationException |api:Nette\Database\NotNullConstraintViolationException] - NOT NULL koşulunun ihlali
+- [UniqueConstraintViolationException |api:Nette\Database\UniqueConstraintViolationException] - benzersiz dizin çakışması
+
+`query()` adresine ek olarak, başka faydalı yöntemler de vardır:
+
+```php
+// id => name ilişkisel dizisini döndürür
+$pairs = $database->fetchPairs('SELECT id, name FROM users');
+
+// tüm satırları dizi olarak döndürür
+$rows = $database->fetchAll('SELECT * FROM users');
+
+// tek satır döndürür
+$row = $database->fetch('SELECT * FROM users WHERE id = ?', $id);
+
+// tek alan döndür
+$name = $database->fetchField('SELECT name FROM users WHERE id = ?', $id);
+```
+
+Başarısızlık durumunda, tüm bu yöntemler `Nette\Database\DriverException.`
+
+
+Ekle, Güncelle ve Sil .[#toc-insert-update-delete]
+==================================================
+
+SQL sorgusuna eklediğimiz parametre dizi de olabilir (bu durumda joker karakter `?`), which may be useful for the `INSERT` ifadesini atlamak mümkündür:
+
+```php
+$database->query('INSERT INTO users ?', [ // burada soru işareti atlanabilir
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978)
+
+$id = $database->getInsertId(); // eklenen satırın otomatik artışını döndürür
+
+id = $database->getInsertId($sequence); // veya sıra değeri
+```
+
+Çoklu ekleme:
+
+```php
+$database->query('INSERT INTO users', [
+	[
+		'name' => 'Jim',
+		'year' => 1978,
+	], [
+		'name' => 'Jack',
+		'year' => 1987,
+	],
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978), ('Jack', 1987)
+```
+
+Ayrıca dosyaları, DateTime nesnelerini veya [numaralandırmaları |https://www.php.net/enumerations] da aktarabiliriz:
+
+```php
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'created' => new DateTime, // or $database::literal('NOW()')
+	'avatar' => fopen('image.gif', 'r'), // inserts file contents
+	'status' => State::New, // enum State
+]);
+```
+
+Satırlar güncelleniyor:
+
+```php
+$result = $database->query('UPDATE users SET', [
+	'name' => $name,
+	'year' => $year,
+], 'WHERE id = ?', $id);
+// UPDATE users SET `name` = 'Jim', `year` = 1978 WHERE id = 123
+
+echo $result->getRowCount(); // etkilenen satır sayısını döndürür
+```
+
+UPDATE için `+=` ve `-=` operatörlerini kullanabiliriz:
+
+```php
+$database->query('UPDATE users SET', [
+	'age+=' => 1, // note +=
+], 'WHERE id = ?', $id);
+// UPDATE users SET `age` = `age` + 1
+```
+
+Siliniyor:
+
+```php
+$result = $database->query('DELETE FROM users WHERE id = ?', $id);
+echo $result->getRowCount(); // etkilenen satır sayısını döndürür
+```
+
+
+Gelişmiş Sorgular .[#toc-advanced-queries]
+==========================================
+
+Zaten mevcutsa ekleyin veya güncelleyin:
+
+```php
+$database->query('INSERT INTO users', [
+	'id' => $id,
+	'name' => $name,
+	'year' => $year,
+], 'ON DUPLICATE KEY UPDATE', [
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`id`, `name`, `year`) VALUES (123, 'Jim', 1978)
+//   ON DUPLICATE KEY UPDATE `name` = 'Jim', `year` = 1978
+```
+
+Nette Database'in dizi parametresinin eklendiği SQL bağlamını tanıdığını ve SQL kodunu buna göre oluşturduğunu unutmayın. Böylece, ilk diziden `(id, name, year) VALUES (123, 'Jim', 1978)` üretirken, ikincisini `name = 'Jim', year = 1978`'a dönüştürür.
+
+Sıralamayı dizi kullanarak da tanımlayabiliriz, anahtarlar sütun adlarıdır ve değerler artan sırada sıralanıp sıralanmayacağını belirleyen boolean'dır:
+
+```php
+$database->query('SELECT id FROM author ORDER BY', [
+	'id' => true, // artan
+	'name' => false, // azalan
+]);
+// SELECT id FROM author ORDER BY `id`, `name` DESC
+```
+
+Algılama işe yaramadıysa, derlemenin biçimini bir joker karakter `?` ve ardından bir ipucu ile belirtebilirsiniz. Bu ipuçları desteklenir:
+
+| ?values | (key1, key2, ...) VALUES (value1, value2, ...)
+| ?set | anahtar1 = değer1, anahtar2 = değer2, ...
+| ?ve | anahtar1 = değer1 VE anahtar2 = değer2 ...
+| ?or | key1 = value1 OR key2 = value2 ...
+| ?order | key1 ASC, key2 DESC
+
+WHERE cümlesi `?and` operatörünü kullanır, böylece koşullar `AND` ile birbirine bağlanır:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND `year` = 1978
+```
+
+Bu, `?or` joker karakteri kullanılarak kolayca `OR` olarak değiştirilebilir:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE ?or', [
+	'name' => $name,
+	'year' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' OR `year` = 1978
+```
+
+Operatörleri koşullar içinde kullanabiliriz:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name <>' => $name,
+	'year >' => $year,
+]);
+// SELECT * FROM users WHERE `name` <> 'Jim' AND `year` > 1978
+```
+
+Ve ayrıca numaralandırmalar:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => ['Jim', 'Jack'],
+	'role NOT IN' => ['admin', 'owner'], // enumeration + operator NOT IN
+]);
+// SELECT * FROM users WHERE
+//   `name` IN ('Jim', 'Jack') AND `role` NOT IN ('admin', 'owner')
+```
+
+Ayrıca SQL literal olarak adlandırılan özel bir SQL kodu parçası da ekleyebiliriz:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year >' => $database::literal('YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (`year` > YEAR())
+```
+
+Alternatif olarak:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (year > YEAR())
+```
+
+SQL literalinin parametreleri de olabilir:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > ? AND year < ?', $min, $max),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (year > 1978 AND year < 2017)
+```
+
+Bu sayede ilginç kombinasyonlar yaratabiliriz:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('?or', [
+		'active' => true,
+		'role' => $role,
+	]),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (`active` = 1 OR `role` = 'admin')
+```
+
+
+Değişken Adı .[#toc-variable-name]
+==================================
+
+Tablo adı veya sütun adı bir değişken ise kullanabileceğiniz bir `?name` joker karakteri vardır. (Dikkat edin, kullanıcının böyle bir değişkenin içeriğini değiştirmesine izin vermeyin):
+
+```php
+$table = 'blog.users';
+$column = 'name';
+$database->query('SELECT * FROM ?name WHERE ?name = ?', $table, $column, $name);
+// SELECT * FROM `blog`.`users` WHERE `name` = 'Jim'
+```
+
+
+İşlemler .[#toc-transactions]
+=============================
+
+İşlemlerle ilgilenmek için üç yöntem vardır:
+
+```php
+$database->beginTransaction();
+
+$database->commit();
+
+$database->rollback();
+```
+
+`transaction()` yöntemi zarif bir yol sunar. Transaction içinde çalıştırılan geri çağırmayı iletirsiniz. Yürütme sırasında bir istisna atılırsa, işlem düşürülür, her şey yolunda giderse işlem işlenir.
+
+```php
+$id = $database->transaction(function ($database) {
+	$database->query('DELETE FROM ...');
+	$database->query('INSERT INTO ...');
+	// ...
+	return $database->getInsertId();
+});
+```
+
+Gördüğünüz gibi, `transaction()` yöntemi geri aramanın dönüş değerini döndürür.
+
+transaction() da iç içe geçebilir, bu da bağımsız depoların uygulanmasını basitleştirir.

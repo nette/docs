@@ -1,0 +1,290 @@
+Аутентификация пользователей
+****************************
+
+<div class=perex>
+
+Мало-мальски значимые веб-приложения не нуждаются в механизме для входа пользователей в систему или проверки их привилегий. В этой главе мы поговорим о:
+
+- вход и выход пользователя
+- пользовательские аутентификаторы и авторизаторы
+
+</div>
+
+→ [Установка и требования |@home#Installation]
+
+В примерах мы будем использовать объект класса [api:Nette\Security\User], который представляет текущего пользователя и который вы получаете, передавая его с помощью [инъекции зависимостей |dependency-injection:passing-dependencies]. В презентаторах просто вызывайте `$user = $this->getUser()`.
+
+
+Аутентификация .[#toc-authentication]
+=====================================
+
+Аутентификация означает **вход пользователя в систему**, т.е. процесс, в ходе которого проверяется личность пользователя. Пользователь обычно идентифицирует себя с помощью имени пользователя и пароля. Верификация выполняется так называемым [аутентификатором |#Authenticator]. Если вход в систему не удается, происходит выброс `Nette\Security\AuthenticationException`.
+
+```php
+try {
+	$user->login($username, $password);
+} catch (Nette\Security\AuthenticationException $e) {
+	$this->flashMessage('The username or password you entered is incorrect.');
+}
+```
+
+Вот как выйти из системы:
+
+```php
+$user->logout();
+```
+
+И проверить, вошел ли пользователь в систему:
+
+```php
+echo $user->isLoggedIn() ? 'yes' : 'no';
+```
+
+Просто, правда? И все аспекты безопасности обрабатываются Nette за вас.
+
+В Presenter вы можете проверить вход в систему в методе `startup()` и перенаправить незалогиненного пользователя на страницу входа.
+
+```php
+protected function startup()
+{
+	parent::startup();
+	if (!$this->getUser()->isLoggedIn()) {
+		$this->redirect('Sign:in');
+	}
+}
+```
+
+
+Срок действия .[#toc-expiration]
+================================
+
+Логин пользователя истекает вместе с [истечением срока действия репозитория |#Storage-for-Logged-User], который обычно является сессией (см. настройку [истечения срока действия сессии |http:configuration#Session] ).
+Однако можно задать и более короткий промежуток времени, по истечении которого пользователь выходит из системы. Для этого используется метод `setExpiration()`, который вызывается перед `login()`. В качестве параметра предоставьте строку с относительным временем:
+
+```php
+// срок действия логина истекает после 30 минут бездействия
+$user->setExpiration('30 minutes');
+
+// отмена установленного срока действия
+$user->setExpiration(null);
+```
+
+Метод `$user->getLogoutReason()` определяет, вышел ли пользователь из системы, поскольку истек временной интервал. Он возвращает либо константу `Nette\Security\UserStorage::LogoutInactivity`, если время истекло, либо `UserStorage::LogoutManual`, если был вызван метод `logout()`.
+
+
+Аутентификатор .[#toc-authenticator]
+====================================
+
+Это объект, который проверяет данные для входа в систему, т.е. обычно имя и пароль. Тривиальной реализацией является класс [api:Nette\Security\SimpleAuthenticator], который может быть определен в [конфигурации |configuration]:
+
+```neon
+security:
+	users:
+		# name: password
+		johndoe: secret123
+		kathy: evenmoresecretpassword
+```
+
+Это решение больше подходит для целей тестирования. Мы покажем вам, как создать аутентификатор, который будет проверять учетные данные по таблице базы данных.
+
+Аутентификатор - это объект, реализующий интерфейс [api:Nette\Security\Authenticator] с методом `authenticate()`. Его задача - либо вернуть так называемый [идентификатор |#Identity], либо выбросить исключение `Nette\Security\AuthenticationException`. Также можно было бы предоставить код ошибки `Authenticator::IdentityNotFound` или `Authenticator::InvalidCredential`.
+
+```php
+use Nette;
+use Nette\Security\SimpleIdentity;
+
+class MyAuthenticator implements Nette\Security\Authenticator
+{
+	public function __construct(
+		private Nette\Database\Explorer $database,
+		private Nette\Security\Passwords $passwords,
+	) {
+	}
+
+	public function authenticate(string $username, string $password): SimpleIdentity
+	{
+		$row = $this->database->table('users')
+			->where('username', $username)
+			->fetch();
+
+		if (!$row) {
+			throw new Nette\Security\AuthenticationException('User not found.');
+		}
+
+		if (!$this->passwords->verify($password, $row->password)) {
+			throw new Nette\Security\AuthenticationException('Invalid password.');
+		}
+
+		return new SimpleIdentity(
+			$row->id,
+			$row->role, // или массив ролей
+			['name' => $row->username],
+		);
+	}
+}
+```
+
+Класс MyAuthenticator взаимодействует с базой данных через [Nette Database Explorer |database:explorer] и работает с таблицей `users`, где столбец `username` содержит имя пользователя для входа в систему, а столбец `password` - [хэш |passwords]. После проверки имени и пароля он возвращает идентификатор с ID пользователя, роль (столбец `role` в таблице), которую мы упомянем [позже |#Roles], и массив с дополнительными данными (в нашем случае имя пользователя).
+
+Мы добавим аутентификатор в конфигурацию [как сервис |dependency-injection:services] контейнера DI:
+
+```neon
+services:
+	- MyAuthenticator
+```
+
+
+$onLoggedIn, $onLoggedOut Events
+--------------------------------
+
+Объект `Nette\Security\User` имеет [события |nette:glossary#Events] `$onLoggedIn` и `$onLoggedOut`, поэтому вы можете добавить обратные вызовы, которые срабатывают после успешного входа в систему или после выхода пользователя из системы.
+
+
+```php
+$user->onLoggedIn[] = function () {
+	// пользователь только что вошел в систему
+};
+```
+
+
+Идентичность .[#toc-identity]
+=============================
+
+Идентификатор - это набор информации о пользователе, который возвращается аутентификатором и который затем хранится в сессии и извлекается с помощью `$user->getIdentity()`. Таким образом, мы можем получить id, роли и другие данные пользователя в том виде, в котором мы передали их в аутентификаторе:
+
+```php
+$user->getIdentity()->getId();
+// также работает сокращение $user->getId();
+
+$user->getIdentity()->getRoles();
+
+// данные пользователя могут быть доступны как свойства
+// имя, которое мы передали в MyAuthenticator
+$user->getIdentity()->name;
+```
+
+Важно отметить, что когда пользователь выходит из системы с помощью `$user->logout()`, **идентичность не удаляется** и все еще доступна. Таким образом, если идентификатор существует, он сам по себе не гарантирует, что пользователь также вошел в систему. Если мы хотим явным образом удалить идентификатор, мы выходим из системы с помощью `logout(true)`.
+
+Благодаря этому вы все еще можете определить, какой пользователь находится за компьютером, и, например, отображать персонализированные предложения в интернет-магазине, однако вы можете отображать его личные данные только после входа в систему.
+
+Identity - это объект, реализующий интерфейс [api:Nette\Security\IIdentity], реализация по умолчанию - [api:Nette\Security\SimpleIdentity]. Как уже упоминалось, идентификатор хранится в сессии, поэтому если, например, мы изменим роль какого-то из вошедших в систему пользователей, старые данные будут храниться в идентификаторе до тех пор, пока он снова не войдет в систему.
+
+
+Хранение данных для вошедшего пользователя .[#toc-storage-for-logged-user]
+==========================================================================
+
+Две основные части информации о пользователе, т.е. вошел ли он в систему и его [личность |#Identity], обычно хранятся в сессии. Которая может быть изменена. За хранение этой информации отвечает объект, реализующий интерфейс `Nette\Security\UserStorage`. Существует две стандартные реализации, первая передает данные в сессии, вторая - в cookie. Это классы `Nette\Bridges\SecurityHttp\SessionStorage` и `CookieStorage`. Выбрать хранилище и настроить его очень удобно в конфигурации [security › authentication |configuration].
+
+Вы также можете контролировать, как именно будет происходить сохранение (*sleep*) и восстановление (*wakeup*) аутентификации. Все, что вам нужно, это чтобы аутентификатор реализовывал интерфейс `Nette\Security\IdentityHandler`. У него есть два метода: `sleepIdentity()` вызывается перед записью идентификатора в хранилище, а `wakeupIdentity()` - после считывания идентификатора. Эти методы могут изменять содержимое идентификатора или заменять его новым объектом, который возвращается. Метод `wakeupIdentity()` может даже возвращать `null`, который выводит пользователя из системы.
+
+В качестве примера мы покажем решение распространенного вопроса о том, как обновить роли идентификатора сразу после восстановления из сессии. В методе `wakeupIdentity()` мы передаем идентификатору текущие роли, например, из базы данных:
+
+```php
+final class Authenticator implements
+	Nette\Security\Authenticator, Nette\Security\IdentityHandler
+{
+	public function sleepIdentity(IIdentity $identity): IIdentity
+	{
+		// здесь вы можете изменить идентификатор перед хранением после входа в систему,
+		// но сейчас нам это не нужно
+		return $identity;
+	}
+
+	public function wakeupIdentity(IIdentity $identity): ?IIdentity
+	{
+		// обновление ролей в идентификации
+		$userId = $identity->getId();
+		$identity->setRoles($this->facade->getUserRoles($userId));
+		return $identity;
+	}
+```
+
+А теперь вернемся к хранилищу на основе cookie. Оно позволяет создать сайт, на котором пользователи могут входить в систему без необходимости использования сессий. Поэтому ему не требуется запись на диск. В конце концов, именно так работает сайт, который вы сейчас читаете, включая форум. В этом случае реализация `IdentityHandler` является необходимостью. Мы будем хранить в cookie только случайный токен, представляющий вошедшего пользователя.
+
+Поэтому сначала мы зададим нужное хранилище в конфигурации с помощью `security › authentication › storage: cookie`.
+
+Мы добавим в базу данных колонку `authtoken`, в которой каждый пользователь будет иметь [совершенно случайную, уникальную и не угадываемую|utils:random] строку достаточной длины (не менее 13 символов). Хранилище `CookieStorage` хранит только значение `$identity->getId()` в cookie, поэтому в методе `sleepIdentity()` мы заменим оригинальную личность на прокси с `authtoken` в ID, а в методе `wakeupIdentity()`, наоборот, восстановим всю личность из базы данных по auttoken:
+
+```php
+final class Authenticator implements
+	Nette\Security\Authenticator, Nette\Security\IdentityHandler
+{
+	public function authenticate(string $username, string $password): SimpleIdentity
+	{
+		$row = $this->db->fetch('SELECT * FROM user WHERE username = ?', $username);
+		// проверка пароля
+		...
+		// возвращаем идентификатор со всеми данными из базы данных
+		return new SimpleIdentity($row->id, null, (array) $row);
+	}
+
+	public function sleepIdentity(IIdentity $identity): SimpleIdentity
+	{
+		// мы возвращаем идентификатор прокси, где в качестве идентификатора выступает authtoken
+		return new SimpleIdentity($identity->authtoken);
+	}
+
+	public function wakeupIdentity(IIdentity $identity): ?SimpleIdentity
+	{
+		// заменить идентификатор прокси на полный идентификатор, как в authenticate()
+		$row = $this->db->fetch('SELECT * FROM user WHERE authtoken = ?', $identity->getId());
+		return $row
+			? new SimpleIdentity($row->id, null, (array) $row)
+			: null;
+	}
+}
+```
+
+
+Множественная независимая аутентификация .[#toc-multiple-independent-authentications]
+=====================================================================================
+
+Можно иметь несколько независимых зарегистрированных пользователей в рамках одного сайта и одной сессии одновременно. Например, если мы хотим иметь отдельную аутентификацию для frontend и backend, мы просто установим уникальное пространство имен сессии для каждого из них:
+
+```php
+$user->getStorage()->setNamespace('backend');
+```
+
+Необходимо помнить, что оно должно быть задано во всех местах, принадлежащих одному сегменту. При использовании презентаторов мы установим пространство имен в общем предке - обычно BasePresenter. Для этого мы расширим метод [checkRequirements() |api:Nette\Application\UI\Presenter::checkRequirements()]:
+
+```php
+public function checkRequirements($element): void
+{
+	$this->getUser()->getStorage()->setNamespace('backend');
+	parent::checkRequirements($element);
+}
+```
+
+
+Множественные аутентификаторы .[#toc-multiple-authenticators]
+-------------------------------------------------------------
+
+Разделение приложения на сегменты с независимой аутентификацией обычно требует использования разных аутентификаторов. Однако регистрация двух классов, реализующих Authenticator, в конфигурационных службах приведет к ошибке, поскольку Nette не будет знать, какой из них должен быть [автоподключен |dependency-injection:autowiring] к объекту `Nette\Security\User`. Вот почему мы должны ограничить автоподключение для них с помощью `autowired: self` так, чтобы оно активировалось только при конкретном запросе их класса:
+
+```neon
+services:
+	-
+		create: FrontAuthenticator
+		autowired: self
+```
+
+```php
+class SignPresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private FrontAuthenticator $authenticator,
+	) {
+	}
+}
+```
+
+Нам нужно установить наш аутентификатор на объект User только перед вызовом метода [login() |api:Nette\Security\User::login()], что обычно означает в обратном вызове формы входа:
+
+```php
+$form->onSuccess[] = function (Form $form, \stdClass $data) {
+	$user = $this->getUser();
+	$user->setAuthenticator($this->authenticator);
+	$user->login($data->username, $data->password);
+	// ...
+};
+```

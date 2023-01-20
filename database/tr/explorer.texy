@@ -1,0 +1,550 @@
+Veritabanı Gezgini
+******************
+<div class=perex>
+
+
+Nette Database Explorer, SQL sorguları yazmadan veritabanından veri almayı önemli ölçüde kolaylaştırır.
+
+- verimli sorgular kullanır
+- hiçbir veri gereksiz yere iletilmez
+- zarif sözdizimine sahiptir
+
+</div>
+
+Veritabanı Gezgini'ni kullanmak için bir tablo ile başlayın - [api:Nette\Database\Explorer] nesnesi üzerinde `table()` adresini çağırın. Bir bağlam nesnesi örneği elde etmenin en kolay yolu [burada açıklanmıştır |core#Connection and Configuration] veya Nette Database Explorer'ın bağımsız bir araç olarak kullanılması durumunda, [manuel |#Creating Explorer Manually] olarak [oluşturulabilir |#Creating Explorer Manually].
+
+```php
+$books = $explorer->table('book'); // db tablo adı 'book'
+```
+
+Çağrı, tüm kitapları almak için üzerinde yinelenebilen bir [Selection |api:Nette\Database\Table\Selection] nesnesi örneği döndürür. Her öğe (bir satır), özelliklerine eşlenen verilerle birlikte bir [ActiveRow |api:Nette\Database\Table\ActiveRow] örneği ile temsil edilir:
+
+```php
+foreach ($books as $book) {
+	echo $book->title;
+	echo $book->author_id;
+}
+```
+
+Sadece belirli bir satırı almak, doğrudan bir ActiveRow örneği döndüren `get()` yöntemiyle yapılır.
+
+```php
+$book = $explorer->table('book')->get(2); // kimliği 2 olan kitabı döndürür
+echo $book->title;
+echo $book->author_id;
+```
+
+Yaygın kullanım durumuna bir göz atalım. Kitapları ve yazarlarını getirmeniz gerekiyor. Bu yaygın bir 1:N ilişkisidir. Sık kullanılan çözüm, tablo birleştirmeleri ile tek bir SQL sorgusu kullanarak veri getirmektir. İkinci olasılık, verileri ayrı ayrı almak, kitapları almak için bir sorgu çalıştırmak ve ardından başka bir sorgu ile her kitap için bir yazar almaktır (örneğin foreach döngünüzde). Bu, biri kitaplar için diğeri de gerekli yazarlar için olmak üzere yalnızca iki sorgu çalıştıracak şekilde kolayca optimize edilebilir - ve Nette Database Explorer'ın yaptığı da tam olarak budur.
+
+Aşağıdaki örneklerde, şekildeki veritabanı şeması ile çalışacağız. Kitap ve etiketleri arasında OneHasMany (1:N) bağlantıları (kitabın yazarı `author_id` ve olası çevirmeni `translator_id`, `null` olabilir) ve ManyHasMany (M:N) bağlantıları vardır.
+
+[Şema da dahil olmak üzere bir örnek GitHub'da bulunabilir |https://github.com/nette-examples/books].
+
+[* db-schema-1-.webp *] *** Örneklerde kullanılan veritabanı yapısı .<>
+
+Aşağıdaki kod her kitap için yazarın adını ve tüm etiketlerini listeler. Bunun dahili olarak nasıl çalıştığını birazdan [tartışacağız |#Working with relationships].
+
+```php
+$books = $explorer->table('book');
+
+foreach ($books as $book) {
+	echo 'başlık: ' . $kitap->başlık;
+	echo 'tarafından yazıldı: ' . $book->author->name; // $book->author is row from table 'author'
+
+	echo 'etiketler: ';
+	foreach ($book->related('book_tag') as $bookTag) {
+		echo $bookTag->tag->name . ', '; // $bookTag->tag 'tag' tablosundan bir satırdır
+	}
+}
+```
+
+Veritabanı katmanının ne kadar verimli çalıştığını görünce memnun olacaksınız. Yukarıdaki örnek, aşağıdaki gibi görünen sabit sayıda istek yapar:
+
+```sql
+SELECT * FROM `book`
+SELECT * FROM `author` WHERE (`author`.`id` IN (11, 12))
+SELECT * FROM `book_tag` WHERE (`book_tag`.`book_id` IN (1, 4, 2, 3))
+SELECT * FROM `tag` WHERE (`tag`.`id` IN (21, 22, 23))
+```
+
+[Önbellek |caching:] kullanırsanız (varsayılan olarak açık), hiçbir sütun gereksiz yere sorgulanmayacaktır. İlk sorgudan sonra, önbellek kullanılan sütun adlarını depolayacak ve Nette Database Explorer yalnızca gerekli sütunlarla sorguları çalıştıracaktır:
+
+```sql
+SELECT `id`, `title`, `author_id` FROM `book`
+SELECT `id`, `name` FROM `author` WHERE (`author`.`id` IN (11, 12))
+SELECT `book_id`, `tag_id` FROM `book_tag` WHERE (`book_tag`.`book_id` IN (1, 4, 2, 3))
+SELECT `id`, `name` FROM `tag` WHERE (`tag`.`id` IN (21, 22, 23))
+```
+
+
+Seçmeler .[#toc-selections]
+===========================
+
+Satırların nasıl filtreleneceği ve kısıtlanacağı ile ilgili olasılıklara bakın [api:Nette\Database\Table\Selection]:
+
+.[language-php]
+| `$table->where($where[, $param[, ...]])` | İki veya daha fazla koşul sağlandığında AND öğesini yapıştırıcı olarak kullanarak WHERE öğesini ayarlayın
+| `$table->whereOr($where)` | İki veya daha fazla koşul sağlandığında VEYA'yı yapıştırıcı olarak kullanarak WHERE'i ayarlayın
+| `$table->order($columns)` | ORDER BY ayarla, ifade olabilir `('column DESC, id DESC')`
+| `$table->select($columns)` | Alınan sütunları ayarlayın, ifade olabilir `('col, MD5(col) AS hash')`
+| `$table->limit($limit[, $offset])` | LIMIT ve OFFSET'i Ayarla
+| `$table->page($page, $itemsPerPage[, &$lastPage])` | Sayfalamayı etkinleştirir
+| `$table->group($columns)` | GROUP BY ayarla
+| `$table->having($having)` | Set HAVING
+
+Fluent arayüzü kullanılabilir, örneğin `$table->where(...)->order(...)->limit(...)`. Birden fazla `where` veya `whereOr` koşulu `AND` operatörü ile bağlanır.
+
+
+nerede() .[#toc-where]
+----------------------
+
+Nette Database Explorer, geçirilen değerler için gerekli operatörleri otomatik olarak ekleyebilir:
+
+.[language-php]
+| `$table->where('field', $value)` | alan = $değer
+| `$table->where('field', null)` | alan NULL
+| `$table->where('field > ?', $val)` | alan > $val
+| `$table->where('field', [1, 2])` | alan IN (1, 2)
+| `$table->where('id = ? OR name = ?', 1, $name)` | id = 1 OR name = 'Jon Snow'
+| `$table->where('field', $explorer->table($tableName))` | field IN (SELECT $primary FROM $tableName)
+| `$table->where('field', $explorer->table($tableName)->select('col'))` | field IN (SELECT col FROM $tableName)
+
+Sütun operatörü olmadan da yer tutucu sağlayabilirsiniz. Bu çağrılar aynıdır.
+
+```php
+$table->where('id = ? OR id = ?', 1, 2);
+$table->where('id ? OR id ?', 1, 2);
+```
+
+Bu özellik, değere bağlı olarak doğru operatörün oluşturulmasını sağlar:
+
+```php
+$table->where('id ?', 2);    // id = 2
+$table->where('id ?', null); // id IS NULL
+$table->where('id', $ids);   // id IN (...)
+```
+
+Seçim, negatif koşulları da doğru bir şekilde işler, boş diziler için de çalışır:
+
+```php
+$table->where('id', []);       // id IS NULL AND FALSE
+$table->where('id NOT', []);   // id IS NULL OR TRUE
+$table->where('NOT (id ?)', $ids);  // NOT (id IS NULL AND FALSE)
+
+// this will throws an exception, this syntax is not supported
+$table->where('NOT id ?', $ids);
+```
+
+
+whereOr() .[#toc-whereor]
+-------------------------
+
+Parametresiz kullanım örneği:
+
+```php
+// WHERE (user_id IS NULL) OR (SUM(`field1`) > SUM(`field2`))
+$table->whereOr([
+	'user_id IS NULL',
+	'SUM(field1) > SUM(field2)',
+]);
+```
+
+Parametreleri kullanırız. Bir operatör belirtmezseniz, Nette Database Explorer uygun olanı otomatik olarak ekleyecektir:
+
+```php
+// WHERE (`field1` IS NULL) OR (`field2` IN (3, 5)) OR (`amount` > 11)
+$table->whereOr([
+	'field1' => null,
+	'field2' => [3, 5],
+	'amount >' => 11,
+]);
+```
+
+Anahtar, joker soru işaretleri içeren bir ifade içerebilir ve ardından değerde parametreleri iletebilir:
+
+```php
+// WHERE (`id` > 12) OR (ROUND(`id`, 5) = 3)
+$table->whereOr([
+	'id > ?' => 12,
+	'ROUND(id, ?) = ?' => [5, 3],
+]);
+```
+
+
+order() .[#toc-order]
+---------------------
+
+Kullanım örnekleri:
+
+```php
+$table->order('field1');               // ORDER BY `field1`
+$table->order('field1 DESC, field2');  // ORDER BY `field1` DESC, `field2`
+$table->order('field = ? DESC', 123);  // ORDER BY `field` = 123 DESC
+```
+
+
+select() .[#toc-select]
+-----------------------
+
+Kullanım örnekleri:
+
+```php
+$table->select('field1');                 // SELECT `field1`
+$table->select('col, UPPER(col) AS abc'); // SELECT `col`, UPPER(`col`) AS abc
+$table->select('SUBSTR(title, ?)', 3);    // SELECT SUBSTR(`title`, 3)
+```
+
+
+limit() .[#toc-limit]
+---------------------
+
+Kullanım örnekleri:
+
+```php
+$table->limit(1);     // LIMIT 1
+$table->limit(1, 10); // LIMIT 1 OFFSET 10
+```
+
+
+page() .[#toc-page]
+-------------------
+
+Limit ve ofseti ayarlamak için alternatif bir yol:
+
+```php
+$page = 5;
+$itemsPerPage = 10;
+$table->page($page, $itemsPerPage); // LIMIT 10 OFFSET 40
+```
+
+`$lastPage` değişkenine aktarılan son sayfa numarasını alır:
+
+```php
+$table->page($page, $itemsPerPage, $lastPage);
+```
+
+
+grup() .[#toc-group]
+--------------------
+
+Kullanım örnekleri:
+
+```php
+$table->group('field1');          // GROUP BY `field1`
+$table->group('field1, field2');  // GROUP BY `field1`, `field2`
+```
+
+
+sahip olmak() .[#toc-having]
+----------------------------
+
+Kullanım örnekleri:
+
+```php
+$table->having('COUNT(items) >', 100);  // HAVING COUNT(`items`) > 100
+```
+
+
+Başka Bir Tablo Değerine Göre Filtreleme .[#toc-joining-key]
+------------------------------------------------------------
+
+Çoğu zaman, sonuçları başka bir veritabanı tablosunu içeren bazı koşullara göre filtrelemeniz gerekir. Bu tür koşullar tablo birleştirme gerektirir. Ancak, artık bunları yazmanıza gerek yoktur.
+
+Diyelim ki yazarının adı 'Jon' olan tüm kitapları almanız gerekiyor. Yazmanız gereken tek şey ilişkinin birleştirme anahtarı ve birleştirilen tablodaki sütun adıdır. Birleştirme anahtarı, birleştirmek istediğiniz tabloyu ifade eden sütundan türetilir. Örneğimizde (db şemasına bakın) bu `author_id` sütunudur ve sadece ilk kısmını kullanmak yeterlidir - `author` ( `_id` son eki atlanabilir). `name`, kullanmak istediğimiz `author` tablosundaki bir sütundur. Kitap çevirmeni için bir koşul ( `translator_id` sütunu ile bağlantılı olan) aynı kolaylıkla oluşturulabilir.
+
+```php
+$books = $explorer->table('book');
+$books->where('author.name LIKE ?', '%Jon%');
+$books->where('translator.name', 'David Grudl');
+```
+
+Birleştirme anahtarı mantığı, [Conventions |api:Nette\Database\Conventions] uygulaması tarafından yönlendirilir. Yabancı anahtarlarınızı analiz eden ve bu ilişkilerle kolayca çalışmanıza olanak tanıyan [DiscoveredConventions'ı |api:Nette\Database\Conventions\DiscoveredConventions] kullanmanızı öneririz.
+
+Kitap ve yazarı arasındaki ilişki 1:N'dir. Ters ilişki de mümkündür. Biz buna **backjoin** diyoruz. Başka bir örneğe bakalım. 3'ten fazla kitap yazmış olan tüm yazarları getirmek istiyoruz. Birleştirmeyi tersine çevirmek için `:` (colon). Colon means that the joined relationship means hasMany (and it's quite logical too, as two dots are more than one dot). Unfortunately, the Selection class isn't smart enough, so we have to help with the aggregation and provide a `GROUP BY` deyimini kullanırız, ayrıca koşul `HAVING` deyimi şeklinde yazılmalıdır.
+
+```php
+$authors = $explorer->table('author');
+$authors->group('author.id')
+	->having('COUNT(:book.id) > 3');
+```
+
+Birleştirme ifadesinin kitaba atıfta bulunduğunu fark etmiş olabilirsiniz, ancak `author_id` üzerinden mi yoksa `translator_id` üzerinden mi birleştirdiğimiz net değildir. Yukarıdaki örnekte, Selection `author_id` sütunu üzerinden birleştirir çünkü kaynak tablo ile bir eşleşme bulunmuştur - `author` tablosu. Böyle bir eşleşme olmasaydı ve daha fazla olasılık olsaydı, Nette [AmbiguousReferenceKeyException |api:Nette\Database\Conventions\AmbiguousReferenceKeyException] atardı.
+
+`translator_id` sütunu aracılığıyla bir birleştirme yapmak için, birleştirme ifadesinde isteğe bağlı bir parametre sağlayın.
+
+```php
+$authors = $explorer->table('author');
+$authors->group('author.id')
+	->having('COUNT(:book(translator).id) > 3');
+```
+
+Şimdi biraz daha zor birleştirme ifadelerine bir göz atalım.
+
+PHP hakkında bir şeyler yazmış olan tüm yazarları bulmak istiyoruz. Tüm kitapların etiketleri vardır, bu nedenle PHP etiketi ile herhangi bir kitap yazmış olan yazarları seçmeliyiz.
+
+```php
+$authors = $explorer->table('author');
+$authors->where(':book:book_tags.tag.name', 'PHP')
+	->group('author.id')
+	->having('COUNT(:book:book_tags.tag.id) > 0');
+```
+
+
+Toplu Sorgular .[#toc-aggregate-queries]
+----------------------------------------
+
+| `$table->count('*')` | Satır sayısını al
+| `$table->count("DISTINCT $column")` | Farklı değerlerin sayısını al
+| `$table->min($column)` | Minimum değeri al
+| `$table->max($column)` | Maksimum değeri al
+| `$table->sum($column)` | Tüm değerlerin toplamını alın
+| `$table->aggregation("GROUP_CONCAT($column)")` | Herhangi bir toplama işlevini çalıştırın
+
+.[caution]
+Herhangi bir parametre belirtilmeyen `count()` yöntemi tüm kayıtları seçer ve dizi boyutunu döndürür, bu da çok verimsizdir. Örneğin, sayfalama için satır sayısını hesaplamanız gerekiyorsa, her zaman ilk bağımsız değişkeni belirtin.
+
+
+Kaçış ve Alıntı .[#toc-escaping-quoting]
+========================================
+
+Veritabanı Gezgini akıllıdır ve parametreleri ve tırnak tanımlayıcılarını sizin için kaçar. Yine de bu temel kurallara uyulması gerekir:
+
+- anahtar kelimeler, fonksiyonlar, prosedürler büyük harfle yazılmalıdır
+- sütunlar ve tablolar küçük harfle yazılmalıdır
+- değişkenleri parametre olarak geçirin, birleştirme yapmayın
+
+```php
+->where('name like ?', 'John'); // WRONG! generates: `isim` `gibi` ?
+->where('name LIKE ?', 'John'); // DOĞRU
+
+->where('KEY = ?', $value); // YANLIŞ! KEY bir anahtar kelimedir
+->where('key = ?', $value); // DOĞRU. üretir: anahtar` = ?
+
+->where('name = ' . $name); // YANLIŞ! sql enjeksiyonu!
+->where('name = ?', $name); // DOĞRU
+
+->select('DATE_FORMAT(created, "%d.%m.%Y")'); // YANLIŞ! değişkenleri parametre olarak geçirin, birleştirmeyin
+->select('DATE_FORMAT(created, ?)', '%d.%m.%Y'); // DOĞRU
+```
+
+.[warning]
+Yanlış kullanım güvenlik açıkları oluşturabilir
+
+
+Veri Getirme .[#toc-fetching-data]
+==================================
+
+| `foreach ($table as $id => $row)` | Sonuçtaki tüm satırlar üzerinde yinele
+| `$row = $table->get($id)` | Tablodan $id kimliğine sahip tek bir satır al
+| `$row = $table->fetch()` | Sonuçtan bir sonraki satırı al
+| `$array = $table->fetchPairs($key, $value)` | Tüm değerleri ilişkisel diziye getir
+| `$array = $table->fetchPairs($key)` | Tüm satırları ilişkisel diziye getir
+| `count($table)` | Sonuç kümesindeki satır sayısını al
+
+
+Ekle, Güncelle ve Sil .[#toc-insert-update-delete]
+==================================================
+
+`insert()` yöntemi Traversable nesneleri dizisini kabul eder (örneğin [formları |forms:] döndüren [ArrayHash |utils:arrays#ArrayHash] ):
+
+```php
+$row = $explorer->table('users')->insert([
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978)
+```
+
+Tabloda birincil anahtar tanımlanmışsa, eklenen satırı içeren bir ActiveRow nesnesi döndürülür.
+
+Çoklu ekleme:
+
+```php
+$explorer->table('users')->insert([
+	[
+		'name' => 'Jim',
+		'year' => 1978,
+	], [
+		'name' => 'Jack',
+		'year' => 1987,
+	],
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978), ('Jack', 1987)
+```
+
+Dosyalar veya DateTime nesneleri parametre olarak geçirilebilir:
+
+```php
+$explorer->table('users')->insert([
+	'name' => $name,
+	'created' => new DateTime, // or $explorer::literal('NOW()')
+	'avatar' => fopen('image.gif', 'r'), // inserts the file
+]);
+```
+
+Güncelleme (etkilenen satırların sayısını döndürür):
+
+```php
+$count = $explorer->table('users')
+	->where('id', 10) // update() işlevinden önce çağrılmalıdır
+	->update([
+		'name' => 'Ned Stark'
+	]);
+// UPDATE `users` SET `name`='Ned Stark' WHERE (`id` = 10)
+```
+
+Güncelleme için `+=` a `-=` operatörlerini kullanabiliriz:
+
+```php
+$explorer->table('users')
+	->update([
+		'age+=' => 1, // see +=
+	]);
+// UPDATE users SET `age` = `age` + 1
+```
+
+Silme (silinen satırların sayısını döndürür):
+
+```php
+$count = $explorer->table('users')
+	->where('id', 10)
+	->delete();
+// DELETE FROM `users` WHERE (`id` = 10)
+```
+
+
+İlişkilerle Çalışmak .[#toc-working-with-relationships]
+=======================================================
+
+
+Bir İlişkisi Var .[#toc-has-one-relation]
+-----------------------------------------
+Bir ilişkiye sahip olmak yaygın bir kullanım durumudur. Kitabın *bir* yazarı vardır. Kitabın *bir* çevirmeni vardır. İlgili satırı almak esas olarak `ref()` yöntemi ile yapılır. İki bağımsız değişken kabul eder: hedef tablo adı ve kaynak birleştirme sütunu. Örneğe bakınız:
+
+```php
+$book = $explorer->table('book')->get(1);
+$book->ref('author', 'author_id');
+```
+
+Yukarıdaki örnekte, `author` tablosundan ilgili yazar girdisini getiriyoruz, yazar birincil anahtarı `book.author_id` sütunu tarafından aranır. Ref() metodu ActiveRow örneğini döndürür veya uygun bir girdi yoksa null döndürür. Dönen satır bir ActiveRow örneğidir, bu nedenle kitap girişiyle aynı şekilde çalışabiliriz.
+
+```php
+$author = $book->ref('author', 'author_id');
+$author->name;
+$author->born;
+
+// veya doğrudan
+$book->ref('author', 'author_id')->name;
+$book->ref('author', 'author_id')->born;
+```
+
+Kitapta ayrıca bir çevirmen var, bu nedenle çevirmen adını almak oldukça kolay.
+```php
+$book->ref('author', 'translator_id')->name
+```
+
+Tüm bunlar iyi, ancak biraz zahmetli, öyle değil mi? Veritabanı Gezgini zaten yabancı anahtar tanımlarını içeriyor, o halde neden bunları otomatik olarak kullanmayalım? Hadi bunu yapalım!
+
+Eğer var olmayan bir özelliği çağırırsak, ActiveRow çağırılan özellik adını 'has one' ilişkisi olarak çözümlemeye çalışır. Bu özelliği almak, ref() metodunu sadece bir argümanla çağırmakla aynıdır. Tek argümanı **key** olarak adlandıracağız. Anahtar, belirli bir yabancı anahtar ilişkisine çözümlenecektir. İletilen anahtar satır sütunlarıyla eşleştirilir ve eşleşirse, eşleşen sütunda tanımlanan yabancı anahtar ilgili hedef tablodan veri almak için kullanılır. Örneğe bakınız:
+
+```php
+$book->author->name;
+// same as
+$book->ref('author')->name;
+```
+
+ActiveRow örneğinin yazar sütunu yoktur. Tüm kitap sütunları *key* ile eşleşme için aranır. Bu durumda eşleştirme, sütun adının anahtarı içermesi gerektiği anlamına gelir. Yukarıdaki örnekte, `author_id` sütunu 'author' dizesini içerir ve bu nedenle 'author' anahtarıyla eşleştirilir. Kitap çevirmenini almak istiyorsanız, anahtar olarak örneğin 'translator' kullanabilirsiniz, çünkü 'translator' anahtarı `translator_id` sütunuyla eşleşecektir. Anahtar eşleştirme mantığı hakkında daha fazla bilgiyi [Joining expressions |#joining-key] bölümünde bulabilirsiniz.
+
+```php
+echo $book->title . ': ';
+echo $book->author->name;
+if ($book->translator) {
+	echo ' (translated by ' . $book->translator->name . ')';
+}
+```
+
+Birden fazla kitap getirmek istiyorsanız, aynı yaklaşımı kullanmalısınız. Nette Database Explorer, getirilen tüm kitaplar için yazarları ve çevirmenleri bir kerede getirecektir.
+
+```php
+$books = $explorer->table('book');
+foreach ($books as $book) {
+	echo $book->title . ': ';
+	echo $book->author->name;
+	if ($book->translator) {
+		echo ' (translated by ' . $book->translator->name . ')';
+	}
+}
+```
+
+Kod yalnızca bu 3 sorguyu çalıştıracaktır:
+```sql
+SELECT * FROM `book`;
+SELECT * FROM `author` WHERE (`id` IN (1, 2, 3)); -- ids of fetched books from author_id column
+SELECT * FROM `author` WHERE (`id` IN (2, 3));    -- ids of fetched books from translator_id column
+```
+
+
+Birçok İlişkisi Var .[#toc-has-many-relation]
+---------------------------------------------
+
+'Has many' ilişkisi 'has one' ilişkisinin tersine çevrilmiş halidir. Yazar *çok* kitap yazmıştır. Yazar *çok* kitap çevirmiştir. Gördüğünüz gibi, bu tür bir ilişki biraz daha zordur çünkü ilişki 'adlandırılmıştır' ('yazılmıştır', 'çevrilmiştir'). ActiveRow örneği, ilgili girdilerin dizisini döndürecek olan `related()` yöntemine sahiptir. Girişler de ActiveRow örnekleridir. Aşağıdaki örneğe bakınız:
+
+```php
+$author = $explorer->table('author')->get(11);
+echo $author->name . ' has written:';
+
+foreach ($author->related('book.author_id') as $book) {
+	echo $book->title;
+}
+
+echo 'and translated:';
+foreach ($author->related('book.translator_id') as $book) {
+	echo $book->title;
+}
+```
+
+Yöntem `related()` yöntemi, iki bağımsız değişken olarak veya nokta ile birleştirilmiş bir bağımsız değişken olarak aktarılan tam birleştirme açıklamasını kabul eder. İlk bağımsız değişken hedef tablo, ikincisi ise hedef sütundur.
+
+```php
+$author->related('book.translator_id');
+// ile aynı
+$author->related('book', 'translator_id');
+```
+
+Yabancı anahtarlara dayalı Nette Database Explorer buluşsal yöntemlerini kullanabilir ve yalnızca **key** bağımsız değişkenini sağlayabilirsiniz. Anahtar, geçerli tabloya işaret eden tüm yabancı anahtarlarla eşleştirilecektir (`author` tablo). Bir eşleşme varsa, Nette Database Explorer bu yabancı anahtarı kullanacaktır, aksi takdirde [Nette\InvalidArgumentException |api:Nette\InvalidArgumentException] veya [AmbiguousReferenceKeyException |api:Nette\Database\Conventions\AmbiguousReferenceKeyException] atacaktır. Anahtar eşleştirme mantığı hakkında daha fazla bilgiyi [Joining expressions |#joining-key] bölümünde bulabilirsiniz.
+
+Elbette, getirilen tüm yazarlar için ilgili yöntemleri çağırabilirsiniz, Nette Database Explorer uygun kitapları bir kerede tekrar getirecektir.
+
+```php
+$authors = $explorer->table('author');
+foreach ($authors as $author) {
+	echo $author->name . ' has written:';
+	foreach ($author->related('book') as $book) {
+		$book->title;
+	}
+}
+```
+
+Yukarıdaki örnek yalnızca iki sorgu çalıştıracaktır:
+
+```sql
+SELECT * FROM `author`;
+SELECT * FROM `book` WHERE (`author_id` IN (1, 2, 3)); -- ids of fetched authors
+```
+
+
+Explorer'ı Manuel Olarak Oluşturma .[#toc-creating-explorer-manually]
+=====================================================================
+
+Uygulama yapılandırması kullanılarak bir veritabanı bağlantısı oluşturulabilir. Bu gibi durumlarda bir `Nette\Database\Explorer` hizmeti oluşturulur ve DI konteyneri kullanılarak bir bağımlılık olarak aktarılabilir.
+
+Ancak, Nette Database Explorer bağımsız bir araç olarak kullanılıyorsa, `Nette\Database\Explorer` nesnesinin bir örneğinin manuel olarak oluşturulması gerekir.
+
+```php
+// $storage Nette\Caching\Storage uygular:
+$storage = new Nette\Caching\Storages\FileStorage($tempDir);
+$connection = new Nette\Database\Connection($dsn, $user, $password);
+$structure = new Nette\Database\Structure($connection, $storage);
+$conventions = new Nette\Database\Conventions\DiscoveredConventions($structure);
+$explorer = new Nette\Database\Explorer($connection, $structure, $conventions, $storage);
+```

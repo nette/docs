@@ -1,0 +1,436 @@
+Přihlašování uživatelů
+**********************
+
+.[perex]
+Nyní aplikaci rozšíříme o přihlašování uživatelů. Přístup k úkolům tak bude podmíněn přihlášením, navíc na úvodní stránce každého uživatele můžeme zobrazit úkoly, které mu jsou přiřazeny.
+
+
+Authenticator
+=============
+
+Nejprve se vrátíme ke třídě `Authenticator`, kterou jsme v části věnované databázi a modelu tak sprostě odbyli. V první řadě budeme muset upravit hashovací funkci. Nyní používá MD5 a složité solení hesla. My však chceme použít [php:crypt()], hesla budeme solit a díky chytrému algoritmu, bude sůl součástí hashe, takže se o ni nemusíme starat.
+
+Ve třídě `Authenticator` tedy upravíme metodu `calculateHash()` takto:
+
+```php
+public static function calculateHash(string $password, string $salt = null): string
+{
+	if ($salt === null) {
+		$salt = '$2a$07$' . Nette\Utils\Strings::random(22);
+	}
+	return crypt($password, $salt);
+}
+```
+
+Tato metoda jen dostane heslo jako parametr a vrátí jej v zahashované podobě. Druhý argument je pro původní heslo kvůli zachování algoritmu a přenášení soli.
+
+Hlavní metodou této třídy je však metoda `authenticate()`. Ta provádí ověření přihlašovacích údajů a pokud jsou zadané údaje správné, vrátí objekt s identitou uživatele. Pokud údaje nesouhlasí, vyhodí výjimku typu `AuthenticationException`. Připravenou metodu musíme také mírně upravit, konkrétně při vytváření objektu `Identity` nebudeme zadávat žádné role uživatele, ale `null`:
+
+```php
+public function authenticate(array $credentials): NS\Identity
+{
+	list($username, $password) = $credentials;
+	$row = $this->userRepository->findByName($username);
+
+	if (!$row) {
+		throw new NS\AuthenticationException("User '$username' not found.", self::IDENTITY_NOT_FOUND);
+	}
+
+	if ($row->password !== self::calculateHash($password, $row->password)) {
+		throw new NS\AuthenticationException("Invalid password.", self::INVALID_CREDENTIAL);
+	}
+
+	unset($row->password);
+	return new NS\Identity($row->id, null, $row->toArray());
+}
+```
+
+Metoda dostane jako argumenty pole s přihlašovacími údaji. Na indexu `0` je uživatelské jméno, na indexu `1` heslo. Nejprve získáme z tabulky uživatelů záznam o uživateli, který se snaží přihlásit. Pokud záznam není nalezen, je vyhozena výjimka. Poté je ověřeno, zda zadané heslo odpovídá heslu uživatele v databázi. Nakonec se vytvoří objekt typu `Identity`. V konstruktoru mu jsou předány jako parametry ID uživatele, seznam rolí (zde `null`) a nakonec pole s dalšími informacemi o uživateli. Zde se předá celý záznam bez pole `password`. K těmto datům pak můžeme později přistupovat.
+
+Ještě musíme implementovat metodu `findByName`, ve třídě `UserRepository`.
+
+```php
+// class UserRepository
+
+public function findByName(string $username)
+{
+	return $this->findAll()->where('username', $username)->fetch();
+}
+```
+
+To je vše, nyní se můžeme přesunout do dalších částí aplikace.
+
+
+Přihlašovací presenter
+======================
+
+V základní kostře je již připravený základ přihlašování v podobě `SignPresenter`u. My si ho však raději od základu přepišeme, už jen proto, že je celý v angličtině.
+
+Nejprve si připravíme přihlašovací formulář:
+
+.[note]
+Nezapomeňte na `use Nette\Application\UI\Form;` na začátku souboru.
+
+```php
+protected function createComponentSignInForm(): Form
+{
+	$form = new Form();
+	$form->addText('username', 'Uživatelské jméno:', 30, 20);
+	$form->addPassword('password', 'Heslo:', 30);
+	$form->addCheckbox('persistent', 'Pamatovat si mě na tomto počítači');
+	$form->addSubmit('login', 'Přihlásit se');
+	$form->onSuccess[] = [$this, 'signInFormSubmitted'];
+	return $form;
+}
+
+public function signInFormSubmitted(Nette\Application\UI\Form $form, stdClass $values): void
+{
+	try {
+		$user = $this->getUser();
+		$values = $form->getValues();
+		if ($values->persistent) {
+			$user->setExpiration('30 days', false);
+		}
+		$user->login($values->username, $values->password);
+		$this->flashMessage('Přihlášení bylo úspěšné.', 'success');
+		$this->redirect('Homepage:');
+	} catch (NS\AuthenticationException $e) {
+		$form->addError('Neplatné uživatelské jméno nebo heslo.');
+	}
+}
+```
+
+Při odeslání formuláře se nejprve připraví instance objektu uživatele a vytáhnou se z něj hodnoty. Poté se ověří, zda bylo zaškrtnuto trvalé přihlášení ("pamatovat si mě na tomto počítači"), pokud ano, nastaví se expirace sezení uživatele na 30 dnů pomocí metody `setExpiration`. Druhý parametr nastavuje, že uživatel nemá být odhlášen, pokud zavře okno prohlížeče.
+
+Poté se konečně provede přihlášení uživatele metodou `login()`. Pokud vše proběhlo, jak má, tak se vypíše flash zpráva a přesměrujeme uživatele na domovskou stránku. Pokud ne, metoda `login()` vyhodí výjimku, kterou zachytíme a ve formuláři necháme zobrazit chybovou hlášku voláním `$form->addError()`.
+
+Formulář ještě musíme v šabloně vykreslit. Šablonu `Sign/in.latte` upravíme následovně:
+
+```html
+{block content}
+
+<h1 n:block="title">Přihlášení</h1>
+
+{form signInForm}
+<div class="sign-in-form">
+	{control $form errors}
+
+	<div class="pair">
+		{label username /}
+		<div class="input">{input username}</div>
+	</div>
+	<div class="pair">
+		{label password /}
+		<div class="input">{input password}</div>
+	</div>
+	<div class="pair">
+		<div class="input">{input persistent} {label persistent /}</div>
+	</div>
+
+	<div class="pair">
+		<div class="input">{input login}</div>
+	</div>
+</div>
+{/form}
+```
+
+
+Bylo by také vhodné dát uživateli možnost odhlášení. Vytvoříme tedy v `BasePresenter`u signál `signOut`:
+
+```php
+public function handleSignOut(): void
+{
+	$this->getUser()->logout();
+	$this->redirect('Sign:in');
+}
+```
+
+Uživatele jen odhlásíme metodou `logout()` a přesměrujeme jej na přihlášení.
+
+
+Zprovoznění trvalého přihlášení
+-------------------------------
+
+Aby fungovalo trvalé přihlášení, je nutné nastavit delší dobu vypršení session. Toho nejsnáze docílíme pomocí konfigurace v `config.neon`. Najdeme sekci `nette` a do podsekce `session` přidáme:
+
+```neon
+session:
+	autoStart: smart
+	expiration: 30 days
+```
+
+
+Přesměrování nepřihlášeného uživatele
+=====================================
+
+Pokud se nepřihlášený uživatel pokusí přistoupit na úvodní stránku nebo stránku s výpisem uživatelů, musíme jej přesměrovat na přihlášení. Uděláme to tím nejjednodušším způsobem, prostě nepřihlášeného uživatele ve `startup()` přesměrujeme.
+
+```php
+protected function startup(): void
+{
+	parent::startup();
+
+	if (!$this->getUser()->isLoggedIn()) {
+		$this->redirect('Sign:in');
+	}
+}
+```
+
+Metoda `User::isLoggedIn()` ověří, zda je uživatel přihlášen. Pokud ne, proběhne přesměrování.
+
+Teď velice jednoduše zkopírujeme tyto řádky do metody `startup()` v presenteru `HomepagePresenter` a `TaskPresenter`.
+
+Nyní již vše funguje. Při pokusu o přístup na stránku s výpisem úkolů jsme přesměrováni na přihlášení. Ale pořád vidíme seznamy úkolů a můžeme zakládat nové. Zobrazování seznamů ošetříme jednoduše v šabloně `@layout.latte`:
+
+```html
+<div id="sidebar">
+	{if $user->isLoggedIn()}
+	<div class="title">Seznamy úkolů</div>
+	<div class="task-lists">
+		<ul>
+			<li n:foreach="$lists as $list"><a n:href="Task: $list->id">{$list->title}</a></li>
+		</ul>
+	</div>
+
+	<fieldset>
+		<legend>Nový seznam</legend>
+		{form newListForm}
+		<div class="new-list-form">
+			{input title}
+			{input create}
+		</div>
+		{/form}
+	</fieldset>
+	{/if}
+</div>
+```
+
+Všechny šablony presenteru mají k dispozici objekt uživatele. Můžeme nad ním bezproblémů zavolat metodu `isLoggedIn()` a zajistit tak podmíněné vykreslování jednotlivých částí stránky.
+
+Nyní však máme v aplikaci bezpečnostní slabinu: formulář pro založení seznamu úkolů sice zmizel, ale pokud pošleme správná data, formulář se nám vytvoří a provede vložení do databáze. Ověření, zda je uživatel přihlášen, je nutné provést také při vytváření formuláře. Oprava je snadná:
+
+```php
+protected function createComponentNewListForm(): Form
+{
+	if (!$this->getUser()->isLoggedIn()) {
+		$this->redirect('Sign:in');
+	}
+
+	$form = new Form();
+	// ...
+}
+```
+
+Pokud uživatel nebude přihlášen, vyhodíme výjimku, která signalizuje neoprávněný přístup. Nette díky tomu zobrazí adekvátní chybovou stránku.
+
+Rovnou také můžeme zajistit, aby v políčku pro výběr uživatele byl předvyplněn aktuální uživatel:
+
+```php
+$form->addSelect('userId', 'Pro:', $userPairs)
+	->setPrompt('- Vyberte -')
+	->addRule(Form::FILLED, 'Je nutné vybrat, komu je úkol přiřazen.')
+	->setDefaultValue($this->getUser()->getId());
+```
+
+Metoda `setDefaultValue()` slouží k nastavení výchozí hodnoty jednoho formulářového prvku. Formulář samotný má také metodu `setDefaults()`, která přejímá jako parametr asociativní pole a nastavuje výchozí hodnoty celému formuláři.
+
+Seznamy úkolů v levém sloupci zmizely a ani nepůjdou zakládat nové. Pokud se nyní přihlásíme, opět se nám zobrazí. Připravená data mají založené 3 uživatele: `admin`, `pepa`, `franta`. Jejich hesla jsou shodná s jejich uživatelským jménem.
+
+Po přihlášení nám ještě chybí možnost odhlášení. Opět si vypomůžeme podmíněným vykreslováním v `@layout.latte`:
+
+```html
+<div id="header">
+	<div id="header-inner">
+		<div class="title"><a n:href="Homepage:">Úkolníček</a></div>
+
+		{if $user->isLoggedIn()}
+		<div class="user">
+			<span class="icon user">{$user->getIdentity()->name}</span> |
+			<a n:href="signOut!">Odhlásit se</a>
+		</div>
+		{/if}
+	</div>
+</div>
+```
+
+`$user->getIdentity()` vrací identitu uživatele, kterou jsme vytvořili při přihlašování. Identita má v sobě uložený celý záznam uživatele z databáze. Díky magické metodě `__get()` k tomuto záznamu můžeme přistupovat podobně, jako kdybychom pracovali přímo s záznamem získaným z databáze.
+
+Hotovo! Nyní máme kompletně funkční přihlašování a odhlašování uživatelů.
+
+[* 07-logged-in.webp *]
+
+
+Výpis úkolů uživatele
+=====================
+
+S připravenými komponentami je nyní již výpis všech úkolů, které jsou přiřazené momentálně přihlášenému uživateli, triviální. Stačí jen vytvořit novou komponentu a vykreslit ji v šabloně. `HomepagePresenter`:
+
+```php
+protected function createComponentUserTasks(): Todo\TaskListControl
+{
+	$incomplete = $this->taskRepository->findIncompleteByUser($this->getUser()->getId());
+	$control = new Todo\TaskListControl($incomplete, $this->taskRepository);
+	$control->displayList = true;
+	$control->displayUser = false;
+	return $control;
+}
+```
+
+U tohoto výpisu nebudeme chtít zobrazit uživatele, kterému je úkol přiřazen, ale místo toho naopak seznam úkolů, ve kterém je úkol veden.
+
+Potřebujeme ještě upravit metodu `findIncomplete()` na `findIncompleteByUser($userId)`
+
+```php
+// class TaskRepository
+
+public function findIncompleteByUser(int $userId)
+{
+	return $this->findIncomplete()->where(['user_id' => $userId]);
+}
+```
+
+Šablona `Homepage/default.latte`:
+
+```html
+{block content}
+
+<h1 n:block="title">Přehled úkolů</h1>
+
+<h2>Mé úkoly</h2>
+{control userTasks}
+
+<h2>Všechny nesplněné</h2>
+{control incompleteTasks}
+
+{/block}
+```
+
+
+Formulář pro změnu hesla
+========================
+
+Změna hesla uživatele je také velmi jednoduchá. Pro začátek si do `UserRepository` přidáme pomocnou metodu pro nastavení hesla uživatele:
+
+```php
+public function setPassword(int $id, string $password): void
+{
+	$this->getTable()->where(['id' => $id])->update([
+		'password' => Authenticator::calculateHash($password)
+	]);
+}
+```
+
+Nyní už stačí jen vytvořit formulář, který změnu hesla provede. Umístíme jej do vlastního presenteru, který pojmenujeme například `UserPresenter`:
+
+```php
+use Nette\Application\UI\Form;
+use Nette\Security as NS;
+
+/**
+ */
+class UserPresenter extends BasePresenter
+{
+	/** @var Todo\UserRepository */
+	private $userRepository;
+
+	/** @var Todo\Authenticator */
+	private $authenticator;
+
+	protected function startup(): void
+	{
+		parent::startup();
+		if (!$this->getUser()->isLoggedIn()) {
+			$this->redirect('Sign:in');
+		}
+		$this->userRepository = $this->context->userRepository;
+		$this->authenticator = $this->context->authenticator;
+	}
+
+	protected function createComponentPasswordForm(): Form
+	{
+		$form = new Form();
+		$form->addPassword('oldPassword', 'Staré heslo:', 30)
+			->addRule(Form::FILLED, 'Je nutné zadat staré heslo.');
+		$form->addPassword('newPassword', 'Nové heslo:', 30)
+			->addRule(Form::MIN_LENGTH, 'Nové heslo musí mít alespoň %d znaků.', 6);
+		$form->addPassword('confirmPassword', 'Potvrzení hesla:', 30)
+			->addRule(Form::FILLED, 'Nové heslo je nutné zadat ještě jednou pro potvrzení.')
+			->addRule(Form::EQUAL, 'Zadná hesla se musejí shodovat.', $form['newPassword']);
+		$form->addSubmit('set', 'Změnit heslo');
+		$form->onSuccess[] = [$this, 'passwordFormSubmitted'];
+		return $form;
+	}
+
+
+	public function passwordFormSubmitted(Nette\Application\UI\Form $form, stdClass $values): void
+	{
+		$values = $form->getValues();
+		$user = $this->getUser();
+		try {
+			$this->authenticator->authenticate([$user->getIdentity()->username, $values->oldPassword]);
+			$this->userRepository->setPassword($user->getId(), $values->newPassword);
+			$this->flashMessage('Heslo bylo změněno.', 'success');
+			$this->redirect('Homepage:');
+		} catch (NS\AuthenticationException $e) {
+			$form->addError('Zadané heslo není správné.');
+		}
+	}
+}
+```
+
+Povšimněte si něktrých nových validačních pravidel. `Form::MIN_LENGTH` ověřuje délku hesla. V popisce je použito zástupné `%d`. To je nahrazeno parametrem validačního pravidla, tedy číslem 6, protože popisky jsou před použitím zpracovány funkcí [sprintf |http://php.net/manual/en/function.sprintf.php]. Pravidlo `EQUAL` kontroluje, zda se hodnota políčka rovná zadané hodnotě. Jako hodnotu můžeme zadat buď statickou hodnotu, nebo odkaz na jiné políčko formuláře, v našem případě `$form['newPassword']`.
+
+Ve zpracování už asi není nic, co by nás mohlo zaskočit. Při zpracování jen ověříme, zda je zadané heslo platné a poté jej změníme.
+
+Pro tento presenter pak také samozřejmě musíme vytvořit šablonu. Půjde o `User/password.latte`:
+
+```html
+{block content}
+
+<h1 n:block="title">Změna hesla</h1>
+
+{form passwordForm}
+<div class="password-form">
+	{control $form errors}
+
+	<div class="pair">
+		{label oldPassword /}
+		<div class="input">{input oldPassword}</div>
+	</div>
+	<div class="pair">
+		{label newPassword /}
+		<div class="input">{input newPassword}</div>
+	</div>
+	<div class="pair">
+		{label confirmPassword /}
+		<div class="input">{input confirmPassword}</div>
+	</div>
+	<div class="pair">
+		<div class="input">{input set}</div>
+	</div>
+</div>
+{/form}
+```
+
+A ještě do hlavičky v `@layout.latte` přidáme odkaz, aby bylo možné heslo změnit:
+
+```html
+<div id="header">
+	<div id="header-inner">
+		<div class="title"><a n:href="Homepage:">Úkolníček</a></div>
+
+		{if $user->isLoggedIn()}
+		<div class="user">
+			<span class="icon user">{$user->getIdentity()->name}</span> |
+			<a n:href="User:password">Změna hesla</a> |
+			<a n:href="signOut!">Odhlásit se</a>
+		</div>
+		{/if}
+	</div>
+</div>
+```
+
+
+Ukázali jsme si základy přihlašování uživatelů a aplikace již začíná být použitelná. Pomalu se chýlíme ke konci, ještě si ukážeme, jak uživateli zpříjemnit práci pomocí AJAXu.
+
+Zdrojové kódy aplikace v této fázi naleznete na [GitHubu |https://github.com/nette/book/tree/6].

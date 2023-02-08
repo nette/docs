@@ -1,0 +1,174 @@
+Dinamik Parçacıklar
+*******************
+
+Uygulama geliştirmede sıklıkla, örneğin bir tablonun tek tek satırlarında veya liste öğelerinde AJAX işlemleri gerçekleştirme ihtiyacı vardır. Örnek olarak, giriş yapan kullanıcının her biri için bir "beğenme/beğenmeme" derecesi seçmesine olanak tanıyan makaleleri listelemeyi seçebiliriz. Sunucunun kodu ve AJAX olmadan ilgili şablon aşağıdaki gibi görünecektir (en önemli parçacıkları listeliyorum, kod, derecelendirmeleri işaretlemek ve bir makale koleksiyonu almak için bir hizmetin varlığını varsayar - özel uygulama bu eğitimin amaçları için önemli değildir):
+
+```php
+public function handleLike(int $articleId): void
+{
+	$this->ratingService->saveLike($articleId, $this->user->id);
+	$this->redirect('this');
+}
+
+public function handleUnlike(int $articleId): void
+{
+	$this->ratingService->removeLike($articleId, $this->user->id);
+	$this->redirect('this');
+}
+```
+
+Şablon:
+
+```latte
+<article n:foreach="$articles as $article">
+	<h2>{$article->title}</h2>
+	<div class="content">{$article->content}</div>
+	{if !$article->liked}
+		<a n:href="like! $article->id" class=ajax>I like it</a>
+	{else}
+		<a n:href="unlike! $article->id" class=ajax>I don't like it anymore</a>
+	{/if}
+</article>
+```
+
+
+Ajaxlaştırma .[#toc-ajaxization]
+================================
+
+Şimdi bu basit uygulamaya AJAX'ı getirelim. Bir makalenin derecelendirmesini değiştirmek, yönlendirmeli bir HTTP isteği gerektirecek kadar önemli değildir, bu nedenle ideal olarak arka planda AJAX ile yapılmalıdır. AJAX bağlantılarının `ajax` CSS sınıfına sahip olduğu olağan kuralıyla [eklentilerdeki işleyici |https://componette.org/vojtech-dobes/nette.ajax.js/] komut dosyasını kullanacağız.
+
+Ancak, bunu özellikle nasıl yapmalı? Nette 2 yol sunuyor: dinamik snippet yolu ve bileşen yolu. Her ikisinin de artıları ve eksileri var, bu yüzden bunları tek tek göstereceğiz.
+
+
+Dinamik Parçacıklar Yolu .[#toc-the-dynamic-snippets-way]
+=========================================================
+
+Latte terminolojisinde, dinamik bir snippet, snippet adında bir değişkenin kullanıldığı `{snippet}` etiketinin özel bir kullanım durumudur. Böyle bir snippet şablonun herhangi bir yerinde bulunamaz - statik bir snippet, yani normal bir snippet tarafından veya bir `{snippetArea}` içinde sarılmalıdır. Şablonumuzu aşağıdaki gibi değiştirebiliriz.
+
+
+```latte
+{snippet articlesContainer}
+	<article n:foreach="$articles as $article">
+		<h2>{$article->title}</h2>
+		<div class="content">{$article->content}</div>
+		{snippet article-$article->id}
+			{if !$article->liked}
+				<a n:href="like! $article->id" class=ajax>I like it</a>
+			{else}
+				<a n:href="unlike! $article->id" class=ajax>I don't like it anymore</a>
+			{/if}
+		{/snippet}
+	</article>
+{/snippet}
+```
+
+Artık her makale, başlığında bir makale kimliği bulunan tek bir snippet tanımlamaktadır. Tüm bu snippet'ler daha sonra `articlesContainer` adlı tek bir snippet'te bir araya getirilir. Bu sarmalama parçacığını atlarsak, Latte bizi bir istisna ile uyaracaktır.
+
+Geriye kalan tek şey sunucuya yeniden çizim eklemektir - sadece statik sarmalayıcıyı yeniden çizin.
+
+```php
+public function handleLike(int $articleId): void
+{
+	$this->ratingService->saveLike($articleId, $this->user->id);
+	if ($this->isAjax()) {
+		$this->redrawControl('articlesContainer');
+		// $this->redrawControl('article-' . $articleId); -- není potřeba
+	} else {
+		$this->redirect('this');
+	}
+}
+```
+
+ `handleUnlike()` kardeş yöntemini de aynı şekilde değiştirin ve AJAX çalışmaya başlasın!
+
+Ancak bu çözümün bir dezavantajı var. AJAX isteğinin nasıl çalıştığını daha fazla araştırırsak, uygulamanın görünüşte verimli görünmesine rağmen (belirli bir makale için yalnızca tek bir snippet döndürür), aslında sunucudaki tüm snippet'leri işlediğini görürüz. İstenen snippet'i payload'umuza yerleştirmiş ve diğerlerini atmıştır (böylece, oldukça gereksiz bir şekilde, bunları veritabanından da almıştır).
+
+Bu süreci optimize etmek için, `$articles` koleksiyonunu şablona aktardığımız yerde (örneğin `renderDefault()` yönteminde) işlem yapmamız gerekecek. Sinyal işlemenin şablondan önce gerçekleştiği gerçeğinden yararlanacağız. `render<Something>` yöntemler:
+
+```php
+public function handleLike(int $articleId): void
+{
+	// ...
+	if ($this->isAjax()) {
+		// ...
+		$this->template->articles = [
+			$this->connection->table('articles')->get($articleId),
+		];
+	} else {
+		// ...
+}
+
+public function renderDefault(): void
+{
+	if (!isset($this->template->articles)) {
+		$this->template->articles = $this->connection->table('articles');
+	}
+}
+```
+
+Şimdi, sinyal işlendiğinde, tüm makaleleri içeren bir koleksiyon yerine, yalnızca tek bir makaleyi içeren bir dizi şablona aktarılır - tarayıcıya payload olarak göndermek ve render etmek istediğimiz. Böylece, `{foreach}` yalnızca bir kez yapılacak ve fazladan snippet oluşturulmayacaktır.
+
+
+Bileşen Yolu .[#toc-component-way]
+==================================
+
+Tamamen farklı bir çözüm, dinamik snippet'lerden kaçınmak için farklı bir yaklaşım kullanır. İşin püf noktası, tüm mantığı ayrı bir bileşene taşımaktır - şu andan itibaren, derecelendirmeyi girmekle ilgilenecek bir sunumcumuz yok, ancak özel bir `LikeControl`. Sınıf aşağıdaki gibi görünecektir (ek olarak, `render`, `handleUnlike`, vb. yöntemleri de içerecektir):
+
+```php
+class LikeControl extends Nette\Application\UI\Control
+{
+	public function __construct(
+		private Article $article,
+	) {
+	}
+
+	public function handleLike(): void
+	{
+		$this->ratingService->saveLike($this->article->id, $this->presenter->user->id);
+		if ($this->presenter->isAjax()) {
+			$this->redrawControl();
+		} else {
+			$this->presenter->redirect('this');
+		}
+	}
+}
+```
+
+Bileşen şablonu:
+
+```latte
+{snippet}
+	{if !$article->liked}
+		<a n:href="like!" class=ajax>I like it</a>
+	{else}
+		<a n:href="unlike!" class=ajax>I don't like it anymore</a>
+	{/if}
+{/snippet}
+```
+
+Elbette görünüm şablonunu değiştireceğiz ve sunucuya bir fabrika eklememiz gerekecek. Bileşeni veritabanından makale aldıkça oluşturacağımız için, onu "çarpmak" için [Multiplier |application:Multiplier] sınıfını kullanacağız.
+
+```php
+protected function createComponentLikeControl()
+{
+	$articles = $this->connection->table('articles');
+	return new Nette\Application\UI\Multiplier(function (int $articleId) use ($articles) {
+		return new LikeControl($articles[$articleId]);
+	});
+}
+```
+
+Şablon görünümü gerekli minimum düzeye indirilmiştir (ve parçacıklardan tamamen arındırılmıştır!):
+
+```latte
+<article n:foreach="$articles as $article">
+	<h2>{$article->title}</h2>
+	<div class="content">{$article->content}</div>
+	{control "likeControl-$article->id"}
+</article>
+```
+
+Neredeyse bitirdik: uygulama artık AJAX'ta çalışacak. Burada da uygulamayı optimize etmek zorundayız, çünkü Nette Veritabanı kullanımı nedeniyle sinyal işleme gereksiz yere veritabanından bir yerine tüm makaleleri yükleyecektir. Bununla birlikte, avantajı, render işlemi olmayacağıdır, çünkü aslında sadece bileşenimiz render edilir.
+
+{{priority: -1}}
+{{sitename: Best Practices}}

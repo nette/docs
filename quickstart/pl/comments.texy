@@ -1,0 +1,172 @@
+Uwagi
+*****
+
+Wrzuciliśmy bloga na serwer internetowy i opublikowaliśmy kilka bardzo ciekawych postów za pomocą Adminera. Ludzie czytają naszego bloga i są nim zachwyceni. Codziennie dostajemy wiele maili z komplementami. Ale jaki jest sens tych wszystkich pochwał, jeśli mamy je tylko w mailu i nikt nie może ich przeczytać? Lepiej by było, gdyby czytelnik mógł bezpośrednio skomentować artykuł, żeby wszyscy mogli przeczytać, jacy jesteśmy zajebiści.
+
+Zaprogramujmy więc komentarze.
+
+
+Tworzenie nowej tabeli .[#toc-tvorba-nove-tabulky]
+==================================================
+
+Załaduj Adminera i utwórz tabelę `comments` z następującymi kolumnami:
+
+- `id` int, sprawdzenie autoinkrementacji (AI)
+- `post_id`, klucz obcy wskazujący na tabelę `posts`
+- `name` varchar, długość 255
+- `email` varchar, długość 255
+- `content` tekst
+- `created_at` znacznik czasu
+
+Tak więc tabela powinna wyglądać coś takiego:
+
+[* adminer-comments.webp *]
+
+Nie zapomnij ponownie użyć magazynu InnoDB.
+
+```sql
+CREATE TABLE `comments` (
+	`id` int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+	`post_id` int(11) NOT NULL,
+	`name` varchar(250) NOT NULL,
+	`email` varchar(250) NOT NULL,
+	`content` text NOT NULL,
+	`created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (`post_id`) REFERENCES `posts` (`id`)
+) ENGINE=InnoDB CHARSET=utf8;
+```
+
+
+Formularz do komentowania .[#toc-formular-pro-komentovani]
+==========================================================
+
+Najpierw musimy stworzyć formularz, który pozwoli użytkownikom komentować posty. Nette Framework ma niesamowite wsparcie dla formularzy. Możemy je skonfigurować w prezenterze i wyrenderować w szablonie.
+
+Nette Framework wykorzystuje pojęcie *komponentu*. **Komponent** to klasa wielokrotnego użytku lub fragment kodu, który można dołączyć do innego komponentu. Nawet prezenter jest składnikiem. Każdy komponent jest tworzony poprzez fabrykę. Stwórzmy więc fabrykę dla formularza komentarza w prezenterze `PostPresenter`.
+
+```php .{file:app/Presenters/PostPresenter.php}
+protected function createComponentCommentForm(): Form
+{
+	$form = new Form; // means Nette\Application\UI\Form
+
+	$form->addText('name', 'Jméno:')
+		->setRequired();
+
+	$form->addEmail('email', 'E-mail:');
+
+	$form->addTextArea('content', 'Komentář:')
+		->setRequired();
+
+	$form->addSubmit('send', 'Publikovat komentář');
+
+	return $form;
+}
+```
+
+Wyjaśnijmy to jeszcze raz trochę. Pierwsza linia tworzy nową instancję komponentu `Form`. Kolejne metody dołączają wejścia HTML do definicji tego formularza. `->addText` jest renderowany jako `<input type="text" name="name">` s `<label>Jméno:</label>`. Jak zapewne dobrze się domyśliłeś, `->addTextArea` jest renderowany jako `<textarea>` oraz `->addSubmit` jako `<input type="submit">`. Podobnych metod jest znacznie więcej, ale te na razie wystarczą dla tej formy. Więcej na ten temat można przeczytać w [dokumentacji |forms:].
+
+Jeśli formularz jest już zdefiniowany w prezenterze, możemy go renderować (wyświetlać) w szablonie. Zrobimy to, umieszczając znacznik `{control}` na końcu szablonu renderującego jeden konkretny post, w `Post/show.latte`. Ponieważ komponent nazywa się `commentForm` (nazwa pochodzi od nazwy metody `createComponentCommentForm`), znacznik będzie wyglądał tak:
+
+```latte .{file:app/Presenters/templates/Post/show.latte}
+...
+<h2>Vložte nový příspěvek</h2>
+
+{control commentForm}
+```
+
+Teraz, gdy zobaczysz stronę szczegółów postu, zobaczysz nowy formularz komentarza na końcu postu.
+
+
+Zapisywanie do bazy danych .[#toc-ukladani-do-databaze]
+=======================================================
+
+Czy próbowałeś wypełnić i przesłać formularz? Być może zauważyłeś, że formularz w zasadzie nic nie robi. Musimy dołączyć metodę callback, która zapisuje przesłane dane.
+
+Na linii przed `return` w fabryce dla komponentu `commentForm` umieszczamy następujący wiersz:
+
+```php
+$form->onSuccess[] = [$this, 'commentFormSucceeded'];
+```
+
+Poprzedni zapis oznacza "po udanym przesłaniu formularza wywołaj metodę `commentFormSucceeded` z bieżącego prezentera". Jednak ta metoda jeszcze nie istnieje. Więc stwórzmy go:
+
+```php .{file:app/Presenters/PostPresenter.php}
+public function commentFormSucceeded(\stdClass $data): void
+{
+	$postId = $this->getParameter('postId');
+
+	$this->database->table('comments')->insert([
+		'post_id' => $postId,
+		'name' => $data->name,
+		'email' => $data->email,
+		'content' => $data->content,
+	]);
+
+	$this->flashMessage('Děkuji za komentář', 'success');
+	$this->redirect('this');
+}
+```
+
+Metodę tę umieścimy bezpośrednio za fabryką formularzy `commentForm`.
+
+Ta nowa metoda przyjmuje jeden argument, którym jest instancja formularza, która została złożona - utworzona przez fabrykę. Pobieramy przekazane wartości w `$data`. A następnie przechowujemy dane w tabeli bazy danych `comments`.
+
+Są jeszcze dwie metody, które zasługują na wyjaśnienie. Metoda Redirect dosłownie przekierowuje z powrotem na bieżącą stronę. Jest to przydatne do zrobienia po każdym przesłaniu formularza, o ile zawierał on prawidłowe dane, a callback wykonał operację tak, jak powinien. Ponadto, jeśli przekierujemy stronę po przesłaniu formularza, nie zobaczymy znanego komunikatu `Chcete odeslat data z formuláře znovu?`, który czasem widzimy w przeglądarce. (Ogólnie rzecz biorąc, po przesłaniu formularza metodą `POST` zawsze powinno nastąpić przekierowanie do akcji `GET` ).
+
+Metoda `flashMessage` służy do informowania użytkownika o wyniku jakiejś operacji. Ponieważ przekierowujemy, wiadomość nie może być po prostu przekazana do szablonu i wyrenderowana. Dlatego istnieje ta metoda, która zapisuje wiadomość i udostępnia ją przy następnym załadowaniu strony. Komunikaty flash są renderowane w głównym szablonie `app/Presenters/templates/@layout.latte` i wygląda to tak:
+
+```latte
+<div n:foreach="$flashes as $flash" n:class="flash, $flash->type">
+	{$flash->message}
+</div>
+```
+
+Jak już wiemy, komunikaty flash są automatycznie przekazywane do szablonu, więc nie musimy się nad tym zbytnio zastanawiać, to po prostu działa. Więcej informacji na ten temat można [znaleźć w dokumentacji |application:presenters#flash-zpravy].
+
+
+Uwagi dotyczące renderingu .[#toc-vykreslovani-komentaru]
+=========================================================
+
+To jedna z tych rzeczy, które po prostu się kocha. Nette Database posiada świetną funkcję o nazwie [Explorer |database:explorer]. Czy pamiętasz jeszcze, że celowo tworzyliśmy tabele w bazie danych przy użyciu repozytorium InnoDB? Więc Adminer stworzył coś, co nazywa się [kluczami obcymi |https://dev.mysql.com/doc/refman/8.0/en/create-table-foreign-keys.html], co oszczędza nam wiele pracy.
+
+Nette Database Explorer wykorzystuje klucze obce do rozwiązywania relacji między tabelami i może automatycznie tworzyć zapytania do bazy danych na podstawie znajomości tych relacji.
+
+Jak pamiętasz, przekazaliśmy zmienną `$post` do szablonu za pomocą metody `PostPresenter::renderShow()`, a teraz chcemy iterować po wszystkich komentarzach, które mają wartość kolumny `post_id` pasującą do `$post->id`. Możemy to zrobić, wywołując `$post->related('comments')`. Tak, to takie proste. Przyjrzyjmy się wynikowemu kodowi:
+
+```php .{file:app/Presenters/PostPresenter.php}
+public function renderShow(int $postId): void
+{
+	...
+	$this->template->post = $post;
+	$this->template->comments = $post->related('comments')->order('created_at');
+}
+```
+
+I szablon:
+
+```latte .{file:app/Presenters/templates/Post/show.latte}
+...
+<h2>Komentáře</h2>
+
+<div class="comments">
+	{foreach $comments as $comment}
+		<p><b><a href="mailto:{$comment->email}" n:tag-if="$comment->email">
+			{$comment->name}
+		</a></b> napsal:</p>
+
+		<div>{$comment->content}</div>
+	{/foreach}
+</div>
+...
+```
+
+Zwróć uwagę na specjalny atrybut `n:tag-if`. Wiesz już jak działa `n:atributy`. Jeśli poprzedzisz atrybut znakiem `tag-`, funkcjonalność jest stosowana tylko do znacznika HTML, a nie do jego zawartości. Dzięki temu możemy sprawić, że imię komentatora stanie się linkiem tylko wtedy, gdy podał on swój e-mail. Obie linie są identyczne:
+
+```latte
+<strong n:tag-if="$important"> Dobrý den! </strong>
+
+{if $important}<strong>{/if} Dobrý den! {if $important}</strong>{/if}
+```
+
+{{priority: -1}}
+{{sitename: Nette Quickstart}}

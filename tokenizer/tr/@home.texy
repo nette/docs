@@ -1,0 +1,205 @@
+Tokenizer: Dize Tokenizasyonu
+*****************************
+
+.[perex]
+Tokenizer, verilen dizeyi belirteçlere bölmek için düzenli ifadeler kullanan basit bir araçtır. **Bu kütüphane artık geliştirilmemektedir.**
+
+Kurulum:
+
+```shell
+composer require nette/tokenizer
+```
+
+
+Dize Tokenizasyonu .[#toc-string-tokenization]
+----------------------------------------------
+
+Dizeleri sayılara, boşluklara ve harflere ayıran basit bir tokenizer oluşturalım.
+
+```php
+$tokenizer = new Nette\Tokenizer\Tokenizer([
+	T_DNUMBER => '\d+',
+	T_WHITESPACE => '\s+',
+	T_STRING => '\w+',
+]);
+```
+
+İpucu: T_ sabitlerinin nereden geldiğini merak ediyorsanız, bunlar kodu ayrıştırmak için kullanılan "dahili tiplerdir":https://www.php.net/manual/tokens.php. Genellikle ihtiyaç duyduğumuz yaygın belirteç adlarının çoğunu kapsarlar. Değerlerinin garanti edilmediğini unutmayın, bu nedenle karşılaştırma için sayıları kullanmayın.
+
+Şimdi ona bir dize verdiğimizde, [belirteçlerin |api:Nette\Tokenizer\Token] [akışını |api:Nette\Tokenizer\Stream] döndürecektir.
+
+```php
+$stream = $tokenizer->tokenize("say \n123");
+```
+
+Sonuçta ortaya çıkan belirteç dizisi `$stream->tokens` şu şekilde görünecektir.
+
+```php
+[
+	new Token('say', T_STRING, 0),
+	new Token(" \n", T_WHITESPACE, 3),
+	new Token('123', T_DNUMBER, 5),
+]
+```
+
+Ayrıca, token'ın bireysel özelliklerine de erişebilirsiniz:
+
+```php
+$firstToken = $stream->tokens[0];
+$firstToken->value; // say
+$firstToken->type; // value of T_STRING
+$firstToken->offset; // position in string: 0
+```
+
+Basit, değil mi?
+
+
+Jetonların İşlenmesi .[#toc-processing-the-tokens]
+--------------------------------------------------
+
+Artık bir string'ten nasıl token oluşturacağımızı biliyoruz. [Stream |api:Nette\Tokenizer\Stream] kullanarak bunları etkili bir şekilde işleyelim. Token'lar arasında geçiş yapmanız gerekiyorsa, gerçekten harika birçok yöntemi vardır!
+
+PHPDoc'tan basit bir ek açıklamayı ayrıştırmaya ve ondan bir nesne oluşturmaya çalışalım. Belirteçler için hangi düzenli ifadelere ihtiyacımız var? Tüm ek açıklamalar `@` ile başlar, sonra bir isim, boşluk ve değeri vardır.
+
+- Ek açıklama başlangıcı için `@`
+- Beyaz boşluklar için `\s+`
+- Telli çalgılar için `\w+`
+
+.[note]
+Tokenizer'ın düzenli ifadelerinde asla `'(ab)+c'` gibi yakalayıcı alt kalıplar kullanmayın, yalnızca yakalayıcı olmayanları kullanın `'(?:ab)+c'`.
+
+Bu basit ek açıklamalar üzerinde çalışmalıdır, değil mi? Şimdi ayrıştırmaya çalışacağımız girdi dizesini gösterelim.
+
+```php
+$input = '
+	@author David Grudl
+	@package Nette
+';
+```
+
+String kabul edecek ve '['name, value |name, value]'' çiftlerinden oluşan bir dizi döndürecek bir `Parser` sınıfı oluşturalım. Çok naif ve basit olacak.
+
+```php
+use Nette\Tokenizer\Tokenizer;
+use Nette\Tokenizer\Stream;
+
+class Parser
+{
+	const T_AT = 1;
+	const T_WHITESPACE = 2;
+	const T_STRING = 3;
+
+	private Tokenizer $tokenizer;
+	private Stream $stream;
+
+	public function __construct()
+	{
+		$this->tokenizer = new Tokenizer([
+			self::T_AT => '@',
+			self::T_WHITESPACE => '\s+',
+			self::T_STRING => '\w+',
+		]);
+	}
+
+	public function parse(string $input): array
+	{
+		$this->stream = $this->tokenizer->tokenize($input);
+
+		$result = [];
+		while ($this->stream->nextToken()) {
+			if ($this->stream->isCurrent(self::T_AT)) {
+				$result[] = $this->parseAnnotation();
+			}
+		}
+
+		return $result;
+	}
+
+	private function parseAnnotation(): array
+	{
+		$name = $this->stream->joinUntil(self::T_WHITESPACE);
+		$this->stream->nextUntil(self::T_STRING);
+		$content = $this->stream->joinUntil(self::T_AT);
+
+		return [$name, trim($content)];
+	}
+}
+```
+
+```php
+$parser = new Parser;
+$annotations = $parser->parse($input);
+```
+
+Peki `parse()` yöntemi ne yapar? Belirteçler üzerinde yineleme yapar ve `@` which is the symbol annotations start with. Calling `nextToken()` için arama yaparak imleci bir sonraki belirtece taşır. `isCurrent()` yöntemi, imleçteki geçerli belirtecin verilen türde olup olmadığını kontrol eder. Daha sonra, eğer `@` is found, the `parse()` metodu ek açıklamaların çok spesifik bir formatta olmasını bekleyen `parseAnnotation()` metodunu çağırır.
+
+İlk olarak, `joinUntil()` yöntemini kullanarak, akış imleci hareket ettirmeye devam eder ve gerekli türdeki jetonu bulana kadar jetonların değerlerini tampona ekler, sonra durur ve tampon çıktısını döndürür. Verilen konumda `T_STRING` türünde yalnızca bir belirteç olduğundan ve bu belirteç `'name'` olduğundan, `$name` değişkeninde `'name'` değeri olacaktır.
+
+ `nextUntil()` yöntemi `joinUntil()` yöntemine benzer ancak tamponu yoktur. Sadece belirteci bulana kadar imleci hareket ettirir. Yani bu çağrı, ek açıklama adından sonraki tüm boşlukları atlar.
+
+Ve sonra, bir sonraki `@`. This specific call will return `"David Grudl\n    "` adresini arayan başka bir `joinUntil()` var.
+
+Ve işte, bütün bir ek açıklamayı ayrıştırdık! `$content` muhtemelen boşluklarla bitiyor, bu yüzden kırpmamız gerekiyor. Şimdi bu özel ek açıklamayı çift olarak döndürebiliriz `[$name, $content]`.
+
+Kodu kopyalayıp çalıştırmayı deneyin. `$annotations` değişkeninin dökümünü alırsanız benzer bir çıktı döndürmesi gerekir.
+
+```
+array (2)
+   0 => array (2)
+   |  0 => 'author'
+   |  1 => 'David Grudl'
+   1 => array (2)
+   |  0 => 'package'
+   |  1 => 'Nette'
+```
+
+
+Akış Yöntemleri .[#toc-stream-methods]
+--------------------------------------
+
+Akış, `currentToken()` yöntemini kullanarak geçerli belirteci veya `currentValue()` yöntemini kullanarak yalnızca değerini döndürebilir.
+
+`nextToken()` imleci hareket ettirir ve belirteci döndürür. Hiçbir argüman vermezseniz, sadece bir sonraki belirteci döndürür.
+
+`nextValue()` tıpkı `nextToken()` gibidir ancak yalnızca token değerini döndürür.
+
+Yöntemlerin çoğu birden fazla argüman kabul eder, böylece aynı anda birden fazla türü arayabilirsiniz.
+
+```php
+// iterate until a string or a whitespace is found, then return the following token
+$token = $stream->nextToken(T_STRING, T_WHITESPACE);
+
+// give me next token
+$token = $stream->nextToken();
+```
+
+Ayrıca belirteç değerine göre de arama yapabilirsiniz.
+
+```php
+// move the cursor until you find token containing only '@', then stop and return it
+$token = $stream->nextToken('@');
+```
+
+`nextUntil()` imleci hareket ettirir ve istenen belirteci bulana kadar gördüğü tüm belirteçlerin bir dizisini döndürür, ancak belirteçten önce durur. Birden fazla argüman kabul edebilir.
+
+`joinUntil()` `nextUntil()` 'a benzer, ancak içinden geçtiği tüm simgeleri birleştirir ve dize döndürür.
+
+`joinAll()` basitçe kalan tüm belirteç değerlerini birleştirir ve döndürür. İmleci belirteç akışının sonuna taşır
+
+`nextAll()` tıpkı `joinAll()` gibidir, ancak belirteçlerin dizisini döndürür.
+
+`isCurrent()` Geçerli belirtecin veya geçerli belirtecin değerinin verilen bağımsız değişkenlerden birine eşit olup olmadığını denetler.
+
+```php
+// is the current token '@' or type of T_AT?
+$stream->isCurrent(T_AT, '@');
+```
+
+`isNext()` tıpkı `isCurrent()` gibidir ancak bir sonraki belirteci kontrol eder.
+
+`isPrev()` tıpkı `isCurrent()` gibidir ancak önceki belirteci kontrol eder.
+
+Ve son yöntem `reset()` imleci sıfırlar, böylece token akışını tekrar yineleyebilirsiniz.
+
+
+{{leftbar: utils:@left-menu}}

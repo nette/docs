@@ -1,0 +1,550 @@
+Adatbázis-kutató
+****************
+<div class=perex>
+
+
+A Nette Database Explorer jelentősen leegyszerűsíti az adatok lekérdezését az adatbázisból SQL-lekérdezések írása nélkül.
+
+- hatékony lekérdezéseket használ
+- nem továbbít feleslegesen adatokat
+- elegáns szintaxissal rendelkezik
+
+</div>
+
+Az Adatbázis-kutató használatához kezdje egy táblával - hívja meg a `table()` címet a [api:Nette\Database\Explorer] objektumon. A kontextusobjektum-példány megszerzésének legegyszerűbb módja [itt van leírva |core#Connection and Configuration], vagy abban az esetben, ha a Nette Database Explorer önálló eszközként használatos, [kézzel is létrehozható |#Creating Explorer Manually].
+
+```php
+$books = $explorer->table('book'); // db table name is 'book'
+```
+
+A hívás a [Selection |api:Nette\Database\Table\Selection] objektum egy példányát adja vissza, amelyen iterálva lekérdezhetjük az összes könyvet. Minden egyes elemet (sort) egy [ActiveRow |api:Nette\Database\Table\ActiveRow] példány képvisel, amelynek tulajdonságaihoz adatokat rendelünk:
+
+```php
+foreach ($books as $book) {
+	echo $book->title;
+	echo $book->author_id;
+}
+```
+
+Csak egy adott sor kinyerése a `get()` metódussal történik, amely közvetlenül egy ActiveRow példányt ad vissza.
+
+```php
+$book = $explorer->table('book')->get(2); // returns book with id 2
+echo $book->title;
+echo $book->author_id;
+```
+
+Vessünk egy pillantást a gyakori felhasználási esetre. Könyveket és szerzőiket kell lekérni. Ez egy gyakori 1:N kapcsolat. A gyakran használt megoldás az adatok lekérdezése egyetlen SQL-lekérdezéssel, táblázat-összekötésekkel. A másik lehetőség, hogy az adatokat külön-külön lekérdezzük, egy lekérdezést futtatunk a könyvek lekérdezésére, majd egy másik lekérdezéssel (pl. a foreach ciklusban) minden könyvhöz megkapjuk a szerzőt. Ez könnyen optimalizálható úgy, hogy csak két lekérdezés fusson, egy a könyvekre és egy másik a szükséges szerzőkre - és a Nette Database Explorer pontosan így csinálja.
+
+Az alábbi példákban az ábrán látható adatbázis-sémával fogunk dolgozni. Vannak OneHasMany (1:N) linkek (a könyv szerzője `author_id` és az esetleges fordító `translator_id`, amely lehet `null`) és ManyHasMany (M:N) link a könyv és a címkék között.
+
+[Egy sémát is tartalmazó példa megtalálható a GitHubon |https://github.com/nette-examples/books].
+
+[* db-schema-1-.webp *] *** A példákban használt adatbázis-struktúra .<>
+
+A következő kód minden könyvhöz felsorolja a szerző nevét és az összes címkét. [Mindjárt megbeszéljük |#Working with relationships], hogyan működik ez belsőleg.
+
+```php
+$books = $explorer->table('book');
+
+foreach ($books as $book) {
+	echo 'title:      ' . $book->title;
+	echo 'written by: ' . $book->author->name; // $book->author is row from table 'author'
+
+	echo 'tags: ';
+	foreach ($book->related('book_tag') as $bookTag) {
+		echo $bookTag->tag->name . ', '; // $bookTag->tag is row from table 'tag'
+	}
+}
+```
+
+Örülni fog, hogy milyen hatékonyan működik az adatbázis-réteg. A fenti példa állandó számú kérést tesz, amelyek így néznek ki:
+
+```sql
+SELECT * FROM `book`
+SELECT * FROM `author` WHERE (`author`.`id` IN (11, 12))
+SELECT * FROM `book_tag` WHERE (`book_tag`.`book_id` IN (1, 4, 2, 3))
+SELECT * FROM `tag` WHERE (`tag`.`id` IN (21, 22, 23))
+```
+
+Ha a [gyorsítótárat |caching:] használja (alapértelmezés szerint be van kapcsolva), egyetlen oszlopot sem kérdez le feleslegesen. Az első lekérdezés után a gyorsítótár tárolja a használt oszlopneveket, és a Nette Database Explorer csak a szükséges oszlopokkal kapcsolatos lekérdezéseket hajtja végre:
+
+```sql
+SELECT `id`, `title`, `author_id` FROM `book`
+SELECT `id`, `name` FROM `author` WHERE (`author`.`id` IN (11, 12))
+SELECT `book_id`, `tag_id` FROM `book_tag` WHERE (`book_tag`.`book_id` IN (1, 4, 2, 3))
+SELECT `id`, `name` FROM `tag` WHERE (`tag`.`id` IN (21, 22, 23))
+```
+
+
+Kiválasztások .[#toc-selections]
+================================
+
+Lásd a sorok szűrésének és korlátozásának lehetőségeit [api:Nette\Database\Table\Selection]:
+
+.[language-php]
+| `$table->where($where[, $param[, ...]])` | WHERE beállítása AND ragasztóval, ha két vagy több feltétel van megadva
+| `$table->whereOr($where)` | WHERE beállítása, amely két vagy több feltétel megadása esetén OR-t használ ragasztóként.
+| `$table->order($columns)` | ORDER BY beállítása, lehet kifejezés. `('column DESC, id DESC')`
+| `$table->select($columns)` | Letöltött oszlopok beállítása, lehet kifejezés is. `('col, MD5(col) AS hash')`
+| `$table->limit($limit[, $offset])` | LIMIT és OFFSET beállítása
+| `$table->page($page, $itemsPerPage[, &$lastPage])` | Engedélyezi a lapozást
+| `$table->group($columns)` | GROUP BY beállítása
+| `$table->having($having)` | HAVING beállítása
+
+Fluent interfész használható, például `$table->where(...)->order(...)->limit(...)`. Több `where` vagy `whereOr` feltétel a `AND` operátorral kapcsolódik.
+
+
+where() .[#toc-where]
+---------------------
+
+A Nette Database Explorer automatikusan hozzá tudja adni a szükséges operátorokat az átadott értékekhez:
+
+.[language-php]
+| `$table->where('field', $value)` | field = $value
+| `$table->where('field', null)` | field IS NULL
+| `$table->where('field > ?', $val)` | mező &gt; $val
+| `$table->where('field', [1, 2])` | field IN (1, 2)
+| `$table->where('id = ? OR name = ?', 1, $name)` | id = 1 VAGY név = 'Jon Snow'
+| `$table->where('field', $explorer->table($tableName))` | field IN (SELECT $primary FROM $tableName)
+| `$table->where('field', $explorer->table($tableName)->select('col'))` | field IN (SELECT col FROM $tableName)
+
+A helyőrzőt oszlopoperátor nélkül is megadhatja. Ezek a hívások ugyanazok.
+
+```php
+$table->where('id = ? OR id = ?', 1, 2);
+$table->where('id ? OR id ?', 1, 2);
+```
+
+Ez a funkció lehetővé teszi a helyes operátor generálását az érték alapján:
+
+```php
+$table->where('id ?', 2);    // id = 2
+$table->where('id ?', null); // id IS NULL
+$table->where('id', $ids);   // id IN (...)
+```
+
+A kiválasztás helyesen kezeli a negatív feltételeket is, üres tömbök esetén is működik:
+
+```php
+$table->where('id', []);       // id IS NULL AND FALSE
+$table->where('id NOT', []);   // id IS NULL OR TRUE
+$table->where('NOT (id ?)', $ids);  // NOT (id IS NULL AND FALSE)
+
+// this will throws an exception, this syntax is not supported
+$table->where('NOT id ?', $ids);
+```
+
+
+whereOr() .[#toc-whereor]
+-------------------------
+
+Példa a paraméterek nélküli használatra:
+
+```php
+// WHERE (user_id IS NULL) OR (SUM(`field1`) > SUM(`field2`))
+$table->whereOr([
+	'user_id IS NULL',
+	'SUM(field1) > SUM(field2)',
+]);
+```
+
+A paramétereket használjuk. Ha nem ad meg operátort, a Nette Database Explorer automatikusan hozzáadja a megfelelőt:
+
+```php
+// WHERE (`field1` IS NULL) OR (`field2` IN (3, 5)) OR (`amount` > 11)
+$table->whereOr([
+	'field1' => null,
+	'field2' => [3, 5],
+	'amount >' => 11,
+]);
+```
+
+A kulcs tartalmazhat egy joker kérdőjeleket tartalmazó kifejezést, majd az értékben paramétereket adhat át:
+
+```php
+// WHERE (`id` > 12) OR (ROUND(`id`, 5) = 3)
+$table->whereOr([
+	'id > ?' => 12,
+	'ROUND(id, ?) = ?' => [5, 3],
+]);
+```
+
+
+order() .[#toc-order]
+---------------------
+
+Felhasználási példák:
+
+```php
+$table->order('field1');               // ORDER BY `field1`
+$table->order('field1 DESC, field2');  // ORDER BY `field1` DESC, `field2`
+$table->order('field = ? DESC', 123);  // ORDER BY `field` = 123 DESC
+```
+
+
+select() .[#toc-select]
+-----------------------
+
+Felhasználási példák:
+
+```php
+$table->select('field1');                 // SELECT `field1`
+$table->select('col, UPPER(col) AS abc'); // SELECT `col`, UPPER(`col`) AS abc
+$table->select('SUBSTR(title, ?)', 3);    // SELECT SUBSTR(`title`, 3)
+```
+
+
+limit() .[#toc-limit]
+---------------------
+
+Felhasználási példák:
+
+```php
+$table->limit(1);     // LIMIT 1
+$table->limit(1, 10); // LIMIT 1 OFFSET 10
+```
+
+
+page() .[#toc-page]
+-------------------
+
+A határérték és az eltolás beállításának alternatív módja:
+
+```php
+$page = 5;
+$itemsPerPage = 10;
+$table->page($page, $itemsPerPage); // LIMIT 10 OFFSET 40
+```
+
+A `$lastPage` változónak átadott utolsó oldalszám megadása:
+
+```php
+$table->page($page, $itemsPerPage, $lastPage);
+```
+
+
+group() .[#toc-group]
+---------------------
+
+Felhasználási példák:
+
+```php
+$table->group('field1');          // GROUP BY `field1`
+$table->group('field1, field2');  // GROUP BY `field1`, `field2`
+```
+
+
+having() .[#toc-having]
+-----------------------
+
+Használati példák:
+
+```php
+$table->having('COUNT(items) >', 100);  // HAVING COUNT(`items`) > 100
+```
+
+
+Szűrés egy másik táblázat értéke alapján .[#toc-joining-key]
+------------------------------------------------------------
+
+Gyakran előfordul, hogy az eredményeket olyan feltétel alapján kell szűrni, amely egy másik adatbázis-táblát érint. Az ilyen típusú feltételekhez táblaösszekötésre van szükség. Ezeket azonban már nem kell megírni.
+
+Tegyük fel, hogy az összes olyan könyvet meg kell szereznünk, amelynek szerzőjének neve 'Jon'. Mindössze a kapcsolat összekötő kulcsát és az összekapcsolt tábla oszlopnevét kell megírnia. Az összekötő kulcs abból az oszlopból származik, amely az összekötni kívánt táblára utal. Példánkban (lásd a db sémát) ez a `author_id` oszlop, és elegendő, ha csak az első részét használjuk - `author` (a `_id` utótag elhagyható). A `name` a `author` tábla egyik oszlopa, amelyet használni szeretnénk. A könyvfordítóra vonatkozó feltétel (amelyhez a `translator_id` oszlop kapcsolódik) ugyanilyen egyszerűen létrehozható.
+
+```php
+$books = $explorer->table('book');
+$books->where('author.name LIKE ?', '%Jon%');
+$books->where('translator.name', 'David Grudl');
+```
+
+Az összekötő kulcs logikáját a [Conventions |api:Nette\Database\Conventions] megvalósítása vezérli. Javasoljuk a [DiscoveredConventions |api:Nette\Database\Conventions\DiscoveredConventions] használatát, amely elemzi az idegen kulcsokat, és lehetővé teszi, hogy könnyen dolgozzon ezekkel a kapcsolatokkal.
+
+A könyv és a szerzője közötti kapcsolat 1:N. A fordított kapcsolat is lehetséges. Ezt **backjoin**-nak nevezzük. Nézzünk meg egy másik példát. Szeretnénk lekérdezni az összes olyan szerzőt, aki több mint 3 könyvet írt. Ahhoz, hogy a join fordított legyen, a `:` (colon). Colon means that the joined relationship means hasMany (and it's quite logical too, as two dots are more than one dot). Unfortunately, the Selection class isn't smart enough, so we have to help with the aggregation and provide a `GROUP BY` utasítást használjuk, a feltételt is `HAVING` utasítás formájában kell megírni.
+
+```php
+$authors = $explorer->table('author');
+$authors->group('author.id')
+	->having('COUNT(:book.id) > 3');
+```
+
+Észrevehette, hogy az összekötő kifejezés a könyvre utal, de nem egyértelmű, hogy a `author_id` vagy a `translator_id` oldalon keresztül kötünk-e. A fenti példában a Selection a `author_id` oszlopon keresztül köt, mert találtunk egyezést a forrás táblával - a `author` táblával. Ha nem lenne ilyen egyezés, és több lehetőség is lenne, a Nette [AmbiguousReferenceKeyExceptiont |api:Nette\Database\Conventions\AmbiguousReferenceKeyException] dobna.
+
+A `translator_id` oszlopon keresztül történő csatlakozáshoz adjunk meg egy opcionális paramétert a csatlakozási kifejezésben.
+
+```php
+$authors = $explorer->table('author');
+$authors->group('author.id')
+	->having('COUNT(:book(translator).id) > 3');
+```
+
+Nézzünk meg néhány nehezebb csatlakozási kifejezést.
+
+Szeretnénk megtalálni az összes szerzőt, aki írt valamit a PHP-ről. Minden könyvnek van címkéje, így ki kell választanunk azokat a szerzőket, akik PHP címkéjű könyvet írtak.
+
+```php
+$authors = $explorer->table('author');
+$authors->where(':book:book_tags.tag.name', 'PHP')
+	->group('author.id')
+	->having('COUNT(:book:book_tags.tag.id) > 0');
+```
+
+
+Összesített lekérdezések .[#toc-aggregate-queries]
+--------------------------------------------------
+
+| `$table->count('*')` | Sorok számának lekérdezése
+| `$table->count("DISTINCT $column")` | Különálló értékek számának lekérdezése
+| `$table->min($column)` | Minimális érték lekérdezése
+| `$table->max($column)` | Maximális érték lekérdezése
+| `$table->sum($column)` | Az összes érték összegének lekérdezése
+| `$table->aggregation("GROUP_CONCAT($column)")` | Bármilyen aggregációs függvény futtatása
+
+.[caution]
+A `count()` módszer megadott paraméterek nélkül kiválasztja az összes rekordot és visszaadja a tömb méretét, ami nagyon nem hatékony. Ha például a lapozáshoz szükséges sorok számát kell kiszámítania, mindig adja meg az első argumentumot.
+
+
+Kikerülés és idézés .[#toc-escaping-quoting]
+============================================
+
+Az Adatbázis-kutató okos, és kikerüli a paramétereket és idézőjeleket azonosítókat az Ön helyett. Ezeket az alapvető szabályokat azonban be kell tartani:
+
+- kulcsszavak, függvények, eljárások nagybetűsek legyenek.
+- az oszlopoknak és táblázatoknak kisbetűsnek kell lenniük
+- a változókat paraméterként kell átadni, nem szabad összekapcsolni.
+
+```php
+->where('name like ?', 'John'); // WRONG! generates: `name` `like` ?
+->where('name LIKE ?', 'John'); // CORRECT
+
+->where('KEY = ?', $value); // WRONG! KEY is a keyword
+->where('key = ?', $value); // CORRECT. generates: `key` = ?
+
+->where('name = ' . $name); // WRONG! sql injection!
+->where('name = ?', $name); // CORRECT
+
+->select('DATE_FORMAT(created, "%d.%m.%Y")'); // WRONG! pass variables as parameters, do not concatenate
+->select('DATE_FORMAT(created, ?)', '%d.%m.%Y'); // CORRECT
+```
+
+.[warning]
+A helytelen használat biztonsági résekhez vezethet
+
+
+Adatok lekérése .[#toc-fetching-data]
+=====================================
+
+| `foreach ($table as $id => $row)` | Az eredmény összes során való ismételt átfutás
+| `$row = $table->get($id)` | Egyetlen sor kinyerése $id azonosítóval a táblázatból
+| `$row = $table->fetch()` | Következő sor kinyerése az eredményből.
+| `$array = $table->fetchPairs($key, $value)` | Az összes érték beemelése asszociatív tömbbe.
+| `$array = $table->fetchPairs($key)` | Minden sor lekérése asszociatív tömbbe.
+| `count($table)` | Az eredményhalmaz sorainak számának kinyerése
+
+
+Beszúrás, frissítés és törlés .[#toc-insert-update-delete]
+==========================================================
+
+A `insert()` módszer Traversable objektumok tömbjét fogadja el (például [ArrayHash |utils:arrays#ArrayHash], amely [űrlapokat |forms:] ad vissza):
+
+```php
+$row = $explorer->table('users')->insert([
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978)
+```
+
+Ha a táblázatban elsődleges kulcs van definiálva, akkor a rendszer egy ActiveRow objektumot ad vissza, amely a beillesztett sort tartalmazza.
+
+Többszörös beszúrás:
+
+```php
+$explorer->table('users')->insert([
+	[
+		'name' => 'Jim',
+		'year' => 1978,
+	], [
+		'name' => 'Jack',
+		'year' => 1987,
+	],
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978), ('Jack', 1987)
+```
+
+DateTime objektumok paraméterként átadhatók:
+
+```php
+$explorer->table('users')->insert([
+	'name' => $name,
+	'created' => new DateTime, // or $explorer::literal('NOW()')
+	'avatar' => fopen('image.gif', 'r'), // inserts the file
+]);
+```
+
+Frissítés (az érintett sorok számát adja vissza):
+
+```php
+$count = $explorer->table('users')
+	->where('id', 10) // must be called before update()
+	->update([
+		'name' => 'Ned Stark'
+	]);
+// UPDATE `users` SET `name`='Ned Stark' WHERE (`id` = 10)
+```
+
+A frissítéshez használhatjuk a `+=` a `-=` operátorokat:
+
+```php
+$explorer->table('users')
+	->update([
+		'age+=' => 1, // see +=
+	]);
+// UPDATE users SET `age` = `age` + 1
+```
+
+Törlés (a törölt sorok számát adja vissza):
+
+```php
+$count = $explorer->table('users')
+	->where('id', 10)
+	->delete();
+// DELETE FROM `users` WHERE (`id` = 10)
+```
+
+
+Kapcsolatokkal való munka .[#toc-working-with-relationships]
+============================================================
+
+
+Van egy kapcsolata .[#toc-has-one-relation]
+-------------------------------------------
+A Has one reláció egy gyakori felhasználási eset. A könyvnek *egy* szerzője van. A könyvnek *egy* fordítója van. A kapcsolódó sorok kinyerése főként a `ref()` módszerrel történik. Két argumentumot fogad el: a céltábla nevét és a forrás összekötő oszlopát. Lásd a példát:
+
+```php
+$book = $explorer->table('book')->get(1);
+$book->ref('author', 'author_id');
+```
+
+A fenti példában a `author` táblából hozzuk le a kapcsolódó szerzői bejegyzést, a szerző elsődleges kulcsát a `book.author_id` oszlop segítségével keressük. A Ref() metódus visszaadja az ActiveRow példányt vagy nullát, ha nincs megfelelő bejegyzés. A visszaadott sor az ActiveRow egy példánya, így ugyanúgy dolgozhatunk vele, mint a könyv bejegyzéssel.
+
+```php
+$author = $book->ref('author', 'author_id');
+$author->name;
+$author->born;
+
+// or directly
+$book->ref('author', 'author_id')->name;
+$book->ref('author', 'author_id')->born;
+```
+
+A könyvnek is van egy fordítója, így a fordító nevének megszerzése elég egyszerű.
+```php
+$book->ref('author', 'translator_id')->name
+```
+
+Mindez rendben van, de kissé nehézkes, nem gondolja? Az adatbázis-kutató már tartalmazza az idegen kulcsok definícióit, miért ne használhatná őket automatikusan? Csináljuk meg!
+
+Ha olyan tulajdonságot hívunk meg, amely nem létezik, az ActiveRow megpróbálja a hívó tulajdonság nevét 'van egy' relációként feloldani. Ennek a tulajdonságnak a megszerzése ugyanaz, mint a ref() metódus hívása egyetlen argumentummal. Az egyetlen argumentumot **key**-nek fogjuk hívni. A kulcsot egy adott idegen kulcs relációra fogjuk felbontani. Az átadott kulcsot összevetjük a sor oszlopokkal, és ha egyezik, akkor a megfelelő oszlopon definiált idegen kulcsot használjuk a kapcsolódó céltáblából való adatszerzéshez. Lásd a példát:
+
+```php
+$book->author->name;
+// same as
+$book->ref('author')->name;
+```
+
+Az ActiveRow példánynak nincs szerző oszlopa. Az összes könyv oszlopban keresünk egyezést a *kulcs*-val. Az egyezés ebben az esetben azt jelenti, hogy az oszlop nevének tartalmaznia kell a kulcsot. A fenti példában tehát a `author_id` oszlop tartalmazza a 'szerző' karakterláncot, ezért a keresés a 'szerző' kulccsal történik. Ha a könyv fordítóját szeretné megkapni, akkor kulcsként használhatja pl. a 'translator' szót, mert a 'translator' kulcs a `translator_id` oszlopra fog illeszkedni. A kulcsillesztési logikáról bővebben a [Joining expressions |#joining-key] fejezetben olvashat.
+
+```php
+echo $book->title . ': ';
+echo $book->author->name;
+if ($book->translator) {
+	echo ' (translated by ' . $book->translator->name . ')';
+}
+```
+
+Ha több könyvet szeretne lekérdezni, ugyanezt a megközelítést kell alkalmaznia. A Nette Database Explorer egyszerre fogja lekérdezni az összes lekérdezett könyv szerzőit és fordítóit.
+
+```php
+$books = $explorer->table('book');
+foreach ($books as $book) {
+	echo $book->title . ': ';
+	echo $book->author->name;
+	if ($book->translator) {
+		echo ' (translated by ' . $book->translator->name . ')';
+	}
+}
+```
+
+A kód csak ezt a 3 lekérdezést fogja lefuttatni:
+```sql
+SELECT * FROM `book`;
+SELECT * FROM `author` WHERE (`id` IN (1, 2, 3)); -- ids of fetched books from author_id column
+SELECT * FROM `author` WHERE (`id` IN (2, 3));    -- ids of fetched books from translator_id column
+```
+
+
+Has Many Relation .[#toc-has-many-relation]
+-------------------------------------------
+
+A 'Has many' reláció a 'has one' reláció fordítottja. A szerző *már* sok* könyvet írt. A szerző *mindegyik* könyvet lefordította. Amint láthatjuk, ez a fajta reláció egy kicsit nehezebb, mivel a reláció 'megnevezett' ('írt', 'fordított'). Az ActiveRow példány rendelkezik a `related()` metódussal, amely a kapcsolódó bejegyzések tömbjét adja vissza. A bejegyzések szintén ActiveRow példányok. Lásd az alábbi példát:
+
+```php
+$author = $explorer->table('author')->get(11);
+echo $author->name . ' has written:';
+
+foreach ($author->related('book.author_id') as $book) {
+	echo $book->title;
+}
+
+echo 'and translated:';
+foreach ($author->related('book.translator_id') as $book) {
+	echo $book->title;
+}
+```
+
+A `related()` módszer elfogadja a két argumentumként vagy egy argumentumként, ponttal összekötve átadott teljes join leírást. Az első argumentum a céltábla, a második a céloszlop.
+
+```php
+$author->related('book.translator_id');
+// same as
+$author->related('book', 'translator_id');
+```
+
+Használhatja a Nette Database Explorer idegen kulcsokon alapuló heurisztikáját, és csak a **key** argumentumot adhatja meg. A kulcsot az aktuális táblára (`author` tábla) mutató összes idegen kulccsal összeveti a rendszer. Ha van egyezés, a Nette Database Explorer ezt az idegen kulcsot fogja használni, ellenkező esetben [Nette\InvalidArgumentException |api:Nette\InvalidArgumentException] vagy [AmbiguousReferenceKeyException |api:Nette\Database\Conventions\AmbiguousReferenceKeyException] hibát fog dobni. A kulcsillesztési logikáról bővebben a [Joining expressions |#joining-key] fejezetben olvashat.
+
+Természetesen az összes lehívott szerzőhöz meghívhatja a kapcsolódó metódusokat, a Nette Database Explorer ismét egyszerre fogja lehívni a megfelelő könyveket.
+
+```php
+$authors = $explorer->table('author');
+foreach ($authors as $author) {
+	echo $author->name . ' has written:';
+	foreach ($author->related('book') as $book) {
+		$book->title;
+	}
+}
+```
+
+A fenti példa csak két lekérdezést futtat:
+
+```sql
+SELECT * FROM `author`;
+SELECT * FROM `book` WHERE (`author_id` IN (1, 2, 3)); -- ids of fetched authors
+```
+
+
+Az Explorer manuális létrehozása .[#toc-creating-explorer-manually]
+===================================================================
+
+Az adatbázis-kapcsolat az alkalmazás konfigurációjának segítségével hozható létre. Ilyenkor létrejön egy `Nette\Database\Explorer` szolgáltatás, amelyet függőségként át lehet adni a DI konténer segítségével.
+
+Ha azonban a Nette Database Explorer önálló eszközként használatos, akkor a `Nette\Database\Explorer` objektum példányát kézzel kell létrehozni.
+
+```php
+// $storage implements Nette\Caching\Storage:
+$storage = new Nette\Caching\Storages\FileStorage($tempDir);
+$connection = new Nette\Database\Connection($dsn, $user, $password);
+$structure = new Nette\Database\Structure($connection, $storage);
+$conventions = new Nette\Database\Conventions\DiscoveredConventions($structure);
+$explorer = new Nette\Database\Explorer($connection, $structure, $conventions, $storage);
+```

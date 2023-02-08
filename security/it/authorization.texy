@@ -1,0 +1,292 @@
+Controllo degli accessi (autorizzazione)
+****************************************
+
+.[perex]
+L'autorizzazione determina se un utente ha privilegi sufficienti, ad esempio, per accedere a una risorsa specifica o per eseguire un'azione. L'autorizzazione presuppone che l'utente sia stato precedentemente autenticato, cioè che abbia effettuato il login.
+
+→ [Installazione e requisiti |@home#Installation]
+
+Negli esempi, utilizzeremo un oggetto di classe [api:Nette\Security\User], che rappresenta l'utente corrente e che si ottiene passandoglielo tramite [dependency injection |dependency-injection:passing-dependencies]. Nei presenter è sufficiente chiamare `$user = $this->getUser()`.
+
+Per siti web molto semplici con amministrazione, in cui i diritti degli utenti non sono distinti, è possibile utilizzare il metodo già noto come criterio di autorizzazione `isLoggedIn()`. In altre parole: una volta che un utente è loggato, ha i permessi per tutte le azioni e viceversa.
+
+```php
+if ($user->isLoggedIn()) { // is user logged in?
+	deleteItem(); // if so, he may delete an item
+}
+```
+
+
+Ruoli .[#toc-roles]
+-------------------
+
+Lo scopo dei ruoli è quello di offrire una gestione più precisa dei permessi e di rimanere indipendenti dal nome dell'utente. Non appena l'utente si collega, gli vengono assegnati uno o più ruoli. I ruoli stessi possono essere semplici stringhe, ad esempio `admin`, `member`, `guest`, ecc. Sono specificati nel secondo parametro del costruttore `SimpleIdentity`, come stringa o come array.
+
+Come criterio di autorizzazione, si utilizzerà il metodo `isInRole()`, che verifica se l'utente è nel ruolo indicato:
+
+```php
+if ($user->isInRole('admin')) { // is the admin role assigned to the user?
+	deleteItem(); // if so, he may delete an item
+}
+```
+
+Come si sa, la disconnessione dell'utente non cancella la sua identità. Pertanto, il metodo `getIdentity()` restituisce ancora l'oggetto `SimpleIdentity`, comprensivo di tutti i ruoli concessi. Il framework Nette aderisce al principio "meno codice, più sicurezza", quindi quando si controllano i ruoli, non è necessario verificare se l'utente è connesso. Il metodo `isInRole()` funziona con **ruoli effettivi**, cioè se l'utente è connesso, vengono utilizzati i ruoli assegnati all'identità, se non è connesso, viene invece utilizzato un ruolo speciale automatico `guest`.
+
+
+Autorizzatore .[#toc-authorizator]
+----------------------------------
+
+Oltre ai ruoli, introdurremo i termini risorsa e operazione:
+
+- **ruolo** è un attributo dell'utente - ad esempio moderatore, editore, visitatore, utente registrato, amministratore, ...
+- **risorsa** è un'unità logica dell'applicazione (articolo, pagina, utente, voce di menu, sondaggio, presentatore, ...).
+- **operazione** è un'attività specifica che l'utente può o non può fare con la *risorsa* - visualizzare, modificare, cancellare, votare, ...
+
+Un autorizzatore è un oggetto che decide se un determinato *ruolo* ha il permesso di eseguire una certa *operazione* con una specifica *risorsa*. È un oggetto che implementa l'interfaccia [api:Nette\Security\Authorizator] con un solo metodo `isAllowed()`:
+
+```php
+class MyAuthorizator implements Nette\Security\Authorizator
+{
+	public function isAllowed($role, $resource, $operation): bool
+	{
+		if ($role === 'admin') {
+			return true;
+		}
+		if ($role === 'user' && $resource === 'article') {
+			return true;
+		}
+
+		// ...
+
+		return false;
+	}
+}
+```
+
+Aggiungiamo l'autorizzatore alla configurazione [come servizio |dependency-injection:services] del contenitore DI:
+
+```neon
+services:
+	- MyAuthorizator
+```
+
+E quello che segue è un esempio di utilizzo. Si noti che questa volta chiamiamo il metodo `Nette\Security\User::isAllowed()`, non quello dell'autenticatore, quindi non c'è il primo parametro `$role`. Questo metodo chiama `MyAuthorizator::isAllowed()` in sequenza per tutti i ruoli utente e restituisce true se almeno uno di essi ha l'autorizzazione.
+
+```php
+if ($user->isAllowed('file')) { // is user allowed to do everything with resource 'file'?
+	useFile();
+}
+
+if ($user->isAllowed('file', 'delete')) { // is user allowed to delete a resource 'file'?
+	deleteFile();
+}
+```
+
+Entrambi gli argomenti sono opzionali e il loro valore predefinito significa *tutto*.
+
+
+Permessi ACL .[#toc-permission-acl]
+-----------------------------------
+
+Nette dispone di un'implementazione integrata dell'autorizzatore, la classe [api:Nette\Security\Permission], che offre un livello ACL (Access Control List) leggero e flessibile per il controllo dei permessi e degli accessi. Quando si lavora con questa classe, si definiscono ruoli, risorse e permessi individuali. I ruoli e le risorse possono formare gerarchie. Per spiegarlo, mostreremo un esempio di applicazione web:
+
+- `guest`: visitatore non loggato, autorizzato a leggere e navigare nella parte pubblica del web, cioè a leggere articoli, commentare e votare nei sondaggi
+- `registered`: utente loggato, che può inoltre inserire commenti
+- `admin`: può gestire articoli, commenti e sondaggi
+
+Abbiamo quindi definito alcuni ruoli (`guest`, `registered` e `admin`) e menzionato le risorse (`article`, `comments`, `poll`), alle quali gli utenti possono accedere o compiere azioni (`view`, `vote`, `add`, `edit`).
+
+Creiamo un'istanza della classe Permission e definiamo i **ruoli**. È possibile utilizzare l'ereditarietà dei ruoli, che garantisce che, ad esempio, un utente con il ruolo `admin` possa fare ciò che può fare un normale visitatore del sito web (e naturalmente anche di più).
+
+```php
+$acl = new Nette\Security\Permission;
+
+$acl->addRole('guest');
+$acl->addRole('registered', 'guest'); // 'registered' inherits from 'guest'
+$acl->addRole('admin', 'registered'); // and 'admin' inherits from 'registered'
+```
+
+Ora definiremo un elenco di **risorse** a cui gli utenti possono accedere:
+
+```php
+$acl->addResource('article');
+$acl->addResource('comment');
+$acl->addResource('poll');
+```
+
+Le risorse possono anche utilizzare l'ereditarietà, ad esempio possiamo aggiungere `$acl->addResource('perex', 'article')`.
+
+E ora la cosa più importante. Definiremo tra loro delle **regole** che determinano chi può fare cosa:
+
+```php
+// everything is denied now
+
+// let the guest view articles, comments and polls
+$acl->allow('guest', ['article', 'comment', 'poll'], 'view');
+// and also vote in polls
+$acl->allow('guest', 'poll', 'vote');
+
+// the registered inherits the permissions from guesta, we will also let him to comment
+$acl->allow('registered', 'comment', 'add');
+
+// the administrator can view and edit anything
+$acl->allow('admin', $acl::All, ['view', 'edit', 'add']);
+```
+
+E se volessimo **impedire** a qualcuno di accedere a una risorsa?
+
+```php
+// administrator cannot edit polls, that would be undemocractic.
+$acl->deny('admin', 'poll', 'edit');
+```
+
+Ora, una volta creato l'insieme di regole, possiamo semplicemente chiedere l'autorizzazione:
+
+```php
+// can guest view articles?
+$acl->isAllowed('guest', 'article', 'view'); // true
+
+// can guest edit an article?
+$acl->isAllowed('guest', 'article', 'edit'); // false
+
+// can guest vote in polls?
+$acl->isAllowed('guest', 'poll', 'vote'); // true
+
+// may guest add comments?
+$acl->isAllowed('guest', 'comment', 'add'); // false
+```
+
+Lo stesso vale per un utente registrato, ma può anche commentare:
+
+```php
+$acl->isAllowed('registered', 'article', 'view'); // true
+$acl->isAllowed('registered', 'comment', 'add'); // true
+$acl->isAllowed('registered', 'comment', 'edit'); // false
+```
+
+L'amministratore può modificare tutto, tranne i sondaggi:
+
+```php
+$acl->isAllowed('admin', 'poll', 'vote'); // true
+$acl->isAllowed('admin', 'poll', 'edit'); // false
+$acl->isAllowed('admin', 'comment', 'edit'); // true
+```
+
+I permessi possono anche essere valutati dinamicamente e possiamo lasciare la decisione al nostro callback, al quale vengono passati tutti i parametri:
+
+```php
+$assertion = function (Permission $acl, string $role, string $resource, string $privilege): bool {
+	return /* ... */;
+};
+
+$acl->allow('registered', 'comment', null, $assertion);
+```
+
+Ma come risolvere una situazione in cui i nomi dei ruoli e delle risorse non sono sufficienti, cioè vorremmo definire che, per esempio, un ruolo `registered` può modificare una risorsa `article` solo se ne è l'autore? Useremo oggetti invece di stringhe, il ruolo sarà l'oggetto [api:Nette\Security\Role] e la risorsa [api:Nette\Security\Resource]. I metodi `getRoleId()` e `getResourceId()` restituiranno le stringhe originali:
+
+```php
+class Registered implements Nette\Security\Role
+{
+	public $id;
+
+	public function getRoleId(): string
+	{
+		return 'registered';
+	}
+}
+
+
+class Article implements Nette\Security\Resource
+{
+	public $authorId;
+
+	public function getResourceId(): string
+	{
+		return 'article';
+	}
+}
+```
+
+E ora creiamo una regola:
+
+```php
+$assertion = function (Permission $acl, string $role, string $resource, string $privilege): bool {
+	$role = $acl->getQueriedRole(); // object Registered
+	$resource = $acl->getQueriedResource(); // object Article
+	return $role->id === $resource->authorId;
+};
+
+$acl->allow('registered', 'article', 'edit', $assertion);
+```
+
+L'ACL viene interrogata passando degli oggetti:
+
+```php
+$user = new Registered(/* ... */);
+$article = new Article(/* ... */);
+$acl->isAllowed($user, $article, 'edit');
+```
+
+Un ruolo può ereditare da uno o più ruoli. Ma cosa succede se a un antenato è consentita una certa azione e all'altro è negata? Allora entra in gioco il *peso del ruolo*: l'ultimo ruolo dell'array di ruoli da ereditare ha il peso maggiore, il primo il minore:
+
+```php
+$acl = new Nette\Security\Permission;
+$acl->addRole('admin');
+$acl->addRole('guest');
+
+$acl->addResource('backend');
+
+$acl->allow('admin', 'backend');
+$acl->deny('guest', 'backend');
+
+// example A: role admin has lower weight than role guest
+$acl->addRole('john', ['admin', 'guest']);
+$acl->isAllowed('john', 'backend'); // false
+
+// example B: role admin has greater weight than role guest
+$acl->addRole('mary', ['guest', 'admin']);
+$acl->isAllowed('mary', 'backend'); // true
+```
+
+I ruoli e le risorse possono anche essere rimossi (`removeRole()`, `removeResource()`), le regole possono anche essere annullate (`removeAllow()`, `removeDeny()`). L'array di tutti i ruoli genitori diretti restituisce `getRoleParents()`. Se due entità ereditano l'una dall'altra restituisce `roleInheritsFrom()` e `resourceInheritsFrom()`.
+
+
+Aggiungere come servizio .[#toc-add-as-a-service]
+-------------------------------------------------
+
+Dobbiamo aggiungere la ACL da noi creata alla configurazione come servizio, in modo che possa essere utilizzata dall'oggetto `$user`, cioè in modo da poterla usare nel codice, ad esempio `$user->isAllowed('article', 'view')`. A questo scopo, scriveremo un factory per questo servizio:
+
+```php
+namespace App\Model;
+
+class AuthorizatorFactory
+{
+	public static function create(): Nette\Security\Permission
+	{
+		$acl = new Nette\Security\Permission;
+		$acl->addRole(/* ... */);
+		$acl->addResource(/* ... */);
+		$acl->allow(/* ... */);
+		return $acl;
+	}
+}
+```
+
+E lo aggiungeremo alla configurazione:
+
+```neon
+services:
+	- App\Model\AuthorizatorFactory::create
+```
+
+Nei presentatori, è possibile verificare le autorizzazioni nel metodo `startup()`, ad esempio:
+
+```php
+protected function startup()
+{
+	parent::startup();
+	if (!$this->getUser()->isAllowed('backend')) {
+		$this->error('Forbidden', 403);
+	}
+}
+```

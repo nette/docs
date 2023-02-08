@@ -1,0 +1,181 @@
+Kimlik Doğrulama
+****************
+
+Nette, sayfanızda kimlik doğrulamayı nasıl programlayacağınız konusunda size yönergeler sağlar, ancak bunu belirli bir şekilde yapmanız için sizi zorlamaz. Uygulama size bağlıdır. Nette, sizi kullanıcıyı istediğiniz şekilde bulan `authenticate` adlı tek bir yöntemi uygulamaya zorlayan bir `Nette\Security\Authenticator` arayüzüne sahiptir.
+
+Bir kullanıcının kendi kimliğini doğrulamasının birçok yolu vardır. En yaygın yol *parola tabanlı kimlik doğrulamadır* (kullanıcı adını veya e-postasını ve bir parola sağlar), ancak başka yollar da vardır. Birçok web sitesindeki "Facebook ile Giriş Yap" düğmelerine aşina olabilirsiniz veya Google/Twitter/GitHub veya başka bir site üzerinden giriş yapabilirsiniz. Nette ile istediğiniz kimlik doğrulama yöntemine sahip olabilir veya bunları birleştirebilirsiniz. Bu size kalmış bir şey.
+
+Normalde kendi kimlik doğrulayıcınızı yazarsınız, ancak bu basit küçük blog için, bir yapılandırma dosyasında depolanan bir parola ve kullanıcı adına dayalı olarak kimlik doğrulaması yapan yerleşik kimlik doğrulayıcıyı kullanacağız. Test amaçları için iyidir. Bu yüzden `config/common.neon` yapılandırma dosyasına aşağıdaki *security* bölümünü ekleyeceğiz:
+
+
+```neon .{file:config/common.neon}
+security:
+	users:
+		admin: secret  # user 'admin', password 'secret'
+```
+
+
+Nette, DI konteynerinde otomatik olarak bir hizmet oluşturacaktır.
+
+
+Giriş Formu .[#toc-sign-in-form]
+================================
+
+Artık kimlik doğrulamanın arka uç kısmını hazır hale getirdik ve kullanıcının oturum açacağı bir kullanıcı arayüzü sağlamamız gerekiyor. Şimdi *SignPresenter* adında yeni bir sunucu oluşturalım.
+
+- bir oturum açma formu görüntüleme (kullanıcı adı ve şifre sorma)
+- form gönderildiğinde kullanıcının kimliğini doğrulama
+- oturum kapatma eylemi sağlayın
+
+Giriş formu ile başlayalım. Sunucuda formların nasıl çalıştığını zaten biliyorsunuz. `SignPresenter` ve `createComponentSignInForm` yöntemini oluşturun. Bu şekilde görünmelidir:
+
+```php .{file:app/Presenters/SignPresenter.php}
+<?php
+namespace App\Presenters;
+
+use Nette;
+use Nette\Application\UI\Form;
+
+final class SignPresenter extends Nette\Application\UI\Presenter
+{
+	protected function createComponentSignInForm(): Form
+	{
+		$form = new Form;
+		$form->addText('username', 'Username:')
+			->setRequired('Please enter your username.');
+
+		$form->addPassword('password', 'Password:')
+			->setRequired('Please enter your password.');
+
+		$form->addSubmit('send', 'Sign in');
+
+		$form->onSuccess[] = [$this, 'signInFormSucceeded'];
+		return $form;
+	}
+}
+```
+
+Kullanıcı adı ve şifre için bir giriş vardır.
+
+
+Şablon .[#toc-template]
+-----------------------
+
+Form şablonda oluşturulacaktır `in.latte`
+
+```latte .{file:app/Presenters/templates/Sign/in.latte}
+{block content}
+<h1 n:block=title>Sign in</h1>
+
+{control signInForm}
+```
+
+
+Oturum Açma İşleyicisi .[#toc-login-handler]
+--------------------------------------------
+
+Ayrıca, kullanıcının oturum açması için form gönderildikten hemen sonra çağrılan bir *form işleyici* ekliyoruz.
+
+İşleyici sadece kullanıcının girdiği kullanıcı adı ve şifreyi alacak ve daha önce tanımlanan kimlik doğrulayıcıya aktaracaktır. Kullanıcı giriş yaptıktan sonra, onu ana sayfaya yönlendireceğiz.
+
+```php .{file:app/Presenters/SignPresenter.php}
+public function signInFormSucceeded(Form $form, \stdClass $data): void
+{
+	try {
+		$this->getUser()->login($data->username, $data->password);
+		$this->redirect('Homepage:');
+
+	} catch (Nette\Security\AuthenticationException $e) {
+		$form->addError('Incorrect username or password.');
+	}
+}
+```
+
+ [User::login() |api:Nette\Security\User::login()] yöntemi, kullanıcı adı veya parola daha önce tanımladıklarımızla eşleşmediğinde bir istisna fırlatmalıdır. Zaten bildiğimiz gibi, bu bir [Tracy |tracy:] kırmızı ekranına veya üretim modunda dahili bir sunucu hatası hakkında bilgi veren bir mesaja neden olur. Bundan hoşlanmayız. Bu yüzden istisnayı yakalıyoruz ve forma güzel ve dostça bir hata mesajı ekliyoruz.
+
+Formda hata oluştuğunda, formun bulunduğu sayfa yeniden oluşturulacak ve formun üzerinde, kullanıcıya yanlış bir kullanıcı adı veya şifre girdiğini bildiren güzel bir mesaj olacaktır.
+
+
+Sunum Yapanların Güvenliği .[#toc-security-of-presenters]
+=========================================================
+
+Gönderi eklemek ve düzenlemek için bir form oluşturacağız. Sunucuda tanımlanmıştır `EditPresenter`. Amaç, oturum açmamış kullanıcıların sayfaya erişmesini engellemektir.
+
+ [Sunum yapan kişinin yaşam döngüsünün |application:presenters#life-cycle-of-presenter] hemen başında başlatılan bir `startup()` yöntemi oluşturuyoruz. Bu, oturum açmamış kullanıcıları oturum açma formuna yönlendirir.
+
+```php .{file:app/Presenters/EditPresenter.php}
+public function startup(): void
+{
+	parent::startup();
+
+	if (!$this->getUser()->isLoggedIn()) {
+		$this->redirect('Sign:in');
+	}
+}
+```
+
+
+Bağlantıları Gizle .[#toc-hide-links]
+-------------------------------------
+
+Kimliği doğrulanmamış bir kullanıcı artık *oluştur* veya *sayfa düzenle* sayfalarını göremez, ancak bunlara işaret eden bağlantıları hala görebilir. Bunları da gizleyelim. Böyle bir bağlantı `app/Presenters/templates/Homepage/default.latte` adresindedir ve yalnızca kullanıcı oturum açtığında görünür olmalıdır.
+
+Bunu `n:if` adlı *n:attribute* kullanarak gizleyebiliriz. Eğer içindeki ifade `false` ise, tüm `<a>` etiketi ve içeriği görüntülenmeyecektir:
+
+```latte
+<a n:href="Edit:create" n:if="$user->isLoggedIn()">Create post</a>
+```
+
+için bir kısayoldur ( `tag-if` ile karıştırmayın):
+
+```latte
+{if $user->isLoggedIn()}<a n:href="Edit:create">Create post</a>{/if}
+```
+
+ `app/Presenters/templates/Post/show.latte` adresinde bulunan düzenleme bağlantısını da benzer şekilde gizlemelisiniz.
+
+
+Giriş Formu Bağlantısı .[#toc-login-form-link]
+==============================================
+
+Hey, ama giriş sayfasına nasıl ulaşacağız? Onu işaret eden bir bağlantı yok. `@layout.latte` şablon dosyasına bir tane ekleyelim. Güzel bir yer bulmaya çalışın, en çok sevdiğiniz herhangi bir yer olabilir.
+
+```latte .{file:app/Presenters/templates/@layout.latte}
+...
+<ul class="navig">
+	<li><a n:href="Homepage:">Homepage</a></li>
+	{if $user->isLoggedIn()}
+		<li><a n:href="Sign:out">Sign out</a></li>
+	{else}
+		<li><a n:href="Sign:in">Sign in</a></li>
+	{/if}
+</ul>
+...
+```
+
+Kullanıcı henüz oturum açmamışsa, "Oturum aç" bağlantısını göstereceğiz. Aksi takdirde, "Oturumu kapat" bağlantısını göstereceğiz. Bu eylemi SignPresenter'a ekliyoruz.
+
+Oturumu kapatma eylemi şu şekilde görünür ve kullanıcıyı hemen yeniden yönlendirdiğimiz için bir görünüm şablonuna gerek yoktur.
+
+```php .{file:app/Presenters/SignPresenter.php}
+public function actionOut(): void
+{
+	$this->getUser()->logout();
+	$this->flashMessage('You have been signed out.');
+	$this->redirect('Homepage:');
+}
+```
+
+Sadece `logout()` yöntemini çağırır ve ardından kullanıcıya güzel bir mesaj gösterir.
+
+
+Özet .[#toc-summary]
+====================
+
+Giriş yapmak ve ayrıca kullanıcının oturumunu kapatmak için bir bağlantımız var. Kimlik doğrulama için yerleşik kimlik doğrulayıcıyı kullandık ve bu basit bir test uygulaması olduğu için oturum açma ayrıntıları yapılandırma dosyasında yer alıyor. Düzenleme formlarını da güvence altına aldık, böylece yalnızca oturum açmış kullanıcılar gönderi ekleyebilir ve düzenleyebilir.
+
+.[note]
+Burada [kullanıcı girişi |security:authentication] ve [yetkilendirme |security:authorization] hakkında daha fazla bilgi edinebilirsiniz.
+
+{{priority: -1}}
+{{sitename: Nette Quickstart}}

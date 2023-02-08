@@ -1,0 +1,205 @@
+Tokenizzatore: Tokenizzazione di stringhe
+*****************************************
+
+.[perex]
+Tokenizer è un semplice strumento che usa le espressioni regolari per dividere una stringa in token. **Questa libreria non è più in fase di sviluppo.
+
+Installazione:
+
+```shell
+composer require nette/tokenizer
+```
+
+
+Tokenizzazione delle stringhe .[#toc-string-tokenization]
+---------------------------------------------------------
+
+Creiamo un semplice tokenizzatore che separa le stringhe in numeri, spazi bianchi e lettere.
+
+```php
+$tokenizer = new Nette\Tokenizer\Tokenizer([
+	T_DNUMBER => '\d+',
+	T_WHITESPACE => '\s+',
+	T_STRING => '\w+',
+]);
+```
+
+Suggerimento: nel caso in cui ci si chieda da dove provengano le costanti T_, esse sono "tipi interni":https://www.php.net/manual/tokens.php usati per il parsing del codice. Coprono la maggior parte dei nomi di token comuni di cui abbiamo bisogno. Tenete presente che il loro valore non è garantito, quindi non usate i numeri per il confronto.
+
+Ora, quando gli diamo una stringa, ci restituirà [un flusso |api:Nette\Tokenizer\Stream] di [token |api:Nette\Tokenizer\Token].
+
+```php
+$stream = $tokenizer->tokenize("say \n123");
+```
+
+L'array di token risultante `$stream->tokens` sarà simile a questo.
+
+```php
+[
+	new Token('say', T_STRING, 0),
+	new Token(" \n", T_WHITESPACE, 3),
+	new Token('123', T_DNUMBER, 5),
+]
+```
+
+Inoltre, è possibile accedere alle singole proprietà dei token:
+
+```php
+$firstToken = $stream->tokens[0];
+$firstToken->value; // say
+$firstToken->type; // value of T_STRING
+$firstToken->offset; // position in string: 0
+```
+
+Semplice, vero?
+
+
+Elaborazione dei gettoni .[#toc-processing-the-tokens]
+------------------------------------------------------
+
+Ora sappiamo come creare i token da una stringa. Elaboriamoli in modo efficace usando [Stream |api:Nette\Tokenizer\Stream]. Ha un sacco di metodi davvero fantastici se si ha bisogno di attraversare i token!
+
+Proviamo ad analizzare una semplice annotazione da PHPDoc e a creare un oggetto da essa. Di quali espressioni regolari abbiamo bisogno per i token? Tutte le annotazioni iniziano con `@`, poi c'è un nome, uno spazio e il suo valore.
+
+- `@` per l'inizio dell'annotazione
+- `\s+` per gli spazi bianchi
+- `\w+` per le stringhe
+
+.[note]
+Non usare mai sottopattern catturanti nelle espressioni regolari di Tokenizer, come `'(ab)+c'`, ma solo quelli non catturanti `'(?:ab)+c'`.
+
+Questo dovrebbe funzionare per le annotazioni semplici, giusto? Ora mostriamo la stringa di input che cercheremo di analizzare.
+
+```php
+$input = '
+	@author David Grudl
+	@package Nette
+';
+```
+
+Creiamo una classe `Parser` che accetti la stringa e restituisca un array di coppie '['nome, valore |name, value]''. Sarà molto ingenua e semplice.
+
+```php
+use Nette\Tokenizer\Tokenizer;
+use Nette\Tokenizer\Stream;
+
+class Parser
+{
+	const T_AT = 1;
+	const T_WHITESPACE = 2;
+	const T_STRING = 3;
+
+	private Tokenizer $tokenizer;
+	private Stream $stream;
+
+	public function __construct()
+	{
+		$this->tokenizer = new Tokenizer([
+			self::T_AT => '@',
+			self::T_WHITESPACE => '\s+',
+			self::T_STRING => '\w+',
+		]);
+	}
+
+	public function parse(string $input): array
+	{
+		$this->stream = $this->tokenizer->tokenize($input);
+
+		$result = [];
+		while ($this->stream->nextToken()) {
+			if ($this->stream->isCurrent(self::T_AT)) {
+				$result[] = $this->parseAnnotation();
+			}
+		}
+
+		return $result;
+	}
+
+	private function parseAnnotation(): array
+	{
+		$name = $this->stream->joinUntil(self::T_WHITESPACE);
+		$this->stream->nextUntil(self::T_STRING);
+		$content = $this->stream->joinUntil(self::T_AT);
+
+		return [$name, trim($content)];
+	}
+}
+```
+
+```php
+$parser = new Parser;
+$annotations = $parser->parse($input);
+```
+
+Cosa fa il metodo `parse()`? Esegue l'iterazione dei token e cerca `@` which is the symbol annotations start with. Calling `nextToken()` sposta il cursore sul token successivo. Il metodo `isCurrent()` controlla se il token corrente nel cursore è del tipo dato. Poi, se il metodo `@` is found, the `parse()` chiama `parseAnnotation()`, che si aspetta che le annotazioni siano in un formato molto specifico.
+
+In primo luogo, utilizzando il metodo `joinUntil()`, lo stream continua a spostare il cursore e ad aggiungere i valori dei token al buffer finché non trova un token del tipo richiesto, quindi si ferma e restituisce l'output del buffer. Poiché c'è un solo token di tipo `T_STRING` in quella data posizione ed è `'name'`, ci sarà il valore `'name'` nella variabile `$name`.
+
+Il metodo `nextUntil()` è simile a `joinUntil()` ma non ha un buffer. Si limita a spostare il cursore finché non trova il token. Quindi questa chiamata salta semplicemente tutti gli spazi bianchi dopo il nome dell'annotazione.
+
+C'è poi un altro `joinUntil()`, che cerca il prossimo `@`. This specific call will return `"David Grudl\n    "`.
+
+Ed ecco che abbiamo analizzato un'intera annotazione! Probabilmente `$content` termina con spazi bianchi, quindi dobbiamo tagliarlo. Ora possiamo restituire questa specifica annotazione come coppia `[$name, $content]`.
+
+Provate a copiare il codice ed eseguirlo. Se si scarica la variabile `$annotations`, dovrebbe restituire un risultato simile.
+
+```
+array (2)
+   0 => array (2)
+   |  0 => 'author'
+   |  1 => 'David Grudl'
+   1 => array (2)
+   |  0 => 'package'
+   |  1 => 'Nette'
+```
+
+
+Metodi del flusso .[#toc-stream-methods]
+----------------------------------------
+
+Il flusso può restituire il token corrente usando il metodo `currentToken()` o solo il suo valore usando `currentValue()`.
+
+`nextToken()` sposta il cursore e restituisce il token. Se non si forniscono argomenti, restituisce semplicemente il token successivo.
+
+`nextValue()` è come `nextToken()`, ma restituisce solo il valore del token.
+
+La maggior parte dei metodi accetta anche argomenti multipli, in modo da poter cercare più tipi contemporaneamente.
+
+```php
+// iterate until a string or a whitespace is found, then return the following token
+$token = $stream->nextToken(T_STRING, T_WHITESPACE);
+
+// give me next token
+$token = $stream->nextToken();
+```
+
+È anche possibile effettuare una ricerca in base al valore del token.
+
+```php
+// move the cursor until you find token containing only '@', then stop and return it
+$token = $stream->nextToken('@');
+```
+
+`nextUntil()` sposta il cursore e restituisce un array di tutti i token che vede finché non trova il token desiderato, ma si ferma prima del token. Può accettare più argomenti.
+
+`joinUntil()` è simile a `nextUntil()`, ma concatena tutti i token passati e restituisce una stringa.
+
+`joinAll()` concatena semplicemente tutti i valori dei token rimanenti e li restituisce. Sposta il cursore alla fine del flusso di token.
+
+`nextAll()` è simile a `joinAll()`, ma restituisce un array di token.
+
+`isCurrent()` verifica se il token corrente o il valore del token corrente è uguale a uno degli argomenti dati.
+
+```php
+// is the current token '@' or type of T_AT?
+$stream->isCurrent(T_AT, '@');
+```
+
+`isNext()` è come `isCurrent()`, ma controlla il token successivo.
+
+`isPrev()` è come `isCurrent()` ma controlla il token precedente.
+
+L'ultimo metodo `reset()` ripristina il cursore, in modo da poter iterare nuovamente il flusso di token.
+
+
+{{leftbar: utils:@left-menu}}

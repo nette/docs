@@ -1,0 +1,205 @@
+Tokenizer: Tokenizálás
+**********************
+
+.[perex]
+A Tokenizer egy egyszerű eszköz, amely reguláris kifejezések segítségével adott karakterláncot tokenekre bont. **Ezt a könyvtárat már nem fejlesztjük.**
+
+Telepítés:
+
+```shell
+composer require nette/tokenizer
+```
+
+
+Tokenizálás .[#toc-string-tokenization]
+---------------------------------------
+
+Hozzunk létre egy egyszerű tokenizálót, amely a karakterláncokat számokra, szóközökre és betűkre választja szét.
+
+```php
+$tokenizer = new Nette\Tokenizer\Tokenizer([
+	T_DNUMBER => '\d+',
+	T_WHITESPACE => '\s+',
+	T_STRING => '\w+',
+]);
+```
+
+Tipp: Ha kíváncsi vagy, honnan származnak a T_ konstansok, ezek a kód elemzésére használt "belső típusok:https://www.php.net/manual/tokens.php ". Lefedik a legtöbb gyakori token nevet, amire általában szükségünk van. Ne feledje, hogy értékük nem garantált, ezért ne használjon számokat összehasonlításhoz.
+
+Most, amikor egy karakterláncot adunk neki, [tokenek |api:Nette\Tokenizer\Token] [folyamát |api:Nette\Tokenizer\Stream] fogja visszaadni.
+
+```php
+$stream = $tokenizer->tokenize("say \n123");
+```
+
+Az így kapott tokenek tömbje `$stream->tokens` így nézne ki.
+
+```php
+[
+	new Token('say', T_STRING, 0),
+	new Token(" \n", T_WHITESPACE, 3),
+	new Token('123', T_DNUMBER, 5),
+]
+```
+
+A tokenek egyes tulajdonságaihoz is hozzáférhet:
+
+```php
+$firstToken = $stream->tokens[0];
+$firstToken->value; // say
+$firstToken->type; // value of T_STRING
+$firstToken->offset; // position in string: 0
+```
+
+Egyszerű, nem igaz?
+
+
+A tokenek feldolgozása .[#toc-processing-the-tokens]
+----------------------------------------------------
+
+Most már tudjuk, hogyan hozhatunk létre tokeneket egy karakterláncból. Gyakorlatilag dolgozzuk fel őket a [Stream |api:Nette\Tokenizer\Stream] segítségével. Rengeteg igazán fantasztikus metódusa van, ha tokeneket kell átszelni!
+
+Próbáljunk meg elemezni egy egyszerű megjegyzést a PHPDoc-ból, és hozzunk létre belőle egy objektumot. Milyen reguláris kifejezésekre van szükségünk a tokenekhez? Minden annotáció `@`-val kezdődik, aztán van egy név, szóköz és az értéke.
+
+- `@` az annotáció kezdete
+- `\s+` a szóközökhöz
+- `\w+` a karakterláncokhoz
+
+.[note]
+Soha ne használjon felfogó almintákat a Tokenizer szabályos kifejezésekben, mint például a `'(ab)+c'`, csak a nem felfogó `'(?:ab)+c'`.
+
+Ennek működnie kell az egyszerű megjegyzéseknél, igaz? Most mutassuk meg a bemeneti karakterláncot, amelyet megpróbálunk elemezni.
+
+```php
+$input = '
+	@author David Grudl
+	@package Nette
+';
+```
+
+Hozzunk létre egy `Parser` osztályt, amely elfogadja a karakterláncot és visszaad egy '['név, érték |name, value]'' párból álló tömböt. Ez nagyon naiv és egyszerű lesz.
+
+```php
+use Nette\Tokenizer\Tokenizer;
+use Nette\Tokenizer\Stream;
+
+class Parser
+{
+	const T_AT = 1;
+	const T_WHITESPACE = 2;
+	const T_STRING = 3;
+
+	private Tokenizer $tokenizer;
+	private Stream $stream;
+
+	public function __construct()
+	{
+		$this->tokenizer = new Tokenizer([
+			self::T_AT => '@',
+			self::T_WHITESPACE => '\s+',
+			self::T_STRING => '\w+',
+		]);
+	}
+
+	public function parse(string $input): array
+	{
+		$this->stream = $this->tokenizer->tokenize($input);
+
+		$result = [];
+		while ($this->stream->nextToken()) {
+			if ($this->stream->isCurrent(self::T_AT)) {
+				$result[] = $this->parseAnnotation();
+			}
+		}
+
+		return $result;
+	}
+
+	private function parseAnnotation(): array
+	{
+		$name = $this->stream->joinUntil(self::T_WHITESPACE);
+		$this->stream->nextUntil(self::T_STRING);
+		$content = $this->stream->joinUntil(self::T_AT);
+
+		return [$name, trim($content)];
+	}
+}
+```
+
+```php
+$parser = new Parser;
+$annotations = $parser->parse($input);
+```
+
+Tehát mit csinál a `parse()` metódus? Végigmegy a tokeneken, és megkeresi a `@` which is the symbol annotations start with. Calling `nextToken()` címet, és a kurzort a következő tokenre mozgatja. A `isCurrent()` módszer ellenőrzi, hogy a kurzornál lévő aktuális token megfelel-e a megadott típusnak. Ezután, ha a `@` is found, the `parse()` metódus meghívja a `parseAnnotation()` metódust, amely elvárja, hogy a megjegyzések egy nagyon speciális formátumban legyenek.
+
+Először a `joinUntil()` metódus segítségével a folyam addig mozgatja a kurzort és addig csatolja a tokenek értékeit a pufferhez, amíg nem talál a kívánt típusú tokent, majd megáll és visszaadja a puffer kimenetét. Mivel az adott pozícióban csak egy `T_STRING` típusú token van, és ez a `'name'`, a `$name` változóban `'name'` érték lesz.
+
+A `nextUntil()` módszer hasonló a `joinUntil()` módszerhez, de nincs puffer. Csak addig mozgatja a kurzort, amíg meg nem találja a tokent. Tehát ez a hívás egyszerűen kihagyja az összes fehérjelet az annotáció neve után.
+
+És ezután van egy másik `joinUntil()`, amely a következő `@`. This specific call will return `"David Grudl\n    "` címet keresi.
+
+És tessék, egy egész annotációt elemeztünk! A `$content` valószínűleg szóközökkel végződik, ezért le kell vágnunk. Most már ezt a konkrét annotációt párként adhatjuk vissza `[$name, $content]`.
+
+Próbáld ki a kód másolását és futtatását. Ha kiüríti a `$annotations` változót, hasonló kimenetet kell visszaadnia.
+
+```
+array (2)
+   0 => array (2)
+   |  0 => 'author'
+   |  1 => 'David Grudl'
+   1 => array (2)
+   |  0 => 'package'
+   |  1 => 'Nette'
+```
+
+
+Patak módszerek .[#toc-stream-methods]
+--------------------------------------
+
+A stream visszaadhatja az aktuális tokent a `currentToken()` módszerrel, vagy csak az értékét a `currentValue()` módszerrel.
+
+`nextToken()` mozgatja a kurzort és visszaadja a tokent. Ha nem adunk neki argumentumokat, akkor egyszerűen a következő tokent adja vissza.
+
+`nextValue()` ugyanúgy működik, mint a `nextToken()`, de csak a token értékét adja vissza.
+
+A legtöbb metódus több argumentumot is elfogad, így egyszerre több típusra is kereshetünk.
+
+```php
+// iterate until a string or a whitespace is found, then return the following token
+$token = $stream->nextToken(T_STRING, T_WHITESPACE);
+
+// give me next token
+$token = $stream->nextToken();
+```
+
+A token értéke alapján is kereshet.
+
+```php
+// move the cursor until you find token containing only '@', then stop and return it
+$token = $stream->nextToken('@');
+```
+
+`nextUntil()` mozgatja a kurzort, és visszaadja a látott tokeneket tartalmazó tömböt, amíg meg nem találja a kívánt tokent, de megáll a token előtt. Több argumentumot is elfogadhat.
+
+`joinUntil()` hasonló a `nextUntil()`-hoz, de az összes átadott token-t összekapcsolja, és string-et ad vissza.
+
+`joinAll()` egyszerűen összefűzi az összes megmaradt token értékét, és azt adja vissza. A kurzort a tokenfolyam végére mozgatja.
+
+`nextAll()` ugyanolyan, mint a `joinAll()`, de a tokenek tömbjét adja vissza.
+
+`isCurrent()` ellenőrzi, hogy az aktuális token vagy az aktuális token értéke megegyezik-e a megadott argumentumok egyikével.
+
+```php
+// is the current token '@' or type of T_AT?
+$stream->isCurrent(T_AT, '@');
+```
+
+`isNext()` ugyanúgy működik, mint a `isCurrent()`, de a következő tokent ellenőrzi.
+
+`isPrev()` olyan, mint a `isCurrent()`, de az előző tokent ellenőrzi.
+
+Az utolsó módszer pedig a `reset()` visszaállítja a kurzort, így újra végig lehet iterálni a tokenfolyamot.
+
+
+{{leftbar: utils:@left-menu}}

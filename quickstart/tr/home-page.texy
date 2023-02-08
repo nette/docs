@@ -1,0 +1,205 @@
+Blog Ana Sayfası
+****************
+
+.[perex]
+Son gönderilerinizi görüntüleyen bir ana sayfa oluşturalım.
+
+
+Başlamadan önce, Model-View-Presenter tasarım deseni (MVC((Model-View-Controller)) ile benzer) hakkında en azından bazı temel bilgileri bilmeniz gerekir:
+
+- Model** - veri manipülasyon katmanı. Uygulamanın geri kalanından tamamen ayrılmıştır. Sadece sunum yapan kişilerle iletişim kurar.
+
+- **View** - bir ön uç tanım katmanı. Şablonları kullanarak istenen verileri kullanıcıya sunar.
+
+- Sunucu** (veya Denetleyici) - bir bağlantı katmanı. Sunucu, Model ve Görünümü birbirine bağlar. İstekleri ele alır, Model'den veri ister ve ardından bunları geçerli Görünüm'e iletir.
+
+
+Blogumuz gibi çok basit bir uygulama söz konusu olduğunda, Model katmanı aslında yalnızca veritabanına yapılan sorgulardan oluşacaktır - bunun için ekstra bir PHP koduna ihtiyacımız yoktur. Sadece Presenter ve View katmanlarını oluşturmamız gerekiyor. Nette, her Presenter'ın kendi View'leri vardır, bu yüzden her ikisiyle de aynı anda devam edeceğiz.
+
+
+Adminer ile Veritabanı Oluşturma .[#toc-creating-the-database-with-adminer]
+===========================================================================
+
+Verileri depolamak için MySQL veritabanını kullanacağız çünkü web geliştiricileri arasında en yaygın seçim bu. Ancak bundan hoşlanmıyorsanız, istediğiniz bir veritabanını kullanmaktan çekinmeyin.
+
+Blog yazılarımızı depolayacak veritabanını hazırlayalım. Çok basit bir şekilde başlayabiliriz - sadece yazılar için tek bir tablo ile.
+
+Veritabanını oluşturmak için [Adminer |https://www.adminer.org]'i indirebiliriz veya veritabanı yönetimi için başka bir araç kullanabilirsiniz.
+
+
+Adminer'ı açalım ve `quickstart` adında yeni bir veritabanı oluşturalım.
+
+ `posts` adında yeni bir tablo oluşturun ve şu sütunları ekleyin:
+- `id` int, autoincrement (AI) üzerine tıklayın
+- `title` varchar, uzunluk 255
+- `content` metin
+- `created_at` zaman damgası
+
+Bu şekilde görünmelidir:
+
+[* adminer-posts.webp *]
+
+```sql
+CREATE TABLE `posts` (
+	`id` int(11) NOT NULL AUTO_INCREMENT PRIMARY KEY,
+	`title` varchar(255) NOT NULL,
+	`content` text NOT NULL,
+	`created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+) ENGINE=InnoDB CHARSET=utf8;
+```
+
+.[caution]
+InnoDB** tablo depolama alanını kullanmak çok önemlidir. Nedenini daha sonra göreceksiniz. Şimdilik sadece bunu seçin ve gönderin. Şimdi Kaydet'e basabilirsiniz.
+
+Doğrudan uygulamamızdan yeni yazı ekleme özelliğini uygulamadan önce bazı örnek blog yazıları eklemeyi deneyin.
+
+```sql
+INSERT INTO `posts` (`id`, `title`, `content`, `created_at`) VALUES
+(1,	'Article One',	'Lorem ipusm dolor one',	CURRENT_TIMESTAMP),
+(2,	'Article Two',	'Lorem ipsum dolor two',	CURRENT_TIMESTAMP),
+(3,	'Article Three',	'Lorem ipsum dolor three',	CURRENT_TIMESTAMP);
+```
+
+
+Veritabanına Bağlanma .[#toc-connecting-to-the-database]
+========================================================
+
+Şimdi, veritabanı oluşturulduğunda ve içinde bazı gönderilerimiz olduğunda, bunları yeni parlak sayfamızda görüntülemenin tam zamanıdır.
+
+İlk olarak, uygulamamıza hangi veritabanını kullanacağını söylememiz gerekir. Veritabanı bağlantı yapılandırması `config/local.neon` adresinde saklanır. DSN((Veri Kaynağı Adı)) bağlantısını ve kimlik bilgilerinizi ayarlayın. Bu şekilde görünmelidir:
+
+```neon .{file:config/local.neon}
+database:
+	dsn: 'mysql:host=127.0.0.1;dbname=quickstart'
+	user: *enter user name*
+	password: *enter password here*
+```
+
+.[note]
+Bu dosyayı düzenlerken girintilere dikkat edin. [NEON formatı |neon:format] hem boşlukları hem de sekmeleri kabul eder ancak ikisini birlikte kabul etmez! Web Projesindeki yapılandırma dosyası varsayılan olarak sekmeleri kullanır.
+
+Tüm yapılandırma `config/` adresinde `common.neon` ve `local.neon` dosyalarında saklanır. `common.neon` dosyası uygulamanın genel yapılandırmasını içerirken, `local.neon` dosyası yalnızca ortama özgü parametreleri (örneğin geliştirme ve üretim sunucusu arasındaki fark) içerir.
+
+
+Veritabanı Bağlantısının Enjekte Edilmesi .[#toc-injecting-the-database-connection]
+===================================================================================
+
+Makaleleri listeleyecek olan `HomepagePresenter` sunucusunun bir veritabanı bağlantısına ihtiyacı vardır. Bunu almak için aşağıdaki gibi bir kurucu yazın:
+
+```php .{file:app/Presenters/HomepagePresenter.php}
+<?php
+namespace App\Presenters;
+
+use Nette;
+use Nette\Application\UI\Form;
+
+final class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private Nette\Database\Explorer $database,
+	) {
+	}
+
+	// ...
+}
+```
+
+
+Veritabanından Gönderileri Yükleme .[#toc-loading-posts-from-the-database]
+==========================================================================
+
+Şimdi gönderileri veritabanından alalım ve HTML kodunu oluşturacak olan şablona aktaralım. İşte *render* metodu bunun içindir:
+
+```php .{file:app/Presenters/HomepagePresenter.php}
+public function renderDefault(): void
+{
+	$this->template->posts = $this->database
+		->table('posts')
+		->order('created_at DESC')
+		->limit(5);
+}
+```
+
+Sunucu artık `default` adlı bir görünüme veri aktaran bir `renderDefault()` render yöntemine sahiptir. Sunucu şablonları `app/Presenters/templates/{PresenterName}/{viewName}.latte` adresinde bulunabilir, bu nedenle bu durumda şablon `app/Presenters/templates/Homepage/default.latte` adresinde yer alacaktır. Şablonda, veritabanındaki gönderileri içeren `$posts` adlı bir değişken artık mevcuttur.
+
+
+Şablon .[#toc-template]
+=======================
+
+Tüm sayfa için genel bir şablon (üstbilgi, stil sayfaları, altbilgi, ... ile *düzen* olarak adlandırılır) ve ardından her görünüm için (örneğin blog yazılarının listesini görüntülemek için) düzen şablonunun bazı bölümlerini geçersiz kılabilen özel şablonlar vardır.
+
+Varsayılan olarak, düzen şablonu `templates/@layout.latte` adresinde bulunur:
+
+```latte .{file:app/Presenters/templates/@layout.latte}
+...
+{include content}
+...
+```
+
+`{include content}` ana şablona `content` adında bir blok ekler. Bunu her görünümün şablonlarında tanımlayabilirsiniz. Bu durumda `Homepage/default.latte` dosyasını şu şekilde düzenleyeceğiz:
+
+```latte .{file:app/Presenters/templates/Homepage/default.latte}
+{block content}
+	Hello World
+{/block}
+```
+
+Düzene eklenecek olan *içerik* [bloğunu |latte:tags#block] tanımlar. Tarayıcıyı yenilediğinizde, "Merhaba dünya" metnini içeren bir sayfa göreceksiniz (kaynak kodda ayrıca `@layout.latte` adresinde tanımlanmış HTML üstbilgisi ve altbilgisi ile birlikte).
+
+Blog yazılarını görüntüleyelim - şablonu şu şekilde düzenleyeceğiz:
+
+```latte .{file:app/Presenters/templates/Homepage/default.latte}
+{block content}
+	<h1>My blog</h1>
+
+	{foreach $posts as $post}
+	<div class="post">
+		<div class="date">{$post->created_at|date:'j. n. Y'}</div>
+
+		<h2>{$post->title}</h2>
+
+		<div>{$post->content|truncate:256}</div>
+	</div>
+	{/foreach}
+{/block}
+```
+
+Tarayıcınızı yenilediğinizde blog yazılarınızın listesini göreceksiniz. Liste çok süslü veya renkli değildir, bu nedenle `www/css/style.css` adresine biraz [parlak CSS |https://github.com/nette-examples/quickstart/blob/v4.0/www/css/style.css] eklemekten ve bir düzene bağlamaktan çekinmeyin:
+
+```latte .{file:app/Presenters/templates/@layout.latte}
+	...
+	<link rel="stylesheet" href="{$basePath}/css/style.css">
+</head>
+...
+```
+
+ `{foreach}` etiketi, `$posts` değişkeninde şablona aktarılan tüm gönderileri yineler ve her gönderi için bir HTML kodu parçası görüntüler. Tıpkı bir PHP kodunun yapacağı gibi.
+
+ `|date` şeyine filtre denir. Filtreler çıktıyı biçimlendirmek için kullanılır. Bu özel filtre bir tarihi (örneğin `2013-04-12`) daha okunabilir bir biçime (`12. 4. 2013`) dönüştürür. `|truncate` filtresi, dizeyi belirtilen maksimum uzunlukta keser ve dize kesilmişse sonuna bir üç nokta ekler. Bu bir önizleme olduğundan, makalenin tam içeriğini görüntülemenin bir anlamı yoktur. Diğer varsayılan filtreler [belgelerde bulunabilir |latte:filters] veya gerekirse kendiniz oluşturabilirsiniz.
+
+Bir şey daha var. Kodu biraz daha kısaltabilir ve böylece daha basit hale getirebiliriz. Latte etiketlerini* aşağıdaki gibi *n:attributes* ile değiştirebiliriz:
+
+```latte .{file:app/Presenters/templates/Homepage/default.latte}
+{block content}
+	<h1>My blog</h1>
+
+	<div n:foreach="$posts as $post" class="post">
+		<div class="date">{$post->created_at|date:'F j, Y'}</div>
+
+		<h2>{$post->title}</h2>
+
+		<div>{$post->content}</div>
+	</div>
+{/block}
+```
+
+ `n:foreach`, basitçe *div*'i bir *foreach* bloğu ile sarar (önceki kod bloğu ile tamamen aynı şeyi yapar).
+
+
+Özet .[#toc-summary]
+====================
+
+İçinde bazı blog yazıları olan çok basit bir MySQL veritabanımız var. Uygulama veritabanına bağlanıyor ve yazıların basit bir listesini görüntülüyor.
+
+{{priority: -1}}
+{{sitename: Nette Quickstart}}

@@ -1,0 +1,449 @@
+Önbellekleme
+************
+<div class=perex>
+
+
+Önbellek, bir kez zor alınan verileri gelecekte kullanılmak üzere depolayarak uygulamanızı hızlandırır. Size göstereceğiz:
+
+- Önbellek nasıl kullanılır
+- Önbellek depolama alanı nasıl değiştirilir
+- Önbellek nasıl düzgün şekilde geçersiz kılınır
+
+</div>
+
+Nette'de önbelleği kullanmak çok kolaydır, aynı zamanda çok gelişmiş önbellekleme ihtiyaçlarını da karşılar. Performans ve %100 dayanıklılık için tasarlanmıştır. Temel olarak, en yaygın arka uç depolama için adaptörler bulacaksınız. Etiket tabanlı geçersiz kılma, önbellek izdiham koruması, zaman aşımı vb. sağlar.
+
+
+Kurulum .[#toc-installation]
+============================
+
+ [Composer |best-practices:composer]'ı kullanarak paketi indirin ve yükleyin:
+
+```shell
+composer require nette/caching
+```
+
+
+Temel Kullanım .[#toc-basic-usage]
+==================================
+
+Önbellek ile çalışmanın merkezi [api:Nette\Caching\Cache] nesnesidir. Örneğini oluştururuz ve depolama alanını yapıcıya parametre olarak aktarırız. Bu, verilerin fiziksel olarak depolanacağı yeri temsil eden bir nesnedir (veritabanı, Memcached, diskteki dosyalar, ...). Depolama nesnesini `Nette\Caching\Storage` tipi ile [bağımlılık enjeksiyonu |dependency-injection:passing-dependencies] kullanarak geçirerek elde edersiniz. [Depolama bölümündeki |#Storages] tüm temel bilgileri öğreneceksiniz.
+
+.[warning]
+Sürüm 3.0'da arayüz hala `I` prefix, so the name was `Nette\Caching\IStorage` şeklindeydi. Ayrıca, `Cache` sınıfının sabitleri büyük harfle yazılıyordu, yani örneğin `Cache::Expire` yerine `Cache::EXPIRE`.
+
+Aşağıdaki örnekler için, bir `Cache` takma adımız ve `$storage` değişkeninde bir depolama alanımız olduğunu varsayalım.
+
+```php
+use Nette\Caching\Cache;
+
+$storage = /* ... */; // instance of Nette\Caching\Storage
+```
+
+Önbellek aslında bir *anahtar-değer deposudur*, bu nedenle anahtarlar altındaki verileri tıpkı ilişkisel diziler gibi okur ve yazarız. Uygulamalar bir dizi bağımsız parçadan oluşur ve hepsi tek bir depolama alanı kullansaydı (fikir için: bir diskteki bir dizin), er ya da geç bir anahtar çarpışması olurdu. Nette Framework bu sorunu tüm alanı isim alanlarına (alt dizinler) bölerek çözer. Böylece programın her bir parçası kendi alanını benzersiz bir isimle kullanır ve hiçbir çarpışma meydana gelmez.
+
+Alanın adı, Cache sınıfının yapıcısının ikinci parametresi olarak belirtilir:
+
+```php
+$cache = new Cache($storage, 'Full Html Pages');
+```
+
+Artık önbellekten okumak ve yazmak için `$cache` nesnesini kullanabiliriz. Her ikisi için de `load()` yöntemi kullanılır. İlk argüman anahtar, ikincisi ise anahtar önbellekte bulunamadığında çağrılan PHP geri çağrısıdır. Geri arama bir değer üretir, geri döndürür ve önbelleğe alır:
+
+```php
+$value = $cache->load($key, function () use ($key) {
+	$computedValue = /* ... */; // heavy computations
+	return $computedValue;
+});
+```
+
+İkinci parametre belirtilmezse `$value = $cache->load($key)`, öğe önbellekte değilse `null` döndürülür.
+
+.[tip]
+Harika olan şey, yalnızca dizelerin değil, serileştirilebilir tüm yapıların önbelleğe alınabilmesidir. Ve aynı şey anahtarlar için de geçerlidir.
+
+Öğe, `remove()` yöntemi kullanılarak önbellekten temizlenir:
+
+```php
+$cache->remove($key);
+```
+
+Bir öğeyi `$cache->save($key, $value, array $dependencies = [])` yöntemini kullanarak da önbelleğe alabilirsiniz. Ancak, `load()` adresini kullanan yukarıdaki yöntem tercih edilir.
+
+
+Memoizasyon .[#toc-memoization]
+===============================
+
+Hafızaya alma, aynı şeyi tekrar tekrar hesaplamak yerine bir dahaki sefere kullanabilmeniz için bir işlevin veya yöntemin sonucunu önbelleğe almak anlamına gelir.
+
+Metotlar ve fonksiyonlar `call(callable $callback, ...$args)` kullanılarak memoize edilebilir:
+
+```php
+$result = $cache->call('gethostbyaddr', $ip);
+```
+
+ `gethostbyaddr()` işlevi her parametre için yalnızca bir kez çağrılır `$ip` ve bir sonraki sefer önbellekten değer döndürülür.
+
+Daha sonra çağrılabilecek bir yöntem veya fonksiyon için memoize edilmiş bir sarmalayıcı oluşturmak da mümkündür:
+
+```php
+function factorial($num)
+{
+	return /* ... */;
+}
+
+$memoizedFactorial = $cache->wrap('factorial');
+
+$result = $memoizedFactorial(5); // counts it
+$result = $memoizedFactorial(5); // returns it from cache
+```
+
+
+Sona Erme ve Geçersiz Kılma .[#toc-expiration-invalidation]
+===========================================================
+
+Önbellekleme ile, daha önce kaydedilen verilerin bazılarının zaman içinde geçersiz hale geleceği sorusunu ele almak gerekir. Nette Framework, verilerin geçerliliğinin nasıl sınırlandırılacağı ve kontrollü bir şekilde nasıl silineceği ("geçersiz kılmak", framework'ün terminolojisini kullanarak) konusunda bir mekanizma sağlar.
+
+Verilerin geçerliliği, `save()` yönteminin üçüncü parametresi kullanılarak kaydetme sırasında ayarlanır, örn:
+
+```php
+$cache->save($key, $value, [
+	$cache::Expire => '20 minutes',
+]);
+```
+
+Ya da `load()` yöntemindeki geri aramaya referans olarak aktarılan `$dependencies` parametresini kullanarak, örn:
+
+```php
+$value = $cache->load($key, function (&$dependencies) {
+	$dependencies[Cache::Expire] = '20 minutes';
+	return /* ... */;
+});
+```
+
+Veya `load()` yönteminde 3. parametreyi kullanarak, örn:
+
+```php
+$value = $cache->load($key, function () {
+	return ...;
+}, [Cache::Expire => '20 minutes']);
+```
+
+Aşağıdaki örneklerde, ikinci varyantı ve dolayısıyla `$dependencies` değişkeninin varlığını varsayacağız.
+
+
+Son kullanma tarihi .[#toc-expiration]
+--------------------------------------
+
+En basit sona erme zaman sınırıdır. İşte 20 dakika boyunca geçerli verileri nasıl önbelleğe alacağınız:
+
+```php
+// it also accepts the number of seconds or the UNIX timestamp
+$dependencies[Cache::Expire] = '20 minutes';
+```
+
+Her okumada geçerlilik süresini uzatmak istiyorsak, bu şekilde elde edilebilir, ancak dikkat edin, bu önbellek yükünü artıracaktır:
+
+```php
+$dependencies[Cache::Sliding] = true;
+```
+
+Kullanışlı seçenek, belirli bir dosya veya birkaç dosyadan biri değiştirildiğinde verilerin süresinin dolmasına izin verme yeteneğidir. Bu, örneğin, bu dosyaların işlenmesinden kaynaklanan verileri önbelleğe almak için kullanılabilir. Mutlak yolları kullanın.
+
+```php
+$dependencies[Cache::Files] = '/path/to/data.yaml';
+// or
+$dependencies[Cache::Files] = ['/path/to/data1.yaml', '/path/to/data2.yaml'];
+```
+
+Başka bir öğenin (veya diğerlerinden birinin) süresi dolduğunda önbellekteki bir öğenin süresinin dolmasına izin verebiliriz. Bu, HTML sayfasının tamamını ve diğer anahtarlar altındaki parçalarını önbelleğe aldığımızda kullanılabilir. Parçacık değiştiğinde, sayfanın tamamı geçersiz hale gelir. `frag1` ve `frag2` gibi anahtarlar altında depolanan parçalarımız varsa, kullanacağız:
+
+```php
+$dependencies[Cache::Items] = ['frag1', 'frag2'];
+```
+
+Süre dolumu, öğenin hala geçerli olup olmadığına okuma sırasında her zaman karar veren özel işlevler veya statik yöntemler kullanılarak da kontrol edilebilir. Örneğin, PHP sürümü her değiştiğinde öğenin süresinin dolmasına izin verebiliriz. Geçerli sürümü parametre ile karşılaştıran bir işlev oluşturacağız ve kaydederken şu biçimde bir dizi ekleyeceğiz `[function name, ...arguments]` bağımlılıklara:
+
+```php
+function checkPhpVersion($ver): bool
+{
+	return $ver === PHP_VERSION_ID;
+}
+
+$dependencies[Cache::Callbacks] = [
+	['checkPhpVersion', PHP_VERSION_ID] // expire when checkPhpVersion(...) === false
+];
+```
+
+Elbette tüm kriterler birleştirilebilir. En az bir kriter karşılanmadığında önbellek sona erer.
+
+```php
+$dependencies[Cache::Expire] = '20 minutes';
+$dependencies[Cache::Files] = '/path/to/data.yaml';
+```
+
+
+Etiket Kullanarak Geçersiz Kılma .[#toc-invalidation-using-tags]
+----------------------------------------------------------------
+
+Etiketler çok kullanışlı bir geçersiz kılma aracıdır. Önbellekte depolanan her bir öğeye rastgele dizeler olan bir etiket listesi atayabiliriz. Örneğin, önbelleğe almak istediğimiz bir makale ve yorumlar içeren bir HTML sayfamız olduğunu varsayalım. Bu yüzden önbelleğe kaydederken etiketleri belirtiriz:
+
+```php
+$dependencies[Cache::Tags] = ["article/$articleId", "comments/$articleId"];
+```
+
+Şimdi, yönetime geçelim. Burada makale düzenleme için bir formumuz var. Makaleyi bir veritabanına kaydetmekle birlikte, önbelleğe alınmış öğeleri etikete göre silecek olan `clean()` komutunu çağırıyoruz:
+
+```php
+$cache->clean([
+	$cache::Tags => ["article/$articleId"],
+]);
+```
+
+Aynı şekilde, yeni bir yorum ekleme (veya bir yorumu düzenleme) yerine, ilgili etiketi geçersiz kılmayı unutmayacağız:
+
+```php
+$cache->clean([
+	$cache::Tags => ["comments/$articleId"],
+]);
+```
+
+Ne elde ettik? Makale veya yorumlar her değiştiğinde HTML önbelleğimizin geçersiz kılınmasını (silinmesini). ID = 10 olan bir makaleyi düzenlerken, `article/10` etiketi geçersiz kılınmaya zorlanır ve etiketi taşıyan HTML sayfası önbellekten silinir. Aynı şey ilgili makalenin altına yeni bir yorum eklediğinizde de gerçekleşir.
+
+.[note]
+Etiketler [Dergi |#Journal] gerektirir.
+
+
+Önceliğe Göre Geçersiz Kılma .[#toc-invalidation-by-priority]
+-------------------------------------------------------------
+
+Önbellekteki her bir öğe için önceliği ayarlayabiliriz ve örneğin önbellek belirli bir boyutu aştığında bunları kontrollü bir şekilde silmek mümkün olacaktır:
+
+```php
+$dependencies[Cache::Priority] = 50;
+```
+
+Önceliği 100'e eşit veya daha az olan tüm öğeleri silin:
+
+```php
+$cache->clean([
+	$cache::Priority => 100,
+]);
+```
+
+.[note]
+Öncelikler sözde [Dergi |#Journal] gerektirir.
+
+
+Önbelleği Temizle .[#toc-clear-cache]
+-------------------------------------
+
+ `Cache::All` parametresi her şeyi temizler:
+
+```php
+$cache->clean([
+	$cache::All => true,
+]);
+```
+
+
+Toplu Okuma .[#toc-bulk-reading]
+================================
+
+Önbelleğe toplu okuma ve yazma için, bir anahtar dizisi ilettiğimiz ve bir değer dizisi elde ettiğimiz `bulkLoad()` yöntemi kullanılır:
+
+```php
+$values = $cache->bulkLoad($keys);
+```
+
+ `bulkLoad()` yöntemi, oluşturulan öğenin anahtarının aktarıldığı ikinci geri arama parametresiyle `load()` yöntemine benzer şekilde çalışır:
+
+```php
+$values = $cache->bulkLoad($keys, function ($key, &$dependencies) {
+	$computedValue = /* ... */; // heavy computations
+	return $computedValue;
+});
+```
+
+
+Çıktı Önbelleğe Alma .[#toc-output-caching]
+===========================================
+
+Çıktı çok zarif bir şekilde yakalanabilir ve önbelleğe alınabilir:
+
+```php
+if ($capture = $cache->capture($key)) {
+
+	echo ... // printing some data
+
+	$capture->end(); // save the output to the cache
+}
+```
+
+Çıktının önbellekte zaten mevcut olması durumunda, `capture()` yöntemi çıktıyı yazdırır ve `null` döndürür, böylece koşul yürütülmez. Aksi takdirde, çıktıyı tamponlamaya başlar ve sonunda verileri önbelleğe kaydettiğimiz `$capture` nesnesini döndürür.
+
+.[note]
+Sürüm 3.0'da bu yöntem `$cache->start()` olarak adlandırılmıştır.
+
+
+Latte'de Önbellekleme .[#toc-caching-in-latte]
+==============================================
+
+ [Latte |latte:] şablonlarında önbelleğe almak çok kolaydır, şablonun bir kısmını etiketlerle sarmanız yeterlidir `{cache}...{/cache}`. Kaynak şablon değiştiğinde önbellek otomatik olarak geçersiz kılınır ( `{cache}` etiketleri içinde bulunan tüm şablonlar dahil). Etiketler `{cache}` iç içe geçebilir ve iç içe geçmiş bir blok geçersiz kılındığında (örneğin, bir etiket tarafından), üst blok da geçersiz kılınır.
+
+Etikette, önbelleğin bağlanacağı anahtarları (burada `$id` değişkeni) belirtmek ve sona erme ve [geçersiz |#Invalidation using Tags] kılma etiketlerini ayarlamak mümkündür
+
+```latte
+{cache $id, expire: '20 minutes', tags: [tag1, tag2]}
+	...
+{/cache}
+```
+
+Tüm parametreler isteğe bağlıdır, bu nedenle süre sonu, etiket veya anahtar belirtmeniz gerekmez.
+
+Önbelleğin kullanımı `if` tarafından da koşullandırılabilir - içerik yalnızca koşul karşılandığında önbelleğe alınacaktır:
+
+```latte
+{cache $id, if: !$form->isSubmitted()}
+	{$form}
+{/cache}
+```
+
+
+Depolar .[#toc-storages]
+========================
+
+Depolama alanı, verilerin fiziksel olarak depolandığı yeri temsil eden bir nesnedir. Bir veritabanı, bir Memcached sunucusu veya diskteki dosyalar olan en kullanılabilir depolama alanını kullanabiliriz.
+
+|----------------------
+| Depolama | Açıklama
+|----------------------
+| [FileStorage |#FileStorage] | diskteki dosyalara kaydetme ile varsayılan depolama
+| [MemcachedStorage |#MemcachedStorage] | `Memcached` sunucusunu kullanır
+| [MemoryStorage |#MemoryStorage] | veriler geçici olarak bellektedir
+| [SQLiteStorage |#SQLiteStorage] | veriler SQLite veritabanında saklanır
+| [DevNullStorage |#DevNullStorage] | veriler saklanmıyor - test amaçlı
+
+Depolama nesnesini `Nette\Caching\Storage` türüyle [bağımlılık enjeksiyonu |dependency-injection:passing-dependencies] kullanarak geçirerek elde edersiniz. Varsayılan olarak Nette, verileri [geçici dosyalar |application:bootstrap#Temporary Files] için dizindeki `cache` alt klasöründe depolayan bir FileStorage nesnesi sağlar.
+
+Yapılandırmadaki depolama alanını değiştirebilirsiniz:
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\DevNullStorage
+```
+
+
+FileStorage .[#toc-filestorage]
+-------------------------------
+
+Önbelleği diskteki dosyalara yazar. Depolama `Nette\Caching\Storages\FileStorage` performans için çok iyi optimize edilmiştir ve her şeyden önce işlemlerin tam atomikliğini sağlar. Bu ne anlama gelmektedir? Önbelleği kullanırken, başka bir iş parçacığı tarafından henüz tamamen yazılmamış bir dosyayı okumamız veya birinin onu "ellerinizin altında" silmesi mümkün değildir. Bu nedenle önbellek kullanımı tamamen güvenlidir.
+
+Bu depolama alanı ayrıca, önbellek temizlendiğinde veya soğuk olduğunda (yani oluşturulmadığında) CPU kullanımında aşırı bir artışı önleyen önemli bir yerleşik özelliğe sahiptir. Bu "önbellek izdihamı":https://en.wikipedia.org/wiki/Cache_stampede önlemesidir.
+Bir anda önbellekten aynı şeyi isteyen birkaç eşzamanlı istek olur (örneğin pahalı bir SQL sorgusunun sonucu) ve önbelleğe alınmadığı için tüm işlemler aynı SQL sorgusunu yürütmeye başlar.
+İşlemci yükü katlanır ve hatta hiçbir iş parçacığı zaman sınırı içinde yanıt veremez, önbellek oluşturulmaz ve uygulama çökebilir.
+Neyse ki, Nette'deki önbellek, bir öğe için birden fazla eşzamanlı istek olduğunda, yalnızca ilk iş parçacığı tarafından oluşturulacak, diğerleri bekleyecek ve ardından oluşturulan sonucu kullanacak şekilde çalışır.
+
+Bir FileStorage oluşturma örneği:
+
+```php
+// the storage will be the directory '/path/to/temp' on the disk
+$storage = new Nette\Caching\Storages\FileStorage('/path/to/temp');
+```
+
+
+MemcachedStorage .[#toc-memcachedstorage]
+-----------------------------------------
+
+ [Memcached |https://memcached.org] sunucusu, bağdaştırıcısı `Nette\Caching\Storages\MemcachedStorage` olan yüksek performanslı bir dağıtılmış depolama sistemidir. Yapılandırmada, standart 11211'den farklıysa IP adresini ve bağlantı noktasını belirtin.
+
+.[caution]
+PHP uzantısı gerektirir `memcached`.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\MemcachedStorage('10.0.0.5')
+```
+
+
+MemoryStorage .[#toc-memorystorage]
+-----------------------------------
+
+`Nette\Caching\Storages\MemoryStorage` verileri bir PHP dizisinde saklayan ve böylece istek sonlandırıldığında kaybolan bir depolama alanıdır.
+
+
+SQLiteStorage .[#toc-sqlitestorage]
+-----------------------------------
+
+SQLite veritabanı ve bağdaştırıcı `Nette\Caching\Storages\SQLiteStorage` disk üzerinde tek bir dosyada önbellekleme için bir yol sunar. Yapılandırma bu dosyanın yolunu belirtecektir.
+
+.[caution]
+ `pdo` ve `pdo_sqlite` PHP uzantılarını gerektirir.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\SQLiteStorage('%tempDir%/cache.db')
+```
+
+
+DevNullStorage .[#toc-devnullstorage]
+-------------------------------------
+
+Özel bir depolama uygulaması olan `Nette\Caching\Storages\DevNullStorage`, aslında hiç veri depolamaz. Bu nedenle, önbelleğin etkisini ortadan kaldırmak istiyorsak test etmek için uygundur.
+
+
+Kodda Önbellek Kullanımı .[#toc-using-cache-in-code]
+====================================================
+
+Kodda önbellekleme kullanırken, bunu yapmanın iki yolu vardır. Birincisi, [bağımlılık enjeksiyonu |dependency-injection:passing-dependencies] kullanarak depolama nesnesini geçirerek elde etmeniz ve ardından `Cache` adresinde bir nesne oluşturmanızdır:
+
+```php
+use Nette;
+
+class ClassOne
+{
+	private Nette\Caching\Cache $cache;
+
+	public function __construct(Nette\Caching\Storage $storage)
+	{
+		$this->cache = new Nette\Caching\Cache($storage, 'my-namespace');
+	}
+}
+```
+
+İkinci yol ise depolama nesnesini `Cache` adresinden almanızdır:
+
+```php
+class ClassTwo
+{
+	private Nette\Caching\Cache $cache;
+
+	public function __construct(Nette\Caching\Cache $cache)
+	{
+		$this->cache = $cache;
+	}
+}
+```
+
+ `Cache` nesnesi daha sonra aşağıdaki gibi doğrudan yapılandırmada oluşturulur:
+
+```neon
+services:
+	- ClassTwo( Nette\Caching\Cache(namespace: 'my-namespace') )
+```
+
+
+Dergi .[#toc-journal]
+=====================
+
+Nette etiketleri ve öncelikleri günlük olarak adlandırılan bir dosyada saklar. Bunun için varsayılan olarak SQLite ve `journal.s3db` dosyası kullanılır ve **PHP uzantıları `pdo` ve `pdo_sqlite` gereklidir.**
+
+Yapılandırmada günlüğü değiştirebilirsiniz:
+
+```neon
+services:
+	cache.journal: MyJournal
+```
+
+
+{{leftbar: nette:@menu-topics}}

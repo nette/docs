@@ -1,0 +1,447 @@
+Schemat: zatwierdzanie danych
+*****************************
+
+.[perex]
+Poręczna biblioteka do walidacji i normalizacji struktur danych względem danego schematu z inteligentnym, łatwym do zrozumienia API.
+
+Instalacja:
+
+```shell
+composer require nette/schema
+```
+
+
+Zastosowanie podstawowe .[#toc-zakladni-pouziti]
+------------------------------------------------
+
+W zmiennej `$schema` mamy schemat walidacji (o tym, co to dokładnie znaczy i jak stworzyć taki schemat powiemy później), a w zmiennej `$data` mamy strukturę danych, którą chcemy zwalidować i znormalizować. Mogą to być np. dane przesłane przez użytkownika poprzez API, plik konfiguracyjny itp.
+
+Zadanie to jest obsługiwane przez klasę [api:Nette\Schema\Processor], która przetwarza dane wejściowe i albo zwraca znormalizowane dane, albo w przypadku błędu rzuca wyjątek [api:Nette\Schema\ValidationException].
+
+```php
+$processor = new Nette\Schema\Processor;
+
+try {
+	$normalized = $processor->process($schema, $data);
+} catch (Nette\Schema\ValidationException $e) {
+	echo 'Data nejsou platná: ' . $e->getMessage();
+}
+```
+
+Metoda `$e->getMessages()` zwraca tablicę wszystkich wiadomości jako ciągi znaków, a `$e->getMessageObjects()` zwraca wszystkie wiadomości jako obiekty "Nette\Message":https://api.nette.org/3.1/Nette/Schema/Message.html.
+
+
+Definiowanie schematu .[#toc-definovani-schematu]
+-------------------------------------------------
+
+Teraz stwórzmy schemat. Do jego zdefiniowania służy klasa [api:Nette\Schema\Expect], tak naprawdę definiujemy oczekiwania co do tego, jak powinny wyglądać dane. Powiedzmy, że dane wejściowe muszą być strukturą (na przykład tablicą) zawierającą elementy `processRefund` typu bool oraz `refundAmount` typu int.
+
+```php
+use Nette\Schema\Expect;
+
+$schema = Expect::structure([
+	'processRefund' => Expect::bool(),
+	'refundAmount' => Expect::int(),
+]);
+```
+
+Wierzymy, że definicja schematu wygląda na łatwą do zrozumienia, nawet jeśli widzisz ją po raz pierwszy.
+
+Prześlemy następujące dane do walidacji:
+
+```php
+$data = [
+	'processRefund' => true,
+	'refundAmount' => 17,
+];
+
+$normalized = $processor->process($schema, $data); // OK, projde validací
+```
+
+Wyjściem, czyli wartością `$normalized`, jest obiekt `stdClass`. Jeśli chcielibyśmy, aby wyjście było tablicą, dodamy nadpisanie schematu `Expect::structure([...])->castTo('array')`.
+
+Wszystkie elementy struktury są opcjonalne i mają domyślną wartość `null`. Przykład:
+
+```php
+$data = [
+	'refundAmount' => 17,
+];
+
+$normalized = $processor->process($schema, $data); // OK, projde validací
+// $normalized = {'processRefund' => null, 'refundAmount' => 17}
+```
+
+Fakt, że wartością domyślną jest `null`, nie oznacza, że `'processRefund' => null` zostałaby zaakceptowana w danych wejściowych. Nie, dane wejściowe muszą być booleanem, czyli tylko `true` lub `false`. Aby dopuścić `null` musielibyśmy wyraźnie użyć `Expect::bool()->nullable()`.
+
+Wpis może być obowiązkowy za pomocą `Expect::bool()->required()`. Możemy zmienić wartość domyślną na `false` za pomocą `Expect::bool()->default(false)` lub w skrócie `Expect::bool(false)`.
+
+A co by było gdybyśmy chcieli oprócz boolean przyjąć `1` a `0`? Następnie wymieniamy wartości, które dodatkowo pozwalamy znormalizować do boolean:
+
+```php
+$schema = Expect::structure([
+	'processRefund' => Expect::anyOf(true, false, 1, 0)->castTo('bool'),
+	'refundAmount' => Expect::int(),
+]);
+
+$normalized = $processor->process($schema, $data);
+is_bool($normalized->processRefund); // true
+```
+
+Teraz znasz już podstawy definiowania schematu i tego, jak zachowują się elementy struktury. Teraz zobaczymy, jakie pozostałe elementy mogą być użyte podczas definiowania schematu.
+
+
+Typy danych: type() .[#toc-datove-typy-type]
+--------------------------------------------
+
+Wszystkie standardowe typy danych PHP mogą być wymienione w schemacie:
+
+```php
+Expect::string($default = null)
+Expect::int($default = null)
+Expect::float($default = null)
+Expect::bool($default = null)
+Expect::null()
+Expect::array($default = [])
+```
+
+Jak również wszystkie typy [obsługiwane przez klasę Validators |utils:validators#Očekávané typy], na przykład `Expect::type('scalar')` lub w skrócie `Expect::scalar()`. Również nazwy klas lub interfejsów, na przykład `Expect::type('AddressEntity')`.
+
+Można również zastosować notację unijną:
+
+```php
+Expect::type('bool|string|array')
+```
+
+Domyślnie zawsze jest to `null` z wyjątkiem `array` i `list`, gdzie jest to puste pole. (Lista to tablica indeksowana przez rosnący szereg kluczy numerycznych od zera, czyli tablica nieasocjacyjna).
+
+
+Tablica wartości: arrayOf() listOf() .[#toc-pole-hodnot-arrayof-listof]
+-----------------------------------------------------------------------
+
+Tablica jest zbyt ogólną strukturą; bardziej przydatne jest określenie dokładnie, jakie elementy może zawierać. Na przykład tablica, której elementami mogą być tylko ciągi znaków:
+
+```php
+$schema = Expect::arrayOf('string');
+
+$processor->process($schema, ['hello', 'world']); // OK
+$processor->process($schema, ['a' => 'hello', 'b' => 'world']); // OK
+$processor->process($schema, ['key' => 123]); // CHYBA: 123 není string
+```
+
+Drugi parametr może być użyty do określenia kluczy (od wersji 1.2):
+
+```php
+$schema = Expect::arrayOf('string', 'int');
+
+$processor->process($schema, ['hello', 'world']); // OK
+$processor->process($schema, ['a' => 'hello']); // CHYBA: 'a' není int
+```
+
+Lista jest tablicą indeksowaną:
+
+```php
+$schema = Expect::listOf('string');
+
+$processor->process($schema, ['a', 'b']); // OK
+$processor->process($schema, ['a', 123]); // CHYBA: 123 není string
+$processor->process($schema, ['key' => 'a']); // CHYBA: není list
+$processor->process($schema, [1 => 'a', 0 => 'b']); // CHYBA: také není list
+```
+
+Parametr może być również schematem, więc możemy napisać:
+
+```php
+Expect::arrayOf(Expect::bool())
+```
+
+Domyślną wartością jest puste pole. Jeśli określisz wartość domyślną, zostanie ona połączona z przekazanymi danymi. Można to wyłączyć za pomocą `mergeDefaults(false)` (od wersji 1.1).
+
+
+Wyliczenie: anyOf() .[#toc-vycet-anyof]
+---------------------------------------
+
+`anyOf()` reprezentuje wyliczenie wartości lub schematów, które może przyjąć dana wartość. W ten sposób piszemy tablicę z elementami, które mogą być albo `'a'`, `true`, albo `null`:
+
+```php
+$schema = Expect::listOf(
+	Expect::anyOf('a', true, null),
+);
+
+$processor->process($schema, ['a', true, null, 'a']); // OK
+$processor->process($schema, ['a', false]); // CHYBA: false tam nepatří
+```
+
+Elementami wyliczenia mogą być również schematy:
+
+```php
+$schema = Expect::listOf(
+	Expect::anyOf(Expect::string(), true, null),
+);
+
+$processor->process($schema, ['foo', true, null, 'bar']); // OK
+$processor->process($schema, [123]); // CHYBA
+```
+
+Metoda `anyOf()` przyjmuje warianty jako pojedyncze parametry, a nie tablice. Aby przekazać mu tablicę wartości, użyj operatora rozpakowywania `anyOf(...$variants)`.
+
+Wartość domyślna to `null`. Użyj metody `firstIsDefault()`, aby pierwszy element był domyślny:
+
+```php
+// výchozí je 'hello'
+Expect::anyOf(Expect::string('hello'), true, null)->firstIsDefault();
+```
+
+
+Struktury .[#toc-struktury]
+---------------------------
+
+Struktury to obiekty o zdefiniowanych kluczach. Każda z par klucz =&gt; wartość jest określana jako "właściwość":
+
+Struktury przyjmują tablice i obiekty i zwracają `stdClass` obiekty (chyba że zmienisz to za pomocą `castTo('array')` itp.).
+
+Domyślnie wszystkie właściwości są opcjonalne i domyślnie ustawione na `null`. Możesz zdefiniować właściwości obowiązkowe używając `required()`:
+
+```php
+$schema = Expect::structure([
+	'required' => Expect::string()->required(),
+	'optional' => Expect::string(), // výchozí hodnota je null
+]);
+
+$processor->process($schema, ['optional' => '']);
+// CHYBA: option 'required' is missing
+
+$processor->process($schema, ['required' => 'foo']);
+// OK, vrací {'required' => 'foo', 'optional' => null}
+```
+
+Jeśli nie chcesz, aby właściwości z wartością domyślną znalazły się na wyjściu, użyj `skipDefaults()`:
+
+```php
+$schema = Expect::structure([
+	'required' => Expect::string()->required(),
+	'optional' => Expect::string(),
+])->skipDefaults();
+
+$processor->process($schema, ['required' => 'foo']);
+// OK, vrací {'required' => 'foo'}
+```
+
+Chociaż `null` jest domyślną wartością właściwości `optional`, nie jest dozwolone w danych wejściowych (wartość musi być łańcuchem). Właściwości akceptujące `null` są definiowane za pomocą `nullable()`:
+
+```php
+$schema = Expect::structure([
+	'optional' => Expect::string(),
+	'nullable' => Expect::string()->nullable(),
+]);
+
+$processor->process($schema, ['optional' => null]);
+// CHYBA: 'optional' expects to be string, null given.
+
+$processor->process($schema, ['nullable' => null]);
+// OK, vrací {'optional' => null, 'nullable' => null}
+```
+
+Domyślnie w danych wejściowych nie może być żadnych dodatkowych elementów:
+
+```php
+$schema = Expect::structure([
+	'key' => Expect::string(),
+]);
+
+$processor->process($schema, ['additional' => 1]);
+// CHYBA: Unexpected item 'additional'
+```
+
+Które można zmienić za pomocą `otherItems()`. Jako parametr podajemy schemat, według którego będą walidowane dodatkowe elementy:
+
+```php
+$schema = Expect::structure([
+	'key' => Expect::string(),
+])->otherItems(Expect::int());
+
+$processor->process($schema, ['additional' => 1]); // OK
+$processor->process($schema, ['additional' => true]); // CHYBA
+```
+
+
+Właściwości przestarzałe .[#toc-zastarale-vlastnosti]
+-----------------------------------------------------
+
+Możesz oznaczyć właściwość jako przestarzałą używając metody `deprecated([string $message])`. Informacje o deprecjacji są zwracane za pomocą `$processor->getWarnings()`:
+
+```php
+$schema = Expect::structure([
+	'old' => Expect::int()->deprecated('The item %path% is deprecated'),
+]);
+
+$processor->process($schema, ['old' => 1]); // OK
+$processor->getWarnings(); // ["The item 'old' is deprecated"]
+```
+
+
+Zakresy: min() max() .[#toc-rozsahy-min-max]
+--------------------------------------------
+
+Użyj `min()` i `max()`, aby ograniczyć liczbę elementów dla tablic:
+
+```php
+// pole, nejméně 10 položek, maximálně 20 položek
+Expect::array()->min(10)->max(20);
+```
+
+W przypadku ciągów, ogranicz ich długość:
+
+```php
+// řetězec, nejméně 10 znaků dlouhý, maximálně 20 znaků
+Expect::string()->min(10)->max(20);
+```
+
+W przypadku liczb, ogranicz ich wartość:
+
+```php
+// celé číslo, mezi 10 a 20 včetně
+Expect::int()->min(10)->max(20);
+```
+
+Oczywiście można wymienić tylko `min()`, lub tylko `max()`:
+
+```php
+// řetězec maximálně 20 znaků
+Expect::string()->max(20);
+```
+
+
+Wyrażenia regularne: pattern() .[#toc-regularni-vyrazy-pattern]
+---------------------------------------------------------------
+
+Możesz użyć `pattern()` do określenia wyrażenia regularnego, do którego musi pasować **cały** łańcuch wejściowy (tj. tak jakby zawinięty przez `^` a `$`):
+
+```php
+// právě 9 čísel
+Expect::string()->pattern('\d{9}');
+```
+
+
+Niestandardowe ograniczenie: assert() .[#toc-vlastni-omezeni-assert]
+--------------------------------------------------------------------
+
+Wszelkie dodatkowe ograniczenia można określić za pomocą `assert(callable $fn)`.
+
+```php
+$countIsEven = fn($v) => count($v) % 2 === 0;
+
+$schema = Expect::arrayOf('string')
+	->assert($countIsEven); // počet musí být sudý
+
+$processor->process($schema, ['a', 'b']); // OK
+$processor->process($schema, ['a', 'b', 'c']); // CHYBA: 3 není sudý počet
+```
+
+Albo
+
+```php
+Expect::string()->assert('is_file'); // soubor musí existovat
+```
+
+Do każdego ograniczenia można dodać własny opis. Zostanie to uwzględnione w komunikacie o błędzie.
+
+```php
+$schema = Expect::arrayOf('string')
+	->assert($countIsEven, 'Even items in array');
+
+$processor->process($schema, ['a', 'b', 'c']);
+// Failed assertion "Even items in array" for item with value array.
+```
+
+Metoda ta może być wywoływana wielokrotnie, aby dodać więcej ograniczeń.
+
+
+Mapowanie na obiekty: from() .[#toc-mapovani-na-objekty-from]
+-------------------------------------------------------------
+
+Możemy mieć schemat struktury wygenerowany z klasy. Przykład:
+
+```php
+class Config
+{
+	public string $name;
+	public string|null $password;
+	public bool $admin = false;
+}
+
+$schema = Expect::from(new Config);
+
+$data = [
+	'name' => 'franta',
+];
+
+$normalized = $processor->process($schema, $data);
+// $normalized instanceof Config
+// $normalized = {'name' => 'franta', 'password' => null, 'admin' => false}
+```
+
+Jeśli używasz PHP 7.4 lub nowszego, możesz użyć typów natywnych:
+
+```php
+class Config
+{
+	public string $name;
+	public ?string $password;
+	public bool $admin = false;
+}
+
+$schema = Expect::from(new Config);
+```
+
+Obsługiwane są również klasy anonimowe:
+
+```php
+$schema = Expect::from(new class {
+	public string $name;
+	public ?string $password;
+	public bool $admin = false;
+});
+```
+
+Ponieważ informacje uzyskane z definicji klasy mogą nie być wystarczające, możesz użyć drugiego parametru, aby dodać własny schemat do elementów:
+
+```php
+$schema = Expect::from(new Config, [
+	'name' => Expect::string()->pattern('\w:.*'),
+]);
+```
+
+
+Override: castTo() .[#toc-pretypovani-castto]
+---------------------------------------------
+
+Pomyślnie zwalidowane dane mogą zostać poddane repatriacji:
+
+```php
+Expect::scalar()->castTo('string');
+```
+
+Oprócz natywnych typów PHP, może być również przepisany na klasy:
+
+```php
+Expect::scalar()->castTo('AddressEntity');
+```
+
+
+Normalizacja: before() .[#toc-normalizace-before]
+-------------------------------------------------
+
+Przed walidacją dane mogą zostać znormalizowane przy użyciu metody `before()`. Jako przykład rozważmy element, który musi być tablicą łańcuchów (np. `['a', 'b', 'c']`), ale otrzymuje dane wejściowe w postaci ciągu `a b c`:
+
+```php
+$explode = fn($v) => explode(' ', $v);
+
+$schema = Expect::arrayOf('string')
+	->before($explode);
+
+$normalized = $processor->process($schema, 'a b c');
+// OK a vrátí ['a', 'b', 'c']
+```
+
+
+{{leftbar: nette:@menu-topics}}

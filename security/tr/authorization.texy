@@ -1,0 +1,292 @@
+Erişim Kontrolü (Yetkilendirme)
+*******************************
+
+.[perex]
+Yetkilendirme, bir kullanıcının örneğin belirli bir kaynağa erişmek veya bir eylemi gerçekleştirmek için yeterli ayrıcalıklara sahip olup olmadığını belirler. Yetkilendirme, daha önce başarılı bir kimlik doğrulaması yapıldığını, yani kullanıcının oturum açtığını varsayar.
+
+→ [Kurulum ve gereksinimler |@home#Installation]
+
+Örneklerde, mevcut kullanıcıyı temsil eden ve [bağımlılık enjeksiyonu |dependency-injection:passing-dependencies] kullanarak geçirerek elde ettiğiniz [api:Nette\Security\User] sınıfından bir nesne kullanacağız. Sunucularda `$user = $this->getUser()` adresini çağırmanız yeterlidir.
+
+Kullanıcı haklarının ayırt edilmediği çok basit yönetimli web siteleri için, zaten bilinen yöntemi bir yetkilendirme kriteri olarak kullanmak mümkündür `isLoggedIn()`. Başka bir deyişle: bir kullanıcı oturum açtığında, tüm eylemler için izinlere sahip olur ve bunun tersi de geçerlidir.
+
+```php
+if ($user->isLoggedIn()) { // is user logged in?
+	deleteItem(); // if so, he may delete an item
+}
+```
+
+
+Roller .[#toc-roles]
+--------------------
+
+Rollerin amacı daha hassas bir izin yönetimi sunmak ve kullanıcı adından bağımsız kalmaktır. Kullanıcı oturum açar açmaz, kendisine bir veya daha fazla rol atanır. Rollerin kendileri basit dizeler olabilir, örneğin, `admin`, `member`, `guest`, vb. Bunlar `SimpleIdentity` kurucusunun ikinci argümanında bir dize ya da dizi olarak belirtilir.
+
+Bir yetkilendirme kriteri olarak, şimdi kullanıcının verilen rolde olup olmadığını kontrol eden `isInRole()` yöntemini kullanacağız:
+
+```php
+if ($user->isInRole('admin')) { // is the admin role assigned to the user?
+	deleteItem(); // if so, he may delete an item
+}
+```
+
+Bildiğiniz gibi, kullanıcının oturumu kapatması kimliğini silmemektedir. Bu nedenle, `getIdentity()` yöntemi, verilen tüm roller de dahil olmak üzere `SimpleIdentity` nesnesini döndürmeye devam eder. Nette Framework "daha az kod, daha fazla güvenlik" ilkesine bağlıdır, bu nedenle rolleri kontrol ederken kullanıcının oturum açıp açmadığını da kontrol etmeniz gerekmez. `isInRole()` yöntemi **etkili roller** ile çalışır, yani kullanıcı oturum açmışsa, kimliğe atanan roller kullanılır, oturum açmamışsa, bunun yerine otomatik bir özel rol `guest` kullanılır.
+
+
+Yetkilendirici .[#toc-authorizator]
+-----------------------------------
+
+Rollere ek olarak, kaynak ve operasyon terimlerini de tanıtacağız:
+
+- rol** bir kullanıcı niteliğidir - örneğin moderatör, editör, ziyaretçi, kayıtlı kullanıcı, yönetici, ...
+- kaynak** uygulamanın mantıksal bir birimidir - makale, sayfa, kullanıcı, menü öğesi, anket, sunucu, ...
+- işlem** kullanıcının *kaynak* ile yapabileceği veya yapamayacağı belirli bir faaliyettir - görüntüleme, düzenleme, silme, oylama, ...
+
+Yetkilendirici, belirli bir *rolün* belirli bir *kaynak* ile belirli bir *işlem* gerçekleştirme iznine sahip olup olmadığına karar veren bir nesnedir. Sadece bir yöntemle [api:Nette\Security\Authorizator] arayüzünü uygulayan bir nesnedir `isAllowed()`:
+
+```php
+class MyAuthorizator implements Nette\Security\Authorizator
+{
+	public function isAllowed($role, $resource, $operation): bool
+	{
+		if ($role === 'admin') {
+			return true;
+		}
+		if ($role === 'user' && $resource === 'article') {
+			return true;
+		}
+
+		// ...
+
+		return false;
+	}
+}
+```
+
+Yetkilendiriciyi DI konteynerinin [bir servisi olarak |dependency-injection:services] yapılandırmaya ekliyoruz:
+
+```neon
+services:
+	- MyAuthorizator
+```
+
+Ve aşağıda bir kullanım örneği verilmiştir. Bu kez yetkilendiricinin değil `Nette\Security\User::isAllowed()` yöntemini çağırdığımıza dikkat edin, bu nedenle ilk parametre `$role` değildir. Bu yöntem `MyAuthorizator::isAllowed()` adresini tüm kullanıcı rolleri için sırayla çağırır ve en az birinin izni varsa true değerini döndürür.
+
+```php
+if ($user->isAllowed('file')) { // is user allowed to do everything with resource 'file'?
+	useFile();
+}
+
+if ($user->isAllowed('file', 'delete')) { // is user allowed to delete a resource 'file'?
+	deleteFile();
+}
+```
+
+Her iki argüman da isteğe bağlıdır ve varsayılan değerleri *her şey* anlamına gelir.
+
+
+İzin ACL .[#toc-permission-acl]
+-------------------------------
+
+Nette, izin ve erişim kontrolü için hafif ve esnek bir ACL (Erişim Kontrol Listesi) katmanı sunan [api:Nette\Security\Permission] sınıfı olan yerleşik bir yetkilendirici uygulaması ile birlikte gelir. Bu sınıfla çalıştığımızda, roller, kaynaklar ve bireysel izinler tanımlarız. Ve roller ve kaynaklar hiyerarşiler oluşturabilir. Açıklamak için bir web uygulaması örneği göstereceğiz:
+
+- `guest`: oturum açmamış, web'in herkese açık bölümünü okumasına ve taramasına izin verilen ziyaretçi, yani makaleleri okumak, yorum yapmak ve anketlerde oy kullanmak
+- `registered`: oturum açmış kullanıcı, bunun üzerine yorum gönderebilir
+- `admin`: makaleleri, yorumları ve anketleri yönetebilir
+
+Bu nedenle, belirli roller tanımladık (`guest`, `registered` ve `admin`) ve kullanıcıların erişebileceği veya üzerinde işlem yapabileceği kaynakları (`article`, `comments`, `poll`) belirttik (`view`, `vote`, `add`, `edit`).
+
+Permission sınıfının bir örneğini oluşturur ve **rolleri** tanımlarız. Rollerin kalıtımını kullanmak mümkündür, bu da örneğin `admin` rolüne sahip bir kullanıcının sıradan bir web sitesi ziyaretçisinin yapabildiklerini (ve tabii ki daha fazlasını) yapabilmesini sağlar.
+
+```php
+$acl = new Nette\Security\Permission;
+
+$acl->addRole('guest');
+$acl->addRole('registered', 'guest'); // 'registered' inherits from 'guest'
+$acl->addRole('admin', 'registered'); // and 'admin' inherits from 'registered'
+```
+
+Şimdi kullanıcıların erişebileceği **kaynakların** bir listesini tanımlayacağız:
+
+```php
+$acl->addResource('article');
+$acl->addResource('comment');
+$acl->addResource('poll');
+```
+
+Kaynaklar kalıtım da kullanabilir, örneğin `$acl->addResource('perex', 'article')` adresini ekleyebiliriz.
+
+Ve şimdi en önemli şey. Kimin ne yapabileceğini belirleyen **kuralları** aralarında tanımlayacağız:
+
+```php
+// everything is denied now
+
+// let the guest view articles, comments and polls
+$acl->allow('guest', ['article', 'comment', 'poll'], 'view');
+// and also vote in polls
+$acl->allow('guest', 'poll', 'vote');
+
+// the registered inherits the permissions from guesta, we will also let him to comment
+$acl->allow('registered', 'comment', 'add');
+
+// the administrator can view and edit anything
+$acl->allow('admin', $acl::All, ['view', 'edit', 'add']);
+```
+
+Birinin bir kaynağa erişmesini **engellemek** istersek ne olur?
+
+```php
+// administrator cannot edit polls, that would be undemocractic.
+$acl->deny('admin', 'poll', 'edit');
+```
+
+Şimdi kurallar setini oluşturduğumuzda, basitçe yetkilendirme sorgularını sorabiliriz:
+
+```php
+// can guest view articles?
+$acl->isAllowed('guest', 'article', 'view'); // true
+
+// can guest edit an article?
+$acl->isAllowed('guest', 'article', 'edit'); // false
+
+// can guest vote in polls?
+$acl->isAllowed('guest', 'poll', 'vote'); // true
+
+// may guest add comments?
+$acl->isAllowed('guest', 'comment', 'add'); // false
+```
+
+Aynı şey kayıtlı bir kullanıcı için de geçerlidir, ancak o da yorum yapabilir:
+
+```php
+$acl->isAllowed('registered', 'article', 'view'); // true
+$acl->isAllowed('registered', 'comment', 'add'); // true
+$acl->isAllowed('registered', 'comment', 'edit'); // false
+```
+
+Yönetici, anketler hariç her şeyi düzenleyebilir:
+
+```php
+$acl->isAllowed('admin', 'poll', 'vote'); // true
+$acl->isAllowed('admin', 'poll', 'edit'); // false
+$acl->isAllowed('admin', 'comment', 'edit'); // true
+```
+
+İzinler dinamik olarak da değerlendirilebilir ve kararı tüm parametrelerin aktarıldığı kendi geri çağrımıza bırakabiliriz:
+
+```php
+$assertion = function (Permission $acl, string $role, string $resource, string $privilege): bool {
+	return /* ... */;
+};
+
+$acl->allow('registered', 'comment', null, $assertion);
+```
+
+Ancak, rollerin ve kaynakların adlarının yeterli olmadığı bir durumu nasıl çözebiliriz, yani örneğin, bir rolün `registered` bir kaynağı `article` yalnızca yazarı ise düzenleyebileceğini tanımlamak istiyoruz? Dizeler yerine nesneler kullanacağız, rol [api:Nette\Security\Role] nesnesi ve kaynak [api:Nette\Security\Resource] olacak. Metotları `getRoleId()` resp. `getResourceId()` orijinal dizgileri döndürecektir:
+
+```php
+class Registered implements Nette\Security\Role
+{
+	public $id;
+
+	public function getRoleId(): string
+	{
+		return 'registered';
+	}
+}
+
+
+class Article implements Nette\Security\Resource
+{
+	public $authorId;
+
+	public function getResourceId(): string
+	{
+		return 'article';
+	}
+}
+```
+
+Ve şimdi bir kural oluşturalım:
+
+```php
+$assertion = function (Permission $acl, string $role, string $resource, string $privilege): bool {
+	$role = $acl->getQueriedRole(); // object Registered
+	$resource = $acl->getQueriedResource(); // object Article
+	return $role->id === $resource->authorId;
+};
+
+$acl->allow('registered', 'article', 'edit', $assertion);
+```
+
+ACL, nesneler geçirilerek sorgulanır:
+
+```php
+$user = new Registered(/* ... */);
+$article = new Article(/* ... */);
+$acl->isAllowed($user, $article, 'edit');
+```
+
+Bir rol, bir veya daha fazla başka rolden miras alabilir. Ancak, bir atanın belirli bir eyleme izin vermesi ve diğerinin bunu reddetmesi durumunda ne olur? O zaman *rol ağırlığı* devreye girer - miras alınacak roller dizisindeki son rol en büyük, ilk rol ise en düşük ağırlığa sahiptir:
+
+```php
+$acl = new Nette\Security\Permission;
+$acl->addRole('admin');
+$acl->addRole('guest');
+
+$acl->addResource('backend');
+
+$acl->allow('admin', 'backend');
+$acl->deny('guest', 'backend');
+
+// example A: role admin has lower weight than role guest
+$acl->addRole('john', ['admin', 'guest']);
+$acl->isAllowed('john', 'backend'); // false
+
+// example B: role admin has greater weight than role guest
+$acl->addRole('mary', ['guest', 'admin']);
+$acl->isAllowed('mary', 'backend'); // true
+```
+
+Roller ve kaynaklar da kaldırılabilir (`removeRole()`, `removeResource()`), kurallar da geri alınabilir (`removeAllow()`, `removeDeny()`). Tüm doğrudan üst rollerin dizisi `getRoleParents()` döndürür. İki varlığın birbirinden miras alıp almadığı `roleInheritsFrom()` ve `resourceInheritsFrom()` döndürür.
+
+
+Hizmet Olarak Ekle .[#toc-add-as-a-service]
+-------------------------------------------
+
+Oluşturduğumuz ACL'yi `$user` nesnesi tarafından kullanılabilmesi için yani örneğin `$user->isAllowed('article', 'view')` kodunda kullanabilmemiz için yapılandırmaya bir servis olarak eklememiz gerekiyor. Bu amaçla bunun için bir fabrika yazacağız:
+
+```php
+namespace App\Model;
+
+class AuthorizatorFactory
+{
+	public static function create(): Nette\Security\Permission
+	{
+		$acl = new Nette\Security\Permission;
+		$acl->addRole(/* ... */);
+		$acl->addResource(/* ... */);
+		$acl->allow(/* ... */);
+		return $acl;
+	}
+}
+```
+
+Ve bunu yapılandırmaya ekleyeceğiz:
+
+```neon
+services:
+	- App\Model\AuthorizatorFactory::create
+```
+
+Sunucularda, örneğin `startup()` yönteminde izinleri doğrulayabilirsiniz:
+
+```php
+protected function startup()
+{
+	parent::startup();
+	if (!$this->getUser()->isAllowed('backend')) {
+		$this->error('Forbidden', 403);
+	}
+}
+```

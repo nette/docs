@@ -1,0 +1,579 @@
+Създаване на разширение
+***********************
+
+.[perex]{data-version:3.0}
+Разширението е клас за многократна употреба, който може да дефинира персонализирани тагове, филтри, функции, доставчици и т.н.
+
+Създаваме разширения, когато искаме да използваме повторно настройките на Latte в различни проекти или да ги споделим с други хора.
+Полезно е също така да създадете разширение за всеки уеб проект, което да съдържа всички специфични тагове и филтри, които искате да използвате в шаблоните на проектите си.
+
+
+Клас за разширение .[#toc-extension-class]
+==========================================
+
+Extension е клас, наследен от [api:Latte\Extension]. Регистрира се в Latte с помощта на `addExtension()` (или чрез [конфигурационен файл |application:configuration#Latte]):
+
+```php
+$latte = new Latte\Engine;
+$latte->addExtension(new MyLatteExtension);
+```
+
+Ако регистрирате няколко разширения и те дефинират идентични по име тагове, филтри или функции, печели последното добавено разширение. Това означава също, че разширенията ви могат да отменят собствените си тагове/филтри/функции.
+
+Когато направите промени в клас и автоматичното обновяване не е изключено, Latte автоматично ще прекомпилира вашите шаблони.
+
+Класът може да реализира някой от следните методи:
+
+```php
+abstract class Extension
+{
+	/**
+	 * Initializes before template is compiler.
+	 */
+	public function beforeCompile(Engine $engine): void;
+
+	/**
+	 * Returns a list of parsers for Latte tags.
+	 * @return array<string, callable>
+	 */
+	public function getTags(): array;
+
+	/**
+	 * Returns a list of compiler passes.
+	 * @return array<string, callable>
+	 */
+	public function getPasses(): array;
+
+	/**
+	 * Returns a list of |filters.
+	 * @return array<string, callable>
+	 */
+	public function getFilters(): array;
+
+	/**
+	 * Returns a list of functions used in templates.
+	 * @return array<string, callable>
+	 */
+	public function getFunctions(): array;
+
+	/**
+	 * Returns a list of providers.
+	 * @return array<mixed>
+	 */
+	public function getProviders(): array;
+
+	/**
+	 * Returns a value to distinguish multiple versions of the template.
+	 */
+	public function getCacheKey(Engine $engine): mixed;
+
+	/**
+	 * Initializes before template is rendered.
+	 */
+	public function beforeRender(Template $template): void;
+}
+```
+
+За да получите представа как изглежда разширението, разгледайте вграденото  разширение "CoreExtension:https://github.com/nette/latte/blob/master/src/Latte/Essential/CoreExtension.php".
+
+
+beforeCompile(Latte\Engine $engine): void .[method]
+---------------------------------------------------
+
+Извиква се преди компилирането на шаблона. Методът може да се използва например за инициализация, свързана с компилирането.
+
+
+getTags(): array .[method]
+--------------------------
+
+Извиква се при компилиране на шаблон. Връща асоциативен масив *име на таг =&gt; callable*, които са [функции за парсване на тагове |#Tag-Parsing-Function].
+
+```php
+public function getTags(): array
+{
+	return [
+		'foo' => [FooNode::class, 'create'],
+		'bar' => [BarNode::class, 'create'],
+		'n:baz' => [NBazNode::class, 'create'],
+		// ...
+	];
+}
+```
+
+Тагът `n:baz` е чист n:атрибут, т.е. това е таг, който може да бъде записан само като атрибут.
+
+В случая с таговете `foo` и `bar` Latte автоматично разпознава дали са двойки и ако е така, те могат да бъдат автоматично записани с помощта на n:attributes, включително варианти, предхождани от `n:inner-foo` и `n:tag-foo`.
+
+Редът, по който се изпълняват тези n:атрибути, се определя от реда им в масива, върнат от `getTags()`. По този начин `n:foo` се изпълнява винаги преди `n:bar`, дори ако атрибутите са изброени в обратен ред в HTML тага като `<div n:bar="..." n:foo="...">`.
+
+Ако трябва да определите реда на изпълнение на n:атрибути за няколко разширения, използвайте помощния метод `order()`, където параметърът `before` xor `after` определя кои тагове ще бъдат подредени преди или след тага .
+
+```php
+public function getTags(): array
+{
+	return [
+		'foo' => self::order([FooNode::class, 'create'], before: 'bar')]
+		'bar' => self::order([BarNode::class, 'create'], after: ['block', 'snippet'])]
+	];
+}
+```
+
+
+getPasses(): array .[method]
+----------------------------
+
+Извиква се при компилиране на шаблона. Връща асоциативен масив *name pass =&gt; callable*, които са функции, представляващи така наречените [passes на компилатора |#Compiler-Passes], които заобикалят и модифицират AST.
+
+Отново може да се използва спомагателен метод `order()`. Стойността на параметъра `before` или `after` може да бъде `*` със стойност преди/след всички.
+
+```php
+public function getPasses(): array
+{
+	return [
+		'optimize' => [Passes::class, 'optimizePass'],
+		'sandbox' => self::order([$this, 'sandboxPass'], before: '*'),
+		// ...
+	];
+}
+```
+
+
+beforeRender(Latte\Engine $engine): void .[method]
+--------------------------------------------------
+
+Извиква се преди всяко визуализиране на шаблона. Методът може да се използва например за инициализиране на променливи, използвани по време на рендирането.
+
+
+getFilters(): array .[method]
+-----------------------------
+
+Извиква се преди шаблонът да бъде визуализиран. Връща [филтрите |extending-latte#Filters] като асоциативен масив *име на филтър =&gt; извикващ се*.
+
+```php
+public function getFilters(): array
+{
+	return [
+		'batch' => [$this, 'batchFilter'],
+		'trim' => [$this, 'trimFilter'],
+		// ...
+	];
+}
+```
+
+
+getFunctions(): array .[method]
+-------------------------------
+
+Извиква се преди шаблонът да бъде визуализиран. Връща [функциите |extending-latte#Functions] като асоциативен масив *име на функция =&gt; callable*.
+
+```php
+public function getFunctions(): array
+{
+	return [
+		'clamp' => [$this, 'clampFunction'],
+		'divisibleBy' => [$this, 'divisibleByFunction'],
+		// ...
+	];
+}
+```
+
+
+getProviders(): array .[method]
+-------------------------------
+
+Извиква се преди шаблонът да бъде визуализиран. Връща масив от доставчици, които обикновено са маркирани по време на изпълнение обекти. Достъпът до тях се осъществява чрез `$this->global->...`.
+
+```php
+public function getProviders(): array
+{
+	return [
+		'myFoo' => $this->foo,
+		'myBar' => $this->bar,
+		// ...
+	];
+}
+```
+
+
+getCacheKey(Latte\Engine $engine): mixed .[method]
+--------------------------------------------------
+
+Извиква се преди шаблонът да бъде визуализиран. Върнатата стойност става част от ключа, чийто хеш се съдържа в името на файла на компилирания шаблон. По този начин Latte ще генерира различни кеш файлове за различните върнати стойности.
+
+
+Как работи Latte? .[#toc-how-does-latte-work]
+=============================================
+
+За да разберете как да дефинирате потребителски тагове или пропуски на компилатора, трябва да разберете как работи Latte под капака.
+
+Съставянето на модели в Latte опростено работи по следния начин:
+
+- Първо, **parser** разбива изходния код на шаблона на малки фрагменти (токени) за по-лесна обработка.
+- След това **парсерът** преобразува потока от символи в смислено дърво от възли (Abstract Syntax Tree, AST).
+- Накрая компилаторът **генерира** PHP клас от AST, който съпоставя шаблона, и го съхранява в кеша си.
+
+Всъщност съставянето е малко по-сложно. Latte **има два** лексикатора и анализатора: един за HTML шаблона и един за PHP-подобния код вътре в таговете. Освен това парсингът не се извършва след токенизацията, а лексикаторът и парсерът работят паралелно в две "нишки" и са координирани. Това е ракетна наука :-)
+
+Освен това всички тагове имат свои собствени процедури за парсване. Когато парсерът срещне таг, той извиква своята функция за парсиране (тя връща [Extension::getTags() |#getTags]).
+Задачата му е да анализира аргументите на тага и, в случай на сдвоени тагове, вътрешното съдържание. Той връща *възел*, който става част от AST. За повече информация вижте раздел [Разработване на етикети |#Tag-Parsing-Function].
+
+Когато анализаторът завърши работата си, получаваме пълния AST, представящ модела. Коренният възел е `Latte\Compiler\Nodes\TemplateNode`. Отделните възли в дървото представляват не само таговете, но и HTML елементите, техните атрибути, всички изрази, използвани в таговете, и т.н.
+
+След това се появяват т.нар. [passes на компилатора |#Compiler-Passes], които представляват функции (връщани от [Extension::getPasses() |#getPasses]), които модифицират AST.
+
+Целият процес - от зареждането на съдържанието на шаблона, през парсирането, до генерирането на получения файл - може да бъде оптимизиран с този код, с който можете да експериментирате и да изхвърляте междинни резултати:
+
+```php
+$latte = new Latte\Engine;
+$source = $latte->getLoader()->getContent($file);
+$ast = $latte->parse($source);
+$latte->applyPasses($ast);
+$code = $latte->generate($ast, $file);
+```
+
+
+Пример за AST .[#toc-example-of-ast]
+------------------------------------
+
+За да получите по-добра представа за AST, ще добавим пример. Това е оригиналният шаблон:
+
+```latte
+{foreach $category->getItems() as $item}
+	<li>{$item->name|upper}</li>
+	{else}
+	no items found
+{/foreach}
+```
+
+И това е нейното представяне като AST:
+
+/--pre
+Latte\Compiler\Nodes\<b>TemplateNode</b>(
+   Latte\Compiler\Nodes\<b>FragmentNode</b>(
+      - Latte\Essential\Nodes\<b>ForeachNode</b>(
+           expression: Latte\Compiler\Nodes\Php\Expression\<b>MethodCallNode</b>(
+              object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$category')
+              name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('getItems')
+           )
+           value: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+           content: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+              - Latte\Compiler\Nodes\<b>TextNode</b>('  ')
+              - Latte\Compiler\Nodes\<b>Html\ElementNode</b>('li')(
+                   content: Latte\Essential\Nodes\<b>PrintNode</b>(
+                      expression: Latte\Compiler\Nodes\Php\Expression\<b>PropertyFetchNode</b>(
+                         object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+                         name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('name')
+                      )
+                      modifier: Latte\Compiler\Nodes\Php\<b>ModifierNode</b>(
+                         filters:
+                            - Latte\Compiler\Nodes\Php\<b>FilterNode</b>('upper')
+                      )
+                   )
+                )
+            )
+            else: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+               - Latte\Compiler\Nodes\<b>TextNode</b>('no items found')
+            )
+        )
+   )
+)
+\--
+
+
+Потребителски етикети .[#toc-custom-tags]
+=========================================
+
+За дефинирането на нов етикет са необходими три стъпки:
+
+- дефиниране на [функция за разбор на таг |#Tag-Parsing-Function] (отговорна за разбора на тага във възел)
+- създаване на клас за възли (отговарящ за [генерирането на PHP код |#Generating-PHP-Code] и [обхождането на AST |#AST-Traversing])
+- регистриране на тага с [Extension::getTags() |#getTags]
+
+
+Функция за парсване на етикети .[#toc-tag-parsing-function]
+-----------------------------------------------------------
+
+Таговете се анализират от функцията за анализ (тази, която се връща от [Extension::getTags() |#getTags]). Неговата задача е да анализира и проверява всички аргументи в даден таг (за целта използва TagParser).
+Също така, ако тагът е двойка, той ще поиска от TemplateParser да анализира и върне вътрешното съдържание.
+Функцията създава и връща възел, който обикновено е дъщерен възел `Latte\Compiler\Nodes\StatementNode`, и той става част от AST.
+
+Създаваме клас за всеки възел, което ще направим сега, и елегантно поставяме функцията за парсинг в него като статична фабрика. Като пример, нека се опитаме да създадем познатия таг `{foreach}`:
+
+```php
+use Latte\Compiler\Nodes\StatementNode;
+
+class ForeachNode extends StatementNode
+{
+	// a parsing function that just creates a node for now
+	public static function create(Latte\Compiler\Tag $tag): self
+	{
+		$node = new self;
+		return $node;
+	}
+
+	public function print(Latte\Compiler\PrintContext $context): string
+	{
+		// code will be added later
+	}
+
+	public function &getIterator(): \Generator
+	{
+		// code will be added later
+	}
+}
+```
+
+На функцията за парсинг `create()` се предава обект [api:Latte\Compiler\Tag], който носи основна информация за тага (дали е класически таг или n:атрибут, на кой ред се намира и т.н.) и основно се отнася до обекта [api:Latte\Compiler\TagParser] в `$tag->parser`.
+
+Ако даден таг трябва да има аргументи, проверете за тях, като извикате `$tag->expectArguments()`. Методите на обекта `$tag->parser` са на разположение за анализирането им :
+
+- `parseExpression(): ExpressionNode` за израз, подобен на PHP (например `10 + 3`).
+- `parseUnquotedStringOrExpression(): ExpressionNode` за израз или низ без кавички
+- Съдържание на масива `parseArguments(): ArrayNode` (напр. `10, true, foo => bar`)
+- `parseModifier(): ModifierNode` за модификатор (напр. `|upper|truncate:10`)
+- `parseType(): expressionNode` за подсказка за типа (например `int|string` или `Foo\Bar[]`)
+
+и на ниско ниво [api:Latte\Compiler\TokenStream], работещи директно с токени:
+
+- `$tag->parser->stream->consume(...): Token`
+- `$tag->parser->stream->tryConsume(...): ?Token`
+
+Latte разширява синтаксиса на PHP по малки начини, например чрез добавяне на модификатори, съкращаване на тернарни оператори или позволяване на запис на прости буквено-цифрови низове без кавички. Ето защо използваме термина *PHP-like* вместо PHP. Например, методът `parseExpression()` анализира `foo` като `'foo'`.
+Също така *нецитиран низ* е специален случай на низ, който също не се нуждае от кавички, но в същото време не е задължително да бъде буквено-цифров. Например, това е пътят до файла в тага `{include ../file.latte}`. За анализирането му се използва методът `parseUnquotedStringOrExpression()`.
+
+.[note]
+Изучаването на класовете възли, които съставляват Latte, е най-добрият начин да научите тънкостите на процеса на разбор.
+
+Нека се върнем към етикета `{foreach}`. В него очакваме аргументи с формата `expression + 'as' + second expression`, които анализираме по следния начин:
+
+```php
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\AreaNode;
+
+class ForeachNode extends StatementNode
+{
+	public ExpressionNode $expression;
+	public ExpressionNode $value;
+
+	public static function create(Latte\Compiler\Tag $tag): self
+	{
+		$tag->expectArguments();
+		$node = new self;
+		$node->expression = $tag->parser->parseExpression();
+		$tag->parser->stream->consume('as');
+		$node->value = $parser->parseExpression();
+		return $node;
+	}
+}
+```
+
+Изразите, които сме записали в променливите `$expression` и `$value`, са вложени възли.
+
+.[tip]
+Дефинирайте променливите на подвъзела като **публични**, за да могат да бъдат променяни на [по-късни етапи от обработката |#Compiler-Passes], ако е необходимо. Също така трябва да ги направите **достъпни** за [обхождане |#AST-Traversing].
+
+За сдвоени тагове като нашия методът трябва да позволява на TemplateParser да анализира вътрешното съдържание на тага. Това се обработва от `yield`, който връща двойката '['вътрешно съдържание, краен таг |внутреннее содержимое, конечный тег]''. Съхраняваме вътрешното съдържание в променлива `$node->content`.
+
+```php
+public AreaNode $content;
+
+public static function create(Latte\Compiler\Tag $tag): \Generator
+{
+	// ...
+	[$node->content, $endTag] = yield;
+	return $node;
+}
+```
+
+Ключовата дума `yield` води до прекратяване на метода `create()`, като връща управлението обратно към TemplateParser, който продължава да анализира съдържанието, докато достигне тага end. След това той предава управлението обратно на метода `create()`, който продължава оттам, където е спрял. Използването на метода `yield`, автоматично връща `Generator`.
+
+Можете също така да подадете масив от имена на тагове на `yield`, за които искате да спрете парсирането, ако се появят преди крайния таг. Това ни помага да прилагаме `{foreach}...{else}...{/foreach}` конструкция. Ако срещнем `{else}`, анализираме съдържанието след него до `$node->elseContent`:
+
+```php
+public AreaNode $content;
+public ?AreaNode $elseContent = null;
+
+public static function create(Latte\Compiler\Tag $tag): \Generator
+{
+	// ...
+	[$node->content, $nextTag] = yield ['else'];
+	if ($nextTag?->name === 'else') {
+		[$node->elseContent] = yield;
+	}
+
+	return $node;
+}
+```
+
+Връщането на възела завършва разбора на тага.
+
+
+Генериране на PHP код .[#toc-generating-php-code]
+-------------------------------------------------
+
+Всеки възел трябва да прилага метода `print()`. Връща код на PHP, който визуализира дадената част от шаблона (код за изпълнение). Като параметър той се предава на обекта [api:Latte\Compiler\PrintContext], който има полезен метод `format()`, улесняващ сглобяването на получения код.
+
+Методът `format(string $mask, ...$args)` приема следните заместители в маска:
+- `%node` отпечатва възела
+- `%dump` експортира стойността в PHP
+- `%raw` вмъква текст директно, без преобразувания
+- `%args` отпечатва ArrayNode като аргументи за извикване на функция
+- `%line` отпечатва коментар с номер на реда
+- `%escape(...)` избягва съдържанието
+- `%modify(...)` прилага модификатор
+- `%modifyContent(...)` прилага модификатор към блокове
+
+
+Нашата функция `print()` може да изглежда по следния начин (за улеснение пренебрегваме клона `else` )
+
+```php
+public function print(Latte\Compiler\PrintContext $context): string
+{
+	return $context->format(
+		<<<'XX'
+			foreach (%node as %node) %line {
+				%node
+			}
+
+			XX,
+		$this->expression,
+		$this->value,
+		$this->position,
+		$this->content,
+	);
+}
+```
+
+Променливата `$this->position` вече е дефинирана от класа [api:Latte\Compiler\Node] и се задава от анализатора. Той съдържа обект [api:Latte\Compiler\Position] с позицията на тага в изходния код като номер на ред и колона.
+
+Кодът по време на изпълнение може да използва спомагателни променливи. За да се избегне сблъсък с променливи, използвани от самия шаблон, е прието те да се предхождат от `$ʟ__`.
+
+Времето за изпълнение може също така да използва произволни стойности, които се предават на шаблона като доставчици чрез метода [Extension::getProviders() |#getProviders]. Достъпът до тях се осъществява чрез `$this->global->...`.
+
+
+Байпас AST .[#toc-ast-traversing]
+---------------------------------
+
+За да може да се прегледа дървото AST в дълбочина, трябва да се приложи методът `getIterator()`. Това ще осигури достъп до вложените възли:
+
+```php
+public function &getIterator(): \Generator
+{
+	yield $this->expression;
+	yield $this->value;
+	yield $this->content;
+	if ($this->elseContent) {
+		yield $this->elseContent;
+	}
+}
+```
+
+Обърнете внимание, че `getIterator()` връща връзка. Това позволява на посетителите на възела да заменят отделни възли с други възли.
+
+.[warning]
+Ако даден възел има подвъзли, е необходимо да се приложи този метод и да се осигури достъп до всички подвъзли. В противен случай може да се стигне до пробив в сигурността. Например режимът "пясъчник" няма да може да контролира подвъзлите и да гарантира, че в тях няма да бъдат извикани неразрешени проекти.
+
+Тъй като ключовата дума `yield` трябва да присъства в тялото на метода, дори ако той няма подчинени възли, запишете я по следния начин:
+
+```php
+public function &getIterator(): \Generator
+{
+	if (false) {
+		yield;
+	}
+}
+```
+
+
+Компилаторът предава .[#toc-compiler-passes]
+============================================
+
+Пропусканията на компилатора са функции, които модифицират AST или събират информация в тях. Те се връщат чрез метода [Extension::getPasses() |#getPasses].
+
+
+Обхождане на възли .[#toc-node-traverser]
+-----------------------------------------
+
+Най-разпространеният начин за работа с AST е да се използва [api:Latte\Compiler\NodeTraverser]:
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+
+$ast = (new NodeTraverser)->traverse(
+	$ast,
+	enter: fn(Node $node) => ...,
+	leave: fn(Node $node) => ...,
+);
+```
+
+Функцията *вход* (т.е. посетител) се извиква, когато даден възел се срещне за първи път, преди да бъдат обработени неговите подвъзели. Функцията *leave* се извиква, след като са посетени всички възли.
+Често срещан модел е, че *enter* се използва за събиране на някаква информация, а след това *leave* извършва модификации въз основа на тази информация. В момента, в който се извика *leave*, всички кодове във възела ще са посетени и ще е събрана необходимата информация.
+
+Как да променя AST? Най-лесният начин е просто да промените свойствата на възела. Вторият начин е да замените изцяло възела, като върнете нов възел. Пример: Следният код ще промени всички цели числа в AST в низове (например 42 ще бъде заменено с `'42'`).
+
+```php
+use Latte\Compiler\Nodes\Php;
+
+$ast = (new NodeTraverser)->traverse(
+	$ast,
+	leave: function (Node $node) {
+		if ($node instanceof Php\Scalar\IntegerNode) {
+            return new Php\Scalar\StringNode((string) $node->value);
+        }
+	},
+);
+```
+
+Един AST може да съдържа хиляди възли и преминаването през всички възли може да бъде бавно. В някои случаи може да се избегне цялостно обхождане.
+
+Ако търсите всички `Html\ElementNode` в дървото, знаете, че след като разгледате `Php\ExpressionNode`, няма смисъл да проверявате всички негови дъщерни възли, защото HTML не може да бъде вътре в изразите. В този случай можете да кажете на байпасния модул да не отива във възела на класа:
+
+```php
+$ast = (new NodeTraverser)->traverse(
+	$ast,
+	enter: function (Node $node) {
+		if ($node instanceof Php\ExpressionNode) {
+			return NodeTraverser::DontTraverseChildren;
+        }
+        // ...
+	},
+);
+```
+
+Ако търсите само един конкретен възел, можете също така напълно да прекъснете обхождането, след като го намерите.
+
+```php
+$ast = (new NodeTraverser)->traverse(
+	$ast,
+	enter: function (Node $node) {
+		if ($node instanceof Nodes\ParametersNode) {
+			return NodeTraverser::StopTraversal;
+        }
+        // ...
+	},
+);
+```
+
+
+Асистенти на възли .[#toc-node-helpers]
+---------------------------------------
+
+Класът [api:Latte\Compiler\NodeHelpers] предоставя няколко метода, чрез които могат да се намерят AST възли, които отговарят на определено обратно повикване, и т.н. Показани са няколко примера:
+
+```php
+use Latte\Compiler\NodeHelpers;
+
+// finds all HTML element nodes
+$elements = NodeHelpers::find($ast, fn(Node $node) => $node instanceof Nodes\Html\ElementNode);
+
+// finds first text node
+$text = NodeHelpers::findFirst($ast, fn(Node $node) => $node instanceof Nodes\TextNode);
+
+// converts PHP value node to real value
+$value = NodeHelpers::toValue($node);
+
+// converts static textual node to string
+$text = NodeHelpers::toText($node);
+```

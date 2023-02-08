@@ -1,0 +1,287 @@
+Extending Latte
+***************
+
+.[perex]
+A Latte nagyon rugalmas, és sokféleképpen bővíthető: hozzáadhatsz egyéni szűrőket, funkciókat, címkéket, betöltőket stb. Megmutatjuk, hogyan kell ezt megtenni.
+
+Ez a fejezet a Latte bővítésének különböző módjait ismerteti. Ha a változtatásait különböző projektekben szeretné újra felhasználni, vagy ha meg akarja osztani másokkal, akkor [ún. kiterjesztést |creating-extension] kell [létrehoznia |creating-extension].
+
+
+Hány út vezet Rómába? .[#toc-how-many-roads-lead-to-rome]
+=========================================================
+
+Mivel a Latte kiterjesztésének néhány módja keveredhet, először próbáljuk meg elmagyarázni a köztük lévő különbségeket. Példaként próbáljunk meg egy *Lorem ipsum* generátort implementálni, amelynek átadjuk a generálandó szavak számát.
+
+A Latte nyelv fő konstrukciója a tag. Egy generátort úgy tudunk megvalósítani, hogy a Latte-t egy új címkével bővítjük:
+
+```latte
+{lipsum 40}
+```
+
+A tag nagyszerűen fog működni. A generátor tag formájában azonban nem biztos, hogy elég rugalmas, mert nem lehet kifejezésben használni. Egyébként a gyakorlatban ritkán van szükség címkék generálására; és ez jó hír, mert a címkék bonyolultabb módja a bővítésnek.
+
+Oké, próbáljunk meg címke helyett szűrőt létrehozni:
+
+```latte
+{=40|lipsum}
+```
+
+Ismét egy érvényes lehetőség. De a szűrőnek az átadott értéket valami mássá kell átalakítania. Itt a `40` értéket, amely a generált szavak számát jelzi, használjuk a szűrő argumentumaként, nem pedig az átalakítandó értékként.
+
+Próbáljuk meg tehát a függvényt használni:
+
+```latte
+{lipsum(40)}
+```
+
+Ez az! Ehhez a konkrét példához a függvény létrehozása az ideális kiterjesztési pont. Bárhol meghívhatja, ahol például egy kifejezést elfogadnak:
+
+```latte
+{var $text = lipsum(40)}
+```
+
+
+Szűrők .[#toc-filters]
+======================
+
+Hozzon létre egy szűrőt a nevének és bármely PHP-meghívható elemnek, például függvénynek a regisztrálásával:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFilter('shortify', fn(string $s) => mb_substr($s, 0, 10)); // shortens the text to 10 characters
+```
+
+Ebben az esetben jobb lenne, ha a szűrő kapna egy további paramétert:
+
+```php
+$latte->addFilter('shortify', function (string $s, int $len = 10): string {
+	return mb_substr($s, 0, $len);
+});
+```
+
+A sablonban így használjuk:
+
+```latte
+<p>{$text|shortify}</p>
+<p>{$text|shortify:100}</p>
+```
+
+Mint látható, a függvény a következő argumentumként a szűrő bal oldalát kapja a pipe `|` as the first argument and the arguments passed to the filter after `:` előtt.
+
+Természetesen a szűrőt reprezentáló függvény tetszőleges számú paramétert fogadhat el, és a változó paraméterek is támogatottak.
+
+
+Az osztályt használó szűrők .[#toc-filters-using-the-class]
+-----------------------------------------------------------
+
+A szűrő definiálásának második módja az [osztály használata |develop#Parameters as a class]. Létrehozunk egy metódust a `TemplateFilter` attribútummal:
+
+```php
+class TemplateParameters
+{
+	public function __construct(
+		// parameters
+	) {}
+
+	#[Latte\Attributes\TemplateFilter]
+	public function shortify(string $s, int $len = 10): string
+	{
+		return mb_substr($s, 0, $len);
+	}
+}
+
+$params = new TemplateParameters(/* ... */);
+$latte->render('template.latte', $params);
+```
+
+Ha PHP 7.x és Latte 2.x rendszert használ, az attribútum helyett a `/** @filter */` megjegyzést használja.
+
+
+Szűrő betöltő .[#toc-filter-loader]
+-----------------------------------
+
+Az egyedi szűrők regisztrálása helyett létrehozhat egy úgynevezett betöltőt, amely egy olyan függvény, amelyet a szűrő nevével mint argumentummal hívunk meg, és amely visszaadja a PHP hívhatóságát, vagy nullát.
+
+```php
+$latte->addFilterLoader([new Filters, 'load']);
+
+
+class Filters
+{
+	public function load(string $filter): ?callable
+	{
+		if (in_array($filter, get_class_methods($this))) {
+			return [$this, $filter];
+		}
+		return null;
+	}
+
+	public function shortify($s, $len = 10)
+	{
+		return mb_substr($s, 0, $len);
+	}
+
+	// ...
+}
+```
+
+
+Kontextuális szűrők .[#toc-contextual-filters]
+----------------------------------------------
+
+A kontextuális szűrő olyan szűrő, amely az első paraméterként egy objektumot fogad el: [api:Latte\Runtime\FilterInfo], amelyet a klasszikus szűrőkhöz hasonlóan további paraméterek követnek. Ugyanúgy regisztrálódik, maga a Latte ismeri fel, hogy a szűrő kontextuális:
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('foo', function (FilterInfo $info, string $str): string {
+	// ...
+});
+```
+
+A kontextusszűrők képesek felismerni és megváltoztatni a `$info->contentType` változóban kapott tartalomtípust. Ha a szűrőt klasszikusan egy változó (pl. `{$var|foo}`) felett hívjuk meg, a `$info->contentType` nullát fog tartalmazni.
+
+A szűrőnek először azt kell ellenőriznie, hogy a bemeneti karakterlánc tartalomtípusa támogatott-e. Meg is változtathatja azt. Példa egy olyan szűrőre, amely szöveget (vagy nullot) fogad el és HTML-t ad vissza:
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('money', function (FilterInfo $info, float $amount): string {
+	// first we check if the input's content-type is text
+	if (!in_array($info->contentType, [null, ContentType::Text])) {
+		throw new Exception("Filter |money used in incompatible content type $info->contentType.");
+	}
+
+	// change content-type to HTML
+	$info->contentType = ContentType::Html;
+	return "<i>$num Kč</i>";
+});
+```
+
+.[note]
+Ebben az esetben a szűrőnek biztosítania kell az adatok helyes escapingjét.
+
+Minden olyan szűrő, amelyet [blokkok |tags#block] felett használunk (pl. mint a `{block|foo}...{/block}`) kontextusfüggőnek kell lennie.
+
+
+Funkciók .[#toc-functions]
+==========================
+
+Alapértelmezés szerint minden natív PHP függvény használható a Latte-ban, hacsak a homokozó nem tiltja le. De definiálhatsz saját függvényeket is. Ezek felülírhatják a natív függvényeket.
+
+Hozzon létre egy függvényt a nevének és bármely PHP hívhatóságának regisztrálásával:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFunction('random', function (...$args) {
+	return $args[array_rand($args)];
+});
+```
+
+A használat ezután ugyanaz, mint a PHP-funkció hívásakor:
+
+```latte
+{random(apple, orange, lemon)} // prints for example: apple
+```
+
+
+Az osztályt használó függvények .[#toc-functions-using-the-class]
+-----------------------------------------------------------------
+
+A függvények definiálásának második módja az [osztály használata |develop#Parameters as a class]. Létrehozunk egy metódust a `TemplateFunction` attribútummal:
+
+```php
+class TemplateParameters
+{
+	public function __construct(
+		// parameters
+	) {}
+
+	#[Latte\Attributes\TemplateFunction]
+	public function random(...$args)
+	{
+		return $args[array_rand($args)];
+	}
+}
+
+$params = new TemplateParameters(/* ... */);
+$latte->render('template.latte', $params);
+```
+
+Ha PHP 7.x és Latte 2.x programot használ, az attribútum helyett a `/** @function */` megjegyzést használja.
+
+
+Betöltők .[#toc-loaders]
+========================
+
+A betöltők felelősek a sablonok betöltéséért egy forrásból, például egy fájlrendszerből. Ezek beállítása a `setLoader()` módszerrel történik:
+
+```php
+$latte->setLoader(new MyLoader);
+```
+
+A beépített betöltők a következők:
+
+
+FileLoader .[#toc-fileloader]
+-----------------------------
+
+Alapértelmezett betöltő. Sablonokat tölt be a fájlrendszerből.
+
+A fájlokhoz való hozzáférés korlátozható az alapkönyvtár beállításával:
+
+```php
+$latte->setLoader(new Latte\Loaders\FileLoader($templateDir));
+$latte->render('test.latte');
+```
+
+
+StringLoader .[#toc-stringloader]
+---------------------------------
+
+Sablonokat tölt be stringekből. Ez a betöltő nagyon hasznos a unit teszteléshez. Kisebb projekteknél is használható, ahol érdemes az összes sablon egyetlen PHP fájlban tárolni.
+
+```php
+$latte->setLoader(new Latte\Loaders\StringLoader([
+	'main.file' => '{include other.file}',
+	'other.file' => '{if true} {$var} {/if}',
+]));
+
+$latte->render('main.file');
+```
+
+Egyszerűsített használat:
+
+```php
+$template = '{if true} {$var} {/if}';
+$latte->setLoader(new Latte\Loaders\StringLoader);
+$latte->render($template);
+```
+
+
+Egyéni betöltő létrehozása .[#toc-creating-a-custom-loader]
+-----------------------------------------------------------
+
+A Loader egy osztály, amely a [api:Latte\Loader] interfészt valósítja meg.
+
+
+Címkék .[#toc-tags]
+===================
+
+A templating motor egyik legérdekesebb funkciója, hogy új nyelvi konstrukciókat definiálhatunk címkék segítségével. Ez egyben egy összetettebb funkcionalitás is, és meg kell értenie, hogyan működik a Latte belsőleg.
+
+A legtöbb esetben azonban nincs szükség a címkére:
+- Ha valamilyen kimenetet kell generálnia, használjon helyette [függvényt |#functions].
+- ha valamilyen bemenetet kellene módosítania és visszaadnia, használjon helyette [filtert |#filters]
+- ha egy szövegrészletet kellene szerkesztenie, akkor csomagolja be egy [`{block}` |tags#block] címkével és egy [szűrővel |#Contextual Filters]
+- ha nem kellett volna semmit kiadnia, hanem csak egy függvényt hívnia, hívja meg a [`{do}` |tags#do]
+
+Ha mégis taget akarsz létrehozni, remek! Minden lényeges tudnivalót megtalálsz a [Bővítmény létrehozása |creating-extension] című fejezetben.
+
+
+Fordítói passzusok .[#toc-compiler-passes]
+==========================================
+
+A fordítói átmenetek olyan függvények, amelyek módosítják az AST-eket vagy információt gyűjtenek bennük. A Latte-ban például egy homokozót így valósítanak meg: végigjárja egy AST összes csomópontját, megtalálja a függvény- és metódushívásokat, és azokat ellenőrzött hívásokkal helyettesíti.
+
+A címkékhez hasonlóan ez is összetettebb funkcionalitás, és meg kell értenie, hogyan működik a Latte a motorháztető alatt. Az összes lényeges tudnivaló megtalálható a [Bővítmény létrehozása |creating-extension] fejezetben.

@@ -1,0 +1,174 @@
+Динамічні сніпети
+*****************
+
+Досить часто при розробці додатків виникає необхідність виконання операцій AJAX, наприклад, в окремих рядках таблиці або елементах списку. Як приклад, ми можемо вибрати список статей, даючи змогу користувачеві, який увійшов у систему, вибрати "подобається/не подобається" для кожної з них. Код презентера і відповідного шаблону без AJAX матиме приблизно такий вигляд (я перераховую найважливіші фрагменти, код передбачає наявність сервісу для розмітки рейтингів і отримання колекції статей - конкретна реалізація не важлива для цілей цього посібника):
+
+```php
+public function handleLike(int $articleId): void
+{
+	$this->ratingService->saveLike($articleId, $this->user->id);
+	$this->redirect('this');
+}
+
+public function handleUnlike(int $articleId): void
+{
+	$this->ratingService->removeLike($articleId, $this->user->id);
+	$this->redirect('this');
+}
+```
+
+Template:
+
+```latte
+<article n:foreach="$articles as $article">
+	<h2>{$article->title}</h2>
+	<div class="content">{$article->content}</div>
+	{if !$article->liked}
+		<a n:href="like! $article->id" class=ajax>Мне нравится</a>
+	{else}
+		<a n:href="unlike! $article->id" class=ajax>Мне не нравится</a>
+	{/if}
+</article>
+```
+
+
+Аяксизація .[#toc-ajaxization]
+==============================
+
+Тепер давайте привнесемо AJAX у цей простий додаток. Зміна рейтингу статті не настільки важлива, щоб вимагати HTTP-запит із переспрямуванням, тому в ідеалі це має бути зроблено за допомогою AJAX у фоновому режимі. Ми будемо використовувати [скрипт обробника з додат |https://componette.org/vojtech-dobes/nette.ajax.js/] ків зі звичайною угодою, що AJAX-посилання мають CSS клас `ajax`.
+
+Однак як це зробити конкретно? Nette пропонує 2 способи: спосіб динамічних фрагментів і спосіб компонентів. Обидва мають свої плюси та мінуси, тому ми покажемо їх по черзі.
+
+
+Шлях динамічних сніпетів .[#toc-the-dynamic-snippets-way]
+=========================================================
+
+У термінології Latte динамічний сніппет - це особливий випадок використання тега `{snippet}`, коли в імені сніппета використовується змінна. Такий сніппет не може бути знайдений просто в будь-якому місці шаблону - він має бути обгорнутий статичним сніппетом, тобто звичайний, або всередині `{snippetArea}`. Ми можемо змінити наш шаблон таким чином.
+
+
+```latte
+{snippet articlesContainer}
+	<article n:foreach="$articles as $article">
+		<h2>{$article->title}</h2>
+		<div class="content">{$article->content}</div>
+		{snippet article-$article->id}
+			{if !$article->liked}
+				<a n:href="like! $article->id" class=ajax>Мне нравится</a>
+			{else}
+				<a n:href="unlike! $article->id" class=ajax>Мне не нравится</a>
+			{/if}
+		{/snippet}
+	</article>
+{/snippet}
+```
+
+Кожна стаття тепер визначає один сніппет, який має ID статті в заголовку. Усі ці фрагменти потім об'єднуються в один фрагмент під назвою `articlesContainer`. Якщо ми опустимо цей фрагмент обгортки, Latte попередить нас про виключення.
+
+Все, що залишилося зробити, це додати перемальовування в презентер - просто перемалювати статичну обгортку.
+
+```php
+public function handleLike(int $articleId): void
+{
+	$this->ratingService->saveLike($articleId, $this->user->id);
+	if ($this->isAjax()) {
+		$this->redrawControl('articlesContainer');
+		// $this->redrawControl('article-' . $articleId); -- нет необходимости
+	} else {
+		$this->redirect('this');
+	}
+}
+```
+
+Змініть споріднений метод `handleUnlike()` таким самим чином, і AJAX працюватиме!
+
+Однак у цього рішення є і зворотний бік. Якщо ми докладніше розглянемо, як працює AJAX-запит, то виявимо, що хоча застосунок має ефективний зовнішній вигляд (він повертає тільки один сніпет для цієї статті), насправді він відображає всі сніпети на сервері. Він помістив потрібний фрагмент у наше корисне навантаження, а решту відкинув (таким чином, абсолютно без необхідності, він також витягнув їх із бази даних).
+
+Щоб оптимізувати цей процес, нам знадобиться дія, під час якої ми передаємо колекцію `$articles` шаблону (скажімо, у методі `renderDefault()`). Ми скористаємося тим, що обробка сигналу відбувається до методів `render<Something>`:
+
+```php
+public function handleLike(int $articleId): void
+{
+	// ...
+	if ($this->isAjax()) {
+		// ...
+		$this->template->articles = [
+			$this->connection->table('articles')->get($articleId),
+		];
+	} else {
+		// ...
+}
+
+public function renderDefault(): void
+{
+	if (!isset($this->template->articles)) {
+		$this->template->articles = $this->connection->table('articles');
+	}
+}
+```
+
+Тепер, коли сигнал обробляється, замість колекції з усіма статтями в шаблон передається тільки масив з однією статтею - тією, яку ми хочемо відобразити і відправити в корисному навантаженні браузеру. Таким чином, `{foreach}` буде виконано тільки один раз, і жодних додаткових сніпетів не буде виведено.
+
+
+Компонентний спосіб .[#toc-component-way]
+=========================================
+
+Зовсім інше рішення використовує інший підхід, щоб уникнути динамічних сніпетів. Хитрість полягає в тому, щоб перенести всю логіку в окремий компонент - відтепер у нас не презентер, що піклуватиметься про введення рейтингу, а спеціальний `LikeControl`. Клас матиме такий вигляд (крім того, він також міститиме `render`, `handleUnlike` і т. д. методи):
+
+```php
+class LikeControl extends Nette\Application\UI\Control
+{
+	public function __construct(
+		private Article $article,
+	) {
+	}
+
+	public function handleLike(): void
+	{
+		$this->ratingService->saveLike($this->article->id, $this->presenter->user->id);
+		if ($this->presenter->isAjax()) {
+			$this->redrawControl();
+		} else {
+			$this->presenter->redirect('this');
+		}
+	}
+}
+```
+
+Шаблон компонента:
+
+```latte
+{snippet}
+	{if !$article->liked}
+		<a n:href="like!" class=ajax>Мне нравится</a>
+	{else}
+		<a n:href="unlike!" class=ajax>Мне не нравится</a>
+	{/if}
+{/snippet}
+```
+
+Звичайно, ми змінимо шаблон подання, і нам доведеться додати фабрику до презентера. Оскільки ми будемо створювати компонент стільки разів, скільки статей ми отримаємо з бази даних, ми будемо використовувати клас [Multiplier |application:Multiplier] для цього:
+
+```php
+protected function createComponentLikeControl()
+{
+	$articles = $this->connection->table('articles');
+	return new Nette\Application\UI\Multiplier(function (int $articleId) use ($articles) {
+		return new LikeControl($articles[$articleId]);
+	});
+}
+```
+
+Вигляд шаблону скорочено до необхідного мінімуму (і повністю вільний від сніпетів!):
+
+```latte
+<article n:foreach="$articles as $article">
+	<h2>{$article->title}</h2>
+	<div class="content">{$article->content}</div>
+	{control "likeControl-$article->id"}
+</article>
+```
+
+Ми майже закінчили: додаток тепер працюватиме в AJAX. Тут також необхідно оптимізувати застосунок, оскільки через використання бази даних Nette, обробка сигналу буде надмірно завантажувати всі статті з бази даних замість однієї. Однак перевага в тому, що рендерінгу не буде, бо насправді рендерується лише наш компонент.
+
+{{priority: -1}}
+{{sitename: Лучшие практики}}

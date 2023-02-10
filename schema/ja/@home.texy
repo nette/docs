@@ -1,0 +1,446 @@
+スキーマデータバリデーション
+**************
+
+.[perex]
+与えられたスキーマに対してデータ構造を検証し、正規化するための実用的なライブラリで、スマートで理解しやすいAPIを備えています。
+
+インストール方法
+
+```shell
+composer require nette/schema
+```
+
+
+基本的な使い方 .[#toc-basic-usage]
+---------------------------
+
+変数`$schema` には検証スキーマ（これが何を意味し、どのように作成するかは後述します）があり、変数`$data` には検証および正規化したいデータ構造があります。これは例えば、APIや設定ファイルなどを通してユーザーから送られたデータであることができます。
+
+このタスクは[api:Nette\Schema\Processor] クラスによって処理され、入力を処理して正規化されたデータを返すか、エラー時に[api:Nette\Schema\ValidationException] 例外を投げます。
+
+```php
+$processor = new Nette\Schema\Processor;
+
+try {
+	$normalized = $processor->process($schema, $data);
+} catch (Nette\Schema\ValidationException $e) {
+	echo 'Data is invalid: ' . $e->getMessage();
+}
+```
+
+Method`$e->getMessages()` は全てのメッセージ文字列の配列を返し、`$e->getMessageObjects()` は全てのメッセージを"NetteSchema FilterMessage":https://api.nette.org/3.1/Nette/Schema/Message.htmlオブジェクトとして返す。
+
+
+スキーマの定義 .[#toc-defining-schema]
+-------------------------------
+
+そして、今度はスキーマを作成してみましょう。[api:Nette\Schema\Expect] というクラスを使って定義します。実際に、データがどのようなものであるべきかという期待値を定義します。入力データは、bool型の要素`processRefund` とint型の要素`refundAmount` を含む構造体（例えば配列）でなければならないとします。
+
+```php
+use Nette\Schema\Expect;
+
+$schema = Expect::structure([
+	'processRefund' => Expect::bool(),
+	'refundAmount' => Expect::int(),
+]);
+```
+
+このようにスキーマを定義することで、初めて見る人でもわかりやすくなったと思います。
+
+以下のデータを送って検証してみましょう。
+
+```php
+$data = [
+	'processRefund' => true,
+	'refundAmount' => 17,
+];
+
+$normalized = $processor->process($schema, $data); // OK, it passes
+```
+
+出力、つまり値`$normalized` は、オブジェクト`stdClass` です。出力を配列にしたい場合は、スキーマにキャストを追加します。 `Expect::structure([...])->castTo('array')`.
+
+構造体のすべての要素はオプションであり，デフォルト値`null` を持ちます．例
+
+```php
+$data = [
+	'refundAmount' => 17,
+];
+
+$normalized = $processor->process($schema, $data); // OK, it passes
+// $normalized = {'processRefund' => null, 'refundAmount' => 17}
+```
+
+例：デフォルト値が`null` であることは、入力データ`'processRefund' => null` で受け入れられることを意味しない。いいえ、入力はブーリアンでなければなりません。つまり、`true` または`false` だけです。`null` を`Expect::bool()->nullable()` 経由で明示的に許可しなければならないでしょう。
+
+項目は`Expect::bool()->required()` を使って必須とすることができる。`Expect::bool()->default(false)` を使ってデフォルト値を`false` に変更したり、`Expect::bool(false)` を使ってデフォルト値を間もなく変更したりします。
+
+そして、ブーリアン以外に`1` and `0` も受け入れたい場合はどうすればよいでしょうか。そこで、許容される値をリストアップし、これもbooleanに正規化することにします。
+
+```php
+$schema = Expect::structure([
+	'processRefund' => Expect::anyOf(true, false, 1, 0)->castTo('bool'),
+	'refundAmount' => Expect::int(),
+]);
+
+$normalized = $processor->process($schema, $data);
+is_bool($normalized->processRefund); // true
+```
+
+これでスキーマがどのように定義され、構造の個々の要素がどのように動作するかの基本がわかったと思います。これから、スキーマを定義する際に、他のすべての要素がどのように使用できるかを紹介します。
+
+
+データ型：type() .[#toc-data-types-type]
+-----------------------------------
+
+PHP の標準的なデータ型は、すべてスキーマにリストアップすることができます。
+
+```php
+Expect::string($default = null)
+Expect::int($default = null)
+Expect::float($default = null)
+Expect::bool($default = null)
+Expect::null()
+Expect::array($default = [])
+```
+
+そして、[Validators がサポートする |utils:en:validators#Expected Types]すべての型を`Expect::type('scalar')` あるいは`Expect::scalar()` のように省略した形式で指定します。また、クラス名やインターフェイス名も使用できます。例えば`Expect::type('AddressEntity')` のようになります。
+
+また、ユニオン表記も使用できます。
+
+```php
+Expect::type('bool|string|array')
+```
+
+デフォルト値は，`array` と`list` を除いて，常に`null` で，これは空の配列である．(リストは，ゼロから数値キーの昇順でインデックスが付けられた配列，つまり非結合型配列です)．
+
+
+値の配列： arrayOf() listOf() .[#toc-array-of-values-arrayof-listof]
+---------------------------------------------------------------
+
+配列はあまりにも一般的な構造なので、どのような要素を含むことができるかを正確に指定する方が便利です。例えば、要素が文字列のみ可能な配列。
+
+```php
+$schema = Expect::arrayOf('string');
+
+$processor->process($schema, ['hello', 'world']); // OK
+$processor->process($schema, ['a' => 'hello', 'b' => 'world']); // OK
+$processor->process($schema, ['key' => 123]); // ERROR: 123 is not a string
+```
+
+2 番目のパラメータで、キーを指定することができます (バージョン 1.2 以降)。
+
+```php
+$schema = Expect::arrayOf('string', 'int');
+
+$processor->process($schema, ['hello', 'world']); // OK
+$processor->process($schema, ['a' => 'hello']); // ERROR: 'a' is not int
+```
+
+リストはインデックス付き配列となります。
+
+```php
+$schema = Expect::listOf('string');
+
+$processor->process($schema, ['a', 'b']); // OK
+$processor->process($schema, ['a', 123]); // ERROR: 123 is not a string
+$processor->process($schema, ['key' => 'a']); // ERROR: is not a list
+$processor->process($schema, [1 => 'a', 0 => 'b']); // ERROR: is not a list
+```
+
+パラメータはスキーマでもよいので、次のように書きます。
+
+```php
+Expect::arrayOf(Expect::bool())
+```
+
+デフォルト値は空の配列です。default value を指定すると、渡されたデータにマージされます。これを無効にするには、`mergeDefaults(false)` (バージョン 1.1 以降) を使用します。
+
+
+列挙：anyOf() .[#toc-enumeration-anyof]
+------------------------------------
+
+`anyOf()` は、ある値が取りうる値やスキーマの集合です。以下は、`'a'`,`true`,`null` のいずれかになりうる要素の配列の書き方です。
+
+```php
+$schema = Expect::listOf(
+	Expect::anyOf('a', true, null),
+);
+
+$processor->process($schema, ['a', true, null, 'a']); // OK
+$processor->process($schema, ['a', false]); // ERROR: false does not belong there
+```
+
+列挙された要素はスキーマになることもできます。
+
+```php
+$schema = Expect::listOf(
+	Expect::anyOf(Expect::string(), true, null),
+);
+
+$processor->process($schema, ['foo', true, null, 'bar']); // OK
+$processor->process($schema, [123]); // ERROR
+```
+
+`anyOf()` メソッドはバリアントを配列としてではなく、個々のパラメータとして受け取ります。値の配列を渡すには、アンパッキングオペレータ`anyOf(...$variants)` を使ってください。
+
+デフォルト値は`null` です。最初の要素をデフォルトにするには、`firstIsDefault()` メソッドを使います。
+
+```php
+// default is 'hello'
+Expect::anyOf(Expect::string('hello'), true, null)->firstIsDefault();
+```
+
+
+構造体 .[#toc-structures]
+----------------------
+
+構造体は、定義されたキーを持つオブジェクトである。このキー => 値のペアをそれぞれ「プロパティ」と呼びます。
+
+構造体は配列やオブジェクトを受け入れ、オブジェクトを返す`stdClass` （`castTo('array')`, などで変更しない限り）。
+
+デフォルトでは、すべてのプロパティはオプションであり、デフォルト値は`null` です。必須プロパティは`required()` を使って定義できます。
+
+```php
+$schema = Expect::structure([
+	'required' => Expect::string()->required(),
+	'optional' => Expect::string(), // the default value is null
+]);
+
+$processor->process($schema, ['optional' => '']);
+// ERROR: option 'required' is missing
+
+$processor->process($schema, ['required' => 'foo']);
+// OK, returns {'required' => 'foo', 'optional' => null}
+```
+
+デフォルト値のみを持つプロパティを出力したくない場合は、`skipDefaults()` を使用します。
+
+```php
+$schema = Expect::structure([
+	'required' => Expect::string()->required(),
+	'optional' => Expect::string(),
+])->skipDefaults();
+
+$processor->process($schema, ['required' => 'foo']);
+// OK, returns {'required' => 'foo'}
+```
+
+`null` は`optional` プロパティのデフォルト値であるが、入力データでは許されない（値は文字列でなければならない）。`null` を受け入れるプロパティは、`nullable()` を使って定義します。
+
+```php
+$schema = Expect::structure([
+	'optional' => Expect::string(),
+	'nullable' => Expect::string()->nullable(),
+]);
+
+$processor->process($schema, ['optional' => null]);
+// ERROR: 'optional' expects to be string, null given.
+
+$processor->process($schema, ['nullable' => null]);
+// OK, returns {'optional' => null, 'nullable' => null}
+```
+
+デフォルトでは、入力データに余分な項目は存在できない。
+
+```php
+$schema = Expect::structure([
+	'key' => Expect::string(),
+]);
+
+$processor->process($schema, ['additional' => 1]);
+// ERROR: Unexpected item 'additional'
+```
+
+これは`otherItems()` で変更可能です。パラメータとして、各追加要素のスキーマを指定します。
+
+```php
+$schema = Expect::structure([
+	'key' => Expect::string(),
+])->otherItems(Expect::int());
+
+$processor->process($schema, ['additional' => 1]); // OK
+$processor->process($schema, ['additional' => true]); // ERROR
+```
+
+
+非推奨事項 .[#toc-deprecations]
+--------------------------
+
+非推奨のプロパティは `deprecated([string $message])`メソッドを使って非推奨にすることができます。非推奨の通知は`$processor->getWarnings()` で返されます。
+
+```php
+$schema = Expect::structure([
+	'old' => Expect::int()->deprecated('The item %path% is deprecated'),
+]);
+
+$processor->process($schema, ['old' => 1]); // OK
+$processor->getWarnings(); // ["The item 'old' is deprecated"]
+```
+
+
+範囲: min() max() .[#toc-ranges-min-max]
+--------------------------------------
+
+`min()` と`max()` を使って、配列の要素数を制限します。
+
+```php
+// array, at least 10 items, maximum 20 items
+Expect::array()->min(10)->max(20);
+```
+
+文字列の場合は、その長さを制限する。
+
+```php
+// string, at least 10 characters long, maximum 20 characters
+Expect::string()->min(10)->max(20);
+```
+
+数値の場合は、値を制限する。
+
+```php
+// integer, between 10 and 20 inclusive
+Expect::int()->min(10)->max(20);
+```
+
+もちろん、`min()` だけ、あるいは`max()` だけに言及することも可能です。
+
+```php
+// string, maximum 20 characters
+Expect::string()->max(20);
+```
+
+
+正規表現: pattern() .[#toc-regular-expressions-pattern]
+---------------------------------------------------
+
+`pattern()` を使うと、入力文字列の **全体** にマッチしなければならない正規表現を指定できます (つまり、入力文字列が`^` a `$` という文字でくくられたようなものです)。
+
+```php
+// just 9 digits
+Expect::string()->pattern('\d{9}');
+```
+
+
+カスタムアサーション: assert() .[#toc-custom-assertions-assert]
+-----------------------------------------------------
+
+`assert(callable $fn)` を使って、その他の制限を追加することができます。
+
+```php
+$countIsEven = fn($v) => count($v) % 2 === 0;
+
+$schema = Expect::arrayOf('string')
+	->assert($countIsEven); // the count must be even
+
+$processor->process($schema, ['a', 'b']); // OK
+$processor->process($schema, ['a', 'b', 'c']); // ERROR: 3 is not even
+```
+
+または
+
+```php
+Expect::string()->assert('is_file'); // the file must exist
+```
+
+各アサーションに独自の説明を追加することができます。これはエラーメッセージの一部となります。
+
+```php
+$schema = Expect::arrayOf('string')
+	->assert($countIsEven, 'Even items in array');
+
+$processor->process($schema, ['a', 'b', 'c']);
+// Failed assertion "Even items in array" for item with value array.
+```
+
+このメソッドは、繰り返しコールしてアサーションを追加することができます。
+
+
+オブジェクトへのマッピング: from() .[#toc-mapping-to-objects-from]
+-----------------------------------------------------
+
+クラスから構造体スキーマを生成することができます。例
+
+```php
+class Config
+{
+	public string $name;
+	public string|null $password;
+	public bool $admin = false;
+}
+
+$schema = Expect::from(new Config);
+
+$data = [
+	'name' => 'jeff',
+];
+
+$normalized = $processor->process($schema, $data);
+// $normalized instanceof Config
+// $normalized = {'name' => 'jeff', 'password' => null, 'admin' => false}
+```
+
+PHP 7.4 以降を使用している場合は、ネイティブタイプを使用することができます。
+
+```php
+class Config
+{
+	public string $name;
+	public ?string $password;
+	public bool $admin = false;
+}
+
+$schema = Expect::from(new Config);
+```
+
+匿名クラスもサポートされています。
+
+```php
+$schema = Expect::from(new class {
+	public string $name;
+	public ?string $password;
+	public bool $admin = false;
+});
+```
+
+クラス定義から得られる情報だけでは十分でない場合があるため、2番目のパラメータで要素にカスタムスキーマを追加することができます。
+
+```php
+$schema = Expect::from(new Config, [
+	'name' => Expect::string()->pattern('\w:.*'),
+]);
+```
+
+
+キャスト: castTo() .[#toc-casting-castto]
+-------------------------------------
+
+バリデーションに成功したデータをキャストすることができます。
+
+```php
+Expect::scalar()->castTo('string');
+```
+
+PHP のネイティブな型だけでなく、クラスへのキャストも可能です。
+
+```php
+Expect::scalar()->castTo('AddressEntity');
+```
+
+
+正規化: before() .[#toc-normalization-before]
+------------------------------------------
+
+バリデーションの前に、`before()` メソッドを使用してデータを正規化することができます。例として、文字列の配列でなければならない要素(例:³³)があるとします。 `['a', 'b', 'c']`が、文字列`a b c` という形式で入力を受け取るとします。
+
+```php
+$explode = fn($v) => explode(' ', $v);
+
+$schema = Expect::arrayOf('string')
+	->before($explode);
+
+$normalized = $processor->process($schema, 'a b c');
+// OK, returns ['a', 'b', 'c']
+```
+
+{{leftbar: nette:en:@menu-topics}}

@@ -1,0 +1,260 @@
+オートワイヤリング
+*********
+
+.[perex]
+Autowiringは、コンストラクタなどに自動的にサービスを渡すことができる優れた機能で、私たちはサービスを書く必要が全くありません。時間を大幅に節約できます。
+
+これにより、サービス定義を書く際に、大半の引数を省略することができます。代わりに
+
+```neon
+services:
+	articles: Model\ArticleRepository(@database, @cache.storage)
+```
+
+と書くだけです。
+
+```neon
+services:
+	articles: Model\ArticleRepository
+```
+
+自動配線は型によって駆動されるので、`ArticleRepository` クラスは以下のように定義する必要があります。
+
+```php
+namespace Model;
+
+class ArticleRepository
+{
+	public function __construct(\PDO $db, \Nette\Caching\Storage $storage)
+	{}
+}
+```
+
+autowiring を使用するには、コンテナ内の各タイプに対して **ただ1つのサービス** が必要です。それ以上あると、autowiring はどれを渡せばいいのかわからなくなり、例外を投げ出してしまいます。
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+	tempDb: PDO('sqlite::memory:')
+	articles: Model\ArticleRepository  # THROWS EXCEPTION, both mainDb and tempDb matches
+```
+
+解決策としては、autowiring をバイパスしてサービス名を明示的に指定する方法があります (例:`articles: Model\ArticleRepository(@mainDb)`)。しかし、1つのサービス、または最初のサービスの自動配線を[無効に |#Disabled autowiring]する方が便利[です |#Preferred Autowiring]。
+
+
+自動配線を無効にする .[#toc-disabled-autowiring]
+--------------------------------------
+
+`autowired: no` オプションを使用することで、サービスの自動配線を無効にすることができます。
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+		autowired: false                 # removes tempDb from autowiring
+
+	articles: Model\ArticleRepository    # therefore passes mainDb to constructor
+```
+
+`articles` サービスは`mainDb` サービスしか見ていないので、 コンストラクタに渡すことのできる`PDO` タイプの一致するサービスが二つある (つまり`mainDb` と`tempDb`) という例外を投げません。
+
+.[note]
+Nette で自動配線を設定すると、Symfony の`autowire: false` オプションで自動配線をサービスのコンストラクタ引数に使用しないように指定した場合とは異なる動作をします。
+Nette では、コンストラクタの引数であろうと他のメソッドであろうと、自動配線は常に使用されます。`autowired: false` オプションは、自動配線を使ってサービスのインスタンスをどこにも渡してはいけないというものです。
+
+
+望ましい自動配線 .[#toc-preferred-autowiring]
+-------------------------------------
+
+同じタイプのサービスが複数あり、そのうちの1つが`autowired` のオプションを持っている場合、そのサービスが優先されます。
+
+```neon
+services:
+	mainDb:
+		create: PDO(%dsn%, %user%, %password%)
+		autowired: PDO    # makes it preferred
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+
+	articles: Model\ArticleRepository
+```
+
+`articles` サービスは、一致する`PDO` サービスが2つある (すなわち`mainDb` と`tempDb`)という例外を投げず、優先されるサービス、すなわち`mainDb` を使用します。
+
+
+サービスのコレクション .[#toc-collection-of-services]
+------------------------------------------
+
+Autowiring は、特定の型のサービスの配列を渡すこともできます。PHP は配列の項目の型をネイティブに表記することができないので、`array` の型に加えて、`ClassName[]` のように項目の型を指定した phpDoc コメントを追加する必要があります。
+
+```php
+namespace Model;
+
+class ShipManager
+{
+	/**
+	 * @param Shipper[] $shippers
+	 */
+	public function __construct(array $shippers)
+	{}
+}
+```
+
+DI コンテナは、指定した型に対応するサービスの配列を自動的に渡します。DI コンテナは、指定した型に対応するサービスの配列を自動的に渡します。自動配線が無効になっているサービスは省略されます。
+
+phpDoc のコメントの形式を制御できない場合は、 サービスの配列を直接設定に渡すこともできます。 [`typed()` |services#Special Functions].
+
+
+スカラー引数 .[#toc-scalar-arguments]
+-------------------------------
+
+Autowiring は、オブジェクトとオブジェクトの配列のみを渡すことができます。スカラー引数（文字列、数値、ブール値など）は[設定に書きます |services#Arguments]。
+代替案としては、スカラー値（または複数の値）をオブジェクトとしてカプセル化した[settings-object |best-practices:en:passing-settings-to-presenters]を作成し、それを autowiring を使って再度渡すことができます。
+
+```php
+class MySettings
+{
+	public function __construct(
+		// readonly can be used since PHP 8.1
+		public readonly bool $value,
+	)
+	{}
+}
+```
+
+サービスを作成するには，コンフィギュレーションに追加します．
+
+```neon
+services:
+	- MySettings('any value')
+```
+
+すべてのクラスは自動配線によってそれを要求します。
+
+
+オートワイヤリングの絞り込み .[#toc-narrowing-of-autowiring]
+----------------------------------------------
+
+個々のサービスにおいて、オートワイヤリングは特定のクラスやインターフェースに絞り込むことができます。
+
+通常、自動配線では、サービスが対応する型を持つ各メソッドパラメータにサービスを 渡す。絞り込みとは、メソッドパラメータに指定された型がサービスを渡すために満たすべき条件を指定することである。
+
+例を挙げてみよう。
+
+```php
+class ParentClass
+{}
+
+class ChildClass extends ParentClass
+{}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+すべてサービスとして登録すると、自動配線は失敗してしまいます。
+
+```neon
+services:
+	parent: ParentClass
+	child: ChildClass
+	parentDep: ParentDependent  # THROWS EXCEPTION, both parent and child matches
+	childDep: ChildDependent    # passes the service 'child' to the constructor
+```
+
+`parentDep` サービスは例外`Multiple services of type ParentClass found: parent, child` を投げます。なぜなら`parent` と`child` の両方がそのコンストラクタに適合し、autowiring はどちらを選ぶべきかの判断を下すことができないからです。
+
+したがって、サービス`child` の自動配線は`ChildClass` に絞られます。
+
+```neon
+services:
+	parent: ParentClass
+	child:
+		create: ChildClass
+		autowired: ChildClass   # alternative: 'autowired: self'
+
+	parentDep: ParentDependent  # THROWS EXCEPTION, the 'child' can not be autowired
+	childDep: ChildDependent    # passes the service 'child' to the constructor
+```
+
+`parentDep` サービスは、現在唯一の一致するオブジェクトであるため、`parentDep` サービスのコンストラクタに渡されます。`child` サービスは自動配線で渡されなくなりました。はい、`child` サービスはまだ`ParentClass` 型ですが、パラメータ型に与えられた狭義の条件はもはや適用されません。つまり、`ParentClass` *is a supertype* of`ChildClass` はもはや真ではありません。
+
+`child` の場合，`self` は現在のサービスタイプを意味するので，`autowired: ChildClass` は`autowired: self` と書くことができる．
+
+`autowired` のキーには、いくつかのクラスやインターフェイスを配列として含めることができます。
+
+```neon
+autowired: [BarClass, FooInterface]
+```
+
+例題にインターフェイスを追加してみましょう。
+
+```php
+interface FooInterface
+{}
+
+interface BarInterface
+{}
+
+class ParentClass implements FooInterface
+{}
+
+class ChildClass extends ParentClass implements BarInterface
+{}
+
+class FooDependent
+{
+	function __construct(FooInterface $obj)
+	{}
+}
+
+class BarDependent
+{
+	function __construct(BarInterface $obj)
+	{}
+}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+`child` のサービスを制限しない場合、`FooDependent`,`BarDependent`,`ParentDependent`,`ChildDependent` のすべてのクラスのコンストラクタに収まり、 autowiring はそこにそれを渡します。
+
+しかし、`autowired: ChildClass` (または`self`) を使って`ChildClass` に自動配線を絞ると、`ChildDependent` のコンストラクタにしか渡らなくなります。これは、`ChildClass` 型の引数が必要で、`ChildClass` *型*`ChildClass` であるためです。他のパラメータに指定された型は`ChildClass` のスーパーセットではないので、サービスは渡されません。
+
+`autowired: ParentClass` を使って`ParentClass` に制限すると、autowiring は`ChildDependent` コンストラクタに再び渡します (必要な型`ChildClass` は`ParentClass` のスーパーセットなので)。また、必要な型`ParentClass` も一致するので`ParentDependent` コンストラクタにも渡します。
+
+`FooInterface` に限定すると、`ParentDependent` (要求される型`ParentClass` は`FooInterface` の上位型) と`ChildDependent` にはまだ自動配線されますが、さらに`FooDependent` のコンストラクタには渡されますが、`BarInterface` は`FooInterface` の上位型ではないので、`BarDependent` には渡りません。
+
+```neon
+services:
+	child:
+		create: ChildClass
+		autowired: FooInterface
+
+	fooDep: FooDependent        # passes the service child to the constructor
+	barDep: BarDependent        # THROWS EXCEPTION, no service would pass
+	parentDep: ParentDependent  # passes the service child to the constructor
+	childDep: ChildDependent    # passes the service child to the constructor
+```

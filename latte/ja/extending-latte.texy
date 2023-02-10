@@ -1,0 +1,285 @@
+エクステンド・ラテ
+*********
+
+.[perex]
+Latteは非常に柔軟性が高く、様々な方法で拡張することができます：カスタムフィルタ、関数、タグ、ローダーなどを追加することができます。その方法をご紹介します。
+
+この章では、Latteを拡張するための様々な方法を説明します。もしあなたが、変更した内容を別のプロジェクトで再利用したい、あるいは他の人と共有したいのであれば、次に[いわゆる拡張機能を作成 |creating-extension]する必要があります。
+
+
+ローマに続く道はいくつある？ .[#toc-how-many-roads-lead-to-rome]
+==================================================
+
+ラテの拡張方法の中にはブレンドできるものもあるので、まずはそれぞれの違いを説明してみよう。例として、*Lorem ipsum* ジェネレータを実装してみましょう。ジェネレータには、生成する単語の数が渡されます。
+
+Latte言語の主要な構成要素はタグです。このタグを使ってLatteを拡張することにより，ジェネレータを実装することができます．
+
+```latte
+{lipsum 40}
+```
+
+タグは素晴らしい働きをするでしょう。しかし、タグの形をしたジェネレータは式の中で使うことができないので、柔軟性に欠けるかもしれません。ところで、実際には、タグを生成する必要はほとんどありません。タグは拡張するためのより複雑な方法なので、これは良いニュースです。
+
+では、タグの代わりにフィルタを作ってみましょう。
+
+```latte
+{=40|lipsum}
+```
+
+これも有効なオプションです。しかし、フィルタは渡された値を別のものに変換する必要があります。ここでは、生成された単語の数を示す値`40` を、変換したい値としてではなく、フィルタの引数として使っています。
+
+そこで、関数を使ってみよう。
+
+```latte
+{lipsum(40)}
+```
+
+これだけです。この特定の例では、関数を作成することが理想的な拡張ポイントです。例えば、式が受け入れられるところならどこでもそれを呼び出すことができます。
+
+```latte
+{var $text = lipsum(40)}
+```
+
+
+フィルター .[#toc-filters]
+=====================
+
+フィルタの名前と関数などのPHP呼び出し可能なものを登録することでフィルタを作成します。
+
+```php
+$latte = new Latte\Engine;
+$latte->addFilter('shortify', fn(string $s) => mb_substr($s, 0, 10)); // shortens the text to 10 characters
+```
+
+この場合、フィルタが追加のパラメータを受け取るようにするのがよいでしょう。
+
+```php
+$latte->addFilter('shortify', fn(string $s, int $len = 10) => mb_substr($s, 0, $len));
+```
+
+このようなテンプレートで使用します。
+
+```latte
+<p>{$text|shortify}</p>
+<p>{$text|shortify:100}</p>
+```
+
+見ての通り、この関数は次の引数として、パイプ`|` as the first argument and the arguments passed to the filter after `:` の前にあるフィルタの左側を受け取ります。
+
+もちろん、フィルタを表す関数は任意の数のパラメータを受け取ることができ、可変長のパラメータもサポートされています。
+
+
+クラスを使ったフィルタ .[#toc-filters-using-the-class]
+-------------------------------------------
+
+フィルタを定義する第二の方法は、[クラスを |develop#Parameters as a class]使うことです。`TemplateFilter` 属性でメソッドを作成します。
+
+```php
+class TemplateParameters
+{
+	public function __construct(
+		// parameters
+	) {}
+
+	#[Latte\Attributes\TemplateFilter]
+	public function shortify(string $s, int $len = 10): string
+	{
+		return mb_substr($s, 0, $len);
+	}
+}
+
+$params = new TemplateParameters(/* ... */);
+$latte->render('template.latte', $params);
+```
+
+PHP 7.x および Latte 2.x を使用している場合は、属性のかわりに`/** @filter */` アノテーションを使用します。
+
+
+フィルターローダー .[#toc-filter-loader]
+-------------------------------
+
+個々のフィルタを登録する代わりに、いわゆるローダーを作成することができます。これは、フィルタ名を引数として呼び出され、そのPHP callable、あるいはnullを返す関数です。
+
+```php
+$latte->addFilterLoader([new Filters, 'load']);
+
+
+class Filters
+{
+	public function load(string $filter): ?callable
+	{
+		if (in_array($filter, get_class_methods($this))) {
+			return [$this, $filter];
+		}
+		return null;
+	}
+
+	public function shortify($s, $len = 10)
+	{
+		return mb_substr($s, 0, $len);
+	}
+
+	// ...
+}
+```
+
+
+コンテキスト・フィルタ .[#toc-contextual-filters]
+--------------------------------------
+
+コンテキストフィルタは、古典的なフィルタと同様に、最初のパラメータにオブジェクト[api:Latte\Runtime\FilterInfo] を、その後に他のパラメータを受け付けるフィルタです。登録方法は同じで、Latte自身が文脈的なフィルタであることを認識します。
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('foo', function (FilterInfo $info, string $str): string {
+	// ...
+});
+```
+
+コンテキストフィルタは、`$info->contentType` 変数で受け取ったコンテントタイプを検知して変更することができます。もしフィルタが変数上で古典的に呼ばれた場合（例えば`{$var|foo}` ）、`$info->contentType` には null が入ります。
+
+フィルタはまず入力文字列のcontent-typeがサポートされているかどうかをチェックします。また、それを変更することもできます。テキスト (または null) を受け取り、HTML を返すフィルタの例。
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('money', function (FilterInfo $info, float $amount): string {
+	// first we check if the input's content-type is text
+	if (!in_array($info->contentType, [null, ContentType::Text])) {
+		throw new Exception("Filter |money used in incompatible content type $info->contentType.");
+	}
+
+	// change content-type to HTML
+	$info->contentType = ContentType::Html;
+	return "<i>$num Kč</i>";
+});
+```
+
+.[note]
+この場合、フィルタはデータの正しいエスケープを保証しなければなりません。
+
+[ブロックの |tags#block]上で使われるすべてのフィルタ (例えば `{block|foo}.. .{/block}`のように) ブロック上で使われるフィルタはすべて文脈に沿ったものでなければなりません。
+
+
+関数 .[#toc-functions]
+====================
+
+デフォルトでは、サンドボックスで無効にされない限り、すべてのPHPネイティブ関数がLatteで使用可能です。しかし、独自の関数を定義することも可能です。それらはネイティブ関数をオーバーライドすることができます。
+
+関数名と任意の PHP callable を登録することで、関数を作成します。
+
+```php
+$latte = new Latte\Engine;
+$latte->addFunction('random', function (...$args) {
+	return $args[array_rand($args)];
+});
+```
+
+その場合の使用法は、PHP の関数をコールする場合と同じです。
+
+```latte
+{random(apple, orange, lemon)} // prints for example: apple
+```
+
+
+クラスを使った関数 .[#toc-functions-using-the-class]
+-------------------------------------------
+
+関数を定義する第二の方法は、[クラスを |develop#Parameters as a class]使用することです。`TemplateFunction` 属性でメソッドを作成します。
+
+```php
+class TemplateParameters
+{
+	public function __construct(
+		// parameters
+	) {}
+
+	#[Latte\Attributes\TemplateFunction]
+	public function random(...$args)
+	{
+		return $args[array_rand($args)];
+	}
+}
+
+$params = new TemplateParameters(/* ... */);
+$latte->render('template.latte', $params);
+```
+
+PHP 7.x および Latte 2.x を使用している場合は、属性の代わりに`/** @function */` というアノテーションを使用します。
+
+
+ローダー .[#toc-loaders]
+====================
+
+ローダーは、ファイルシステムなどのソースからテンプレートをロードする役割を果たします。ローダーは`setLoader()` メソッドで設定します。
+
+```php
+$latte->setLoader(new MyLoader);
+```
+
+組み込みのローダーは次のとおりです。
+
+
+FileLoader .[#toc-fileloader]
+-----------------------------
+
+デフォルトのローダーです。ファイルシステムからテンプレートをロードします。
+
+ベースディレクトリを設定することで、ファイルへのアクセスを制限することができます。
+
+```php
+$latte->setLoader(new Latte\Loaders\FileLoader($templateDir));
+$latte->render('test.latte');
+```
+
+
+StringLoader .[#toc-stringloader]
+---------------------------------
+
+文字列からテンプレートをロードします。このローダーはユニットテストのために非常に便利です。また、すべてのテンプレートを単一の PHP ファイルに保存することが理にかなっているような小さなプロジェクトにも使用できます。
+
+```php
+$latte->setLoader(new Latte\Loaders\StringLoader([
+	'main.file' => '{include other.file}',
+	'other.file' => '{if true} {$var} {/if}',
+]));
+
+$latte->render('main.file');
+```
+
+簡略化された使用方法。
+
+```php
+$template = '{if true} {$var} {/if}';
+$latte->setLoader(new Latte\Loaders\StringLoader);
+$latte->render($template);
+```
+
+
+カスタムローダーの作成 .[#toc-creating-a-custom-loader]
+--------------------------------------------
+
+Loader は、[api:Latte\Loader] インターフェースを実装したクラスです。
+
+
+タグ .[#toc-tags]
+===============
+
+テンプレートエンジンの最も興味深い機能の1つは、タグを使って新しい言語構造を定義する機能です。また、より複雑な機能であり、Latteが内部でどのように動作しているかを理解する必要があります。
+
+しかし、ほとんどの場合、このタグは必要ありません。
+- もし出力を生成するのであれば、[関数で |#functions]代用できます。
+- 入力を加工して返すのであれば、[filterを |#filters]使う。
+- テキストを編集するのであれば、そのテキストを [`{block}` |tags#block]タグで囲み、[フィルタを |#Contextual Filters]使う
+- 何も出力せず、ただ関数を呼び出すのであれば、その関数を [`{do}` |tags#do]
+
+それでもまだタグを作りたいなら、すばらしいことです。すべての要点は、[Creating an Extensionに |creating-extension]記載されています。
+
+
+コンパイラのパス .[#toc-compiler-passes]
+================================
+
+コンパイラパスとは，ASTを修正したり，AST内の情報を収集したりする関数です．例えばLatteでは，サンドボックスがこのように実装されています．ASTのすべてのノードを走査して，関数やメソッドの呼び出しを見つけ，制御された呼び出しに置き換えます．
+
+タグと同様、この機能はより複雑であり、Latteがどのように動作しているかを理解する必要があります。重要なことは「[拡張機能の作成 |creating-extension]」の章に書かれています。

@@ -1,0 +1,550 @@
+Exploratorul de baze de date
+****************************
+<div class=perex>
+
+
+Nette Database Explorer simplifică în mod semnificativ recuperarea datelor din baza de date fără a scrie interogări SQL.
+
+- utilizează interogări eficiente
+- nu se transmit date în mod inutil
+- dispune de o sintaxă elegantă
+
+</div>
+
+Pentru a utiliza Database Explorer, începeți cu un tabel - apelați `table()` pe un obiect [api:Nette\Database\Explorer]. Cel mai simplu mod de a obține o instanță de obiect contextual este [descris aici |core#Connection and Configuration] sau, pentru cazul în care Nette Database Explorer este utilizat ca instrument de sine stătător, acesta poate fi [creat manual |#Creating Explorer Manually].
+
+```php
+$books = $explorer->table('book'); // numele tabelului db este 'book'
+```
+
+Apelul returnează o instanță a obiectului [Selection |api:Nette\Database\Table\Selection], care poate fi iterată pentru a prelua toate cărțile. Fiecare element (un rând) este reprezentat de o instanță de [ActiveRow |api:Nette\Database\Table\ActiveRow], cu date alocate proprietăților sale:
+
+```php
+foreach ($books as $book) {
+	echo $book->title;
+	echo $book->author_id;
+}
+```
+
+Obținerea unui singur rând specific se face prin metoda `get()`, care returnează direct o instanță ActiveRow.
+
+```php
+$book = $explorer->table('book')->get(2); // returnează cartea cu id 2
+echo $book->title;
+echo $book->author_id;
+```
+
+Să aruncăm o privire la un caz de utilizare obișnuită. Aveți nevoie să obțineți cărți și autorii acestora. Este o relație comună 1:N. Soluția frecvent utilizată este de a prelua datele utilizând o singură interogare SQL cu îmbinări de tabele. A doua posibilitate este de a prelua datele separat, de a executa o interogare pentru a obține cărți și apoi de a obține un autor pentru fiecare carte printr-o altă interogare (de exemplu, în ciclul foreach). Acest lucru ar putea fi ușor de optimizat pentru a rula doar două interogări, una pentru cărți și alta pentru autorii necesari - și exact așa procedează Nette Database Explorer.
+
+În exemplele de mai jos, vom lucra cu schema bazei de date din figură. Există legături OneHasMany (1:N) (autorul cărții `author_id` și posibilul traducător `translator_id`, care poate fi `null`) și legături ManyHasMany (M:N) între carte și etichetele acesteia.
+
+[Un exemplu, inclusiv o schemă, se găsește pe GitHub |https://github.com/nette-examples/books].
+
+[* db-schema-1-.webp *] *** Structura bazei de date utilizată în exemplele .<>
+
+Următorul cod enumeră numele autorului pentru fiecare carte și toate etichetele acesteia. Vom [discuta imediat |#Working with relationships] cum funcționează acest lucru la nivel intern.
+
+```php
+$books = $explorer->table('book');
+
+foreach ($books as $book) {
+	echo 'title:      ' . $book->title;
+	echo 'written by: ' . $book->author->name; // $book->author este un rând din tabelul 'author'
+
+	echo 'tags: ';
+	foreach ($book->related('book_tag') as $bookTag) {
+		echo $bookTag->tag->name . ', '; // $bookTag->tag este un rând din tabelul 'tag'
+	}
+}
+```
+
+Veți fi mulțumiți de cât de eficient funcționează stratul de bază de date. Exemplul de mai sus face un număr constant de cereri care arată astfel:
+
+```sql
+SELECT * FROM `book`
+SELECT * FROM `author` WHERE (`author`.`id` IN (11, 12))
+SELECT * FROM `book_tag` WHERE (`book_tag`.`book_id` IN (1, 4, 2, 3))
+SELECT * FROM `tag` WHERE (`tag`.`id` IN (21, 22, 23))
+```
+
+Dacă folosiți [memoria cache |caching:] (activată în mod implicit), nicio coloană nu va fi interogată în mod inutil. După prima interogare, memoria cache va stoca numele coloanelor utilizate, iar Nette Database Explorer va rula interogări numai cu coloanele necesare:
+
+```sql
+SELECT `id`, `title`, `author_id` FROM `book`
+SELECT `id`, `name` FROM `author` WHERE (`author`.`id` IN (11, 12))
+SELECT `book_id`, `tag_id` FROM `book_tag` WHERE (`book_tag`.`book_id` IN (1, 4, 2, 3))
+SELECT `id`, `name` FROM `tag` WHERE (`tag`.`id` IN (21, 22, 23))
+```
+
+
+Selecții .[#toc-selections]
+===========================
+
+Vedeți posibilitățile de filtrare și restricționare a rândurilor [api:Nette\Database\Table\Selection]:
+
+.[language-php]
+| `$table->where($where[, $param[, ...]])` | Setați WHERE utilizând AND ca un liant dacă sunt furnizate două sau mai multe condiții
+| `$table->whereOr($where)` | Set WHERE care utilizează OR ca liant dacă sunt furnizate două sau mai multe condiții.
+| `$table->order($columns)` | Setați ORDER BY, poate fi o expresie `('column DESC, id DESC')`
+| `$table->select($columns)` | Setați coloanele recuperate, poate fi o expresie `('col, MD5(col) AS hash')`
+| `$table->limit($limit[, $offset])` | Setați LIMIT și OFFSET
+| `$table->page($page, $itemsPerPage[, &$lastPage])` | Activează paginarea
+| `$table->group($columns)` | Setează GROUP BY
+| `$table->having($having)` | Setează HAVING
+
+Se poate utiliza o interfață fluidă, de exemplu `$table->where(...)->order(...)->limit(...)`. Mai multe condiții `where` sau `whereOr` sunt conectate cu ajutorul operatorului `AND`.
+
+
+unde() .[#toc-where]
+--------------------
+
+Nette Database Explorer poate adăuga automat operatorii necesari pentru valorile transmise:
+
+.[language-php]
+| `$table->where('field', $value)` | field = $value
+| `$table->where('field', null)` | field IS NULL
+| `$table->where('field > ?', $val)` | field > $val
+| `$table->where('field', [1, 2])` | field IN (1, 2)
+| `$table->where('id = ? OR name = ?', 1, $name)` | id = 1 OR name = 'Jon Snow'
+| `$table->where('field', $explorer->table($tableName))` | field IN (SELECT $primary FROM $tableName)
+| `$table->where('field', $explorer->table($tableName)->select('col'))` | field IN (SELECT col FROM $tableName)
+
+Puteți furniza spații libere chiar și fără operatorul de coloană. Aceste apeluri sunt identice.
+
+```php
+$table->where('id = ? OR id = ?', 1, 2);
+$table->where('id ? OR id ?', 1, 2);
+```
+
+Această caracteristică permite generarea operatorului corect pe baza valorii:
+
+```php
+$table->where('id ?', 2);    // id = 2
+$table->where('id ?', null); // id IS NULL
+$table->where('id', $ids);   // id IN (...)
+```
+
+Selecția gestionează corect și condițiile negative, funcționează și pentru array-uri goale:
+
+```php
+$table->where('id', []);       // id IS NULL AND FALSE
+$table->where('id NOT', []);   // id IS NULL OR TRUE
+$table->where('NOT (id ?)', $ids);  // NOT (id IS NULL AND FALSE)
+
+// acest lucru va genera o excepție, această sintaxă nu este acceptată.
+$table->where('NOT id ?', $ids);
+```
+
+
+whereOr() .[#toc-whereor]
+-------------------------
+
+Exemplu de utilizare fără parametri:
+
+```php
+// WHERE (user_id IS NULL) OR (SUM(`field1`) > SUM(`field2`))
+$table->whereOr([
+	'user_id IS NULL',
+	'SUM(field1) > SUM(field2)',
+]);
+```
+
+Se utilizează parametrii. Dacă nu specificați un operator, Nette Database Explorer îl va adăuga automat pe cel corespunzător:
+
+```php
+// WHERE (`field1` IS NULL) OR (`field2` IN (3, 5)) OR (`amount` > 11)
+$table->whereOr([
+	'field1' => null,
+	'field2' => [3, 5],
+	'amount >' => 11,
+]);
+```
+
+Cheia poate conține o expresie care să conțină semne de întrebare wildcard și apoi să treacă parametrii în valoare:
+
+```php
+// WHERE (`id` > 12) OR (ROUND(`id`, 5) = 3)
+$table->whereOr([
+	'id > ?' => 12,
+	'ROUND(id, ?) = ?' => [5, 3],
+]);
+```
+
+
+order() .[#toc-order]
+---------------------
+
+Exemple de utilizare:
+
+```php
+$table->order('field1');               // ORDER BY `field1`
+$table->order('field1 DESC, field2');  // ORDER BY `field1` DESC, `field2`
+$table->order('field = ? DESC', 123);  // ORDER BY `field` = 123 DESC
+```
+
+
+select() .[#toc-select]
+-----------------------
+
+Exemple de utilizare:
+
+```php
+$table->select('field1');                 // SELECT `field1`
+$table->select('col, UPPER(col) AS abc'); // SELECT `col`, UPPER(`col`) AS abc
+$table->select('SUBSTR(title, ?)', 3);    // SELECT SUBSTR(`title`, 3)
+```
+
+
+limit() .[#toc-limit]
+---------------------
+
+Exemple de utilizare:
+
+```php
+$table->limit(1);     // LIMIT 1
+$table->limit(1, 10); // LIMIT 1 OFFSET 10
+```
+
+
+page() .[#toc-page]
+-------------------
+
+O modalitate alternativă de a seta limita și decalajul:
+
+```php
+$page = 5;
+$itemsPerPage = 10;
+$table->page($page, $itemsPerPage); // LIMIT 10 OFFSET 40
+```
+
+Obținerea ultimului număr de pagină, trecut în variabila `$lastPage`:
+
+```php
+$table->page($page, $itemsPerPage, $lastPage);
+```
+
+
+group() .[#toc-group]
+---------------------
+
+Exemple de utilizare:
+
+```php
+$table->group('field1');          // GROUP BY `field1`
+$table->group('field1, field2');  // GROUP BY `field1`, `field2`
+```
+
+
+having() .[#toc-having]
+-----------------------
+
+Exemple de utilizare:
+
+```php
+$table->having('COUNT(items) >', 100);  // HAVING COUNT(`items`) > 100
+```
+
+
+Filtrarea după o altă valoare de tabel .[#toc-joining-key]
+----------------------------------------------------------
+
+Destul de des aveți nevoie să filtrați rezultatele în funcție de o condiție care implică un alt tabel din baza de date. Aceste tipuri de condiții necesită îmbinarea tabelelor. Cu toate acestea, nu mai este nevoie să le scrieți.
+
+Să spunem că trebuie să obțineți toate cărțile al căror nume de autor este "Jon". Tot ce trebuie să scrieți este cheia de îmbinare a relației și numele coloanei din tabelul îmbinat. Cheia de îmbinare este derivată din coloana care se referă la tabelul pe care doriți să îl îmbinați. În exemplul nostru (a se vedea schema db), aceasta este coloana `author_id`, și este suficient să se utilizeze doar prima parte a acesteia - `author` (sufixul `_id` poate fi omis). `name` este o coloană din tabelul `author` pe care dorim să o utilizăm. O condiție pentru traducătorul de cărți (care este legată de coloana `translator_id` ) poate fi creată la fel de ușor.
+
+```php
+$books = $explorer->table('book');
+$books->where('author.name LIKE ?', '%Jon%');
+$books->where('translator.name', 'David Grudl');
+```
+
+Logica cheilor de îmbinare este determinată de implementarea [Convențiilor |api:Nette\Database\Conventions]. Vă încurajăm să utilizați [DiscoveredConventions |api:Nette\Database\Conventions\DiscoveredConventions], care analizează cheile străine și vă permite să lucrați cu ușurință cu aceste relații.
+
+Relația dintre carte și autorul acesteia este 1:N. Relația inversă este, de asemenea, posibilă. Noi o numim **backjoin**. Aruncați o privire la un alt exemplu. Dorim să obținem toți autorii care au scris mai mult de 3 cărți. Pentru a inversa îmbinarea, folosim instrucțiunea `:` (colon). Colon means that the joined relationship means hasMany (and it's quite logical too, as two dots are more than one dot). Unfortunately, the Selection class isn't smart enough, so we have to help with the aggregation and provide a `GROUP BY`, iar condiția trebuie să fie scrisă sub forma unei instrucțiuni `HAVING`.
+
+```php
+$authors = $explorer->table('author');
+$authors->group('author.id')
+	->having('COUNT(:book.id) > 3');
+```
+
+Poate ați observat că expresia de alăturare se referă la carte, dar nu este clar dacă ne alăturăm prin `author_id` sau `translator_id`. În exemplul de mai sus, Selection se alătură prin coloana `author_id` deoarece a fost găsită o potrivire cu tabelul sursă - tabelul `author`. În cazul în care nu ar exista o astfel de potrivire și ar exista mai multe posibilități, Nette ar lansa [AmbiguousReferenceKeyException |api:Nette\Database\Conventions\AmbiguousReferenceKeyException].
+
+Pentru a realiza o îmbinare prin intermediul coloanei `translator_id`, furnizați un parametru opțional în cadrul expresiei de îmbinare.
+
+```php
+$authors = $explorer->table('author');
+$authors->group('author.id')
+	->having('COUNT(:book(translator).id) > 3');
+```
+
+Să ne uităm la câteva expresii de îmbinare mai dificile.
+
+Am dori să găsim toți autorii care au scris ceva despre PHP. Toate cărțile au etichete, deci ar trebui să selectăm acei autori care au scris o carte cu eticheta PHP.
+
+```php
+$authors = $explorer->table('author');
+$authors->where(':book:book_tags.tag.name', 'PHP')
+	->group('author.id')
+	->having('COUNT(:book:book_tags.tag.id) > 0');
+```
+
+
+Interogări agregate .[#toc-aggregate-queries]
+---------------------------------------------
+
+| `$table->count('*')` | Obțineți numărul de rânduri
+| `$table->count("DISTINCT $column")` | Obține numărul de valori distincte
+| `$table->min($column)` | Obține valoarea minimă
+| `$table->max($column)` | Obține valoarea maximă
+| `$table->sum($column)` | Obține suma tuturor valorilor
+| `$table->aggregation("GROUP_CONCAT($column)")` | Rulați orice funcție de agregare
+
+.[caution]
+Metoda `count()` fără niciun parametru specificat selectează toate înregistrările și returnează dimensiunea tabloului, ceea ce este foarte ineficient. De exemplu, dacă trebuie să calculați numărul de rânduri pentru paginare, specificați întotdeauna primul argument.
+
+
+Evadare și citare .[#toc-escaping-quoting]
+==========================================
+
+Database Explorer este inteligent și evită parametrii și identificatorii de ghilimele pentru dumneavoastră. Totuși, trebuie respectate aceste reguli de bază:
+
+- cuvintele cheie, funcțiile, procedurile trebuie să fie scrise cu majuscule
+- coloanele și tabelele trebuie să fie scrise cu minuscule
+- treceți variabilele ca parametri, nu concatenate
+
+```php
+->where('name like ?', 'John'); // WRONG! generează: `name` `like` ?
+->where('name LIKE ?', 'John'); // CORECT
+
+->where('KEY = ?', $value); // WRONG! KEY este un cuvânt cheie
+->where('key = ?', $value); // CORECT. generează: `key` = ?
+
+->where('name = ' . $name); // GREȘIT! injecție sql!
+->where('name = ?', $name); // CORECT
+
+->select('DATE_FORMAT(created, "%d.%m.%Y")'); // WRONG! treceți variabile ca parametri, nu concatenați
+->select('DATE_FORMAT(created, ?)', '%d.%m.%Y'); // CORECT
+```
+
+.[warning]
+Utilizarea greșită poate produce găuri de securitate
+
+
+Preluarea datelor .[#toc-fetching-data]
+=======================================
+
+| `foreach ($table as $id => $row)` | Iterați peste toate rândurile din rezultat
+| `$row = $table->get($id)` | Obține un singur rând cu ID $id din tabel
+| `$row = $table->fetch()` | Obține următorul rând din rezultat
+| `$array = $table->fetchPairs($key, $value)` | Preluarea tuturor valorilor în matricea asociativă
+| `$array = $table->fetchPairs($key)` | Preluarea tuturor rândurilor în matricea asociativă
+| `count($table)` | Obține numărul de rânduri din setul de rezultate
+
+
+Inserare, actualizare și ștergere .[#toc-insert-update-delete]
+==============================================================
+
+Metoda `insert()` acceptă o matrice de obiecte Traversable (de exemplu, [ArrayHash |utils:arrays#ArrayHash], care returnează [formulare |forms:]):
+
+```php
+$row = $explorer->table('users')->insert([
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978)
+```
+
+În cazul în care cheia primară este definită în tabel, se returnează un obiect ActiveRow care conține rândul inserat.
+
+Inserare multiplă:
+
+```php
+$explorer->table('users')->insert([
+	[
+		'name' => 'Jim',
+		'year' => 1978,
+	], [
+		'name' => 'Jack',
+		'year' => 1987,
+	],
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978), ('Jack', 1987)
+```
+
+Fișiere sau obiecte DateTime pot fi transmise ca parametri:
+
+```php
+$explorer->table('users')->insert([
+	'name' => $name,
+	'created' => new DateTime, // sau $explorer::literal('NOW()')
+	'avatar' => fopen('image.gif', 'r'), // inserează fișierul
+]);
+```
+
+Actualizare (returnează numărul de rânduri afectate):
+
+```php
+$count = $explorer->table('users')
+	->where('id', 10) // trebuie să fie apelat înainte de update()
+	->update([
+		'name' => 'Ned Stark'
+	]);
+// UPDATE `users` SET `name`='Ned Stark' WHERE (`id` = 10)
+```
+
+Pentru actualizare se pot folosi operatorii `+=` a `-=`:
+
+```php
+$explorer->table('users')
+	->update([
+		'age+=' => 1, // vezi +=
+	]);
+// UPDATE users SET `age` = `age` + 1
+```
+
+Ștergere (returnează numărul de rânduri șterse):
+
+```php
+$count = $explorer->table('users')
+	->where('id', 10)
+	->delete();
+// DELETE FROM `users` WHERE (`id` = 10)
+```
+
+
+Lucrul cu relații .[#toc-working-with-relationships]
+====================================================
+
+
+Are o singură relație .[#toc-has-one-relation]
+----------------------------------------------
+Are o singură relație este un caz obișnuit de utilizare. Cartea *are un* autor. Cartea *are un* traducător. Obținerea rândului de relații se face în principal prin metoda `ref()`. Aceasta acceptă două argumente: numele tabelului țintă și coloana de legătură sursă. A se vedea exemplul:
+
+```php
+$book = $explorer->table('book')->get(1);
+$book->ref('author', 'author_id');
+```
+
+În exemplul de mai sus, preluăm intrarea autorului asociat din tabelul `author`, cheia primară a autorului este căutată prin coloana `book.author_id`. Metoda Ref() returnează o instanță ActiveRow sau este nulă dacă nu există o intrare corespunzătoare. Rândul returnat este o instanță de ActiveRow, astfel încât putem lucra cu el în același mod ca și cu intrarea de carte.
+
+```php
+$author = $book->ref('author', 'author_id');
+$author->name;
+$author->born;
+
+// sau direct
+$book->ref('author', 'author_id')->name;
+$book->ref('author', 'author_id')->born;
+```
+
+Cartea are, de asemenea, un traducător, astfel încât obținerea numelui traducătorului este destul de ușoară.
+```php
+$book->ref('author', 'translator_id')->name
+```
+
+Toate acestea sunt bune, dar sunt oarecum greoaie, nu credeți? Database Explorer conține deja definițiile cheilor străine, așa că de ce să nu le folosim automat? Haideți să facem asta!
+
+Dacă apelăm o proprietate, care nu există, ActiveRow încearcă să rezolve numele proprietății apelante ca fiind o relație "are o". Obținerea acestei proprietăți este identică cu apelarea metodei ref() cu un singur argument. Vom numi singurul argument **key**. Cheia va fi rezolvată în funcție de o anumită relație de cheie străină. Cheia transmisă este comparată cu coloanele rândului și, dacă se potrivește, cheia externă definită pe coloana corespunzătoare este utilizată pentru a obține date din tabelul țintă aferent. A se vedea exemplul:
+
+```php
+$book->author->name;
+// la fel ca
+$book->ref('author')->name;
+```
+
+Instanța ActiveRow nu are o coloană "author". Toate coloanele de cărți sunt căutate pentru a găsi o potrivire cu *key*. În acest caz, potrivirea înseamnă că numele coloanei trebuie să conțină cheia. Astfel, în exemplul de mai sus, coloana `author_id` conține șirul de caractere "author" și, prin urmare, se potrivește cu cheia "author". Dacă doriți să obțineți traducătorul cărții, puteți utiliza, de exemplu, "translator" ca cheie, deoarece cheia "translator" se va potrivi cu coloana `translator_id`. Puteți afla mai multe despre logica de potrivire a cheilor în capitolul [Expresii de îmbinare |#joining-key].
+
+```php
+echo $book->title . ': ';
+echo $book->author->name;
+if ($book->translator) {
+	echo ' (translated by ' . $book->translator->name . ')';
+}
+```
+
+Dacă doriți să obțineți mai multe cărți, trebuie să utilizați aceeași abordare. Nette Database Explorer va prelua deodată autorii și traducătorii pentru toate cărțile preluate.
+
+```php
+$books = $explorer->table('book');
+foreach ($books as $book) {
+	echo $book->title . ': ';
+	echo $book->author->name;
+	if ($book->translator) {
+		echo ' (translated by ' . $book->translator->name . ')';
+	}
+}
+```
+
+Codul va rula doar aceste 3 interogări:
+```sql
+SELECT * FROM `book`;
+SELECT * FROM `author` WHERE (`id` IN (1, 2, 3)); -- ids of fetched books from author_id column
+SELECT * FROM `author` WHERE (`id` IN (2, 3));    -- ids of fetched books from translator_id column
+```
+
+
+Are multe relații .[#toc-has-many-relation]
+-------------------------------------------
+
+Relația "are mai mulți" este doar o relație inversă a relației "are unul". Autorul *are* a scris *mai multe* cărți. Autorul *a* tradus *mai multe* cărți. După cum puteți vedea, acest tip de relație este puțin mai dificil, deoarece relația este "nominală" ("scris", "tradus"). Instanța ActiveRow are metoda `related()`, care va returna o matrice de intrări legate. Intrările sunt, de asemenea, instanțe ActiveRow. A se vedea exemplul de mai jos:
+
+```php
+$author = $explorer->table('author')->get(11);
+echo $author->name . ' has written:';
+
+foreach ($author->related('book.author_id') as $book) {
+	echo $book->title;
+}
+
+echo 'and translated:';
+foreach ($author->related('book.translator_id') as $book) {
+	echo $book->title;
+}
+```
+
+Metoda `related()` Metoda acceptă descrierea completă a îmbinării transmisă ca două argumente sau ca un singur argument unit prin punct. Primul argument este tabelul țintă, iar al doilea este coloana țintă.
+
+```php
+$author->related('book.translator_id');
+// la fel ca
+$author->related('book', 'translator_id');
+```
+
+Puteți utiliza euristica Nette Database Explorer bazată pe chei străine și să furnizați doar argumentul **key**. Cheia va fi comparată cu toate cheile străine care indică spre tabelul curent (`author` table). Dacă există o potrivire, [Nette |api:Nette\InvalidArgumentException] Database Explorer va utiliza această cheie externă, în caz contrar va arunca [Nette\InvalidArgumentException |api:Nette\InvalidArgumentException] sau [AmbiguousReferenceKeyException |api:Nette\Database\Conventions\AmbiguousReferenceKeyException]. Puteți afla mai multe despre logica de potrivire a cheilor în capitolul [Expresii de îmbinare |#joining-key].
+
+Desigur, puteți apela metodele aferente pentru toți autorii recuperați, Nette Database Explorer va recupera din nou cărțile corespunzătoare deodată.
+
+```php
+$authors = $explorer->table('author');
+foreach ($authors as $author) {
+	echo $author->name . ' has written:';
+	foreach ($author->related('book') as $book) {
+		$book->title;
+	}
+}
+```
+
+Exemplul de mai sus va rula doar două interogări:
+
+```sql
+SELECT * FROM `author`;
+SELECT * FROM `book` WHERE (`author_id` IN (1, 2, 3)); -- ids of fetched authors
+```
+
+
+Crearea manuală a exploratorului .[#toc-creating-explorer-manually]
+===================================================================
+
+O conexiune la baza de date poate fi creată folosind configurația aplicației. În astfel de cazuri, se creează un serviciu `Nette\Database\Explorer` care poate fi trecut ca dependență cu ajutorul containerului DI.
+
+Cu toate acestea, în cazul în care Nette Database Explorer este utilizat ca instrument independent, trebuie creată manual o instanță a obiectului `Nette\Database\Explorer`.
+
+```php
+// $storage implements Nette\Caching\Storage:
+$storage = new Nette\Caching\Storages\FileStorage($tempDir);
+$connection = new Nette\Database\Connection($dsn, $user, $password);
+$structure = new Nette\Database\Structure($connection, $storage);
+$conventions = new Nette\Database\Conventions\DiscoveredConventions($structure);
+$explorer = new Nette\Database\Explorer($connection, $structure, $conventions, $storage);
+```

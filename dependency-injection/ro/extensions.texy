@@ -1,0 +1,194 @@
+Crearea extensiilor pentru Nette DI
+***********************************
+
+.[perex]
+Generarea unui container DI, pe lângă fișierele de configurare, afectează și așa-numitele *extensiuni*. Le activăm în fișierul de configurare din secțiunea `extensions`.
+
+În acest mod adăugăm extensia reprezentată de clasa `BlogExtension` cu numele `blog`:
+
+```neon
+extensions:
+	blog: BlogExtension
+```
+
+Fiecare extensie de compilare moștenește din [api:Nette\DI\CompilerExtension] și poate implementa următoarele metode care sunt apelate în timpul compilării DI:
+
+1. getConfigSchema()
+2. loadConfiguration()
+3. beforeCompile()
+4. afterCompile()
+
+
+getConfigSchema() .[method]
+===========================
+
+Această metodă este apelată mai întâi. Aceasta definește schema utilizată pentru validarea parametrilor de configurare.
+
+Extensiile sunt configurate într-o secțiune al cărei nume este același cu cel al secțiunii în care a fost adăugată extensia, de exemplu `blog`.
+
+```neon
+# același nume ca și extensia mea
+blog:
+	postsPerPage: 10
+	comments: false
+```
+
+Vom defini o schemă care să descrie toate opțiunile de configurare, inclusiv tipurile, valorile acceptate și, eventual, valorile implicite ale acestora:
+
+```php
+use Nette\Schema\Expect;
+
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function getConfigSchema(): Nette\Schema\Schema
+	{
+		return Expect::structure([
+			'postsPerPage' => Expect::int(),
+			'allowComments' => Expect::bool()->default(true),
+		]);
+	}
+}
+```
+
+Consultați [Schema |schema:] pentru documentație. În plus, puteți specifica ce opțiuni pot fi [dinamice |application:bootstrap#Dynamic Parameters] folosind `dynamic()`, de exemplu `Expect::int()->dynamic()`.
+
+Accesăm configurația prin intermediul `$this->config`, care este un obiect `stdClass`:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		$num = $this->config->postPerPage;
+		if ($this->config->allowComments) {
+			// ...
+		}
+	}
+}
+```
+
+
+loadConfiguration() .[method]
+=============================
+
+Această metodă este utilizată pentru a adăuga servicii la container. Acest lucru se face prin [api:Nette\DI\ContainerBuilder]:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		$builder = $this->getContainerBuilder();
+		$builder->addDefinition($this->prefix('articles'))
+			->setFactory(App\Model\HomepageArticles::class, ['@connection']) // sau setCreator()
+			->addSetup('setLogger', ['@logger']);
+	}
+}
+```
+
+Convenția este de a prefixa serviciile adăugate de o extensie cu numele acesteia, astfel încât să nu apară conflicte de nume. Acest lucru se face prin `prefix()`, astfel încât, dacă extensia se numește "blog", serviciul se va numi `blog.articles`.
+
+Dacă trebuie să redenumim un serviciu, putem crea un alias cu numele său original pentru a menține compatibilitatea cu trecutul. În mod similar, acest lucru este ceea ce face Nette pentru, de exemplu, `routing.router`, care este, de asemenea, disponibil sub numele anterior `router`.
+
+```php
+$builder->addAlias('router', 'routing.router');
+```
+
+
+Recuperarea serviciilor dintr-un fișier .[#toc-retrieve-services-from-a-file]
+-----------------------------------------------------------------------------
+
+Putem crea servicii utilizând API-ul ContainerBuilder, dar le putem adăuga și prin intermediul cunoscutului fișier de configurare NEON și al secțiunii sale `services`. Prefixul `@extension` reprezintă extensia curentă.
+
+```neon
+services:
+	articles:
+		create: MyBlog\ArticlesModel(@connection)
+
+	comments:
+		create: MyBlog\CommentsModel(@connection, @extension.articles)
+
+	articlesList:
+		create: MyBlog\Components\ArticlesList(@extension.articles)
+```
+
+Vom adăuga servicii în acest mod:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		$builder = $this->getContainerBuilder();
+
+		// încarcă fișierul de configurare pentru extensie
+		$this->compiler->loadDefinitionsFromConfig(
+			$this->loadFromFile(__DIR__ . '/blog.neon')['services'],
+		);
+	}
+}
+```
+
+
+beforeCompile() .[method]
+=========================
+
+Metoda este apelată atunci când containerul conține toate serviciile adăugate de extensiile individuale în metodele `loadConfiguration`, precum și fișierele de configurare ale utilizatorului. În această fază a asamblării, putem apoi modifica definițiile serviciilor sau adăuga legături între ele. Puteți utiliza metoda `findByTag()` pentru a căuta servicii după etichete sau metoda `findByType()` pentru a căuta după clasă sau interfață.
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function beforeCompile()
+	{
+		$builder = $this->getContainerBuilder();
+
+		foreach ($builder->findByTag('logaware') as $serviceName => $tagValue) {
+			$builder->getDefinition($serviceName)->addSetup('setLogger');
+		}
+	}
+}
+```
+
+
+afterCompile() .[method]
+========================
+
+În această fază, clasa container este deja generată ca obiect [ClassType |php-generator:#classes], conține toate metodele pe care serviciul le creează și este gata pentru a fi pusă în cache ca fișier PHP. În acest moment putem încă să modificăm codul clasei rezultate.
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function afterCompile(Nette\PhpGenerator\ClassType $class)
+	{
+		$method = $class->getMethod('__construct');
+		// ...
+	}
+}
+```
+
+
+$initializare .[wiki-method]
+============================
+
+Configuratorul apelează codul de inițializare după [crearea containerului |application:bootstrap#index.php], care este creat prin scrierea într-un obiect `$this->initialization` folosind [metoda addBody() |php-generator:#method-and-function-body].
+
+Vom prezenta un exemplu de pornire a unei sesiuni sau de pornire a serviciilor care au eticheta `run` folosind codul de inițializare:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		// pornirea automată a sesiunii
+		if ($this->config->session->autoStart) {
+			$this->initialization->addBody('$this->getService("session")->start()');
+		}
+
+		// serviciile cu tag-ul "run" trebuie create după instanțierea containerului.
+		$builder = $this->getContainerBuilder();
+		foreach ($builder->findByTag('run') as $name => $foo) {
+			$this->initialization->addBody('$this->getService(?);', [$name]);
+		}
+	}
+}
+```

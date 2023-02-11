@@ -1,0 +1,292 @@
+Nadzor dostopa (avtorizacija)
+*****************************
+
+.[perex]
+Avtorizacija določa, ali ima uporabnik zadostne pravice, na primer za dostop do določenega vira ali za izvedbo dejanja. Avtorizacija predpostavlja predhodno uspešno preverjanje pristnosti, tj. da je uporabnik prijavljen.
+
+→ [Namestitev in zahteve |@home#Installation]
+
+V primerih bomo uporabili objekt razreda [api:Nette\Security\User], ki predstavlja trenutnega uporabnika in ga dobite s posredovanjem z uporabo [vbrizgavanja odvisnosti |dependency-injection:passing-dependencies]. V predstavitvah preprosto pokličite `$user = $this->getUser()`.
+
+Za zelo preprosta spletna mesta z administracijo, kjer se pravice uporabnikov ne razlikujejo, je mogoče kot merilo za avtorizacijo uporabiti že znano metodo `isLoggedIn()`. Z drugimi besedami: ko je uporabnik enkrat prijavljen, ima dovoljenja za vsa dejanja in obratno.
+
+```php
+if ($user->isLoggedIn()) { // je uporabnik prijavljen?
+	deleteItem(); // če je tako, lahko izbriše element.
+}
+```
+
+
+Vloge .[#toc-roles]
+-------------------
+
+Namen vlog je omogočiti natančnejše upravljanje dovoljenj in ostati neodvisen od uporabniškega imena. Takoj ko se uporabnik prijavi, se mu dodeli ena ali več vlog. Same vloge so lahko preprosti nizi, na primer `admin`, `member`, `guest` itd. Navedene so v drugem argumentu konstruktorja `SimpleIdentity`, in sicer kot niz ali polje.
+
+Kot merilo avtorizacije bomo zdaj uporabili metodo `isInRole()`, ki preveri, ali je uporabnik v dani vlogi:
+
+```php
+if ($user->isInRole('admin')) { // ali je vloga upravitelja dodeljena uporabniku?
+	deleteItem(); // če je, lahko izbriše element
+}
+```
+
+Kot že veste, odjava uporabnika ne izbriše njegove identitete. Tako metoda `getIdentity()` še vedno vrne objekt `SimpleIdentity`, vključno z vsemi dodeljenimi vlogami. Okvir Nette se drži načela "manj kode, več varnosti", zato vam pri preverjanju vlog ni treba preverjati, ali je uporabnik tudi prijavljen. Metoda `isInRole()` deluje z **učinkovitimi vlogami**, tj. če je uporabnik prijavljen, se uporabijo vloge, dodeljene identiteti, če ni prijavljen, se namesto tega uporabi samodejna posebna vloga `guest`.
+
+
+Avtorizator .[#toc-authorizator]
+--------------------------------
+
+Poleg vlog bomo uvedli tudi izraza resource in operation:
+
+- **vloga** je atribut uporabnika - na primer moderator, urednik, obiskovalec, registrirani uporabnik, administrator, ...
+- **vložek** je logična enota aplikacije - članek, stran, uporabnik, element menija, anketa, voditelj, ...
+- **operacija** je določena dejavnost, ki jo uporabnik lahko ali ne sme opraviti z *virem* - ogled, urejanje, brisanje, glasovanje, ...
+
+Avtorizator je objekt, ki odloča o tem, ali ima določena *role* dovoljenje za izvajanje določene *operacije* z določenim *izdelkom*. To je objekt, ki implementira vmesnik [api:Nette\Security\Authorizator] s samo eno metodo `isAllowed()`:
+
+```php
+class MyAuthorizator implements Nette\Security\Authorizator
+{
+	public function isAllowed($role, $resource, $operation): bool
+	{
+		if ($role === 'admin') {
+			return true;
+		}
+		if ($role === 'user' && $resource === 'article') {
+			return true;
+		}
+
+		// ...
+
+		return false;
+	}
+}
+```
+
+Avtorizator dodamo v konfiguracijo [kot storitev |dependency-injection:services] vsebnika DI:
+
+```neon
+services:
+	- MyAuthorizator
+```
+
+V nadaljevanju je prikazan primer uporabe. Upoštevajte, da tokrat kličemo metodo `Nette\Security\User::isAllowed()`, in ne avtorizatorjeve, zato ni prvega parametra `$role`. Ta metoda zaporedno kliče `MyAuthorizator::isAllowed()` za vse uporabniške vloge in vrne true, če ima vsaj ena od njih dovoljenje.
+
+```php
+if ($user->isAllowed('file')) { // ali lahko uporabnik z virom 'file' počne vse?
+	useFile();
+}
+
+if ($user->isAllowed('file', 'delete')) { // ali sme uporabnik izbrisati vir 'file'?
+	deleteFile();
+}
+```
+
+Oba argumenta sta neobvezna, njuna privzeta vrednost pa pomeni *vse*.
+
+
+Dovoljenje ACL .[#toc-permission-acl]
+-------------------------------------
+
+Nette ima vgrajeno implementacijo avtorizatorja, razred [api:Nette\Security\Permission], ki ponuja lahek in prilagodljiv sloj ACL (Access Control List) za nadzor dovoljenj in dostopa. Pri delu s tem razredom določimo vloge, vire in posamezna dovoljenja. Vloge in viri lahko tvorijo hierarhije. Za razlago bomo prikazali primer spletne aplikacije:
+
+- `guest`: obiskovalec, ki ni prijavljen, lahko bere in brska po javnem delu spleta, tj. bere članke, komentira in glasuje v anketah
+- `registered`: prijavljeni uporabnik, ki lahko poleg tega objavlja komentarje
+- `admin`: lahko upravlja članke, komentarje in ankete
+
+Tako smo določili določene vloge (`guest`, `registered` in `admin`) in omenili vire (`article`, `comments`, `poll`), do katerih lahko uporabniki dostopajo ali izvajajo dejanja (`view`, `vote`, `add`, `edit`).
+
+Ustvarimo primerek razreda Permission in opredelimo **vloge**. Uporabiti je mogoče dedovanje vlog, kar zagotavlja, da lahko na primer uporabnik z vlogo `admin` počne to, kar lahko počne običajni obiskovalec spletnega mesta (in seveda še več).
+
+```php
+$acl = new Nette\Security\Permission;
+
+$acl->addRole('guest');
+$acl->addRole('registered', 'guest'); // 'registered' podeduje od 'guest'
+$acl->addRole('admin', 'registered'); // in "admin" podeduje od "registered".
+```
+
+Zdaj bomo opredelili seznam **vsebin**, do katerih lahko dostopajo uporabniki:
+
+```php
+$acl->addResource('article');
+$acl->addResource('comment');
+$acl->addResource('poll');
+```
+
+Viri lahko uporabljajo tudi dedovanje, na primer, dodamo lahko `$acl->addResource('perex', 'article')`.
+
+In zdaj najpomembnejša stvar. Med njimi bomo določili **pravila**, ki določajo, kdo lahko kaj počne:
+
+```php
+// zdaj je vse zanikano
+
+// gostom omogočite ogled člankov, komentarjev in anket.
+$acl->allow('guest', ['article', 'comment', 'poll'], 'view');
+// in tudi glasovati v anketah.
+$acl->allow('guest', 'poll', 'vote');
+
+// registrirani podeduje dovoljenja od gosta, dovolili mu bomo tudi komentiranje
+$acl->allow('registered', 'comment', 'add');
+
+// administrator lahko pregleduje in ureja vse.
+$acl->allow('admin', $acl::All, ['view', 'edit', 'add']);
+```
+
+Kaj pa, če želimo nekomu **preprečiti** dostop do vira?
+
+```php
+// administrator ne more urejati anket, to bi bilo nedemokracije.
+$acl->deny('admin', 'poll', 'edit');
+```
+
+Ko smo ustvarili nabor pravil, lahko preprosto zastavimo poizvedbe o avtorizaciji:
+
+```php
+// lahko gost pregleduje članke?
+$acl->isAllowed('guest', 'article', 'view'); // Resnično
+
+// lahko gost ureja članek?
+$acl->isAllowed('guest', 'article', 'edit'); // false
+
+// lahko gost glasuje v anketah?
+$acl->isAllowed('guest', 'poll', 'vote'); // true
+
+// lahko gost dodaja komentarje?
+$acl->isAllowed('guest', 'comment', 'add'); // false
+```
+
+Enako velja za registriranega uporabnika, ki pa lahko tudi komentira:
+
+```php
+$acl->isAllowed('registered', 'article', 'view'); // true
+$acl->isAllowed('registered', 'comment', 'add'); // true
+$acl->isAllowed('registered', 'comment', 'edit'); // false
+```
+
+Administrator lahko ureja vse razen anket:
+
+```php
+$acl->isAllowed('admin', 'poll', 'vote'); // true
+$acl->isAllowed('admin', 'poll', 'edit'); // false
+$acl->isAllowed('admin', 'comment', 'edit'); // true
+```
+
+Dovoljenja se lahko ocenjujejo tudi dinamično, odločitev pa lahko prepustimo lastnemu povratnemu klicu, ki so mu posredovani vsi parametri:
+
+```php
+$assertion = function (Permission $acl, string $role, string $resource, string $privilege): bool {
+	return /* ... */;
+};
+
+$acl->allow('registered', 'comment', null, $assertion);
+```
+
+Kako pa rešiti situacijo, ko imena vlog in virov ne zadoščajo, torej bi radi določili, da lahko na primer vloga `registered` ureja vir `article` le, če je njegov avtor? Namesto nizov bomo uporabili predmete, vloga bo predmet [api:Nette\Security\Role] in vir [api:Nette\Security\Resource]. Njuni metodi `getRoleId()` oziroma `getResourceId()` bosta vrnili izvirne nize:
+
+```php
+class Registered implements Nette\Security\Role
+{
+	public $id;
+
+	public function getRoleId(): string
+	{
+		return 'registered';
+	}
+}
+
+
+class Article implements Nette\Security\Resource
+{
+	public $authorId;
+
+	public function getResourceId(): string
+	{
+		return 'article';
+	}
+}
+```
+
+Zdaj pa ustvarimo pravilo:
+
+```php
+$assertion = function (Permission $acl, string $role, string $resource, string $privilege): bool {
+	$role = $acl->getQueriedRole(); // predmet Registrirano
+	$resource = $acl->getQueriedResource(); // predmet Člen
+	return $role->id === $resource->authorId;
+};
+
+$acl->allow('registered', 'article', 'edit', $assertion);
+```
+
+Po ACL poizvedujemo tako, da posredujemo predmete:
+
+```php
+$user = new Registered(/* ... */);
+$article = new Article(/* ... */);
+$acl->isAllowed($user, $article, 'edit');
+```
+
+Vloga lahko podeduje eno ali več drugih vlog. Toda kaj se zgodi, če ima en prednik določeno dejanje dovoljeno, drugi pa prepovedano? Takrat pride v poštev *teža vloge* - zadnja vloga v nizu podedovanih vlog ima največjo težo, prva pa najmanjšo:
+
+```php
+$acl = new Nette\Security\Permission;
+$acl->addRole('admin');
+$acl->addRole('guest');
+
+$acl->addResource('backend');
+
+$acl->allow('admin', 'backend');
+$acl->deny('guest', 'backend');
+
+// primer A: vloga admin ima manjšo utež kot vloga guest
+$acl->addRole('john', ['admin', 'guest']);
+$acl->isAllowed('john', 'backend'); // false
+
+// primer B: vloga admin ima večjo težo kot vloga guest
+$acl->addRole('mary', ['guest', 'admin']);
+$acl->isAllowed('mary', 'backend'); // true
+```
+
+Vloge in vire je mogoče tudi odstraniti (`removeRole()`, `removeResource()`), pravila je mogoče tudi razveljaviti (`removeAllow()`, `removeDeny()`). Polje vseh neposrednih starševskih vlog vrne `getRoleParents()`. Ali dve entiteti dedujeta druga od druge, vrne `roleInheritsFrom()` in `resourceInheritsFrom()`.
+
+
+Dodaj kot storitev .[#toc-add-as-a-service]
+-------------------------------------------
+
+ACL, ki smo ga ustvarili, moramo dodati v konfiguracijo kot storitev, da ga lahko uporablja objekt `$user`, tj. da ga lahko uporabimo v kodi, na primer `$user->isAllowed('article', 'view')`. V ta namen bomo zanj napisali tovarno:
+
+```php
+namespace App\Model;
+
+class AuthorizatorFactory
+{
+	public static function create(): Nette\Security\Permission
+	{
+		$acl = new Nette\Security\Permission;
+		$acl->addRole(/* ... */);
+		$acl->addResource(/* ... */);
+		$acl->allow(/* ... */);
+		return $acl;
+	}
+}
+```
+
+In jo bomo dodali v konfiguracijo:
+
+```neon
+services:
+	- App\Model\AuthorizatorFactory::create
+```
+
+V predstavitvah lahko nato preverite dovoljenja v metodi `startup()`, na primer:
+
+```php
+protected function startup()
+{
+	parent::startup();
+	if (!$this->getUser()->isAllowed('backend')) {
+		$this->error('Forbidden', 403);
+	}
+}
+```

@@ -1,0 +1,174 @@
+Dinamični utrinki
+*****************
+
+Pri razvoju aplikacij se pogosto pojavi potreba po izvajanju operacij AJAX, na primer v posameznih vrsticah tabele ali elementih seznama. Kot primer lahko izberemo seznam člankov, ki prijavljenemu uporabniku omogoča, da za vsakega od njih izbere oceno "všeč/neprijetno". Koda predstavitvenega programa in ustrezne predloge brez AJAX bo videti nekako takole (navajam najpomembnejše utrinke, koda predpostavlja obstoj storitve za označevanje ocen in pridobivanje zbirke člankov - konkretna izvedba za namene tega vodnika ni pomembna):
+
+```php
+public function handleLike(int $articleId): void
+{
+	$this->ratingService->saveLike($articleId, $this->user->id);
+	$this->redirect('this');
+}
+
+public function handleUnlike(int $articleId): void
+{
+	$this->ratingService->removeLike($articleId, $this->user->id);
+	$this->redirect('this');
+}
+```
+
+Predloga:
+
+```latte
+<article n:foreach="$articles as $article">
+	<h2>{$article->title}</h2>
+	<div class="content">{$article->content}</div>
+	{if !$article->liked}
+		<a n:href="like! $article->id" class=ajax>I like it</a>
+	{else}
+		<a n:href="unlike! $article->id" class=ajax>I don't like it anymore</a>
+	{/if}
+</article>
+```
+
+
+Ajaksizacija .[#toc-ajaxization]
+================================
+
+V to preprosto aplikacijo zdaj vnesimo AJAX. Spreminjanje ocene članka ni dovolj pomembno, da bi zahtevalo zahtevo HTTP s preusmeritvijo, zato bi bilo idealno, če bi to opravili z AJAXom v ozadju. Uporabili bomo [skript za obdelavo iz dodatkov |https://componette.org/vojtech-dobes/nette.ajax.js/] z običajno konvencijo, da imajo povezave AJAX razred CSS `ajax`.
+
+Vendar pa, kako to storiti konkretno? Nette ponuja dva načina: način z dinamičnimi utrinki in način s komponentami. Oba načina imata svoje prednosti in slabosti, zato ju bomo prikazali enega za drugim.
+
+
+Način dinamičnih utrinkov .[#toc-the-dynamic-snippets-way]
+==========================================================
+
+V terminologiji Latte je dinamični izsek poseben primer uporabe oznake `{snippet}`, pri katerem se v imenu izseka uporabi spremenljivka. Takšnega odlomka ne moremo najti kar kjerkoli v predlogi - oviti ga mora statični odlomek, tj. običajni odlomek, ali pa mora biti znotraj `{snippetArea}`. Našo predlogo lahko spremenimo na naslednji način.
+
+
+```latte
+{snippet articlesContainer}
+	<article n:foreach="$articles as $article">
+		<h2>{$article->title}</h2>
+		<div class="content">{$article->content}</div>
+		{snippet article-$article->id}
+			{if !$article->liked}
+				<a n:href="like! $article->id" class=ajax>I like it</a>
+			{else}
+				<a n:href="unlike! $article->id" class=ajax>I don't like it anymore</a>
+			{/if}
+		{/snippet}
+	</article>
+{/snippet}
+```
+
+Vsak članek zdaj opredeljuje en sam izsek, ki ima v naslovu ID članka. Vsi ti odlomki so nato združeni v en sam odlomek, ki se imenuje `articlesContainer`. Če ta ovitek izpustimo, nas bo Latte opozoril z izjemo.
+
+Vse, kar nam preostane, je, da predstavniku dodamo ponovno risanje - samo ponovno narišemo statični ovitek.
+
+```php
+public function handleLike(int $articleId): void
+{
+	$this->ratingService->saveLike($articleId, $this->user->id);
+	if ($this->isAjax()) {
+		$this->redrawControl('articlesContainer');
+		// $this->redrawControl('article-' . $articleId); -- ni potrebno
+	} else {
+		$this->redirect('this');
+	}
+}
+```
+
+Na enak način spremenite sestrsko metodo `handleUnlike()` in AJAX je pripravljen in deluje!
+
+Vendar ima rešitev eno slabost. Če se podrobneje poglobimo v delovanje zahteve AJAX, ugotovimo, da čeprav je aplikacija na videz videti učinkovita (vrne le en odlomek za določen članek), dejansko vse odlomke prikaže v strežniku. Želene utrinke je umestila v naš koristni tovor, druge pa zavrgla (tako jih je povsem po nepotrebnem pridobila tudi iz podatkovne zbirke).
+
+Da bi optimizirali ta postopek, bomo morali izvesti dejanje, pri katerem zbirko `$articles` posredujemo predlogi (recimo v metodi `renderDefault()` ). Pri tem bomo izkoristili dejstvo, da obdelava signalov poteka pred `render<Something>` metodami:
+
+```php
+public function handleLike(int $articleId): void
+{
+	// ...
+	if ($this->isAjax()) {
+		// ...
+		$this->template->articles = [
+			$this->connection->table('articles')->get($articleId),
+		];
+	} else {
+		// ...
+}
+
+public function renderDefault(): void
+{
+	if (!isset($this->template->articles)) {
+		$this->template->articles = $this->connection->table('articles');
+	}
+}
+```
+
+Zdaj, ko se signal obdela, se namesto zbirke z vsemi članki predlogi posreduje le polje z enim samim členom - tistim, ki ga želimo prikazati in poslati v breme brskalniku. Tako bo `{foreach}` izveden samo enkrat in ne bodo prikazani nobeni dodatni odlomki.
+
+
+Način komponente .[#toc-component-way]
+======================================
+
+Popolnoma drugačna rešitev uporablja drugačen pristop za preprečevanje dinamičnih utrinkov. Trik je v tem, da vso logiko prenesemo v ločeno komponento - odslej nimamo predstavnika, ki bi skrbel za vnos ocene, temveč namensko komponento `LikeControl`. Razred bo videti takole (poleg tega bo vseboval tudi metode `render`, `handleUnlike` itd.):
+
+```php
+class LikeControl extends Nette\Application\UI\Control
+{
+	public function __construct(
+		private Article $article,
+	) {
+	}
+
+	public function handleLike(): void
+	{
+		$this->ratingService->saveLike($this->article->id, $this->presenter->user->id);
+		if ($this->presenter->isAjax()) {
+			$this->redrawControl();
+		} else {
+			$this->presenter->redirect('this');
+		}
+	}
+}
+```
+
+Predloga komponente:
+
+```latte
+{snippet}
+	{if !$article->liked}
+		<a n:href="like!" class=ajax>I like it</a>
+	{else}
+		<a n:href="unlike!" class=ajax>I don't like it anymore</a>
+	{/if}
+{/snippet}
+```
+
+Seveda bomo spremenili predlogo pogleda in morali bomo dodati tovarno za predstavljanje. Ker bomo komponento ustvarili tolikokrat, kolikorkrat bomo prejeli člankov iz podatkovne zbirke, bomo za njeno "pomnoževanje" uporabili razred [application:Multiplier].
+
+```php
+protected function createComponentLikeControl()
+{
+	$articles = $this->connection->table('articles');
+	return new Nette\Application\UI\Multiplier(function (int $articleId) use ($articles) {
+		return new LikeControl($articles[$articleId]);
+	});
+}
+```
+
+Predloga pogleda je tako zmanjšana na najmanjšo potrebno mero (in popolnoma brez sličic!):
+
+```latte
+<article n:foreach="$articles as $article">
+	<h2>{$article->title}</h2>
+	<div class="content">{$article->content}</div>
+	{control "likeControl-$article->id"}
+</article>
+```
+
+Skoraj smo končali: aplikacija bo zdaj delovala v načinu AJAX. Tudi tu moramo aplikacijo optimizirati, saj bo zaradi uporabe podatkovne zbirke Nette obdelava signalov po nepotrebnem naložila vse članke iz zbirke namesto enega. Prednost pa je v tem, da ne bo prišlo do izrisovanja, saj se dejansko izriše le naša komponenta.
+
+{{priority: -1}}
+{{sitename: Best Practices}}

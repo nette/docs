@@ -1,0 +1,371 @@
+Latte je sinonim za varnost
+***************************
+<div class=perex>
+
+
+Latte je edini sistem za oblikovanje predlog PHP z učinkovito zaščito pred kritično ranljivostjo XSS (Cross-site Scripting). Za to je zaslužno tako imenovano kontekstno občutljivo escapiranje. Pogovorimo se,
+
+- kakšno je načelo ranljivosti XSS in zakaj je tako nevarna
+- zakaj je Latte tako učinkovit pri zaščiti pred XSS
+- zakaj je mogoče zlahka ogroziti predloge Twig, Blade in druge predloge
+
+</div>
+
+
+Križanje spletnih strani (XSS) .[#toc-cross-site-scripting-xss]
+===============================================================
+
+Cross-site Scripting (krajše XSS) je ena najpogostejših in zelo nevarnih ranljivosti spletnih mest. Napadalcu omogoča, da v tuje spletno mesto vstavi zlonamerno skripto (imenovano zlonamerna programska oprema), ki se izvede v brskalniku nič hudega slutečega uporabnika.
+
+Kaj lahko takšna skripta naredi? Na primer, napadalcu lahko pošlje poljubno vsebino z ogroženega spletnega mesta, vključno z občutljivimi podatki, ki se prikažejo po prijavi. V imenu uporabnika lahko spreminja stran ali izvaja druge zahteve.
+Če bi šlo na primer za spletno pošto, bi lahko prebrala občutljiva sporočila, spremenila prikazano vsebino ali spremenila nastavitve, npr. vklopila posredovanje kopij vseh sporočil na napadalčev naslov in tako pridobila dostop do prihodnjih e-poštnih sporočil.
+
+Tudi zato je XSS na vrhu seznama najnevarnejših ranljivosti. Če na spletnem mestu odkrijete ranljivost, jo je treba čim prej odstraniti, da preprečite izkoriščanje.
+
+
+Kako se ranljivost pojavi? .[#toc-how-does-the-vulnerability-arise]
+-------------------------------------------------------------------
+
+Napaka se pojavi na mestu, kjer se ustvari spletna stran in natisnejo spremenljivke. Predstavljajte si, da ustvarjate iskalno stran in na začetku bo odstavek z iskalnim izrazom v obliki:
+
+```php
+echo '<p>Search results for <em>' . $search . '</em></p>';
+```
+
+Napadalec lahko zapiše kateri koli niz, vključno s kodo HTML, kot npr. `<script>alert("Hacked!")</script>`, v iskalno polje in s tem v spremenljivko `$search`. Ker izpis ni na noben način prečiščen, postane del prikazane strani:
+
+```html
+<p>Search results for <em><script>alert("Hacked!")</script></em></p>
+```
+
+Namesto, da bi brskalnik izpisal iskalni niz, izvede JavaScript. Tako napadalec prevzame stran.
+
+Morda boste ugovarjali, da bo vnos kode v spremenljivko res izvedel JavaScript, vendar le v napadalčevem brskalniku. Kako pride do žrtve? S tega vidika lahko razlikujemo več vrst XSS. V našem primeru iskalne strani govorimo o *odraženem XSS*.
+V tem primeru je treba žrtev prevarati, da klikne na povezavo, ki v parametru vsebuje zlonamerno kodo:
+
+```
+https://example.com/?search=<script>alert("Hacked!")</script>
+```
+
+Čeprav je potrebno nekaj socialnega inženiringa, da uporabnik dostopa do povezave, to ni težko. Uporabniki brez večjega premisleka klikajo na povezave, bodisi v e-poštnih sporočilih bodisi v družabnih medijih. In dejstvo, da je v naslovu nekaj sumljivega, je mogoče prikriti s skrajševalnikom URL, tako da uporabnik vidi le `bit.ly/xxx`.
+
+Vendar pa obstaja druga in veliko nevarnejša oblika napada, znana kot *hranjena XSS* ali *trajnostna XSS*, pri kateri napadalcu uspe shraniti zlonamerno kodo v strežnik, tako da se samodejno vstavi na določene strani.
+
+Tak primer so spletne strani, na katerih uporabniki objavljajo komentarje. Napadalec pošlje sporočilo, ki vsebuje kodo, ta pa se shrani v strežnik. Če spletno mesto ni dovolj varno, se nato zažene v brskalnik vsakega obiskovalca.
+
+Zdi se, da je namen napada pridobiti `<script>` niz v stran. Dejansko "obstaja veliko načinov za vgradnjo JavaScripta":https://cheatsheetseries.owasp.org/cheatsheets/XSS_Filter_Evasion_Cheat_Sheet.html.
+Poglejmo primer vgradnje z uporabo atributa HTML. Imejmo fotogalerijo, v katero lahko k slikam vstavite napis, ki se izpiše v atributu `alt`:
+
+```php
+echo '<img src="' . $imageFile . '" alt="' . $imageAlt . '">';
+```
+
+Napadalec mora samo vstaviti spretno sestavljen niz `" onload="alert('Hacked!')` kot oznako, in če izpis ni sanitiziran, bo nastala koda videti takole:
+
+```html
+<img src="photo0145.webp" alt="" onload="alert('Hacked!')">
+```
+
+Ponarejeni atribut `onload` zdaj postane del strani. Brskalnik bo kodo, ki jo vsebuje, izvedel takoj, ko bo slika prenesena. Hacked!
+
+
+Kako se zaščititi pred XSS? .[#toc-how-to-defend-against-xss]
+-------------------------------------------------------------
+
+Vsi poskusi odkrivanja napada z uporabo črne liste, kot je blokiranje `<script>` niz itd., so nezadostni. Osnova učinkovite obrambe je **dosledno prečiščevanje vseh podatkov, izpisanih na strani**.
+
+To najprej vključuje zamenjavo vseh znakov s posebnim pomenom z drugimi ujemajočimi se zaporedji, kar se v slengu imenuje **escaping** (prvi znak zaporedja se imenuje znak escape, od tod tudi ime).
+V besedilu HTML je na primer znak `<` has a special meaning, which, if it is not to be interpreted as the beginning of a tag, must be replaced by a visually corresponding sequence, the so-called HTML entity `&lt;`.
+In brskalnik izpiše znak.
+
+**Zelo pomembno je razlikovati kontekst, v katerem se podatki izpišejo**. Različni konteksti namreč različno razčiščujejo nize. Različni znaki imajo v različnih kontekstih poseben pomen.
+Na primer, eskapiranje v besedilu HTML, v atributih HTML, znotraj nekaterih posebnih elementov itd. je različno. O tem bomo podrobneje razpravljali čez trenutek.
+
+Najbolje je, da se escapiranje izvede neposredno, ko se niz izpiše na strani, s čimer se zagotovi, da se dejansko izvede in da se izvede samo enkrat. Najbolje je, če obdelavo **avtomatsko** neposredno opravi sistem za oblikovanje predlog.
+Če se obdelava ne izvede samodejno, lahko namreč programer nanjo pozabi. Ena opustitev pa pomeni, da je spletno mesto ranljivo.
+
+Vendar pa XSS ne vpliva samo na izpis podatkov v predlogah, temveč tudi na druge dele aplikacije, ki morajo ustrezno ravnati z nezaupljivimi podatki. Na primer, JavaScript v aplikaciji ne sme uporabljati `innerHTML` v povezavi z njimi, temveč le `innerText` ali `textContent`.
+Posebno previdnost je treba nameniti funkcijam, ki vrednotijo nize, kot je JavaScript, ki je `eval()`, pa tudi `setTimeout()`, ali uporabi `setAttribute()` z atributi dogodkov, kot je `onload`, itd. Vendar to presega področje, ki ga pokrivajo predloge.
+
+**idealna obramba za tri točke:**
+
+1) Prepoznajte kontekst, v katerem se podatki izpisujejo
+2) uredi podatke v skladu s pravili tega konteksta (tj. "zavedanje konteksta")
+3) to stori samodejno
+
+
+Izbris z zavedanjem konteksta .[#toc-context-aware-escaping]
+============================================================
+
+Kaj točno pomeni beseda kontekst? To je mesto v dokumentu z lastnimi pravili za obravnavo podatkov, ki jih je treba izpisati. Odvisen je od vrste dokumenta (HTML, XML, CSS, JavaScript, navadno besedilo ...) in se lahko v določenih delih dokumenta razlikuje.
+V dokumentu HTML je na primer veliko takih mest (kontekstov), kjer veljajo zelo različna pravila. Morda boste presenečeni, koliko jih je. Tukaj so prva štiri:
+
+```html
+<p>#text</p>
+<img src="#attribute">
+<textarea>#rawtext</textarea>
+<!-- #comment -->
+```
+
+Začetni in osnovni kontekst strani HTML je besedilo HTML. Kakšna so pravila na tem mestu? Znaki posebnega pomena `<` and `&` predstavljajo začetek oznake ali entitete, zato se jim moramo izogniti tako, da jih nadomestimo z entiteto HTML (`<` with `&lt;`, `&` with `&amp`).
+
+Drugi najpogostejši kontekst je vrednost atributa HTML. Od besedila se razlikuje po tem, da ima tu poseben pomen narekovaj `"` or `'`, ki omejuje atribut. To je treba zapisati kot entiteto, da se ne razume kot konec atributa.
+Po drugi strani pa lahko znak `&lt;` varno uporabimo v atributu, saj tu nima posebnega pomena; ni ga mogoče razumeti kot začetek oznake ali komentarja.
+Toda pozor, v jeziku HTML lahko vrednosti atributov zapišete brez narekovajev, v tem primeru ima cel niz znakov poseben pomen, zato gre za še en ločen kontekst.
+
+Morda vas bo to presenetilo, vendar se posebna pravila uporabljajo tudi znotraj `<textarea>` in `<title>` elementov, kjer je `<` character need not (but can) be escaped unless followed by `/`. Toda to je bolj zanimivost.
+
+Zanimivo je znotraj komentarjev HTML. Tu se entitete HTML ne uporabljajo za pobeg. Ni niti specifikacije, ki bi določala, kako escapirati v komentarjih.
+Upoštevati morate le nekoliko "nenavadna pravila":https://html.spec.whatwg.org/multipage/syntax.html#comments in se v njih izogibati določenim kombinacijam znakov.
+
+Konteksti so lahko tudi večplastni, kar se zgodi, ko v HTML vgradimo JavaScript ali CSS. To lahko storimo na dva različna načina, z elementom ali atributom:
+
+```html
+<script>#js-element</script>
+<img onclick="#js-attribute">
+
+<style>#css-element</style>
+<p style="#css-attribute"></p>
+```
+
+Dva načina in dve različni vrsti pobegov podatkov. Znotraj elementa `<script>` in `<style>` kot v primeru komentarjev HTML, se eskapiranje z uporabo entitet HTML ne izvaja. Pri eskapiranju podatkov znotraj teh elementov velja samo eno pravilo: besedilo ne sme vsebovati zaporedja `</script` oziroma `</style`.
+
+Po drugi strani pa se atributa `style` in `on***` izogibata z uporabo entitet HTML.
+
+In seveda znotraj vgrajenega JavaScripta ali CSS veljajo pravila za eskapiranje teh jezikov. Tako se niz v atributu, kot je `onload`, najprej izriše v skladu s pravili JS in nato v skladu s pravili za atribute HTML.
+
+Uf... Kot lahko vidite, je HTML zelo zapleten dokument s plastmi kontekstov, in če ne vem natančno, kam izpisujem podatke (tj. v katerem kontekstu), ne morem vedeti, kako to narediti pravilno.
+
+
+Želite primer? .[#toc-do-you-want-an-example]
+---------------------------------------------
+
+Imejmo niz `Rock'n'Roll`.
+
+Če ga izpišete v besedilu HTML, vam v tem primeru ni treba opraviti nobenih zamenjav, saj niz ne vsebuje nobenega znaka s posebnim pomenom. Drugače je, če ga zapišete znotraj atributa HTML, zaprtega v enojne narekovaje. V tem primeru morate narekovaje eskapirati v entitete HTML:
+
+```html
+<div title='Rock&apos;n&apos;Roll'></div>
+```
+
+To je bilo enostavno. Veliko bolj zanimiva situacija nastane, ko je kontekst večplasten, na primer če je niz del JavaScripta.
+
+Zato ga najprej zapišemo v sam JavaScript. To pomeni, da ga zavijemo v narekovaje in hkrati z znakom `\` izločimo narekovaje, ki jih vsebuje:
+
+```js
+'Rock\'n\'Roll'
+```
+
+Dodamo lahko klic funkcije, da koda nekaj naredi:
+
+```js
+alert('Rock\'n\'Roll');
+```
+
+Če to kodo vstavimo v dokument HTML z uporabo `<script>`, nam ni treba spreminjati ničesar drugega, saj prepovedano zaporedje `</script` ni prisotno:
+
+```html
+<script> alert('Rock\'n\'Roll'); </script>
+```
+
+Če pa jo želimo vstaviti v atribut HTML, moramo še vedno eskapirati narekovaje v entitete HTML:
+
+```html
+<div onclick='alert(&apos;Rock\&apos;n\&apos;Roll&apos;)'></div>
+```
+
+Vendar ni nujno, da je vgnezdeni kontekst samo JS ali CSS. Pogosto je tudi URL. Parametri v naslovih URL se izognejo tako, da se posebni znaki pretvorijo v zaporedja, ki se začnejo z `%`. Primer:
+
+```
+https://example.org/?a=Jazz&b=Rock%27n%27Roll
+```
+
+Ko ta niz izpišemo v atributu, še vedno uporabimo izogibanje v skladu s tem kontekstom in nadomestimo `&` with `&amp`:
+
+```html
+<a href="https://example.org/?a=Jazz&amp;b=Rock%27n%27Roll">
+```
+
+Če ste prebrali vse do sem, vam čestitam, bilo je naporno. Zdaj imate dobro predstavo o tem, kaj so konteksti in escapiranje. In ni vam treba skrbeti, da bi bilo to zapleteno. Latte to stori namesto vas samodejno.
+
+
+Latte proti naivnim sistemom .[#toc-latte-vs-naive-systems]
+===========================================================
+
+Pokazali smo, kako pravilno pobegniti v dokumentu HTML in kako pomembno je poznati kontekst, tj. kje izpisujete podatke. Z drugimi besedami, kako deluje kontekstno občutljivo eskapiranje.
+Čeprav je to predpogoj za funkcionalno obrambo pred XSS, je **Latte edini šablonski sistem za PHP, ki to omogoča.**
+
+Kako je to mogoče, ko pa vsi današnji sistemi trdijo, da imajo samodejno eskapiranje?
+Samodejno izogibanje brez poznavanja konteksta je neumnost, ki **ustvarja lažen občutek varnosti**.
+
+Sistemi za izdelavo predlog, kot so Twig, Laravel Blade in drugi, ne vidijo nobene strukture HTML v predlogi. Zato tudi ne vidijo kontekstov. V primerjavi z Lattejem so slepi in naivni. Obravnavajo samo svoje lastne oznake, vse drugo je zanje nepomemben tok znakov:
+
+<div class="juxtapose juxtapose--dark-handle" data-startingposition="80" data-animation="juxtapose-wiper">
+
+```twig .{file:Twig template as seen by Twig himself}
+░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░
+░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░{{ text }}░░░░
+```
+
+```twig .{file:Twig template as the designer sees it}
+- in text: <span>{{ text }}</span>
+- in tag: <span {{ text }} ></span>
+- in attribute: <span title='{{ text }}'></span>
+- in unquoted attribute: <span title={{ text }}></span>
+- in attribute containing URL: <a href="{{ text }}"></a>
+- in attribute containing JavaScript: <img onload="{{ text }}">
+- in attribute containing CSS: <span style="{{ text }}"></span>
+- in JavaScriptu: <script>var = {{ text }}</script>
+- in CSS: <style>body { content: {{ text }}; }</style>
+- in comment: <!-- {{ text }} -->
+```
+
+</div>
+
+Naivni sistemi samo mehansko pretvorijo znake `< > & ' "` v entitete HTML, kar je v večini primerov ustrezen način pobega, vendar še zdaleč ne vedno. Zato ne morejo odkriti ali preprečiti različnih varnostnih lukenj, kot bomo pokazali v nadaljevanju.
+
+Latte vidi predlogo enako kot vi. Razume HTML, XML, prepozna oznake, atribute itd. In zaradi tega razlikuje med konteksti in ustrezno obravnava podatke. Zato ponuja resnično učinkovito zaščito pred kritično ranljivostjo Cross-site Scripting.
+
+
+Prikaz v živo .[#toc-live-demonstration]
+========================================
+
+Na levi strani si lahko ogledate predlogo v Latte, na desni pa ustvarjeno kodo HTML. Spremenljivka `$text` se izpiše večkrat, vsakič v nekoliko drugačnem kontekstu. Zato je tudi izpisana nekoliko drugače. Kodo predloge lahko urejate sami, na primer spremenite vsebino spremenljivke itd. Poskusite:
+
+<div class="grid fiddle wiki-expanded">
+<div class="contains-pre">
+
+``` .{file:template.latte; min-height: 14em}[fiddle-source]
+{* TRY TO EDIT THIS TEMPLATE *}
+{var $text = "Rock'n'Roll"}
+- <span>{$text}</span>
+- <span title='{$text}'></span>
+- <span title={$text}></span>
+- <img onload="{$text}">
+- <script>var = {$text}</script>
+- <!-- {$text} -->
+```
+
+</div>
+
+<div class="contains-pre">
+
+``` .{file:view-source:...; min-height: 14em}[fiddle-output]
+- <span>Rock'n'Roll</span>
+- <span title='Rock&apos;n&apos;Roll'></span>
+- <span title="Rock&apos;n&apos;Roll"></span>
+- <img onload="&quot;Rock&apos;n&apos;Roll&quot;">
+- <script>var = "Rock'n'Roll"</script>
+- <!-- Rock'n'Roll -->
+```
+
+</div>
+</div>
+
+Ali ni to super! Latte samodejno izvaja kontekstno občutljivo eskapiranje, tako da programer:
+
+- mu ni treba razmišljati ali vedeti, kako pobegniti podatke
+- se ne more zmotiti
+- ne more pozabiti nanj
+
+To niti niso vsi konteksti, ki jih Latte loči pri izpisu in za katere prilagodi obdelavo podatkov. Zdaj bomo pregledali več zanimivih primerov.
+
+
+Kako vdreti v naivne sisteme .[#toc-how-to-hack-naive-systems]
+==============================================================
+
+Z nekaj praktičnimi primeri bomo pokazali, kako pomembno je razlikovanje konteksta in zakaj naivni sistemi za oblikovanje predlog za razliko od sistema Latte ne zagotavljajo zadostne zaščite pred XSS.
+V primerih bomo kot predstavnika naivnega sistema uporabili Twig, vendar enako velja tudi za druge sisteme.
+
+
+Ranljivost atributov .[#toc-attribute-vulnerability]
+----------------------------------------------------
+
+Poskusimo v stran vnesti zlonamerno kodo s pomočjo atributa HTML, kot smo [pokazali zgoraj |#How does the vulnerability arise]. Imejmo predlogo v Twigu, ki prikazuje sliko:
+
+```twig .{file:Twig}
+<img src={{ imageFile }} alt={{ imageAlt }}>
+```
+
+Upoštevajte, da okoli vrednosti atributa ni narekovajev. Koder jih je morda pozabil, kar se pač zgodi. Na primer, v jeziku React je koda zapisana takole, brez narekovajev, in koder, ki menja jezike, lahko zlahka pozabi na narekovaje.
+
+Napadalec vstavi spretno sestavljen niz `foo onload=alert('Hacked!')` kot napis slike. Vemo že, da Twig ne more ugotoviti, ali se spremenljivka izpiše v toku besedila HTML, znotraj atributa, znotraj komentarja HTML itd; skratka, ne razlikuje med konteksti. In samo mehanično pretvori znake `< > & ' "` v entitete HTML.
+Tako bo nastala koda videti takole:
+
+```html
+<img src=photo0145.webp alt=foo onload=alert(&#039;Hacked!&#039;)>
+```
+
+**Vzpostavljena je bila varnostna luknja!**
+
+Ponarejeni atribut `onload` je postal del strani in brskalnik ga izvede takoj po prenosu slike.
+
+Zdaj si oglejmo, kako Latte obravnava isto predlogo:
+
+```latte .{file:Latte}
+<img src={$imageFile} alt={$imageAlt}>
+```
+
+Latte vidi predlogo enako kot vi. Za razliko od Twiga razume HTML in ve, da se spremenljivka izpiše kot vrednost atributa, ki ni v narekovajih. Zato jih doda. Ko napadalec vstavi enak napis, bo nastala koda videti takole:
+
+```html
+<img src="photo0145.webp" alt="foo onload=alert(&apos;Hacked!&apos;)">
+```
+
+**Latte je uspešno preprečil XSS.**
+
+
+Tiskanje spremenljivke v jeziku JavaScript .[#toc-printing-a-variable-in-javascript]
+------------------------------------------------------------------------------------
+
+Zaradi kontekstno občutljivega escapiranja je mogoče spremenljivke PHP uporabljati v jeziku JavaScript.
+
+```latte
+<p onclick="alert({$movie})">{$movie}</p>
+
+<script>var movie = {$movie};</script>
+```
+
+Če spremenljivka `$movie` hrani niz `'Amarcord & 8 1/2'`, se ustvari naslednji rezultat. Opazite različno eskapiranje, ki se uporablja v HTML in JavaScript ter tudi v atributu `onclick`:
+
+```latte
+<p onclick="alert(&quot;Amarcord &amp; 8 1\/2&quot;)">Amarcord &amp; 8 1/2</p>
+
+<script>var movie = "Amarcord & 8 1\/2";</script>
+```
+
+
+Preverjanje povezav .[#toc-link-checking]
+-----------------------------------------
+
+Latte samodejno preveri, ali spremenljivka, uporabljena v atributih `src` ali `href`, vsebuje spletni naslov URL (tj. protokol HTTP), in prepreči pisanje povezav, ki bi lahko predstavljale varnostno tveganje.
+
+```latte
+{var $link = 'javascript:attack()'}
+
+<a href="{$link}">click here</a>
+```
+
+Napiše:
+
+```latte
+<a href="">click here</a>
+```
+
+Preverjanje je mogoče izklopiti s filtrom [nocheck |filters#nocheck].
+
+
+Omejitve Latte .[#toc-limits-of-latte]
+======================================
+
+Latte ni popolna zaščita XSS za celotno aplikacijo. Bili bi nezadovoljni, če bi pri uporabi aplikacije Latte nehali razmišljati o varnosti.
+Cilj sistema Latte je zagotoviti, da napadalec ne more spreminjati strukture strani, posegati v elemente HTML ali atribute. Ne preverja pa vsebinske pravilnosti izpisanih podatkov. Prav tako ne preverja pravilnosti obnašanja JavaScripta.
+To presega področje uporabe sistema za oblikovanje predlog. Preverjanje pravilnosti podatkov, zlasti tistih, ki jih vnese uporabnik in so zato nezaupljivi, je pomembna naloga programerja.

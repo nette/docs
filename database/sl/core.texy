@@ -1,0 +1,350 @@
+Jedro zbirke podatkov
+*********************
+
+.[perex]
+Nette Database Core je abstraktni sloj podatkovne zbirke in zagotavlja osnovne funkcionalnosti.
+
+
+Namestitev .[#toc-installation]
+===============================
+
+Prenesite in namestite paket s [programom Composer |best-practices:composer]:
+
+```shell
+composer require nette/database
+```
+
+
+Priključitev in konfiguracija .[#toc-connection-and-configuration]
+==================================================================
+
+Če se želite povezati s podatkovno zbirko, preprosto ustvarite primerek razreda [api:Nette\Database\Connection]:
+
+```php
+$database = new Nette\Database\Connection($dsn, $user, $password);
+```
+
+Parameter `$dsn` (ime vira podatkov) je [enak tistemu, ki ga uporablja PDO |https://www.php.net/manual/en/pdo.construct.php#refsect1-pdo.construct-parameters], npr. `host=127.0.0.1;dbname=test`. V primeru neuspeha se vrže `Nette\Database\ConnectionException`.
+
+Vendar pa bolj prefinjen način ponuja [konfiguracija aplikacije |configuration]. Dodamo razdelek `database` in ta ustvari zahtevane predmete in ploščo s podatkovno bazo v vrstici [Tracy |tracy:].
+
+```neon
+database:
+	dsn: 'mysql:host=127.0.0.1;dbname=test'
+	user: root
+	password: password
+```
+
+Objekt povezave [prejmemo kot storitev iz vsebnika DI |dependency-injection:passing-dependencies], na primer:
+
+```php
+class Model
+{
+	// predajte Nette\Database\Explorer za delo s slojem Raziskovalec podatkovne baze
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+}
+```
+
+Za več informacij glejte [Konfiguracija podatkovne zbirke |configuration].
+
+
+Poizvedbe .[#toc-queries]
+=========================
+
+Za poizvedovanje po zbirki podatkov uporabite metodo `query()`, ki vrne [nabor rezultatov (ResultSet) |api:Nette\Database\ResultSet].
+
+```php
+$result = $database->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+}
+
+echo $result->getRowCount(); // vrne število vrstic, če je znano
+```
+
+.[note]
+Nad `ResultSet` je mogoče iterirati samo enkrat, če pa moramo iterirati večkrat, je treba rezultat pretvoriti v polje prek metode `fetchAll()`.
+
+Poizvedbi lahko preprosto dodate parametre, pri čemer upoštevajte vprašalni znak:
+
+```php
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+$database->query('SELECT * FROM users WHERE name = ? AND active = ?', $name, $active);
+
+$database->query('SELECT * FROM users WHERE id IN (?)', $ids); // $ids je polje
+```
+<div class=warning>
+
+Opozorilo, nikoli ne združujte nizov, da se izognete [ranljivosti vbrizgavanja SQL |https://en.wikipedia.org/wiki/SQL_injection]!
+/--
+$db->query('SELECT * FROM users WHERE name = ' . $name); // WRONG!!!
+\--
+</div>
+
+V primeru neuspeha `query()` vrže `Nette\Database\DriverException` ali enega od njegovih potomcev:
+
+- [ConstraintViolationException |api:Nette\Database\ConstraintViolationException] - kršitev katere koli omejitve
+- [ForeignKeyConstraintViolationException |api:Nette\Database\ForeignKeyConstraintViolationException] - neveljaven tuj ključ
+- [NotNullConstraintViolationException |api:Nette\Database\NotNullConstraintViolationException] - kršitev pogoja NOT NULL
+- [UniqueConstraintViolationException |api:Nette\Database\UniqueConstraintViolationException] - konflikt edinstvenega indeksa
+
+Poleg `query()` so na voljo še druge uporabne metode:
+
+```php
+// vrne asociativno polje id => ime
+$pairs = $database->fetchPairs('SELECT id, name FROM users');
+
+// vrne vse vrstice kot polje
+$rows = $database->fetchAll('SELECT * FROM users');
+
+// vrne posamezno vrstico
+$row = $database->fetch('SELECT * FROM users WHERE id = ?', $id);
+
+// vrne posamezno polje
+$name = $database->fetchField('SELECT name FROM users WHERE id = ?', $id);
+```
+
+V primeru neuspeha vse te metode zavržejo `Nette\Database\DriverException.`
+
+
+Vstavljanje, posodabljanje in brisanje .[#toc-insert-update-delete]
+===================================================================
+
+Parameter, ki ga vstavimo v poizvedbo SQL, je lahko tudi polje (v tem primeru je mogoče preskočiti nadomestno izjavo `?`), which may be useful for the `INSERT`:
+
+```php
+$database->query('INSERT INTO users ?', [ // tukaj se lahko izpusti vprašalno znamenje
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978)
+
+$id = $database->getInsertId(); // vrne samodejno povečanje vstavljene vrstice
+
+$id = $database->getInsertId($sequence); // ali vrednost zaporedja
+```
+
+Večkratno vstavljanje:
+
+```php
+$database->query('INSERT INTO users', [
+	[
+		'name' => 'Jim',
+		'year' => 1978,
+	], [
+		'name' => 'Jack',
+		'year' => 1987,
+	],
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978), ('Jack', 1987)
+```
+
+Vstavljamo lahko tudi datoteke, objekte DateTime ali [naštevanja |https://www.php.net/enumerations]:
+
+```php
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'created' => new DateTime, // ali $databaza::literal('NOW()')
+	'avatar' => fopen('image.gif', 'r'), // vstavi vsebino datoteke
+	'status' => State::New, // enum State
+]);
+```
+
+Posodabljanje vrstic:
+
+```php
+$result = $database->query('UPDATE users SET', [
+	'name' => $name,
+	'year' => $year,
+], 'WHERE id = ?', $id);
+// UPDATE users SET `name` = 'Jim', `year` = 1978 WHERE id = 123
+
+echo $result->getRowCount(); // vrne število prizadetih vrstic
+```
+
+Za UPDATE lahko uporabimo operatorja `+=` in `-=`:
+
+```php
+$database->query('UPDATE users SET', [
+	'age+=' => 1, // Opomba +=
+], 'WHERE id = ?', $id);
+// UPDATE users SET `age` = `age` + 1
+```
+
+Brisanje:
+
+```php
+$result = $database->query('DELETE FROM users WHERE id = ?', $id);
+echo $result->getRowCount(); // vrne število prizadetih vrstic
+```
+
+
+Napredne poizvedbe .[#toc-advanced-queries]
+===========================================
+
+Vstavljanje ali posodabljanje, če že obstaja:
+
+```php
+$database->query('INSERT INTO users', [
+	'id' => $id,
+	'name' => $name,
+	'year' => $year,
+], 'ON DUPLICATE KEY UPDATE', [
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`id`, `name`, `year`) VALUES (123, 'Jim', 1978)
+//   ON DUPLICATE KEY UPDATE `name` = 'Jim', `year` = 1978
+```
+
+Upoštevajte, da podatkovna baza Nette prepozna kontekst SQL, v katerem je vstavljen parameter polja, in v skladu s tem sestavi kodo SQL. Tako iz prvega polja ustvari `(id, name, year) VALUES (123, 'Jim', 1978)`, medtem ko drugo pretvori v `name = 'Jim', year = 1978`.
+
+Sortiranje lahko opišemo tudi z uporabo polja, pri čemer so ključi imena stolpcev, vrednosti pa logične vrednosti, ki določajo, ali naj se sortira v naraščajočem vrstnem redu:
+
+```php
+$database->query('SELECT id FROM author ORDER BY', [
+	'id' => true, // naraščajoče
+	'name' => false, // padajoče
+]);
+// SELECT id FROM author ORDER BY `id`, `name` DESC
+```
+
+Če zaznavanje ni delovalo, lahko določite obliko sklopa z nadomestnim znakom `?`, ki mu sledi namig. Ti namigi so podprti:
+
+| (key1, key2, ...) VALUES (value1, value2, ...)
+| ?set | key1 = value1, key2 = value2, ...
+| ?and | key1 = value1 AND key2 = value2 ...
+| ?or | key1 = value1 OR key2 = value2 ...
+| ?order | key1 ASC, key2 DESC
+
+V stavku WHERE je uporabljen operator `?and`, zato so pogoji povezani s `AND`:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND `year` = 1978
+```
+
+To lahko z uporabo nadomestnega znaka `?or` preprosto spremenite v `OR`:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE ?or', [
+	'name' => $name,
+	'year' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' OR `year` = 1978
+```
+
+V pogojih lahko uporabljamo operatorje:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name <>' => $name,
+	'year >' => $year,
+]);
+// SELECT * FROM users WHERE `name` <> 'Jim' AND `year` > 1978
+```
+
+in tudi naštevanja:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => ['Jim', 'Jack'],
+	'role NOT IN' => ['admin', 'owner'], // naštevanje + operator NOT IN
+]);
+// SELECT * FROM users WHERE
+//   `name` IN ('Jim', 'Jack') AND `role` NOT IN ('admin', 'owner')
+```
+
+Vključimo lahko tudi del kode SQL po meri z uporabo tako imenovanega literala SQL:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year >' => $database::literal('YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (`year` > YEAR())
+```
+
+Druga možnost:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (year > YEAR())
+```
+
+SQL literal ima lahko tudi svoje parametre:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > ? AND year < ?', $min, $max),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (year > 1978 AND year < 2017)
+```
+
+Zaradi tega lahko ustvarimo zanimive kombinacije:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('?or', [
+		'active' => true,
+		'role' => $role,
+	]),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (`active` = 1 OR `role` = 'admin')
+```
+
+
+Ime spremenljivke .[#toc-variable-name]
+=======================================
+
+Obstaja nadomestni znak `?name`, ki ga uporabite, če je ime tabele ali stolpca spremenljivka. (Pazite, da uporabniku ne dovolite, da bi manipuliral z vsebino take spremenljivke):
+
+```php
+$table = 'blog.users';
+$column = 'name';
+$database->query('SELECT * FROM ?name WHERE ?name = ?', $table, $column, $name);
+// SELECT * FROM `blog`.`users` WHERE `name` = 'Jim'
+```
+
+
+Transakcije .[#toc-transactions]
+================================
+
+Obstajajo trije načini obravnavanja transakcij:
+
+```php
+$database->beginTransaction();
+
+$database->commit();
+
+$database->rollback();
+```
+
+Eleganten način ponuja metoda `transaction()`. Predate povratni klic, ki se izvede v transakciji. Če se med izvajanjem vrže izjema, se transakcija opusti, če je vse v redu, se transakcija izvede.
+
+```php
+$id = $database->transaction(function ($database) {
+	$database->query('DELETE FROM ...');
+	$database->query('INSERT INTO ...');
+	// ...
+	return $database->getInsertId();
+});
+```
+
+Kot lahko vidite, metoda `transaction()` vrne povratno vrednost povratnega klica.
+
+Metoda transaction() je lahko tudi vgnezdena, kar poenostavi izvajanje neodvisnih skladišč.

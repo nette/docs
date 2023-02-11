@@ -1,0 +1,194 @@
+Ustvarjanje razširitev za Nette DI
+**********************************
+
+.[perex]
+Generiranje vsebnika DI poleg konfiguracijskih datotek vpliva tudi na tako imenovane *razširitve*. Aktiviramo jih v konfiguracijski datoteki v razdelku `extensions`.
+
+Tako dodamo razširitev, ki jo predstavlja razred `BlogExtension` z imenom `blog`:
+
+```neon
+extensions:
+	blog: BlogExtension
+```
+
+Vsaka razširitev za sestavljanje podeduje od [api:Nette\DI\CompilerExtension] in lahko implementira naslednje metode, ki se kličejo med sestavljanjem DI:
+
+getConfigSchema().
+2. loadConfiguration()
+3. beforeCompile()
+4. afterCompile()
+
+
+getConfigSchema() .[method]
+===========================
+
+Ta metoda se pokliče prva. Opredeljuje shemo, ki se uporablja za preverjanje konfiguracijskih parametrov.
+
+Razširitve se konfigurirajo v razdelku, katerega ime je enako tistemu, pod katerim je bila razširitev dodana, npr. `blog`.
+
+```neon
+# enako ime kot moja razširitev
+blog:
+	postsPerPage: 10
+	comments: false
+```
+
+Opredelili bomo shemo, ki opisuje vse možnosti konfiguracije, vključno z njihovimi vrstami, sprejetimi vrednostmi in po možnosti privzetimi vrednostmi:
+
+```php
+use Nette\Schema\Expect;
+
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function getConfigSchema(): Nette\Schema\Schema
+	{
+		return Expect::structure([
+			'postsPerPage' => Expect::int(),
+			'allowComments' => Expect::bool()->default(true),
+		]);
+	}
+}
+```
+
+Za dokumentacijo glejte [shemo |schema:]. Poleg tega lahko določite, katere možnosti so lahko [dinamične |application:bootstrap#Dynamic Parameters] z uporabo `dynamic()`, na primer `Expect::int()->dynamic()`.
+
+Do konfiguracije dostopamo prek `$this->config`, ki je objekt `stdClass`:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		$num = $this->config->postPerPage;
+		if ($this->config->allowComments) {
+			// ...
+		}
+	}
+}
+```
+
+
+loadConfiguration() .[method]
+=============================
+
+Ta metoda se uporablja za dodajanje storitev v vsebnik. To storimo s [api:Nette\DI\ContainerBuilder]:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		$builder = $this->getContainerBuilder();
+		$builder->addDefinition($this->prefix('articles'))
+			->setFactory(App\Model\HomepageArticles::class, ['@connection']) // ali setCreator()
+			->addSetup('setLogger', ['@logger']);
+	}
+}
+```
+
+Običajno se storitve, ki jih doda razširitev, opremijo z njenim imenom, tako da ne pride do navzkrižja imen. To stori `prefix()`, tako da če se razširitev imenuje "blog", se bo storitev imenovala `blog.articles`.
+
+Če moramo storitev preimenovati, lahko ustvarimo vzdevek z njenim prvotnim imenom, da ohranimo združljivost za nazaj. Podobno stori Nette npr. za `routing.router`, ki je na voljo tudi pod prejšnjim imenom `router`.
+
+```php
+$builder->addAlias('router', 'routing.router');
+```
+
+
+Pridobivanje storitev iz datoteke .[#toc-retrieve-services-from-a-file]
+-----------------------------------------------------------------------
+
+Storitve lahko ustvarimo z uporabo API ContainerBuilder, lahko pa jih dodamo tudi prek znane konfiguracijske datoteke NEON in njenega razdelka `services`. Predpona `@extension` predstavlja trenutno razširitev.
+
+```neon
+services:
+	articles:
+		create: MyBlog\ArticlesModel(@connection)
+
+	comments:
+		create: MyBlog\CommentsModel(@connection, @extension.articles)
+
+	articlesList:
+		create: MyBlog\Components\ArticlesList(@extension.articles)
+```
+
+Storitve bomo dodajali na ta način:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		$builder = $this->getContainerBuilder();
+
+		// naloži konfiguracijsko datoteko za razširitev
+		$this->compiler->loadDefinitionsFromConfig(
+			$this->loadFromFile(__DIR__ . '/blog.neon')['services'],
+		);
+	}
+}
+```
+
+
+beforeCompile() .[method]
+=========================
+
+Metoda se pokliče, ko vsebnik vsebuje vse storitve, ki so jih dodale posamezne razširitve v metodah `loadConfiguration`, in uporabniške konfiguracijske datoteke. V tej fazi sestavljanja lahko nato spreminjamo definicije storitev ali dodajamo povezave med njimi. Za iskanje storitev po oznakah lahko uporabite metodo `findByTag()`, za iskanje po razredih ali vmesnikih pa metodo `findByType()`.
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function beforeCompile()
+	{
+		$builder = $this->getContainerBuilder();
+
+		foreach ($builder->findByTag('logaware') as $serviceName => $tagValue) {
+			$builder->getDefinition($serviceName)->addSetup('setLogger');
+		}
+	}
+}
+```
+
+
+afterCompile() .[method]
+========================
+
+V tej fazi je razred vsebnika že ustvarjen kot objekt [ClassType |php-generator:#classes], vsebuje vse metode, ki jih ustvari storitev, in je pripravljen za predpomnjenje kot datoteka PHP. Na tej točki lahko še vedno urejamo kodo nastalega razreda.
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function afterCompile(Nette\PhpGenerator\ClassType $class)
+	{
+		$method = $class->getMethod('__construct');
+		// ...
+	}
+}
+```
+
+
+$initialization .[wiki-method]
+==============================
+
+Konfigurator pokliče inicializacijsko kodo po [ustvarjanju vsebnika |application:bootstrap#index.php], ki se ustvari z zapisom v objekt `$this->initialization` z [metodo addBody() |php-generator:#method-and-function-body].
+
+Prikazali bomo primer, kako z inicializacijsko kodo zaženemo sejo ali zaženemo storitve, ki imajo oznako `run`:
+
+```php
+class BlogExtension extends Nette\DI\CompilerExtension
+{
+	public function loadConfiguration()
+	{
+		// samodejni zagon seje
+		if ($this->config->session->autoStart) {
+			$this->initialization->addBody('$this->getService("session")->start()');
+		}
+
+		// storitve z oznako 'run' je treba ustvariti po namestitvi vsebnika.
+		$builder = $this->getContainerBuilder();
+		foreach ($builder->findByTag('run') as $name => $foo) {
+			$this->initialization->addBody('$this->getService(?);', [$name]);
+		}
+	}
+}
+```

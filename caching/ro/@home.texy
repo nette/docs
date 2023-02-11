@@ -1,0 +1,447 @@
+Caching
+*******
+
+<div class=perex>
+
+Memoria cache accelerează aplicația dumneavoastră prin stocarea datelor - odată ce au fost recuperate - pentru utilizare ulterioară. Vă vom arăta:
+
+- Cum se utilizează memoria cache
+- Cum să modificați memoria cache
+- Cum să invalidați corect memoria cache
+
+</div>
+
+Utilizarea memoriei cache este foarte simplă în Nette, dar acoperă și nevoile foarte avansate de stocare cache. Este concepută pentru performanță și durabilitate 100%. Practic, veți găsi adaptoare pentru cele mai comune tipuri de stocare backend. Permite invalidarea bazată pe etichete, protecția cache stampede, expirarea timpului etc.
+
+
+Instalare .[#toc-installation]
+==============================
+
+Descărcați și instalați pachetul folosind [Composer |best-practices:composer]:
+
+```shell
+composer require nette/caching
+```
+
+
+Utilizare de bază .[#toc-basic-usage]
+=====================================
+
+Centrul de lucru cu memoria cache este obiectul [api:Nette\Caching\Cache]. Creăm instanța acestuia și transmitem constructorului ca parametru așa-numita stocare. Acesta este un obiect care reprezintă locul în care vor fi stocate fizic datele (bază de date, Memcached, fișiere pe disc, ...). Obiectul de stocare se obține prin trecerea acestuia folosind [injecția de dependență |dependency-injection:passing-dependencies] cu tipul `Nette\Caching\Storage`. Veți afla toate elementele esențiale în [secțiunea Stocare |#Storages].
+
+.[warning]
+În versiunea 3.0, interfața avea încă tipul `I` prefix, so the name was `Nette\Caching\IStorage`. De asemenea, constantele clasei `Cache` au fost scrise cu majuscule, deci, de exemplu, `Cache::EXPIRE` în loc de `Cache::Expire`.
+
+Pentru exemplele următoare, să presupunem că avem un alias `Cache` și o stocare în variabila `$storage`.
+
+```php
+use Nette\Caching\Cache;
+
+$storage = /* ... */; // instanță de Nette\Caching\Storage
+```
+
+Memoria cache este de fapt un *magazin cu valori cheie*, astfel încât citim și scriem date sub chei la fel ca în cazul array-urilor asociative. Aplicațiile sunt formate din mai multe părți independente și, dacă toate acestea ar folosi o singură memorie (de exemplu, un director pe un disc), mai devreme sau mai târziu ar exista o coliziune de chei. Cadrul Nette Framework rezolvă problema prin împărțirea întregului spațiu în spații de nume (subdirectoare). Astfel, fiecare parte a programului utilizează propriul spațiu cu un nume unic și nu pot apărea coliziuni.
+
+Numele spațiului este specificat ca al doilea parametru al constructorului clasei Cache:
+
+```php
+$cache = new Cache($storage, 'Full Html Pages');
+```
+
+Acum putem utiliza obiectul `$cache` pentru a citi și a scrie din memoria cache. Metoda `load()` este utilizată pentru ambele. Primul argument este cheia, iar al doilea este callback-ul PHP, care este apelat atunci când cheia nu este găsită în memoria cache. Callback-ul generează o valoare, o returnează și o pune în cache:
+
+```php
+$value = $cache->load($key, function () use ($key) {
+	$computedValue = /* ... */; // calcule grele
+	return $computedValue;
+});
+```
+
+Dacă al doilea parametru nu este specificat `$value = $cache->load($key)`, se returnează `null` în cazul în care elementul nu se află în memoria cache.
+
+.[tip]
+Lucrul grozav este că orice structuri serializabile pot fi puse în cache, nu numai șirurile de caractere. Și același lucru este valabil și pentru chei.
+
+Elementul este eliminat din memoria cache folosind metoda `remove()`:
+
+```php
+$cache->remove($key);
+```
+
+De asemenea, puteți stoca un element în memoria cache utilizând metoda `$cache->save($key, $value, array $dependencies = [])`. Cu toate acestea, este preferabilă metoda de mai sus, care utilizează `load()`.
+
+
+Memoizare .[#toc-memoization]
+=============================
+
+Memoizarea înseamnă stocarea în memoria cache a rezultatului unei funcții sau metode, astfel încât să îl puteți utiliza data viitoare, în loc să calculați același lucru din nou și din nou.
+
+Metodele și funcțiile pot fi numite memoized folosind `call(callable $callback, ...$args)`:
+
+```php
+$result = $cache->call('gethostbyaddr', $ip);
+```
+
+Funcția `gethostbyaddr()` este apelată o singură dată pentru fiecare parametru `$ip`, iar data următoare va fi returnată valoarea din memoria cache.
+
+De asemenea, este posibil să se creeze un înveliș memoizat pentru o metodă sau o funcție care poate fi apelată ulterior:
+
+```php
+function factorial($num)
+{
+	return /* ... */;
+}
+
+$memoizedFactorial = $cache->wrap('factorial');
+
+$result = $memoizedFactorial(5); // o numără
+$result = $memoizedFactorial(5); // o returnează din memoria cache
+```
+
+
+Expirare și invalidare .[#toc-expiration-invalidation]
+======================================================
+
+În cazul memoriei cache, este necesar să se abordeze problema faptului că unele dintre datele salvate anterior vor deveni invalide în timp. Cadrul Nette Framework oferă un mecanism prin care se poate limita valabilitatea datelor și prin care acestea pot fi șterse într-un mod controlat ("invalidarea lor", folosind terminologia cadrului).
+
+Valabilitatea datelor se stabilește în momentul salvării, folosind al treilea parametru al metodei `save()`, de exemplu, "Validitatea datelor":
+
+```php
+$cache->save($key, $value, [
+	$cache::Expire => '20 minutes',
+]);
+```
+
+Sau utilizând parametrul `$dependencies` transmis prin referință la callback-ul din metoda `load()`, de exemplu:
+
+```php
+$value = $cache->load($key, function (&$dependencies) {
+	$dependencies[Cache::Expire] = '20 minutes';
+	return /* ... */;
+});
+```
+
+Sau folosind al treilea parametru în metoda `load()`, de exemplu:
+
+```php
+$value = $cache->load($key, function () {
+	return ...;
+}, [Cache::Expire => '20 minutes']);
+```
+
+În exemplele următoare, vom presupune cea de-a doua variantă și, prin urmare, existența unei variabile `$dependencies`.
+
+
+Expirarea .[#toc-expiration]
+----------------------------
+
+Cea mai simplă expirare este limita de timp. Iată cum să puneți în cache date valabile timp de 20 de minute:
+
+```php
+// acceptă, de asemenea, numărul de secunde sau timestamp-ul UNIX
+$dependencies[Cache::Expire] = '20 minutes';
+```
+
+Dacă dorim să extindem perioada de valabilitate la fiecare citire, acest lucru se poate realiza în acest mod, dar atenție, acest lucru va crește sarcina de gestionare a cache-ului:
+
+```php
+$dependencies[Cache::Sliding] = true;
+```
+
+Opțiunea cea mai la îndemână este posibilitatea de a lăsa datele să expire atunci când un anumit fișier este modificat sau unul dintre mai multe fișiere. Acest lucru poate fi utilizat, de exemplu, pentru a pune în cache datele rezultate din procesarea acestor fișiere. Utilizați căi absolute.
+
+```php
+$dependencies[Cache::Files] = '/path/to/data.yaml';
+// sau
+$dependencies[Cache::Files] = ['/path/to/data1.yaml', '/path/to/data2.yaml'];
+```
+
+Putem lăsa un element din memoria cache să expire atunci când expiră un alt element (sau unul dintre mai multe altele). Acest lucru poate fi utilizat atunci când punem în cache întreaga pagină HTML și fragmente din ea sub alte chei. Odată ce fragmentul se schimbă, întreaga pagină devine invalidă. Dacă avem fragmente stocate sub chei precum `frag1` și `frag2`, vom folosi:
+
+```php
+$dependencies[Cache::Items] = ['frag1', 'frag2'];
+```
+
+Expirarea poate fi, de asemenea, controlată folosind funcții personalizate sau metode statice, care decid întotdeauna la citire dacă elementul este încă valabil. De exemplu, putem lăsa elementul să expire ori de câte ori se schimbă versiunea PHP. Vom crea o funcție care compară versiunea curentă cu parametrul, iar la salvare vom adăuga o matrice de forma `[function name, ...arguments]` la dependențe:
+
+```php
+function checkPhpVersion($ver): bool
+{
+	return $ver === PHP_VERSION_ID;
+}
+
+$dependencies[Cache::Callbacks] = [
+	['checkPhpVersion', PHP_VERSION_ID] // expiră atunci când checkPhpVersion(...) === false
+];
+```
+
+Bineînțeles, toate criteriile pot fi combinate. Memoria cache expiră atunci când cel puțin un criteriu nu este îndeplinit.
+
+```php
+$dependencies[Cache::Expire] = '20 minutes';
+$dependencies[Cache::Files] = '/path/to/data.yaml';
+```
+
+
+Invalidarea cu ajutorul etichetelor .[#toc-invalidation-using-tags]
+-------------------------------------------------------------------
+
+Etichetele sunt un instrument de invalidare foarte util. Putem atribui o listă de etichete, care sunt șiruri de caractere arbitrare, fiecărui element stocat în memoria cache. De exemplu, să presupunem că avem o pagină HTML cu un articol și comentarii, pe care dorim să o stocăm în memoria cache. Deci, specificăm etichete atunci când salvăm în memoria cache:
+
+```php
+$dependencies[Cache::Tags] = ["article/$articleId", "comments/$articleId"];
+```
+
+Acum, să trecem la administrare. Aici avem un formular pentru editarea articolelor. Împreună cu salvarea articolului într-o bază de date, apelăm comanda `clean()`, care va șterge articolele din memoria cache în funcție de etichetă:
+
+```php
+$cache->clean([
+	$cache::Tags => ["article/$articleId"],
+]);
+```
+
+De asemenea, în locul adăugării unui nou comentariu (sau al editării unui comentariu), nu vom uita să invalidăm tag-ul relevant:
+
+```php
+$cache->clean([
+	$cache::Tags => ["comments/$articleId"],
+]);
+```
+
+Ce am realizat? Că memoria noastră cache HTML va fi invalidată (ștearsă) ori de câte ori articolul sau comentariile se modifică. La editarea unui articol cu ID = 10, tag-ul `article/10` este forțat să fie invalidat și pagina HTML care poartă tag-ul este ștearsă din memoria cache. Același lucru se întâmplă atunci când introduceți un nou comentariu sub articolul respectiv.
+
+.[note]
+Etichetele necesită [Journal |#Journal].
+
+
+Invalidarea în funcție de prioritate .[#toc-invalidation-by-priority]
+---------------------------------------------------------------------
+
+Putem seta prioritatea pentru elementele individuale din memoria cache și va fi posibilă ștergerea lor într-un mod controlat atunci când, de exemplu, memoria cache depășește o anumită dimensiune:
+
+```php
+$dependencies[Cache::Priority] = 50;
+```
+
+Ștergeți toate elementele cu o prioritate mai mică sau egală cu 100:
+
+```php
+$cache->clean([
+	$cache::Priority => 100,
+]);
+```
+
+.[note]
+Prioritățile necesită așa-numitul [Jurnal |#Journal].
+
+
+Ștergeți memoria cache .[#toc-clear-cache]
+------------------------------------------
+
+Parametrul `Cache::All` șterge totul:
+
+```php
+$cache->clean([
+	$cache::All => true,
+]);
+```
+
+
+Citire în masă .[#toc-bulk-reading]
+===================================
+
+Pentru citirea și scrierea în masă în memoria cache, se utilizează metoda `bulkLoad()`, prin care se trece un tablou de chei și se obține un tablou de valori:
+
+```php
+$values = $cache->bulkLoad($keys);
+```
+
+Metoda `bulkLoad()` funcționează în mod similar cu `load()` cu al doilea parametru de apelare, la care se transmite cheia elementului generat:
+
+```php
+$values = $cache->bulkLoad($keys, function ($key, &$dependencies) {
+	$computedValue = /* ... */; // calcule grele
+	return $computedValue;
+});
+```
+
+
+Stocarea în memoria cache de ieșire .[#toc-output-caching]
+==========================================================
+
+Ieșirea poate fi capturată și pusă în cache foarte elegant:
+
+```php
+if ($capture = $cache->capture($key)) {
+
+	echo ... // imprimarea unor date
+
+	$capture->end(); // salvați rezultatul în memoria cache
+}
+```
+
+În cazul în care ieșirea este deja prezentă în memoria cache, metoda `capture()` o imprimă și returnează `null`, astfel încât condiția nu va fi executată. În caz contrar, metoda începe să stocheze ieșirea și returnează obiectul `$capture` cu ajutorul căruia salvăm în final datele în memoria cache.
+
+.[note]
+În versiunea 3.0, metoda se numea `$cache->start()`.
+
+
+Caching în Latte .[#toc-caching-in-latte]
+=========================================
+
+Caching-ul în șabloanele [Latte |latte:] este foarte ușor, trebuie doar să înfășurați o parte din șablon cu tag-uri `{cache}...{/cache}`. Memoria cache este invalidată automat atunci când șablonul sursă se modifică (inclusiv orice șablon inclus în cadrul etichetelor `{cache}` ). Etichetele `{cache}` pot fi imbricate, iar atunci când un bloc imbricate este invalidat (de exemplu, de o etichetă), blocul părinte este, de asemenea, invalidat.
+
+În etichetă este posibil să se specifice cheile la care va fi legat cache-ul (aici variabila `$id`) și să se stabilească etichetele de expirare și [invalidare |#Invalidation using Tags]
+
+```latte
+{cache $id, expire: '20 minutes', tags: [tag1, tag2]}
+	...
+{/cache}
+```
+
+Toți parametrii sunt opționali, astfel încât nu este necesar să se precizeze expirarea, etichetele sau cheile.
+
+Utilizarea memoriei cache poate fi, de asemenea, condiționată de `if` - conținutul va fi pus în memoria cache numai dacă este îndeplinită condiția:
+
+```latte
+{cache $id, if: !$form->isSubmitted()}
+	{$form}
+{/cache}
+```
+
+
+Stocuri .[#toc-storages]
+========================
+
+Un spațiu de stocare este un obiect care reprezintă locul unde sunt stocate fizic datele. Putem folosi o bază de date, un server Memcached sau cea mai disponibilă stocare, care sunt fișierele de pe disc.
+
+|----------------------
+| Stocare | Descriere
+|----------------------
+| [FileStorage |#FileStorage] | stocare implicită cu salvare în fișiere pe disc
+| [MemcachedStorage |#MemcachedStorage] | utilizează serverul `Memcached`
+| [MemoryStorage |#MemoryStorage] | datele sunt stocate temporar în memorie
+| [SQLiteStorage |#SQLiteStorage] | datele sunt stocate în baza de date SQLite
+| [DevNullStorage |#DevNullStorage] | datele nu sunt stocate - în scopuri de testare
+
+Obțineți obiectul de stocare prin transmiterea acestuia folosind [injecția de dependență |dependency-injection:passing-dependencies] cu tipul `Nette\Caching\Storage`. În mod implicit, Nette furnizează un obiect FileStorage care stochează datele într-un subfolder `cache` în directorul pentru [fișiere temporare |application:bootstrap#Temporary Files].
+
+Puteți modifica stocarea în configurație:
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\DevNullStorage
+```
+
+
+Stocare fișiere .[#toc-filestorage]
+-----------------------------------
+
+Scrie memoria cache în fișierele de pe disc. Stocarea `Nette\Caching\Storages\FileStorage` este foarte bine optimizată pentru performanță și, mai presus de toate, asigură atomicitatea completă a operațiunilor. Ce înseamnă acest lucru? Că atunci când folosim memoria cache, nu se poate întâmpla să citim un fișier care nu a fost încă complet scris de un alt fir de execuție sau ca cineva să îl șteargă "pe sub mână". Prin urmare, utilizarea memoriei cache este complet sigură.
+
+Această stocare are, de asemenea, o caracteristică importantă încorporată care previne o creștere extremă a utilizării CPU atunci când memoria cache este ștearsă sau rece (adică nu este creată). Aceasta este prevenirea "stampedei cache":https://en.wikipedia.org/wiki/Cache_stampede.
+Se întâmplă ca, la un moment dat, să existe mai multe cereri concurente care doresc același lucru din memoria cache (de exemplu, rezultatul unei interogări SQL costisitoare) și, deoarece aceasta nu se află în memoria cache, toate procesele încep să execute aceeași interogare SQL.
+Sarcina procesorului este multiplicată și se poate întâmpla chiar ca niciun fir să nu poată răspunde în limita de timp, memoria cache să nu fie creată și aplicația să se blocheze.
+Din fericire, memoria cache din Nette funcționează în așa fel încât, atunci când există mai multe cereri concurente pentru un element, acesta este generat doar de primul fir, celelalte așteaptă și apoi utilizează rezultatul generat.
+
+Exemplu de creare a unui FileStorage:
+
+```php
+// stocarea va fi directorul "/path/to/temp" de pe disc.
+$storage = new Nette\Caching\Storages\FileStorage('/path/to/temp');
+```
+
+
+MemcachedStorage .[#toc-memcachedstorage]
+-----------------------------------------
+
+Serverul [Memcached |https://memcached.org] este un sistem de stocare distribuită de înaltă performanță al cărui adaptor este `Nette\Caching\Storages\MemcachedStorage`. În configurație, specificați adresa IP și portul, dacă diferă de standardul 11211.
+
+.[caution]
+Necesită extensia PHP `memcached`.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\MemcachedStorage('10.0.0.5')
+```
+
+
+MemoryStorage .[#toc-memorystorage]
+-----------------------------------
+
+`Nette\Caching\Storages\MemoryStorage` este o memorie care stochează datele într-o matrice PHP și care este astfel pierdută atunci când cererea este terminată.
+
+
+SQLiteStorage .[#toc-sqlitestorage]
+-----------------------------------
+
+Baza de date SQLite și adaptorul `Nette\Caching\Storages\SQLiteStorage` oferă o modalitate de stocare în memoria cache într-un singur fișier pe disc. Configurația va specifica calea către acest fișier.
+
+.[caution]
+Necesită extensiile PHP `pdo` și `pdo_sqlite`.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\SQLiteStorage('%tempDir%/cache.db')
+```
+
+
+DevNullStorage .[#toc-devnullstorage]
+-------------------------------------
+
+O implementare specială a stocării este `Nette\Caching\Storages\DevNullStorage`, care nu stochează de fapt deloc date. Prin urmare, este potrivită pentru testare dacă dorim să eliminăm efectul cache-ului.
+
+
+Utilizarea memoriei cache în cod .[#toc-using-cache-in-code]
+============================================================
+
+Atunci când folosiți caching în cod, aveți două moduri de a face acest lucru. Prima este că obțineți obiectul de stocare prin trecerea acestuia folosind [injecția de dependență |dependency-injection:passing-dependencies] și apoi creați un obiect `Cache`:
+
+```php
+use Nette;
+
+class ClassOne
+{
+	private Nette\Caching\Cache $cache;
+
+	public function __construct(Nette\Caching\Storage $storage)
+	{
+		$this->cache = new Nette\Caching\Cache($storage, 'my-namespace');
+	}
+}
+```
+
+Al doilea mod este acela de a obține obiectul de stocare `Cache`:
+
+```php
+class ClassTwo
+{
+	public function __construct(
+		private Nette\Caching\Cache $cache,
+	) {
+	}
+}
+```
+
+Obiectul `Cache` este apoi creat direct în configurație, după cum urmează:
+
+```neon
+services:
+	- ClassTwo( Nette\Caching\Cache(namespace: 'my-namespace') )
+```
+
+
+Jurnal .[#toc-journal]
+======================
+
+Nette stochează etichetele și prioritățile într-un așa-numit jurnal. În mod implicit, pentru aceasta se utilizează SQLite și fișierul `journal.s3db`, fiind necesare extensiile **PHP `pdo` și `pdo_sqlite`.**
+
+Puteți schimba jurnalul în configurare:
+
+```neon
+services:
+	cache.journal: MyJournal
+```
+
+
+{{leftbar: nette:@menu-topics}}

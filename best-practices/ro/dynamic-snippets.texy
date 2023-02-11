@@ -1,0 +1,174 @@
+Fragmente dinamice
+******************
+
+Destul de des în dezvoltarea aplicațiilor există necesitatea de a efectua operații AJAX, de exemplu, în rândurile individuale ale unui tabel sau în elementele unei liste. Ca exemplu, putem alege să listăm articole, permițând utilizatorului logat să selecteze un rating "îmi place/nu-mi place" pentru fiecare dintre ele. Codul prezentatorului și șablonul corespunzător fără AJAX vor arăta cam așa (enumăr cele mai importante fragmente, codul presupune existența unui serviciu pentru marcarea ratingurilor și obținerea unei colecții de articole - implementarea specifică nu este importantă în scopul acestui tutorial):
+
+```php
+public function handleLike(int $articleId): void
+{
+	$this->ratingService->saveLike($articleId, $this->user->id);
+	$this->redirect('this');
+}
+
+public function handleUnlike(int $articleId): void
+{
+	$this->ratingService->removeLike($articleId, $this->user->id);
+	$this->redirect('this');
+}
+```
+
+Șablon:
+
+```latte
+<article n:foreach="$articles as $article">
+	<h2>{$article->title}</h2>
+	<div class="content">{$article->content}</div>
+	{if !$article->liked}
+		<a n:href="like! $article->id" class=ajax>I like it</a>
+	{else}
+		<a n:href="unlike! $article->id" class=ajax>I don't like it anymore</a>
+	{/if}
+</article>
+```
+
+
+Ajaxizare .[#toc-ajaxization]
+=============================
+
+Să aducem acum AJAX în această aplicație simplă. Modificarea ratingului unui articol nu este suficient de importantă pentru a necesita o cerere HTTP cu redirecționare, așa că, în mod ideal, ar trebui să se facă cu AJAX în fundal. Vom folosi [scriptul handler din add-ons |https://componette.org/vojtech-dobes/nette.ajax.js/] cu convenția obișnuită ca legăturile AJAX să aibă clasa CSS `ajax`.
+
+Totuși, cum să o facem în mod specific? Nette oferă 2 modalități: modalitatea cu fragmente dinamice și modalitatea cu componente. Ambele au avantajele și dezavantajele lor, așa că le vom prezenta pe rând.
+
+
+Metoda snippeturilor dinamice .[#toc-the-dynamic-snippets-way]
+==============================================================
+
+În terminologia Latte, un fragment dinamic este un caz specific de utilizare a etichetei `{snippet}` în care se utilizează o variabilă în numele fragmentului. Un astfel de snippet nu poate fi găsit oriunde în șablon - trebuie să fie inclus într-un snippet static, adică unul obișnuit, sau în interiorul unui `{snippetArea}`. Am putea modifica șablonul nostru după cum urmează.
+
+
+```latte
+{snippet articlesContainer}
+	<article n:foreach="$articles as $article">
+		<h2>{$article->title}</h2>
+		<div class="content">{$article->content}</div>
+		{snippet article-$article->id}
+			{if !$article->liked}
+				<a n:href="like! $article->id" class=ajax>I like it</a>
+			{else}
+				<a n:href="unlike! $article->id" class=ajax>I don't like it anymore</a>
+			{/if}
+		{/snippet}
+	</article>
+{/snippet}
+```
+
+Fiecare articol definește acum un singur snippet, care are un ID de articol în titlu. Toate aceste fragmente sunt apoi grupate într-un singur fragment numit `articlesContainer`. Dacă omitem acest snippet de împachetare, Latte ne va alerta cu o excepție.
+
+Tot ce mai rămâne de făcut este să adăugăm redesenarea în prezentator - doar redesenăm învelișul static.
+
+```php
+public function handleLike(int $articleId): void
+{
+	$this->ratingService->saveLike($articleId, $this->user->id);
+	if ($this->isAjax()) {
+		$this->redrawControl('articlesContainer');
+		// $this->redrawControl('article-' . $articleId); -- nu este necesar
+	} else {
+		$this->redirect('this');
+	}
+}
+```
+
+Modificați metoda soră `handleUnlike()` în același mod, iar AJAX este gata de funcționare!
+
+Soluția are totuși un dezavantaj. Dacă cercetăm mai bine modul în care funcționează cererea AJAX, vom descoperi că, deși aplicația pare eficientă în aparență (returnează un singur fragment pentru un anumit articol), de fapt, redă toate fragmentele pe server. Acesta a plasat fragmentul dorit în sarcina noastră utilă și le-a eliminat pe celelalte (astfel, destul de inutil, le-a recuperat și din baza de date).
+
+Pentru a optimiza acest proces, va trebui să luăm măsuri prin care să transmitem colecția `$articles` șablonului (de exemplu, în metoda `renderDefault()` ). Vom profita de faptul că procesarea semnalului are loc înainte de `render<Something>` metodelor:
+
+```php
+public function handleLike(int $articleId): void
+{
+	// ...
+	if ($this->isAjax()) {
+		// ...
+		$this->template->articles = [
+			$this->connection->table('articles')->get($articleId),
+		];
+	} else {
+		// ...
+}
+
+public function renderDefault(): void
+{
+	if (!isset($this->template->articles)) {
+		$this->template->articles = $this->connection->table('articles');
+	}
+}
+```
+
+Acum, atunci când semnalul este procesat, în loc de o colecție cu toate articolele, doar o matrice cu un singur articol este transmisă șablonului - cel pe care dorim să îl redăm și să îl trimitem în sarcină utilă către browser. Astfel, `{foreach}` se va face o singură dată și nu vor fi redate fragmente suplimentare.
+
+
+Calea componentei .[#toc-component-way]
+=======================================
+
+O soluție complet diferită utilizează o abordare diferită pentru a evita fragmentele dinamice. Trucul constă în mutarea întregii logici într-o componentă separată - de acum încolo, nu mai avem un prezentator care să se ocupe de introducerea ratingului, ci o componentă dedicată `LikeControl`. Clasa va arăta ca mai jos (în plus, va conține și metodele `render`, `handleUnlike`, etc.):
+
+```php
+class LikeControl extends Nette\Application\UI\Control
+{
+	public function __construct(
+		private Article $article,
+	) {
+	}
+
+	public function handleLike(): void
+	{
+		$this->ratingService->saveLike($this->article->id, $this->presenter->user->id);
+		if ($this->presenter->isAjax()) {
+			$this->redrawControl();
+		} else {
+			$this->presenter->redirect('this');
+		}
+	}
+}
+```
+
+Șablon de componentă:
+
+```latte
+{snippet}
+	{if !$article->liked}
+		<a n:href="like!" class=ajax>I like it</a>
+	{else}
+		<a n:href="unlike!" class=ajax>I don't like it anymore</a>
+	{/if}
+{/snippet}
+```
+
+Bineînțeles că vom schimba șablonul de vizualizare și va trebui să adăugăm o fabrică la prezentator. Deoarece vom crea componenta de câte ori vom primi articole din baza de date, vom folosi clasa [application:Multiplier] pentru a o "multiplica".
+
+```php
+protected function createComponentLikeControl()
+{
+	$articles = $this->connection->table('articles');
+	return new Nette\Application\UI\Multiplier(function (int $articleId) use ($articles) {
+		return new LikeControl($articles[$articleId]);
+	});
+}
+```
+
+Șablonul de vizualizare este redus la minimul necesar (și complet lipsit de fragmente!):
+
+```latte
+<article n:foreach="$articles as $article">
+	<h2>{$article->title}</h2>
+	<div class="content">{$article->content}</div>
+	{control "likeControl-$article->id"}
+</article>
+```
+
+Aproape am terminat: aplicația va funcționa acum în AJAX. Și aici trebuie să optimizăm aplicația, deoarece, datorită utilizării bazei de date Nette, procesarea semnalului va încărca inutil toate articolele din baza de date în loc de unul singur. Totuși, avantajul este că nu va exista nicio redare, deoarece doar componenta noastră este efectiv redată.
+
+{{priority: -1}}
+{{sitename: Best Practices}}

@@ -1,0 +1,285 @@
+Extinderea Latte
+****************
+
+.[perex]
+Latte este foarte flexibil și poate fi extins în multe feluri: puteți adăuga filtre personalizate, funcții, etichete, încărcătoare etc. Vă vom arăta cum să faceți acest lucru.
+
+Acest capitol descrie diferitele modalități de extindere a Latte. Dacă doriți să reutilizați modificările dvs. în diferite proiecte sau dacă doriți să le partajați cu alții, ar trebui să [creați |creating-extension] atunci [așa-numita extensie |creating-extension].
+
+
+Câte drumuri duc la Roma? .[#toc-how-many-roads-lead-to-rome]
+=============================================================
+
+Deoarece unele dintre modalitățile de extindere a Latte pot fi amestecate, să încercăm mai întâi să explicăm diferențele dintre ele. Ca exemplu, să încercăm să implementăm un generator *Lorem ipsum*, căruia i se transmite numărul de cuvinte de generat.
+
+Construcția principală a limbajului Latte este tag-ul. Putem implementa un generator prin extinderea Latte cu un nou tag:
+
+```latte
+{lipsum 40}
+```
+
+Tag-ul va funcționa foarte bine. Cu toate acestea, este posibil ca generatorul sub forma unei etichete să nu fie suficient de flexibil, deoarece nu poate fi utilizat într-o expresie. Apropo, în practică, rareori aveți nevoie să generați etichete; și aceasta este o veste bună, deoarece etichetele reprezintă o modalitate mai complicată de extindere.
+
+Bine, haideți să încercăm să creăm un filtru în loc de o etichetă:
+
+```latte
+{=40|lipsum}
+```
+
+Din nou, o opțiune valabilă. Dar filtrul ar trebui să transforme valoarea transmisă în altceva. Aici folosim valoarea `40`, care indică numărul de cuvinte generate, ca argument al filtrului, nu ca valoare pe care dorim să o transformăm.
+
+Deci, să încercăm să folosim funcția:
+
+```latte
+{lipsum(40)}
+```
+
+Asta este! Pentru acest exemplu particular, crearea unei funcții este punctul de extensie ideal de utilizat. Puteți să o apelați oriunde unde este acceptată o expresie, de exemplu:
+
+```latte
+{var $text = lipsum(40)}
+```
+
+
+Filtre .[#toc-filters]
+======================
+
+Creați un filtru prin înregistrarea numelui său și a oricărui fișier PHP apelabil, cum ar fi o funcție:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFilter('shortify', fn(string $s) => mb_substr($s, 0, 10)); // scurtează textul la 10 caractere
+```
+
+În acest caz, ar fi mai bine ca filtrul să primească un parametru suplimentar:
+
+```php
+$latte->addFilter('shortify', fn(string $s, int $len = 10) => mb_substr($s, 0, $len));
+```
+
+Îl folosim într-un șablon ca acesta:
+
+```latte
+<p>{$text|shortify}</p>
+<p>{$text|shortify:100}</p>
+```
+
+După cum puteți vedea, funcția primește partea stângă a filtrului înainte de pipa `|` as the first argument and the arguments passed to the filter after `:` ca argumente următoare.
+
+Bineînțeles, funcția care reprezintă filtrul poate accepta orice număr de parametri, fiind suportați și parametrii variadici.
+
+
+Filtre care utilizează clasa .[#toc-filters-using-the-class]
+------------------------------------------------------------
+
+A doua modalitate de a defini un filtru este de a [folosi clasa |develop#Parameters as a class]. Creăm o metodă cu atributul `TemplateFilter`:
+
+```php
+class TemplateParameters
+{
+	public function __construct(
+		// parametri
+	) {}
+
+	#[Latte\Attributes\TemplateFilter]
+	public function shortify(string $s, int $len = 10): string
+	{
+		return mb_substr($s, 0, $len);
+	}
+}
+
+$params = new TemplateParameters(/* ... */);
+$latte->render('template.latte', $params);
+```
+
+Dacă utilizați PHP 7.x și Latte 2.x, utilizați adnotarea `/** @filter */` în locul atributului.
+
+
+Încărcător de filtre .[#toc-filter-loader]
+------------------------------------------
+
+În loc să înregistrați filtre individuale, puteți crea un așa-numit încărcător, care este o funcție care este apelată cu numele filtrului ca argument și care returnează fișierul PHP care poate fi apelat sau nul.
+
+```php
+$latte->addFilterLoader([new Filters, 'load']);
+
+
+class Filters
+{
+	public function load(string $filter): ?callable
+	{
+		if (in_array($filter, get_class_methods($this))) {
+			return [$this, $filter];
+		}
+		return null;
+	}
+
+	public function shortify($s, $len = 10)
+	{
+		return mb_substr($s, 0, $len);
+	}
+
+	// ...
+}
+```
+
+
+Filtre contextuale .[#toc-contextual-filters]
+---------------------------------------------
+
+Un filtru contextual este un filtru care acceptă un obiect [api:Latte\Runtime\FilterInfo] în primul parametru, urmat de alți parametri, ca în cazul filtrelor clasice. Acesta este înregistrat în același mod, Latte însuși recunoaște că filtrul este contextual:
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('foo', function (FilterInfo $info, string $str): string {
+	// ...
+});
+```
+
+Filtrele contextuale pot detecta și modifica tipul de conținut pe care îl primesc în variabila `$info->contentType`. Dacă filtrul este apelat în mod clasic peste o variabilă (de exemplu, `{$var|foo}`), `$info->contentType` va conține null.
+
+Filtrul trebuie să verifice mai întâi dacă tipul de conținut al șirului de intrare este acceptat. De asemenea, îl poate modifica. Exemplu de filtru care acceptă text (sau null) și returnează HTML:
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('money', function (FilterInfo $info, float $amount): string {
+	// mai întâi verificăm dacă tipul de conținut al intrării este text
+	if (!in_array($info->contentType, [null, ContentType::Text])) {
+		throw new Exception("Filter |money used in incompatible content type $info->contentType.");
+	}
+
+	// schimbăm tipul de conținut în HTML
+	$info->contentType = ContentType::Html;
+	return "<i>$num Kč</i>";
+});
+```
+
+.[note]
+În acest caz, filtrul trebuie să asigure scăparea corectă a datelor.
+
+Toate filtrele care sunt utilizate peste [blocuri |tags#block] (de exemplu, ca filtre de tip `{block|foo}...{/block}`) trebuie să fie contextuale.
+
+
+Funcții .[#toc-functions]
+=========================
+
+În mod implicit, toate funcțiile PHP native pot fi utilizate în Latte, cu excepția cazului în care sandbox-ul dezactivează acest lucru. Dar puteți, de asemenea, să vă definiți propriile funcții. Acestea pot suprascrie funcțiile native.
+
+Creați o funcție prin înregistrarea numelui său și a oricărui callable PHP:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFunction('random', function (...$args) {
+	return $args[array_rand($args)];
+});
+```
+
+În acest caz, utilizarea este identică cu apelarea funcției PHP:
+
+```latte
+{random(apple, orange, lemon)} // prints for example: apple
+```
+
+
+Funcții care utilizează clasa .[#toc-functions-using-the-class]
+---------------------------------------------------------------
+
+A doua modalitate de a defini o funcție este [utilizarea clasei |develop#Parameters as a class]. Creăm o metodă cu atributul `TemplateFunction`:
+
+```php
+class TemplateParameters
+{
+	public function __construct(
+		// parametri
+	) {}
+
+	#[Latte\Attributes\TemplateFunction]
+	public function random(...$args)
+	{
+		return $args[array_rand($args)];
+	}
+}
+
+$params = new TemplateParameters(/* ... */);
+$latte->render('template.latte', $params);
+```
+
+Dacă utilizați PHP 7.x și Latte 2.x, utilizați adnotarea `/** @function */` în locul atributului.
+
+
+Încărcătoare .[#toc-loaders]
+============================
+
+Încărcătoarele sunt responsabile de încărcarea șabloanelor dintr-o sursă, cum ar fi un sistem de fișiere. Aceștia sunt setați cu ajutorul metodei `setLoader()`:
+
+```php
+$latte->setLoader(new MyLoader);
+```
+
+Încărcătoarele încorporate sunt:
+
+
+FileLoader .[#toc-fileloader]
+-----------------------------
+
+Încărcător implicit. Încarcă șabloanele din sistemul de fișiere.
+
+Accesul la fișiere poate fi restricționat prin setarea directorului de bază:
+
+```php
+$latte->setLoader(new Latte\Loaders\FileLoader($templateDir));
+$latte->render('test.latte');
+```
+
+
+StringLoader .[#toc-stringloader]
+---------------------------------
+
+Încarcă șabloanele din șiruri de caractere. Acest încărcător este foarte util pentru testarea unitară. De asemenea, poate fi utilizat pentru proiecte mici în care poate fi utilă stocarea tuturor șabloanelor într-un singur fișier PHP.
+
+```php
+$latte->setLoader(new Latte\Loaders\StringLoader([
+	'main.file' => '{include other.file}',
+	'other.file' => '{if true} {$var} {/if}',
+]));
+
+$latte->render('main.file');
+```
+
+Utilizare simplificată:
+
+```php
+$template = '{if true} {$var} {/if}';
+$latte->setLoader(new Latte\Loaders\StringLoader);
+$latte->render($template);
+```
+
+
+Crearea unui încărcător personalizat .[#toc-creating-a-custom-loader]
+---------------------------------------------------------------------
+
+Loader este o clasă care implementează interfața [api:Latte\Loader].
+
+
+Etichete .[#toc-tags]
+=====================
+
+Una dintre cele mai interesante caracteristici ale motorului de modelare este capacitatea de a defini noi construcții de limbaj folosind etichete. Este, de asemenea, o funcționalitate mai complexă și trebuie să înțelegeți cum funcționează Latte la nivel intern.
+
+În cele mai multe cazuri, însă, tag-ul nu este necesar:
+- dacă ar trebui să genereze o anumită ieșire, utilizați în schimb [funcția |#functions]
+- dacă ar trebui să modifice unele intrări și să le returneze, utilizați în schimb [filter (filtru |#filters] )
+- dacă ar trebui să editeze o zonă de text, înfășurați-o cu o etichetă [`{block}` |tags#block] și utilizați un [filtru |#Contextual Filters]
+- în cazul în care nu ar trebui să producă nimic, ci doar să apeleze o funcție, apelați-o cu [`{do}` |tags#do]
+
+Dacă doriți în continuare să creați o etichetă, foarte bine! Toate elementele esențiale pot fi găsite în [Crearea unei extensii |creating-extension].
+
+
+Trecerile compilatorului .[#toc-compiler-passes]
+================================================
+
+Pasele de compilare sunt funcții care modifică AST-urile sau colectează informații din acestea. În Latte, de exemplu, un sandbox este implementat în acest mod: parcurge toate nodurile unui AST, găsește apelurile de funcții și metode și le înlocuiește cu apeluri controlate.
+
+Ca și în cazul etichetelor, aceasta este o funcționalitate mai complexă și trebuie să înțelegeți cum funcționează Latte sub capotă. Toate elementele esențiale pot fi găsite în capitolul [Crearea unei extensii |creating-extension].

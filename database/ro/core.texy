@@ -1,0 +1,350 @@
+Baza de date de bază
+********************
+
+.[perex]
+Nette Database Core este un strat de abstractizare a bazei de date și oferă funcționalitatea de bază.
+
+
+Instalare .[#toc-installation]
+==============================
+
+Descărcați și instalați pachetul folosind [Composer |best-practices:composer]:
+
+```shell
+composer require nette/database
+```
+
+
+Conectare și configurare .[#toc-connection-and-configuration]
+=============================================================
+
+Pentru a vă conecta la baza de date, creați pur și simplu o instanță a clasei [api:Nette\Database\Connection]:
+
+```php
+$database = new Nette\Database\Connection($dsn, $user, $password);
+```
+
+Parametrul `$dsn` (numele sursei de date) este [același cu cel utilizat de PDO |https://www.php.net/manual/en/pdo.construct.php#refsect1-pdo.construct-parameters], de exemplu `host=127.0.0.1;dbname=test`. În caz de eșec, se aruncă `Nette\Database\ConnectionException`.
+
+Cu toate acestea, o modalitate mai sofisticată oferă [configurarea aplicației |configuration]. Vom adăuga o secțiune `database` și aceasta creează obiectele necesare și un panou cu baza de date în bara [Tracy |tracy:].
+
+```neon
+database:
+	dsn: 'mysql:host=127.0.0.1;dbname=test'
+	user: root
+	password: password
+```
+
+Obiectul de conexiune pe care îl [primim ca serviciu de la un container DI |dependency-injection:passing-dependencies], de exemplu:
+
+```php
+class Model
+{
+	// treceți Nette\Database\Explorer pentru a lucra cu stratul Database Explorer
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+}
+```
+
+Pentru mai multe informații, consultați [configurarea bazei de date |configuration].
+
+
+Interogări .[#toc-queries]
+==========================
+
+Pentru a interoga baza de date, utilizați metoda `query()` care returnează [ResultSet |api:Nette\Database\ResultSet].
+
+```php
+$result = $database->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+}
+
+echo $result->getRowCount(); // returnează numărul de rânduri dacă este cunoscut
+```
+
+.[note]
+Pe `ResultSet` este posibilă iterarea doar o singură dată, dacă trebuie să iterăm de mai multe ori, este necesar să convertim rezultatul în matrice prin metoda `fetchAll()`.
+
+Puteți adăuga cu ușurință parametri la interogare, rețineți semnul de întrebare:
+
+```php
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+$database->query('SELECT * FROM users WHERE name = ? AND active = ?', $name, $active);
+
+$database->query('SELECT * FROM users WHERE id IN (?)', $ids); // $ids este o matrice
+```
+<div class=warning>
+
+ATENȚIE, nu concatenați niciodată șiruri de caractere pentru a evita [vulnerabilitatea de injecție SQL |https://en.wikipedia.org/wiki/SQL_injection]!
+/--
+$db->query('SELECT * FROM users WHERE name = ' . $name); // WRONG!!!
+\--
+</div>
+
+În caz de eșec, `query()` aruncă fie `Nette\Database\DriverException`, fie unul dintre descendenții săi:
+
+- [ConstraintViolationException |api:Nette\Database\ConstraintViolationException] - încălcarea oricărei constrângeri.
+- [ForeignKeyConstraintViolationException |api:Nette\Database\ForeignKeyConstraintViolationException] - cheie străină invalidă
+- [NotNullConstraintViolationException |api:Nette\Database\NotNullConstraintViolationException] - încălcare a condiției NOT NULL
+- [UniqueConstraintViolationException |api:Nette\Database\UniqueConstraintViolationException] - conflict cu un indice unic
+
+În plus față de `query()`, există și alte metode utile:
+
+```php
+// returnează matricea asociativă id => nume
+$pairs = $database->fetchPairs('SELECT id, name FROM users');
+
+// returnează toate rândurile sub formă de matrice
+$rows = $database->fetchAll('SELECT * FROM users');
+
+// returnează un singur rând
+$row = $database->fetch('SELECT * FROM users WHERE id = ?', $id);
+
+// returnează un singur câmp
+$name = $database->fetchField('SELECT name FROM users WHERE id = ?', $id);
+```
+
+În caz de eșec, toate aceste metode aruncă `Nette\Database\DriverException.`
+
+
+Inserare, actualizare și ștergere .[#toc-insert-update-delete]
+==============================================================
+
+Parametrul pe care îl introducem în interogarea SQL poate fi, de asemenea, matricea (caz în care este posibil să se omită declarația wildcard `?`), which may be useful for the `INSERT`:
+
+```php
+$database->query('INSERT INTO users ?', [ // aici poate fi omis semnul întrebării
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978)
+
+$id = $database->getInsertId(); // returnează creșterea automată a rândului inserat
+
+$id = $database->getInsertId($sequence); // sau valoarea secvenței
+```
+
+Inserare multiplă:
+
+```php
+$database->query('INSERT INTO users', [
+	[
+		'name' => 'Jim',
+		'year' => 1978,
+	], [
+		'name' => 'Jack',
+		'year' => 1987,
+	],
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978), ('Jack', 1987)
+```
+
+De asemenea, putem trece fișiere, obiecte DateTime sau [enumerări |https://www.php.net/enumerations]:
+
+```php
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'created' => new DateTime, // sau $database::literal('NOW()')
+	'avatar' => fopen('image.gif', 'r'), // inserează conținutul fișierului
+	'status' => State::New, // enum State
+]);
+```
+
+Actualizarea rândurilor:
+
+```php
+$result = $database->query('UPDATE users SET', [
+	'name' => $name,
+	'year' => $year,
+], 'WHERE id = ?', $id);
+// UPDATE users SET `name` = 'Jim', `year` = 1978 WHERE id = 123
+
+echo $result->getRowCount(); // returnează numărul de rânduri afectate
+```
+
+Pentru UPDATE, putem folosi operatorii `+=` și `-=`:
+
+```php
+$database->query('UPDATE users SET', [
+	'age+=' => 1, // notă +=
+], 'WHERE id = ?', $id);
+// UPDATE users SET `age` = `age` + 1
+```
+
+Ștergere:
+
+```php
+$result = $database->query('DELETE FROM users WHERE id = ?', $id);
+echo $result->getRowCount(); // returnează numărul de rânduri afectate
+```
+
+
+Interogări avansate .[#toc-advanced-queries]
+============================================
+
+Inserare sau actualizare, dacă există deja:
+
+```php
+$database->query('INSERT INTO users', [
+	'id' => $id,
+	'name' => $name,
+	'year' => $year,
+], 'ON DUPLICATE KEY UPDATE', [
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`id`, `name`, `year`) VALUES (123, 'Jim', 1978)
+//   ON DUPLICATE KEY UPDATE `name` = 'Jim', `year` = 1978
+```
+
+Rețineți că Nette Database recunoaște contextul SQL în care este introdus parametrul de matrice și construiește codul SQL în consecință. Astfel, din primul array generează `(id, name, year) VALUES (123, 'Jim', 1978)`, în timp ce al doilea se convertește în `name = 'Jim', year = 1978`.
+
+De asemenea, putem descrie sortarea folosind array, în care cheile sunt nume de coloane, iar valorile sunt booleane care determină dacă se sortează în ordine crescătoare:
+
+```php
+$database->query('SELECT id FROM author ORDER BY', [
+	'id' => true, // ascendent
+	'name' => false, // descrescător
+]);
+// SELECT id FROM author ORDER BY `id`, `name` DESC
+```
+
+În cazul în care detectarea nu a funcționat, puteți specifica forma ansamblului cu ajutorul unui wildcard `?` urmat de un indiciu. Aceste indicii sunt acceptate:
+
+| ?values | (key1, key2, ...) VALUES (value1, value2, ...)
+| ?set | key1 = valoare1, key2 = valoare2, ...
+| ?and | key1 = valoare1 AND key2 = valoare2 ...
+| ?or | key1 = valoare1 OR key2 = valoare2 ...
+| ?order | key1 ASC, key2 DESC
+
+Clauza WHERE utilizează operatorul `?and`, astfel încât condițiile sunt legate prin `AND`:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND `year` = 1978
+```
+
+Care poate fi ușor de schimbat în `OR` prin utilizarea caracterului wildcard `?or`:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE ?or', [
+	'name' => $name,
+	'year' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' OR `year` = 1978
+```
+
+Putem folosi operatori în condiții:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name <>' => $name,
+	'year >' => $year,
+]);
+// SELECT * FROM users WHERE `name` <> 'Jim' AND `year` > 1978
+```
+
+Și, de asemenea, enumerări:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => ['Jim', 'Jack'],
+	'role NOT IN' => ['admin', 'owner'], // enumerare + operator NOT IN
+]);
+// SELECT * FROM users WHERE
+//   `name` IN ('Jim', 'Jack') AND `role` NOT IN ('admin', 'owner')
+```
+
+De asemenea, putem include o bucată de cod SQL personalizat folosind așa-numitul literal SQL:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year >' => $database::literal('YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (`year` > YEAR())
+```
+
+Alternativ:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (year > YEAR())
+```
+
+Literalul SQL poate avea, de asemenea, parametrii săi:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > ? AND year < ?', $min, $max),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (year > 1978 AND year < 2017)
+```
+
+Datorită cărora putem crea combinații interesante:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('?or', [
+		'active' => true,
+		'role' => $role,
+	]),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (`active` = 1 OR `role` = 'admin')
+```
+
+
+Denumire variabilă .[#toc-variable-name]
+========================================
+
+Există un wildcard `?name` pe care îl utilizați dacă numele tabelului sau al coloanei este o variabilă. (Atenție, nu permiteți utilizatorului să manipuleze conținutul unei astfel de variabile):
+
+```php
+$table = 'blog.users';
+$column = 'name';
+$database->query('SELECT * FROM ?name WHERE ?name = ?', $table, $column, $name);
+// SELECT * FROM `blog`.`users` WHERE `name` = 'Jim'
+```
+
+
+Tranzacții .[#toc-transactions]
+===============================
+
+Există trei metode de tratare a tranzacțiilor:
+
+```php
+$database->beginTransaction();
+
+$database->commit();
+
+$database->rollback();
+```
+
+O modalitate elegantă este oferită de metoda `transaction()`. Se trece callback-ul care este executat în cadrul tranzacției. Dacă în timpul execuției se aruncă o excepție, tranzacția este abandonată, iar dacă totul merge bine, tranzacția este validată.
+
+```php
+$id = $database->transaction(function ($database) {
+	$database->query('DELETE FROM ...');
+	$database->query('INSERT INTO ...');
+	// ...
+	return $database->getInsertId();
+});
+```
+
+După cum puteți vedea, metoda `transaction()` returnează valoarea de returnare a callback-ului.
+
+Tranzacția() poate fi, de asemenea, imbricata, ceea ce simplifică implementarea de depozite independente.

@@ -1,0 +1,277 @@
+Paginarea rezultatelor bazei de date
+************************************
+
+.[perex]
+Atunci când dezvoltați aplicații web, vă confruntați adesea cu cerința de a imprima un număr restrâns de înregistrări pe o pagină.
+
+Ieșim din starea în care ne aflăm atunci când enumerăm toate datele fără paginare. Pentru a selecta datele din baza de date, avem clasa ArticleRepository, care conține constructorul și metoda `findPublishedArticles`, care returnează toate articolele publicate, sortate în ordinea descrescătoare a datei de publicare.
+
+```php
+namespace App\Model;
+
+use Nette;
+
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+
+	public function findPublishedArticles(): Nette\Database\ResultSet
+	{
+		return $this->database->query('
+			SELECT * FROM articles
+			WHERE created_at < ?
+			ORDER BY created_at DESC',
+			new \DateTime,
+		);
+	}
+}
+```
+
+În Presenter vom injecta apoi clasa model, iar în metoda render vom cere articolele publicate pe care le vom trece în șablon:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(): void
+	{
+		$this->template->articles = $this->articleRepository->findPublishedArticles();
+	}
+}
+```
+
+În șablon, ne vom ocupa de redarea unei liste de articole:
+
+```latte
+{block content}
+<h1>Articles</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+```
+
+
+În acest fel, putem scrie toate articolele, dar acest lucru va cauza probleme atunci când numărul de articole crește. În acel moment, va fi util să implementăm mecanismul de paginare.
+
+Acest lucru va asigura că toate articolele sunt împărțite în mai multe pagini și vom afișa doar articolele de pe o singură pagină curentă. Numărul total de pagini și distribuția articolelor este calculat chiar de [utils:Paginator], în funcție de câte articole avem în total și câte articole dorim să afișăm pe pagină.
+
+În primul pas, vom modifica metoda de obținere a articolelor din clasa repository pentru a returna numai articole de o singură pagină. De asemenea, vom adăuga o nouă metodă pentru a obține numărul total de articole din baza de date, de care vom avea nevoie pentru a seta un Paginator:
+
+```php
+namespace App\Model;
+
+use Nette;
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+
+	public function findPublishedArticles(int $limit, int $offset): Nette\Database\ResultSet
+	{
+		return $this->database->query('
+			SELECT * FROM articles
+			WHERE created_at < ?
+			ORDER BY created_at DESC
+			LIMIT ?
+			OFFSET ?',
+			new \DateTime, $limit, $offset,
+		);
+	}
+
+	/**
+	 * Returns the total number of published articles
+	 */
+	public function getPublishedArticlesCount(): int
+	{
+		return $this->database->fetchField('SELECT COUNT(*) FROM articles WHERE created_at < ?', new \DateTime);
+	}
+}
+```
+
+Următorul pas este să modificăm prezentatorul. Vom transmite numărul paginii afișate în prezent către metoda de randare. În cazul în care acest număr nu face parte din URL, trebuie să stabilim valoarea implicită la prima pagină.
+
+De asemenea, extindem metoda de randare pentru a obține instanța Paginator, configurând-o și selectând articolele corecte pentru a fi afișate în șablon. HomepagePresenter va arăta astfel:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(int $page = 1): void
+	{
+		// Vom afla numărul total de articole publicate
+		$articlesCount = $this->articleRepository->getPublishedArticlesCount();
+
+		// Vom crea instanța Paginator și o vom configura
+		$paginator = new Nette\Utils\Paginator;
+		$paginator->setItemCount($articlesCount); // numărul total de articole
+		$paginator->setItemsPerPage(10); // articole pe pagină
+		$paginator->setPage($page); // numărul actual de pagini
+
+		// Vom găsi un set limitat de articole din baza de date pe baza calculelor efectuate de Paginator
+		$articles = $this->articleRepository->findPublishedArticles($paginator->getLength(), $paginator->getOffset());
+
+		// pe care le vom transmite șablonului
+		$this->template->articles = $articles;
+		// și, de asemenea, Paginator însuși pentru a afișa opțiunile de paginare
+		$this->template->paginator = $paginator;
+	}
+}
+```
+
+Șablonul itera deja peste articole într-o singură pagină, trebuie doar să adăugăm linkuri de paginare:
+
+```latte
+{block content}
+<h1>Articles</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+
+<div class="pagination">
+	{if !$paginator->isFirst()}
+		<a n:href="default, 1">First</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->page-1">Previous</a>
+		&nbsp;|&nbsp;
+	{/if}
+
+	Page {$paginator->getPage()} of {$paginator->getPageCount()}
+
+	{if !$paginator->isLast()}
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->getPage() + 1">Next</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->getPageCount()">Last</a>
+	{/if}
+</div>
+```
+
+
+Acesta este modul în care am adăugat paginarea folosind Paginator. Dacă [Nette |database:core] [Database Explorer |database:explorer] este utilizat în locul [Nette Database Core |database:core] ca strat de bază de date, putem implementa paginarea chiar și fără Paginator. Clasa `Nette\Database\Table\Selection` conține metoda [page |api:Nette\Database\Table\Selection::_ page] cu logica de paginare preluată din Paginator.
+
+Depozitul va arăta astfel:
+
+```php
+namespace App\Model;
+
+use Nette;
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Explorer $database,
+	) {
+	}
+
+
+	public function findPublishedArticles(): Nette\Database\Table\Selection
+	{
+		return $this->database->table('articles')
+			->where('created_at < ', new \DateTime)
+			->order('created_at DESC');
+	}
+}
+```
+
+Nu trebuie să creăm Paginator în Presenter, în schimb vom folosi metoda obiectului `Selection` returnat de depozit:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(int $page = 1): void
+	{
+		// Vom găsi articole publicate
+		$articles = $this->articleRepository->findPublishedArticles();
+
+		// și partea lor limitată de metoda de calcul a paginii pe care o vom trece la șablonul
+		$lastPage = 0;
+		$this->template->articles = $articles->page($page, 10, $lastPage);
+
+		// și datele necesare pentru a afișa și opțiunile de paginare
+		$this->template->page = $page;
+		$this->template->lastPage = $lastPage;
+	}
+}
+```
+
+Deoarece nu folosim Paginator, trebuie să modificăm secțiunea care arată legăturile de paginare:
+
+```latte
+{block content}
+<h1>Articles</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+
+<div class="pagination">
+	{if $page > 1}
+		<a n:href="default, 1">First</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $page - 1">Previous</a>
+		&nbsp;|&nbsp;
+	{/if}
+
+	Page {$page} of {$lastPage}
+
+	{if $page < $lastPage}
+		&nbsp;|&nbsp;
+		<a n:href="default, $page + 1">Next</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $lastPage">Last</a>
+	{/if}
+</div>
+```
+
+În acest fel, am implementat un mecanism de paginare fără a utiliza un Paginator.
+
+{{priority: -1}}
+{{sitename: Best Practices}}

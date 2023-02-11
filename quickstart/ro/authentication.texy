@@ -1,0 +1,181 @@
+Autentificare
+*************
+
+Nette vă oferă îndrumări cu privire la modul în care să programați autentificarea pe pagina dvs., dar nu vă obligă să faceți acest lucru într-un anumit mod. Implementarea depinde de dumneavoastră. Nette are o interfață `Nette\Security\Authenticator` care vă obligă să implementați doar o singură metodă numită `authenticate`, care găsește utilizatorul în orice mod doriți.
+
+Există mai multe moduri în care un utilizator se poate autentifica. Cel mai comun mod este *Autentificarea pe bază de parolă* (utilizatorul își furnizează numele sau adresa de e-mail și o parolă), dar există și alte mijloace. Probabil că sunteți familiarizat cu butoanele "Autentificare cu Facebook" de pe multe site-uri web sau autentificarea prin Google/Twitter/GitHub sau orice alt site. Cu Nette, puteți avea orice metodă de autentificare doriți, sau le puteți combina. Depinde de dumneavoastră.
+
+În mod normal, ar trebui să vă scrieți propriul autentificator, dar pentru acest mic blog simplu vom folosi autentificatorul încorporat, care se autentifică pe baza unei parole și a unui nume de utilizator stocate într-un fișier de configurare. Este bun pentru scopuri de testare. Așadar, vom adăuga următoarea secțiune *security* în fișierul de configurare `config/common.neon`:
+
+
+```neon .{file:config/common.neon}
+security:
+	users:
+		admin: secret  # utilizator "admin", parolă "secret
+```
+
+
+Nette va crea automat un serviciu în containerul DI.
+
+
+Formular de înregistrare .[#toc-sign-in-form]
+=============================================
+
+Acum avem gata partea de autentificare din backend și trebuie să furnizăm o interfață de utilizator, prin care utilizatorul se va autentifica. Haideți să creăm un nou prezentator numit *SignPresenter*, care va
+
+- va afișa un formular de autentificare (care va cere numele de utilizator și parola)
+- va autentifica utilizatorul atunci când formularul este trimis
+- să ofere o acțiune de deconectare
+
+Să începem cu formularul de autentificare. Știți deja cum funcționează formularele într-un prezentator. Creați `SignPresenter` și metoda `createComponentSignInForm`. Ar trebui să arate astfel:
+
+```php .{file:app/Presenters/SignPresenter.php}
+<?php
+namespace App\Presenters;
+
+use Nette;
+use Nette\Application\UI\Form;
+
+final class SignPresenter extends Nette\Application\UI\Presenter
+{
+	protected function createComponentSignInForm(): Form
+	{
+		$form = new Form;
+		$form->addText('username', 'Username:')
+			->setRequired('Please enter your username.');
+
+		$form->addPassword('password', 'Password:')
+			->setRequired('Please enter your password.');
+
+		$form->addSubmit('send', 'Sign in');
+
+		$form->onSuccess[] = [$this, 'signInFormSucceeded'];
+		return $form;
+	}
+}
+```
+
+Există o intrare pentru numele de utilizator și parola.
+
+
+Șablon .[#toc-template]
+-----------------------
+
+Formularul va fi redat în șablon `in.latte`
+
+```latte .{file:app/Presenters/templates/Sign/in.latte}
+{block content}
+<h1 n:block=title>Sign in</h1>
+
+{control signInForm}
+```
+
+
+Manipulator de autentificare .[#toc-login-handler]
+--------------------------------------------------
+
+Adăugăm, de asemenea, un *manager de formular* pentru autentificarea utilizatorului, care este invocat imediat după ce formularul este trimis.
+
+Manipulatorul va lua doar numele de utilizator și parola introduse de utilizator și le va transmite către autentificatorul definit anterior. După ce utilizatorul s-a logat, îl vom redirecționa către pagina de start.
+
+```php .{file:app/Presenters/SignPresenter.php}
+public function signInFormSucceeded(Form $form, \stdClass $data): void
+{
+	try {
+		$this->getUser()->login($data->username, $data->password);
+		$this->redirect('Homepage:');
+
+	} catch (Nette\Security\AuthenticationException $e) {
+		$form->addError('Incorrect username or password.');
+	}
+}
+```
+
+Metoda [User::login() |api:Nette\Security\User::login()] ar trebui să arunce o excepție atunci când numele de utilizator sau parola nu se potrivește cu cele pe care le-am definit anterior. După cum știm deja, acest lucru ar avea ca rezultat un ecran roșu [Tracy |tracy:] sau, în modul de producție, un mesaj care să informeze despre o eroare internă a serverului. Nu ne-ar plăcea acest lucru. De aceea, capturăm excepția și adăugăm un mesaj de eroare frumos și prietenos în formular.
+
+Atunci când apare eroarea în formular, pagina cu formularul va fi redată din nou, iar deasupra formularului va apărea un mesaj frumos, informând utilizatorul că a introdus un nume de utilizator sau o parolă greșită.
+
+
+Securitatea prezentatorilor .[#toc-security-of-presenters]
+==========================================================
+
+Vom securiza un formular pentru adăugarea și editarea mesajelor. Acesta este definit în prezentator `EditPresenter`. Scopul este de a împiedica utilizatorii care nu sunt conectați să acceseze pagina.
+
+Creăm o metodă `startup()` care este lansată imediat la începutul [ciclului de viață al prezentatorului |application:presenters#life-cycle-of-presenter]. Aceasta redirecționează utilizatorii care nu sunt autentificați către formularul de autentificare.
+
+```php .{file:app/Presenters/EditPresenter.php}
+public function startup(): void
+{
+	parent::startup();
+
+	if (!$this->getUser()->isLoggedIn()) {
+		$this->redirect('Sign:in');
+	}
+}
+```
+
+
+Ascundeți linkurile .[#toc-hide-links]
+--------------------------------------
+
+Un utilizator neautentificat nu mai poate vedea nici pagina *create*, nici pagina *edit*, dar poate vedea în continuare legăturile care indică spre ele. Haideți să le ascundem și pe acestea. Un astfel de link se află în `app/Presenters/templates/Homepage/default.latte`, și ar trebui să fie vizibil numai dacă utilizatorul este autentificat.
+
+Îl putem ascunde folosind *n:atribut* numit `n:if`. Dacă afirmația din interiorul acestuia este `false`, întregul `<a>` tag și conținutul său nu vor fi afișate:
+
+```latte
+<a n:href="Edit:create" n:if="$user->isLoggedIn()">Create post</a>
+```
+
+aceasta este o prescurtare pentru (nu o confundați cu `tag-if`):
+
+```latte
+{if $user->isLoggedIn()}<a n:href="Edit:create">Create post</a>{/if}
+```
+
+Ar trebui să ascundeți linkul de editare aflat în `app/Presenters/templates/Post/show.latte` într-un mod similar.
+
+
+Legătura formularului de autentificare .[#toc-login-form-link]
+==============================================================
+
+Hei, dar cum ajungem la pagina de autentificare? Nu există nici un link care să arate spre ea. Să adăugăm unul în fișierul șablon `@layout.latte`. Încercați să găsiți un loc frumos, poate fi oriunde vă place cel mai mult.
+
+```latte .{file:app/Presenters/templates/@layout.latte}
+...
+<ul class="navig">
+	<li><a n:href="Homepage:">Homepage</a></li>
+	{if $user->isLoggedIn()}
+		<li><a n:href="Sign:out">Sign out</a></li>
+	{else}
+		<li><a n:href="Sign:in">Sign in</a></li>
+	{/if}
+</ul>
+...
+```
+
+Dacă utilizatorul nu este încă logat, vom afișa link-ul "Sign in". În caz contrar, vom afișa linkul "Sign out". Adăugăm această acțiune în SignPresenter.
+
+Acțiunea de deconectare arată astfel și, deoarece redirecționăm utilizatorul imediat, nu este nevoie de un șablon de vizualizare.
+
+```php .{file:app/Presenters/SignPresenter.php}
+public function actionOut(): void
+{
+	$this->getUser()->logout();
+	$this->flashMessage('You have been signed out.');
+	$this->redirect('Homepage:');
+}
+```
+
+Pur și simplu se apelează metoda `logout()` și apoi se afișează un mesaj frumos pentru utilizator.
+
+
+Rezumat .[#toc-summary]
+=======================
+
+Avem un link pentru a ne conecta și pentru a deconecta utilizatorul. Am folosit autentificatorul încorporat pentru autentificare, iar detaliile de conectare se află în fișierul de configurare, deoarece aceasta este o simplă aplicație de testare. De asemenea, am securizat formularele de editare astfel încât numai utilizatorii autentificați să poată adăuga și edita postări.
+
+.[note]
+Aici puteți citi mai multe despre [autentificarea |security:authentication] și [autorizarea |security:authorization] [utilizatorilor |security:authentication].
+
+{{priority: -1}}
+{{sitename: Nette Quickstart}}

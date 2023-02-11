@@ -1,0 +1,260 @@
+Cablare automată
+****************
+
+.[perex]
+Autowiring este o caracteristică grozavă care poate trece automat servicii către constructor și alte metode, astfel încât nu trebuie să le scriem deloc. Aceasta vă economisește mult timp.
+
+Acest lucru ne permite să sărim peste marea majoritate a argumentelor atunci când scriem definițiile serviciilor. În loc de:
+
+```neon
+services:
+	articles: Model\ArticleRepository(@database, @cache.storage)
+```
+
+Scrieți doar:
+
+```neon
+services:
+	articles: Model\ArticleRepository
+```
+
+Cablarea automată este determinată de tipuri, astfel încât clasa `ArticleRepository` trebuie să fie definită după cum urmează:
+
+```php
+namespace Model;
+
+class ArticleRepository
+{
+	public function __construct(\PDO $db, \Nette\Caching\Storage $storage)
+	{}
+}
+```
+
+Pentru a utiliza autowiring, trebuie să existe **un singur serviciu** pentru fiecare tip din container. Dacă ar exista mai multe, autowiring nu ar ști pe care să îl treacă și ar arunca o excepție:
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+	tempDb: PDO('sqlite::memory:')
+	articles: Model\ArticleRepository  # THROWS EXCEPTION, atât mainDb cât și tempDb se potrivesc
+```
+
+Soluția ar fi fie să se ocolească autowiring și să se precizeze explicit numele serviciului (de exemplu, `articles: Model\ArticleRepository(@mainDb)`). Cu toate acestea, este mai convenabil să se [dezactiveze |#Disabled autowiring] autowiring-ul pentru un singur serviciu, sau să se [prefere |#Preferred Autowiring] primul serviciu.
+
+
+Autowiring dezactivat .[#toc-disabled-autowiring]
+-------------------------------------------------
+
+Puteți dezactiva cablarea automată a serviciilor utilizând opțiunea `autowired: no`:
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+		autowired: false                 # elimină tempDb din autowiring
+
+	articles: Model\ArticleRepository    # prin urmare, trece mainDb la constructor
+```
+
+Serviciul `articles` nu aruncă excepția că există două servicii corespunzătoare de tip `PDO` (de exemplu, `mainDb` și `tempDb`) care pot fi transmise constructorului, deoarece acesta vede doar serviciul `mainDb`.
+
+.[note]
+Configurarea autowiring-ului în Nette funcționează diferit față de Symfony, unde opțiunea `autowire: false` spune că autowiring-ul nu trebuie folosit pentru argumentele constructorului serviciului.
+În Nette, autowiring este întotdeauna folosit, fie pentru argumentele constructorului, fie pentru orice altă metodă. Opțiunea `autowired: false` spune că instanța serviciului nu trebuie să fie transmisă nicăieri folosind autowiring.
+
+
+Autowiring preferat .[#toc-preferred-autowiring]
+------------------------------------------------
+
+În cazul în care avem mai multe servicii de același tip și unul dintre ele are opțiunea `autowired`, acest serviciu devine cel preferat:
+
+```neon
+services:
+	mainDb:
+		create: PDO(%dsn%, %user%, %password%)
+		autowired: PDO    # îl face preferat
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+
+	articles: Model\ArticleRepository
+```
+
+Serviciul `articles` nu aruncă excepția că există două servicii `PDO` corespunzătoare (adică `mainDb` și `tempDb`), ci utilizează serviciul preferat, adică `mainDb`.
+
+
+Colecția de servicii .[#toc-collection-of-services]
+---------------------------------------------------
+
+Autowiring poate transmite, de asemenea, o serie de servicii de un anumit tip. Deoarece PHP nu poate nota în mod nativ tipul de elemente ale tabloului, pe lângă tipul `array`, trebuie adăugat un comentariu phpDoc cu tipul de element, cum ar fi `ClassName[]`:
+
+```php
+namespace Model;
+
+class ShipManager
+{
+	/**
+	 * @param Shipper[] $shippers
+	 */
+	public function __construct(array $shippers)
+	{}
+}
+```
+
+Recipientul DI transmite apoi automat un array de servicii care corespund tipului dat. Acesta va omite serviciile care au cablarea automată dezactivată.
+
+Dacă nu puteți controla forma comentariului phpDoc, puteți trece o matrice de servicii direct în configurație, utilizând [`typed()` |services#Special Functions].
+
+
+Argumente scalare .[#toc-scalar-arguments]
+------------------------------------------
+
+Autowiring poate transmite numai obiecte și array-uri de obiecte. Argumentele scalare (de exemplu, șiruri de caractere, numere, booleeni) se [scriu în configurare |services#Arguments].
+O alternativă este crearea unui [obiect de configurare |best-practices:passing-settings-to-presenters] care încapsulează o valoare scalară (sau mai multe valori) sub forma unui obiect, care poate fi apoi transmis din nou cu ajutorul autowiring-ului.
+
+```php
+class MySettings
+{
+	public function __construct(
+		// readonly poate fi utilizat începând cu PHP 8.1
+		public readonly bool $value,
+	)
+	{}
+}
+```
+
+Creați un serviciu adăugându-l la configurație:
+
+```neon
+services:
+	- MySettings('any value')
+```
+
+Toate clasele îl vor solicita apoi prin cablare automată.
+
+
+Restrângerea cablării automate .[#toc-narrowing-of-autowiring]
+--------------------------------------------------------------
+
+Pentru servicii individuale, autocablarea poate fi restrânsă la anumite clase sau interfețe.
+
+În mod normal, autowiring-ul trece serviciul la fiecare parametru al metodei căruia îi corespunde tipul serviciului. Restrângerea înseamnă că se specifică condițiile pe care tipurile specificate pentru parametrii metodei trebuie să le îndeplinească pentru ca serviciul să le fie transmis.
+
+Să luăm un exemplu:
+
+```php
+class ParentClass
+{}
+
+class ChildClass extends ParentClass
+{}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+Dacă le-am înregistrat pe toate ca servicii, cablarea automată ar eșua:
+
+```neon
+services:
+	parent: ParentClass
+	child: ChildClass
+	parentDep: ParentDependent  # EXCEPȚIE DE ÎNTÂRZIERE, atât părintele cât și copilul se potrivesc
+	childDep: ChildDependent    # trece serviciul "child" în constructor
+```
+
+Serviciul `parentDep` aruncă excepția `Multiple services of type ParentClass found: parent, child`, deoarece atât `parent`, cât și `child` se potrivesc în constructorul său, iar autowiring nu poate lua o decizie cu privire la care să o aleagă.
+
+Prin urmare, pentru serviciul `child`, putem restrânge cablarea automată la `ChildClass`:
+
+```neon
+services:
+	parent: ParentClass
+	child:
+		create: ChildClass
+		autowired: ChildClass   # alternative: 'autowired: self'
+
+	parentDep: ParentDependent  # Se produce o EXCEPȚIE, 'child' nu poate fi autowired.
+	childDep: ChildDependent    # transmite serviciul "child" la constructor
+```
+
+Serviciul `parentDep` este transmis acum constructorului serviciului `parentDep`, deoarece este acum singurul obiect corespunzător. Serviciul `child` nu mai este transmis prin autocablare. Da, serviciul `child` este în continuare de tipul `ParentClass`, dar condiția de restrângere dată pentru tipul de parametru nu se mai aplică, adică nu mai este adevărat că `ParentClass` *este un supratip* al `ChildClass`.
+
+În cazul `child`, `autowired: ChildClass` ar putea fi scris ca `autowired: self`, deoarece `self` înseamnă tipul de serviciu curent.
+
+Cheia `autowired` poate include mai multe clase și interfețe ca matrice:
+
+```neon
+autowired: [BarClass, FooInterface]
+```
+
+Să încercăm să adăugăm interfețe la exemplu:
+
+```php
+interface FooInterface
+{}
+
+interface BarInterface
+{}
+
+class ParentClass implements FooInterface
+{}
+
+class ChildClass extends ParentClass implements BarInterface
+{}
+
+class FooDependent
+{
+	function __construct(FooInterface $obj)
+	{}
+}
+
+class BarDependent
+{
+	function __construct(BarInterface $obj)
+	{}
+}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+Atunci când nu limităm serviciul `child`, acesta se va potrivi în constructorii tuturor claselor `FooDependent`, `BarDependent`, `ParentDependent` și `ChildDependent` și autowiring îl va trece acolo.
+
+Cu toate acestea, dacă limităm autowiring-ul la `ChildClass` folosind `autowired: ChildClass` (sau `self`), autowiring-ul îl trece doar la constructorul `ChildDependent`, deoarece necesită un argument de tip `ChildClass` și `ChildClass` *este de tip* `ChildClass`. Niciun alt tip specificat pentru ceilalți parametri nu este un supraansamblu al `ChildClass`, astfel încât serviciul nu este transmis.
+
+Dacă îl restricționăm la `ParentClass` folosind `autowired: ParentClass`, autowiring îl va trece din nou la constructorul `ChildDependent` (deoarece tipul necesar `ChildClass` este un supraansamblu al `ParentClass`) și la constructorul `ParentDependent` de asemenea, deoarece tipul necesar al `ParentClass` este de asemenea corespunzător.
+
+Dacă îl restricționăm la `FooInterface`, acesta va trece în continuare automat la `ParentDependent` (tipul necesar `ParentClass` este un supratip al `FooInterface`) și la `ChildDependent`, dar și la constructorul `FooDependent`, dar nu și la `BarDependent`, deoarece `BarInterface` nu este un supratip al `FooInterface`.
+
+```neon
+services:
+	child:
+		create: ChildClass
+		autowired: FooInterface
+
+	fooDep: FooDependent        # transmite copilul serviciului către constructor
+	barDep: BarDependent        # EXCEPȚIE, niciun serviciu nu ar trece
+	parentDep: ParentDependent  # trece serviciul copil la constructor
+	childDep: ChildDependent    # trece serviciul copil la constructor
+```

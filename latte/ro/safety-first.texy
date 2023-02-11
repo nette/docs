@@ -1,0 +1,371 @@
+Latte este sinonim cu siguranța
+*******************************
+<div class=perex>
+
+
+Latte este singurul sistem de modelare PHP cu protecție eficientă împotriva vulnerabilității critice Cross-site Scripting (XSS). Acest lucru se datorează așa-numitei scăpări sensibile la context. Să discutăm,
+
+- care este principiul vulnerabilității XSS și de ce este atât de periculoasă
+- ce face ca Latte să fie atât de eficient în apărarea împotriva XSS
+- de ce Twig, Blade și alte șabloane pot fi ușor compromise
+
+</div>
+
+
+Cross-Site Scripting (XSS) .[#toc-cross-site-scripting-xss]
+===========================================================
+
+Cross-Site Scripting (prescurtarea XSS) este una dintre cele mai frecvente vulnerabilități ale site-urilor web și, în plus, una foarte periculoasă. Aceasta permite unui atacator să insereze un script malițios (numit malware) într-un site străin care se execută în browserul unui utilizator neștiutor.
+
+Ce poate face un astfel de script? De exemplu, poate trimite un conținut arbitrar de pe site-ul compromis către atacator, inclusiv date sensibile afișate după autentificare. Acesta poate modifica pagina sau poate face alte cereri în numele utilizatorului.
+De exemplu, dacă ar fi vorba de un webmail, ar putea citi mesajele sensibile, modifica conținutul afișat sau schimba setările, de exemplu, ar putea activa redirecționarea de copii ale tuturor mesajelor către adresa atacatorului pentru a avea acces la viitoarele e-mailuri.
+
+Acesta este și motivul pentru care XSS se află în fruntea listei celor mai periculoase vulnerabilități. În cazul în care se descoperă o vulnerabilitate pe un site web, aceasta trebuie eliminată cât mai curând posibil pentru a preveni exploatarea.
+
+
+Cum apare vulnerabilitatea? .[#toc-how-does-the-vulnerability-arise]
+--------------------------------------------------------------------
+
+Eroarea apare în locul în care este generată pagina web și sunt tipărite variabilele. Imaginați-vă că creați o pagină de căutare, iar la început va exista un paragraf cu termenul de căutare sub forma:
+
+```php
+echo '<p>Search results for <em>' . $search . '</em></p>';
+```
+
+Un atacator poate scrie orice șir de caractere, inclusiv cod HTML de tipul `<script>alert("Hacked!")</script>`, în câmpul de căutare și, prin urmare, în variabila `$search`. Deoarece rezultatul nu este curățat în niciun fel, acesta devine parte a paginii afișate:
+
+```html
+<p>Search results for <em><script>alert("Hacked!")</script></em></p>
+```
+
+În loc să afișeze șirul de căutare, browserul execută JavaScript. Astfel, atacatorul preia controlul paginii.
+
+Ați putea argumenta că introducerea codului într-o variabilă va executa într-adevăr JavaScript, dar numai în browserul atacatorului. Cum ajunge la victimă? Din această perspectivă, putem distinge mai multe tipuri de XSS. În exemplul nostru de pagină de căutare, vorbim despre *XSS reflectat*.
+În acest caz, victima trebuie să fie păcălită să facă clic pe un link care conține cod malițios în parametru:
+
+```
+https://example.com/?search=<script>alert("Hacked!")</script>
+```
+
+Deși este nevoie de o anumită inginerie socială pentru a determina utilizatorul să acceseze link-ul, nu este dificil. Utilizatorii dau clic pe linkuri, fie că sunt în e-mailuri sau pe rețelele de socializare, fără să se gândească prea mult. Iar faptul că există ceva suspect în adresă poate fi mascat de către prescurtarea URL-ului, astfel încât utilizatorul vede doar `bit.ly/xxx`.
+
+Cu toate acestea, există o a doua formă de atac, mult mai periculoasă, cunoscută sub numele de *stored XSS* sau *persistent XSS*, în care un atacator reușește să stocheze codul malițios pe server, astfel încât acesta să fie inserat automat în anumite pagini.
+
+Un exemplu în acest sens sunt site-urile web în care utilizatorii postează comentarii. Un atacator trimite o postare care conține un cod, iar acesta este salvat pe server. Dacă site-ul nu este suficient de securizat, acesta va rula apoi în browserul fiecărui vizitator.
+
+S-ar părea că scopul atacului este de a obține `<script>` în pagină. De fapt, "există multe modalități de a încorpora JavaScript":https://cheatsheetseries.owasp.org/cheatsheets/XSS_Filter_Evasion_Cheat_Sheet.html.
+Să luăm un exemplu de încorporare folosind un atribut HTML. Să avem o galerie foto în care se poate insera o legendă la imagini, care este imprimată în atributul `alt`:
+
+```php
+echo '<img src="' . $imageFile . '" alt="' . $imageAlt . '">';
+```
+
+Un atacator trebuie doar să insereze un șir de caractere inteligent construit `" onload="alert('Hacked!')` ca etichetă, iar dacă ieșirea nu este dezinfectată, codul rezultat va arăta astfel:
+
+```html
+<img src="photo0145.webp" alt="" onload="alert('Hacked!')">
+```
+
+Atributul fals `onload` devine acum parte a paginii. Browserul va executa codul pe care îl conține de îndată ce imaginea este descărcată. Hacked!
+
+
+Cum să vă apărați împotriva XSS? .[#toc-how-to-defend-against-xss]
+------------------------------------------------------------------
+
+Orice încercare de a detecta un atac cu ajutorul unei liste negre, cum ar fi blocarea `<script>` șir de caractere etc. sunt insuficiente. Baza unei apărări viabile este **sanitizarea consecventă a tuturor datelor tipărite în interiorul paginii**.
+
+În primul rând, aceasta presupune înlocuirea tuturor caracterelor cu semnificație specială cu alte secvențe corespunzătoare, ceea ce în argou se numește **escaping** (primul caracter al secvenței se numește caracter de scăpare, de unde și numele).
+De exemplu, în textul HTML, caracterul `<` has a special meaning, which, if it is not to be interpreted as the beginning of a tag, must be replaced by a visually corresponding sequence, the so-called HTML entity `&lt;`.
+Iar browserul tipărește un caracter.
+
+**Este foarte important să se distingă contextul în care sunt emise datele**. Deoarece contexte diferite igienizează diferit șirurile de caractere. Diferite caractere au semnificații speciale în contexte diferite.
+De exemplu, escapingul în textul HTML, în atributele HTML, în interiorul unor elemente speciale etc. este diferit. Vom discuta acest lucru în detaliu în câteva momente.
+
+Cel mai bine este să efectuați escaping-ul direct atunci când șirul este scris în pagină, asigurându-vă că acesta se face efectiv și doar o singură dată. Cel mai bine este ca procesarea să fie gestionată **automat** direct de către sistemul de modelare.
+Pentru că, dacă tratamentul nu se face automat, programatorul poate uita de el. Iar o omisiune înseamnă că site-ul este vulnerabil.
+
+Cu toate acestea, XSS nu afectează doar ieșirea datelor din șabloane, ci și alte părți ale aplicației care trebuie să trateze în mod corespunzător datele nesigure. De exemplu, JavaScript-urile din aplicație nu trebuie să folosească `innerHTML` împreună cu ele, ci doar `innerText` sau `textContent`.
+O atenție deosebită trebuie acordată funcțiilor care evaluează șiruri de caractere, cum ar fi JavaScript, care este `eval()`, dar și `setTimeout()`, sau care utilizează `setAttribute()` cu atribute de eveniment, cum ar fi `onload`, etc. Dar acest lucru depășește domeniul de aplicare acoperit de șabloane.
+
+Apărarea ideală în 3 puncte: **
+
+1) Recunoașteți contextul în care sunt emise datele
+2) igienizează datele în conformitate cu regulile acelui context (adică "context-aware")
+3) face acest lucru în mod automat
+
+
+Evacuarea conștientă de context .[#toc-context-aware-escaping]
+==============================================================
+
+Ce se înțelege mai exact prin cuvântul context? Este un loc în document cu propriile reguli de tratare a datelor care urmează să fie emise. Depinde de tipul de document (HTML, XML, CSS, JavaScript, text simplu, ...) și poate varia în anumite părți ale documentului.
+De exemplu, într-un document HTML, există multe astfel de locuri (contexte) în care se aplică reguli foarte diferite. S-ar putea să fiți surprins cât de multe sunt. Iată-le pe primele patru:
+
+```html
+<p>#text</p>
+<img src="#attribute">
+<textarea>#rawtext</textarea>
+<!-- #comment -->
+```
+
+Contextul inițial și de bază al unei pagini HTML este textul HTML. Care sunt regulile aici? Caracterele cu semnificație specială `<` and `&` reprezintă începutul unei etichete sau al unei entități, deci trebuie să le evadăm prin înlocuirea lor cu entitatea HTML (`<` with `&lt;`, `&` with `&amp`).
+
+Al doilea context cel mai frecvent este valoarea unui atribut HTML. Aceasta diferă de text prin faptul că semnificația specială revine aici ghilimelelor `"` or `'` care delimitează atributul. Acesta trebuie să fie scris ca o entitate, astfel încât să nu fie considerat ca fiind sfârșitul atributului.
+Pe de altă parte, caracterul `&lt;` poate fi utilizat în siguranță într-un atribut, deoarece nu are o semnificație specială aici; nu poate fi înțeles ca fiind începutul unei etichete sau al unui comentariu.
+Dar atenție, în HTML puteți scrie valorile atributelor fără ghilimele, caz în care o întreagă gamă de caractere au semnificație specială, deci este un alt context separat.
+
+S-ar putea să vă surprindă, dar se aplică reguli speciale în interiorul `<textarea>` și `<title>` elemente, unde `<` character need not (but can) be escaped unless followed by `/`. Dar aceasta este mai mult o curiozitate.
+
+Este interesant în interiorul comentariilor HTML. Aici, entitățile HTML nu sunt folosite pentru scăpări. Nu există nici măcar o specificație care să precizeze cum se face escapingul în comentarii.
+Trebuie doar să respectați regulile oarecum "curioase":https://html.spec.whatwg.org/multipage/syntax.html#comments și să evitați anumite combinații de caractere în ele.
+
+Contextele pot fi, de asemenea, stratificate, ceea ce se întâmplă atunci când încorporăm JavaScript sau CSS în HTML. Acest lucru se poate face în două moduri diferite, prin element sau atribut:
+
+```html
+<script>#js-element</script>
+<img onclick="#js-attribute">
+
+<style>#css-element</style>
+<p style="#css-attribute"></p>
+```
+
+Două moduri și două tipuri diferite de scăpare a datelor. În cadrul elementului `<script>` și `<style>` ca și în cazul comentariilor HTML, nu se realizează escaparea cu ajutorul entităților HTML. Atunci când se evadează date în interiorul acestor elemente, există o singură regulă: textul nu trebuie să conțină secvența `</script` și, respectiv, `</style`.
+
+Pe de altă parte, atributele `style` și `on***` sunt evadate cu ajutorul entităților HTML.
+
+Și, bineînțeles, în interiorul elementelor JavaScript sau CSS încorporate, se aplică regulile de scăpare ale acestor limbaje. Așadar, un șir de caractere dintr-un atribut precum `onload` este scăpat mai întâi în conformitate cu regulile JS și apoi în conformitate cu regulile atributelor HTML.
+
+Ugh... După cum vedeți, HTML este un document foarte complex, cu straturi de contexte, și fără să știu exact unde trimit datele (adică în ce context), nu se știe cum să o fac corect.
+
+
+Doriți un exemplu? .[#toc-do-you-want-an-example]
+-------------------------------------------------
+
+Să avem un șir de caractere `Rock'n'Roll`.
+
+Dacă îl afișați în text HTML, în acest caz nu trebuie să faceți nicio substituție, deoarece șirul nu conține niciun caracter cu semnificație specială. Situația este diferită dacă îl scrieți în interiorul unui atribut HTML închis între ghilimele simple. În acest caz, trebuie să scăpați ghilimelele în entități HTML:
+
+```html
+<div title='Rock&apos;n&apos;Roll'></div>
+```
+
+Acest lucru a fost ușor. O situație mult mai interesantă apare atunci când contextul este stratificat, de exemplu, dacă șirul de caractere face parte din JavaScript.
+
+Deci, mai întâi îl scriem în JavaScript. Adică, îl înfășurăm în ghilimele și, în același timp, scăpăm ghilimelele conținute în el folosind caracterul `\`:
+
+```js
+'Rock\'n\'Roll'
+```
+
+Putem adăuga un apel de funcție pentru a face codul să facă ceva:
+
+```js
+alert('Rock\'n\'Roll');
+```
+
+Dacă inserăm acest cod într-un document HTML folosind `<script>`, nu trebuie să modificăm nimic altceva, deoarece secvența interzisă `</script` nu este prezentă:
+
+```html
+<script> alert('Rock\'n\'Roll'); </script>
+```
+
+Cu toate acestea, dacă dorim să îl inserăm într-un atribut HTML, trebuie totuși să scăpăm ghilimelele în entități HTML:
+
+```html
+<div onclick='alert(&apos;Rock\&apos;n\&apos;Roll&apos;)'></div>
+```
+
+Cu toate acestea, contextul imbricat nu trebuie să fie doar JS sau CSS. Este, de asemenea, în mod obișnuit un URL. Parametrii din URL-uri sunt evadați prin convertirea caracterelor speciale în secvențe care încep cu `%`. Exemplu:
+
+```
+https://example.org/?a=Jazz&b=Rock%27n%27Roll
+```
+
+Și când ieșim acest șir de caractere într-un atribut, aplicăm în continuare scăparea în funcție de acest context și înlocuim `&` with `&amp`:
+
+```html
+<a href="https://example.org/?a=Jazz&amp;b=Rock%27n%27Roll">
+```
+
+Dacă ați citit până aici, felicitări, a fost obositor. Acum aveți o idee bună despre ceea ce sunt contextele și scăpările. Și nu trebuie să vă faceți griji că este complicat. Latte face asta pentru tine în mod automat.
+
+
+Latte vs. sistemele naive .[#toc-latte-vs-naive-systems]
+========================================================
+
+Am arătat cum să evadăm în mod corespunzător într-un document HTML și cât de crucial este să cunoaștem contextul, adică locul în care se produc datele. Cu alte cuvinte, cum funcționează escaparea sensibilă la context.
+Deși aceasta este o condiție prealabilă pentru o apărare funcțională împotriva XSS, **Latte este singurul sistem de șabloane pentru PHP care face acest lucru.**
+
+Cum este posibil acest lucru când toate sistemele actuale pretind că au escaping automat?
+Evadarea automată fără a cunoaște contextul este un rahat care **creează un fals sentiment de securitate**.
+
+Sistemele de șabloane precum Twig, Laravel Blade și altele nu văd nicio structură HTML în șablon. Prin urmare, nu văd nici contextele. În comparație cu Latte, ele sunt oarbe și naive. Ei se ocupă doar de propria marcare, orice altceva este un flux de caractere irelevant pentru ei:
+
+<div class="juxtapose juxtapose--dark-handle" data-startingposition="80" data-animation="juxtapose-wiper">
+
+```twig .{file:Twig template as seen by Twig himself}
+░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░
+░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░{{ text }}░░░░░░░░░░░
+░░░░░░░░░░░░░░░░░░░{{ text }}░░░░
+```
+
+```twig .{file:Twig template as the designer sees it}
+- in text: <span>{{ text }}</span>
+- in tag: <span {{ text }} ></span>
+- in attribute: <span title='{{ text }}'></span>
+- in unquoted attribute: <span title={{ text }}></span>
+- in attribute containing URL: <a href="{{ text }}"></a>
+- in attribute containing JavaScript: <img onload="{{ text }}">
+- in attribute containing CSS: <span style="{{ text }}"></span>
+- in JavaScriptu: <script>var = {{ text }}</script>
+- in CSS: <style>body { content: {{ text }}; }</style>
+- in comment: <!-- {{ text }} -->
+```
+
+</div>
+
+Sistemele naive doar convertesc mecanic caracterele `< > & ' "` în entități HTML, ceea ce reprezintă o modalitate validă de scăpare în majoritatea utilizărilor, dar nu întotdeauna. Astfel, ele nu pot detecta sau preveni diverse breșe de securitate, după cum vom arăta mai jos.
+
+Latte vede șablonul în același mod în care îl vedeți dumneavoastră. Înțelege HTML, XML, recunoaște etichetele, atributele etc. Și, datorită acestui fapt, distinge între contexte și tratează datele în consecință. Astfel, oferă o protecție cu adevărat eficientă împotriva vulnerabilității critice Cross-site Scripting.
+
+
+Demonstrație în direct .[#toc-live-demonstration]
+=================================================
+
+În stânga puteți vedea șablonul în Latte, iar în dreapta este codul HTML generat. Variabila `$text` este afișată de mai multe ori, de fiecare dată într-un context ușor diferit. Și, prin urmare, scăpată un pic diferit. Puteți edita singur codul șablonului, de exemplu să modificați conținutul variabilei etc. Încercați:
+
+<div class="grid fiddle wiki-expanded">
+<div class="contains-pre">
+
+``` .{file:template.latte; min-height: 14em}[fiddle-source]
+{* TRY TO EDIT THIS TEMPLATE *}
+{var $text = "Rock'n'Roll"}
+- <span>{$text}</span>
+- <span title='{$text}'></span>
+- <span title={$text}></span>
+- <img onload="{$text}">
+- <script>var = {$text}</script>
+- <!-- {$text} -->
+```
+
+</div>
+
+<div class="contains-pre">
+
+``` .{file:view-source:...; min-height: 14em}[fiddle-output]
+- <span>Rock'n'Roll</span>
+- <span title='Rock&apos;n&apos;Roll'></span>
+- <span title="Rock&apos;n&apos;Roll"></span>
+- <img onload="&quot;Rock&apos;n&apos;Roll&quot;">
+- <script>var = "Rock'n'Roll"</script>
+- <!-- Rock'n'Roll -->
+```
+
+</div>
+</div>
+
+Nu-i așa că e grozav! Latte face escape-uri sensibile la context în mod automat, astfel încât programatorul:
+
+- nu trebuie să se gândească sau să știe cum să evadeze datele
+- nu poate greși
+- nu poate uita de ele
+
+Acestea nu sunt nici măcar toate contextele pe care Latte le distinge la ieșire și pentru care personalizează tratamentul datelor. Vom trece acum în revistă mai multe cazuri interesante.
+
+
+Cum să spargem sistemele naive .[#toc-how-to-hack-naive-systems]
+================================================================
+
+Vom folosi câteva exemple practice pentru a arăta cât de importantă este diferențierea contextului și de ce sistemele de modelare naive nu oferă o protecție suficientă împotriva XSS, spre deosebire de Latte.
+În exemple vom folosi Twig ca reprezentant al unui sistem naiv, dar același lucru este valabil și pentru alte sisteme.
+
+
+Vulnerabilitatea atributelor .[#toc-attribute-vulnerability]
+------------------------------------------------------------
+
+Să încercăm să injectăm cod malițios în pagină folosind atributul HTML, așa cum [am arătat mai sus |#How does the vulnerability arise]. Să avem un șablon în Twig care afișează o imagine:
+
+```twig .{file:Twig}
+<img src={{ imageFile }} alt={{ imageAlt }}>
+```
+
+Observați că nu există ghilimele în jurul valorilor atributului. Este posibil ca programatorul să le fi uitat, ceea ce se întâmplă pur și simplu. De exemplu, în React, codul este scris astfel, fără ghilimele, iar un programator care schimbă limbajul poate uita cu ușurință ghilimelele.
+
+Atacatorul inserează un șir de caractere inteligent construit, `foo onload=alert('Hacked!')`, drept legendă a imaginii. Știm deja că Twig nu poate spune dacă o variabilă este imprimată într-un flux de text HTML, în interiorul unui atribut, într-un comentariu HTML etc.; pe scurt, nu face distincție între contexte. Și doar convertește mecanic caracterele `< > & ' "` în entități HTML.
+Deci, codul rezultat va arăta astfel:
+
+```html
+<img src=photo0145.webp alt=foo onload=alert(&#039;Hacked!&#039;)>
+```
+
+**A fost creată o gaură de securitate!**
+
+Un atribut fals `onload` a devenit parte a paginii, iar browserul îl execută imediat după descărcarea imaginii.
+
+Acum să vedem cum gestionează Latte același șablon:
+
+```latte .{file:Latte}
+<img src={$imageFile} alt={$imageAlt}>
+```
+
+Latte vede șablonul în același mod ca și dumneavoastră. Spre deosebire de Twig, acesta înțelege HTML și știe că o variabilă este tipărită ca o valoare de atribut care nu este între ghilimele. De aceea le adaugă. Când un atacator inserează aceeași legendă, codul rezultat va arăta astfel:
+
+```html
+<img src="photo0145.webp" alt="foo onload=alert(&apos;Hacked!&apos;)">
+```
+
+**Latte a prevenit cu succes XSS.**
+
+
+Imprimarea unei variabile în JavaScript .[#toc-printing-a-variable-in-javascript]
+---------------------------------------------------------------------------------
+
+Datorită scăpării sensibile la context, este posibilă utilizarea variabilelor PHP în mod nativ în JavaScript.
+
+```latte
+<p onclick="alert({$movie})">{$movie}</p>
+
+<script>var movie = {$movie};</script>
+```
+
+Dacă variabila `$movie` stochează șirul `'Amarcord & 8 1/2'`, se generează următoarea ieșire. Observați că sunt utilizate diferite scăpări în HTML și JavaScript și, de asemenea, în atributul `onclick`:
+
+```latte
+<p onclick="alert(&quot;Amarcord &amp; 8 1\/2&quot;)">Amarcord &amp; 8 1/2</p>
+
+<script>var movie = "Amarcord & 8 1\/2";</script>
+```
+
+
+Verificarea legăturii .[#toc-link-checking]
+-------------------------------------------
+
+Latte verifică automat dacă variabila utilizată în atributele `src` sau `href` conține un URL web (adică protocolul HTTP) și previne scrierea de linkuri care pot reprezenta un risc de securitate.
+
+```latte
+{var $link = 'javascript:attack()'}
+
+<a href="{$link}">click here</a>
+```
+
+Scrie:
+
+```latte
+<a href="">click here</a>
+```
+
+Verificarea poate fi dezactivată cu ajutorul unui filtru [nocheck |filters#nocheck].
+
+
+Limitele lui Latte .[#toc-limits-of-latte]
+==========================================
+
+Latte nu este o protecție XSS completă pentru întreaga aplicație. Am fi nefericiți dacă v-ați opri să vă gândiți la securitate atunci când utilizați Latte.
+Scopul Latte este de a se asigura că un atacator nu poate modifica structura unei pagini, nu poate manipula elementele sau atributele HTML. Dar nu verifică corectitudinea conținutului datelor care sunt emise. Sau corectitudinea comportamentului JavaScript.
+Acest lucru depășește sfera de acțiune a sistemului de modelare. Verificarea corectitudinii datelor, în special a celor introduse de utilizator și, prin urmare, nesigure, este o sarcină importantă pentru programator.

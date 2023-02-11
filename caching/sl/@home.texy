@@ -1,0 +1,449 @@
+Predpomnilnik
+*************
+<div class=perex>
+
+
+Predpomnilnik pospešuje aplikacijo s shranjevanjem podatkov, ki so enkrat težko pridobljeni, za prihodnjo uporabo. Predstavili vam bomo:
+
+- Kako uporabljati predpomnilnik
+- kako spremeniti shranjevanje predpomnilnika
+- kako pravilno razveljaviti predpomnilnik
+
+</div>
+
+Uporaba predpomnilnika je v programu Nette zelo preprosta, pokriva pa tudi zelo napredne potrebe po predpomnilniku. Zasnovan je za zmogljivost in 100-odstotno trajnost. V osnovi boste našli adapterje za najpogostejše zaledne shrambe. Omogoča razveljavljanje na podlagi oznak, zaščito predpomnilnika pred stampedo, časovno iztekanje itd.
+
+
+Namestitev .[#toc-installation]
+===============================
+
+Prenesite in namestite paket s [programom Composer |best-practices:composer]:
+
+```shell
+composer require nette/caching
+```
+
+
+Osnovna uporaba .[#toc-basic-usage]
+===================================
+
+Središče dela s predpomnilnikom je objekt [api:Nette\Caching\Cache]. Ustvarimo njegov primerek in konstruktorju kot parameter posredujemo tako imenovano shrambo. Ki je objekt, ki predstavlja mesto, kjer bodo podatki fizično shranjeni (zbirka podatkov, Memcached, datoteke na disku, ...). Objekt shrambe dobimo tako, da ga posredujemo z uporabo [vbrizgavanja odvisnosti |dependency-injection:passing-dependencies] s tipom `Nette\Caching\Storage`. Vse bistvene informacije boste našli v [razdelku Shranjevanje |#Storages].
+
+.[warning]
+V različici 3.0 je imel vmesnik še vedno tip `I` prefix, so the name was `Nette\Caching\IStorage`. Tudi konstante razreda `Cache` so se pisale z velikimi črkami, torej na primer `Cache::EXPIRE` namesto `Cache::Expire`.
+
+V naslednjih primerih predpostavimo, da imamo vzdevek `Cache` in shrambo v spremenljivki `$storage`.
+
+```php
+use Nette\Caching\Cache;
+
+$storage = /* ... */; // primerek predpomnilnika Nette\Caching\Storage
+```
+
+Shramba je pravzaprav *skladišče ključev*, zato podatke pod ključi beremo in pišemo tako kot asociativna polja. Aplikacije so sestavljene iz več neodvisnih delov, in če bi vsi uporabljali eno shrambo (za predstavo: en imenik na disku), bi prej ali slej prišlo do trka ključev. Okvir Nette to težavo reši tako, da celoten prostor razdeli na imenske prostore (podimenike). Vsak del programa tako uporablja svoj prostor z edinstvenim imenom in do trkov ne more priti.
+
+Ime prostora je določeno kot drugi parameter konstruktorja razreda Cache:
+
+```php
+$cache = new Cache($storage, 'Full Html Pages');
+```
+
+Zdaj lahko za branje in pisanje iz predpomnilnika uporabimo objekt `$cache`. Za oboje se uporablja metoda `load()`. Prvi argument je ključ, drugi pa povratni klic PHP, ki se pokliče, ko ključa ne najdemo v predpomnilniku. Povratni klic ustvari vrednost, jo vrne in jo shrani v predpomnilnik:
+
+```php
+$value = $cache->load($key, function () use ($key) {
+	$computedValue = /* ... */; // težka računanja.
+	return $computedValue;
+});
+```
+
+Če drugi parameter ni naveden `$value = $cache->load($key)`, se vrne `null`, če elementa ni v predpomnilniku.
+
+.[tip]
+Odlično je, da je mogoče v predpomnilnik shraniti vse serializabilne strukture, ne le nizov. Enako velja tudi za ključe.
+
+Element se iz predpomnilnika izbriše z metodo `remove()`:
+
+```php
+$cache->remove($key);
+```
+
+Element lahko iz predpomnilnika izbrišete tudi z metodo `$cache->save($key, $value, array $dependencies = [])`. Vendar je zgornja metoda z uporabo `load()` boljša.
+
+
+Memoiziranje .[#toc-memoization]
+================================
+
+Memoizacija pomeni predpomnjenje rezultata funkcije ali metode, tako da ga lahko uporabite naslednjič, namesto da vedno znova izračunavate isto stvar.
+
+Metode in funkcije lahko memoizirate z uporabo `call(callable $callback, ...$args)`:
+
+```php
+$result = $cache->call('gethostbyaddr', $ip);
+```
+
+Funkcija `gethostbyaddr()` se za vsak parameter `$ip` pokliče samo enkrat, naslednjič pa se vrne vrednost iz predpomnilnika.
+
+Prav tako je mogoče ustvariti memoiziran ovoj za metodo ali funkcijo, ki ga lahko pokličemo pozneje:
+
+```php
+function factorial($num)
+{
+	return /* ... */;
+}
+
+$memoizedFactorial = $cache->wrap('factorial');
+
+$result = $memoizedFactorial(5); // ga šteje.
+$result = $memoizedFactorial(5); // ga vrne iz predpomnilnika.
+```
+
+
+Iztek veljavnosti in razveljavitev .[#toc-expiration-invalidation]
+==================================================================
+
+Pri uporabi predpomnilnika je treba obravnavati vprašanje, da bodo nekateri predhodno shranjeni podatki sčasoma postali neveljavni. Okvir Nette zagotavlja mehanizem, kako omejiti veljavnost podatkov in jih nadzorovano izbrisati ("razveljaviti", če uporabimo terminologijo okvira).
+
+Veljavnost podatkov se določi ob shranjevanju s tretjim parametrom metode `save()`, npr:
+
+```php
+$cache->save($key, $value, [
+	$cache::Expire => '20 minutes',
+]);
+```
+
+ali z uporabo parametra `$dependencies`, ki se s sklicevanjem posreduje povratnemu klicu v metodi `load()`, npr:
+
+```php
+$value = $cache->load($key, function (&$dependencies) {
+	$dependencies[Cache::Expire] = '20 minutes';
+	return /* ... */;
+});
+```
+
+Ali z uporabo tretjega parametra v metodi `load()`, npr:
+
+```php
+$value = $cache->load($key, function () {
+	return ...;
+}, [Cache::Expire => '20 minutes']);
+```
+
+V naslednjih primerih bomo predpostavili drugo varianto in s tem obstoj spremenljivke `$dependencies`.
+
+
+Iztek veljavnosti .[#toc-expiration]
+------------------------------------
+
+Najpreprostejše prenehanje veljavnosti je časovna omejitev. Tukaj je prikazan način za shranjevanje podatkov v predpomnilnik, ki velja 20 minut:
+
+```php
+// sprejme tudi število sekund ali časovni žig UNIX
+$dependencies[Cache::Expire] = '20 minutes';
+```
+
+Če želimo z vsakim branjem podaljšati obdobje veljavnosti, lahko to dosežemo na ta način, vendar bodite pozorni, to bo povečalo režijske stroške predpomnilnika:
+
+```php
+$dependencies[Cache::Sliding] = true;
+```
+
+Priročna možnost je možnost, da se podatki iztečejo, ko se spremeni določena datoteka ali ena od več datotek. To lahko na primer uporabite za predpomnjenje podatkov, ki so rezultat procesiranja teh datotek. Uporaba absolutnih poti.
+
+```php
+$dependencies[Cache::Files] = '/path/to/data.yaml';
+// ali
+$dependencies[Cache::Files] = ['/path/to/data1.yaml', '/path/to/data2.yaml'];
+```
+
+Elementu v predpomnilniku lahko dovolimo, da poteče, ko poteče rok veljavnosti drugega elementa (ali enega od več drugih). To lahko uporabimo, kadar v predpomnilnik shranimo celotno stran HTML in njene dele pod drugimi ključi. Ko se odlomek spremeni, celotna stran postane neveljavna. Če imamo fragmente shranjene pod ključi, kot sta `frag1` in `frag2`, bomo uporabili:
+
+```php
+$dependencies[Cache::Items] = ['frag1', 'frag2'];
+```
+
+Iztek veljavnosti lahko nadzorujemo tudi s funkcijami po meri ali statičnimi metodami, ki ob branju vedno odločijo, ali je element še veljaven. Elementu lahko na primer dovolimo, da poteče, kadar koli se spremeni različica PHP. Ustvarili bomo funkcijo, ki bo primerjala trenutno različico s parametrom, pri shranjevanju pa bomo dodali polje v obliki `[function name, ...arguments]` k odvisnostim:
+
+```php
+function checkPhpVersion($ver): bool
+{
+	return $ver === PHP_VERSION_ID;
+}
+
+$dependencies[Cache::Callbacks] = [
+	['checkPhpVersion', PHP_VERSION_ID] // poteče, ko checkPhpVersion(...) === false
+];
+```
+
+Seveda lahko vsa merila kombiniramo. Predpomnilnik se izteče, če vsaj eno merilo ni izpolnjeno.
+
+```php
+$dependencies[Cache::Expire] = '20 minutes';
+$dependencies[Cache::Files] = '/path/to/data.yaml';
+```
+
+
+Neveljavnost z uporabo oznak .[#toc-invalidation-using-tags]
+------------------------------------------------------------
+
+Oznake so zelo uporabno orodje za razveljavitev. Vsakemu elementu, ki je shranjen v predpomnilniku, lahko dodelimo seznam oznak, ki so poljubni nizi. Predpostavimo na primer, da imamo stran HTML s člankom in komentarji, ki jo želimo shraniti v predpomnilnik. Pri shranjevanju v predpomnilnik določimo oznake:
+
+```php
+$dependencies[Cache::Tags] = ["article/$articleId", "comments/$articleId"];
+```
+
+Sedaj pa preidimo k upravljanju. Tu imamo obrazec za urejanje člankov. Hkrati s shranjevanjem članka v zbirko podatkov pokličemo ukaz `clean()`, ki bo izbrisal predpomnilniške elemente po oznakah:
+
+```php
+$cache->clean([
+	$cache::Tags => ["article/$articleId"],
+]);
+```
+
+Prav tako na mestu dodajanja novega komentarja (ali urejanja komentarja) ne bomo pozabili razveljaviti ustrezne oznake:
+
+```php
+$cache->clean([
+	$cache::Tags => ["comments/$articleId"],
+]);
+```
+
+Kaj smo dosegli? Da bo naš predpomnilnik HTML razveljavljen (izbrisan) vsakič, ko se članek ali komentarji spremenijo. Pri urejanju članka z ID = 10 se oznaka `article/10` razveljavi in stran HTML z oznako se izbriše iz predpomnilnika. Enako se zgodi, ko pod ustrezen članek vstavite nov komentar.
+
+.[note]
+Oznake zahtevajo [Journal |#Journal].
+
+
+Neveljavnost po prednostni nalogi .[#toc-invalidation-by-priority]
+------------------------------------------------------------------
+
+Posameznim elementom v predpomnilniku lahko določimo prioriteto in tako jih bo mogoče nadzorovano izbrisati, ko na primer predpomnilnik preseže določeno velikost:
+
+```php
+$dependencies[Cache::Priority] = 50;
+```
+
+Izbriši vse elemente s prioriteto, ki je enaka ali manjša od 100:
+
+```php
+$cache->clean([
+	$cache::Priority => 100,
+]);
+```
+
+.[note]
+Prednostne naloge zahtevajo tako imenovani [dnevnik |#Journal].
+
+
+Počisti predpomnilnik .[#toc-clear-cache]
+-----------------------------------------
+
+Parameter `Cache::All` izbriše vse:
+
+```php
+$cache->clean([
+	$cache::All => true,
+]);
+```
+
+
+Množično branje .[#toc-bulk-reading]
+====================================
+
+Za množično branje in pisanje v predpomnilnik se uporablja metoda `bulkLoad()`, pri kateri posredujemo polje ključev in dobimo polje vrednosti:
+
+```php
+$values = $cache->bulkLoad($keys);
+```
+
+Metoda `bulkLoad()` deluje podobno kot `load()` z drugim parametrom povratne zveze, ki mu posredujemo ključ ustvarjenega elementa:
+
+```php
+$values = $cache->bulkLoad($keys, function ($key, &$dependencies) {
+	$computedValue = /* ... */; // težka računanja.
+	return $computedValue;
+});
+```
+
+
+Izhodno predpomnjenje .[#toc-output-caching]
+============================================
+
+Izhod lahko zelo elegantno zajamete in shranite v predpomnilnik:
+
+```php
+if ($capture = $cache->capture($key)) {
+
+	echo ... // tiskanje nekaterih podatkov
+
+	$capture->end(); // shranite izpis v predpomnilnik
+}
+```
+
+V primeru, da je izhod že v predpomnilniku, ga metoda `capture()` izpiše in vrne `null`, tako da se pogoj ne bo izvedel. V nasprotnem primeru prične z bufferiranjem izpisa in vrne objekt `$capture`, s pomočjo katerega na koncu shranimo podatke v predpomnilnik.
+
+.[note]
+V različici 3.0 se je metoda imenovala `$cache->start()`.
+
+
+Predpomnjenje v Latte .[#toc-caching-in-latte]
+==============================================
+
+Predpomnjenje v predlogah [Latte |latte:] je zelo enostavno, le del predloge ovijte z oznakami `{cache}...{/cache}`. Predpomnilnik se samodejno razveljavi, ko se spremeni izvorna predloga (vključno z vsemi vključenimi predlogami znotraj oznak `{cache}` ). Značke `{cache}` so lahko vgnezdene, in ko je vgnezdeni blok razveljavljen (na primer z oznako), je razveljavljen tudi nadrejeni blok.
+
+V oznaki je mogoče določiti ključe, na katere bo vezan predpomnilnik (tukaj spremenljivka `$id`), ter nastaviti potek veljavnosti in [razveljavitev oznake |#Invalidation using Tags]
+
+```latte
+{cache $id, expire: '20 minutes', tags: [tag1, tag2]}
+	...
+{/cache}
+```
+
+Vsi parametri so neobvezni, zato vam ni treba navesti poteka veljavnosti, oznak ali ključev.
+
+Uporabo predpomnilnika lahko tudi pogojite s spletno stranjo `if` - vsebina se nato predpomeni samo, če je pogoj izpolnjen:
+
+```latte
+{cache $id, if: !$form->isSubmitted()}
+	{$form}
+{/cache}
+```
+
+
+Shrambe .[#toc-storages]
+========================
+
+Skladišče je objekt, ki predstavlja mesto, kjer so podatki fizično shranjeni. Uporabimo lahko podatkovno zbirko, strežnik Memcached ali najbolj razpoložljivo shrambo, ki so datoteke na disku.
+
+|----------------------
+| Shranjevanje | Opis
+|----------------------
+| [FileStorage |#FileStorage] | privzeto shranjevanje s shranjevanjem v datoteke na disku
+| [MemcachedStorage |#MemcachedStorage] | uporablja strežnik `Memcached`
+| [MemoryStorage |#MemoryStorage] | podatki so začasno v pomnilniku
+| [SQLiteStorage |#SQLiteStorage] | podatki so shranjeni v podatkovni zbirki SQLite
+| [DevNullStorage |#DevNullStorage] | podatki niso shranjeni - za namene testiranja
+
+Objekt shrambe dobite tako, da ga posredujete z uporabo [vbrizgavanja odvisnosti |dependency-injection:passing-dependencies] s tipom `Nette\Caching\Storage`. Nette privzeto zagotavlja objekt FileStorage, ki shranjuje podatke v podmapo `cache` v imeniku za [začasne datoteke |application:bootstrap#Temporary Files].
+
+Shranjevanje lahko spremenite v konfiguraciji:
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\DevNullStorage
+```
+
+
+FileStorage .[#toc-filestorage]
+-------------------------------
+
+Predpomnilnik zapiše v datoteke na disku. Shramba `Nette\Caching\Storages\FileStorage` je zelo dobro optimizirana za zmogljivost, predvsem pa zagotavlja popolno atomičnost operacij. Kaj to pomeni? Da se pri uporabi predpomnilnika ne more zgoditi, da bi prebrali datoteko, ki je druga nit še ni v celoti zapisala, ali da bi jo kdo izbrisal "pod rokami". Uporaba predpomnilnika je torej popolnoma varna.
+
+Ta shramba ima vgrajeno tudi pomembno funkcijo, ki preprečuje izjemno povečanje porabe procesorja, ko je predpomnilnik izbrisan ali hladen (tj. ni ustvarjen). To je preprečevanje "stampeda predpomnilnika":https://en.wikipedia.org/wiki/Cache_stampede.
+Zgodi se, da v nekem trenutku obstaja več hkratnih zahtevkov, ki želijo isto stvar iz predpomnilnika (npr. rezultat drage poizvedbe SQL), in ker ta ni shranjena v predpomnilniku, vsi procesi začnejo izvajati isto poizvedbo SQL.
+Obremenitev procesorja se pomnoži in lahko se celo zgodi, da se nobena nit ne more odzvati v časovnem roku, predpomnilnik se ne ustvari in aplikacija se sesuje.
+Na srečo predpomnilnik v Nette deluje tako, da ob več hkratnih zahtevah za en element le-tega ustvari le prva nit, druge počakajo in nato uporabijo ustvarjen rezultat.
+
+Primer ustvarjanja shrambe datotek:
+
+```php
+// shranjevanje bo imenik '/path/to/temp' na disku
+$storage = new Nette\Caching\Storages\FileStorage('/path/to/temp');
+```
+
+
+MemcachedStorage .[#toc-memcachedstorage]
+-----------------------------------------
+
+Strežnik [Memcached |https://memcached.org] je visoko zmogljiv porazdeljeni sistem za shranjevanje, katerega adapter je `Nette\Caching\Storages\MemcachedStorage`. V konfiguraciji določite naslov IP in vrata, če se razlikujejo od standardnih 11211.
+
+.[caution]
+Zahteva razširitev PHP `memcached`.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\MemcachedStorage('10.0.0.5')
+```
+
+
+MemoryStorage .[#toc-memorystorage]
+-----------------------------------
+
+`Nette\Caching\Storages\MemoryStorage` je pomnilnik, ki podatke hrani v polju PHP in se tako izgubi, ko se zahteva konča.
+
+
+Shramba SQLiteStorage .[#toc-sqlitestorage]
+-------------------------------------------
+
+Podatkovna baza SQLite in adapter `Nette\Caching\Storages\SQLiteStorage` ponujata način predpomnjenja v eni sami datoteki na disku. V konfiguraciji je določena pot do te datoteke.
+
+.[caution]
+Zahteva razširitvi PHP `pdo` in `pdo_sqlite`.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\SQLiteStorage('%tempDir%/cache.db')
+```
+
+
+DevNullStorage .[#toc-devnullstorage]
+-------------------------------------
+
+Posebna izvedba shrambe je `Nette\Caching\Storages\DevNullStorage`, ki dejansko sploh ne shranjuje podatkov. Zato je primerna za testiranje, če želimo odpraviti učinek predpomnilnika.
+
+
+Uporaba predpomnilnika v kodi .[#toc-using-cache-in-code]
+=========================================================
+
+Pri uporabi predpomnilnika v kodi lahko to storite na dva načina. Prvi je, da objekt za shranjevanje dobite tako, da ga posredujete z uporabo [injekcije odvisnosti |dependency-injection:passing-dependencies], nato pa ustvarite objekt `Cache`:
+
+```php
+use Nette;
+
+class ClassOne
+{
+	private Nette\Caching\Cache $cache;
+
+	public function __construct(Nette\Caching\Storage $storage)
+	{
+		$this->cache = new Nette\Caching\Cache($storage, 'my-namespace');
+	}
+}
+```
+
+Drugi način je, da pridobite objekt za shranjevanje `Cache`:
+
+```php
+class ClassTwo
+{
+	private Nette\Caching\Cache $cache;
+
+	public function __construct(Nette\Caching\Cache $cache)
+	{
+		$this->cache = $cache;
+	}
+}
+```
+
+Objekt `Cache` se nato ustvari neposredno v konfiguraciji na naslednji način:
+
+```neon
+services:
+	- ClassTwo( Nette\Caching\Cache(namespace: 'my-namespace') )
+```
+
+
+Dnevnik .[#toc-journal]
+=======================
+
+Nette shranjuje oznake in prednostne naloge v tako imenovani dnevnik. Privzeto se za to uporabljata SQLite in datoteka `journal.s3db`, zahtevani pa sta **razširitvi PHP `pdo` in `pdo_sqlite`.**
+
+Dnevnik lahko spremenite v konfiguraciji:
+
+```neon
+services:
+	cache.journal: MyJournal
+```
+
+
+{{leftbar: nette:@menu-topics}}

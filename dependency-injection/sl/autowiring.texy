@@ -1,0 +1,260 @@
+Avtomatsko napeljevanje
+***********************
+
+.[perex]
+Autowiring je odlična funkcija, ki lahko samodejno posreduje storitve konstruktorju in drugim metodam, tako da nam jih sploh ni treba pisati. S tem prihranimo veliko časa.
+
+Tako lahko pri pisanju definicij storitev preskočimo veliko večino argumentov. Namesto:
+
+```neon
+services:
+	articles: Model\ArticleRepository(@database, @cache.storage)
+```
+
+napišite:
+
+```neon
+services:
+	articles: Model\ArticleRepository
+```
+
+Zato je treba razred `ArticleRepository` opredeliti na naslednji način:
+
+```php
+namespace Model;
+
+class ArticleRepository
+{
+	public function __construct(\PDO $db, \Nette\Caching\Storage $storage)
+	{}
+}
+```
+
+Za uporabo samodejnega napeljevanja mora biti za vsak tip v vsebniku **poudarjena samo ena storitev**. Če bi jih bilo več, autowiring ne bi vedel, katero naj posreduje, in bi zavrgel izjemo:
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+	tempDb: PDO('sqlite::memory:')
+	articles: Model\ArticleRepository  # IZJAVA, tako mainDb kot tempDb se ujemata
+```
+
+Rešitev bi bila, da se izognemo samodejnemu usmerjanju in izrecno navedemo ime storitve (tj. `articles: Model\ArticleRepository(@mainDb)`). Vendar pa je bolj priročno, da [onemogočimo |#Disabled autowiring] samodejno posredovanje ene storitve ali [raje |#Preferred Autowiring] prve storitve.
+
+
+Onemogočeno samodejno napeljevanje .[#toc-disabled-autowiring]
+--------------------------------------------------------------
+
+Samodejno ožičenje storitev lahko onemogočite z uporabo možnosti `autowired: no`:
+
+```neon
+services:
+	mainDb: PDO(%dsn%, %user%, %password%)
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+		autowired: false                 # odstrani tempDb iz samodejnega napeljevanja
+
+	articles: Model\ArticleRepository    # zato konstruktorju posreduje mainDb
+```
+
+Storitev `articles` ne vrže izjeme, da obstajata dve ustrezni storitvi tipa `PDO` (tj. `mainDb` in `tempDb`), ki ju je mogoče posredovati konstruktorju, saj vidi samo storitev `mainDb`.
+
+.[note]
+Konfiguracija samodejnega navajanja v Nette deluje drugače kot v Symfonyju, kjer možnost `autowire: false` pravi, da se samodejno navajanje ne sme uporabljati za argumente konstruktorja storitve.
+V Nette se autowiring vedno uporablja, ne glede na to, ali gre za argumente konstruktorja ali katere koli druge metode. Možnost `autowired: false` pravi, da se primerek storitve ne sme nikamor posredovati z uporabo samodejnega vodenja.
+
+
+Prednostno samodejno vodenje .[#toc-preferred-autowiring]
+---------------------------------------------------------
+
+Če imamo več storitev iste vrste in ima ena od njih možnost `autowired`, ta storitev postane prednostna:
+
+```neon
+services:
+	mainDb:
+		create: PDO(%dsn%, %user%, %password%)
+		autowired: PDO    # daje prednost
+
+	tempDb:
+		create: PDO('sqlite::memory:')
+
+	articles: Model\ArticleRepository
+```
+
+Storitev `articles` ne vrže izjeme, da obstajata dve ustrezni storitvi `PDO` (tj. `mainDb` in `tempDb`), temveč uporabi prednostno storitev, tj. `mainDb`.
+
+
+Zbirka storitev .[#toc-collection-of-services]
+----------------------------------------------
+
+Samodejno napeljevanje lahko posreduje tudi niz storitev določene vrste. Ker PHP ne more nativno zapisati vrste elementov polja, je treba poleg vrste `array` dodati še komentar phpDoc z vrsto elementa, kot je `ClassName[]`:
+
+```php
+namespace Model;
+
+class ShipManager
+{
+	/**
+	 * @param Shipper[] $shippers
+	 */
+	public function __construct(array $shippers)
+	{}
+}
+```
+
+Vsebnik DI nato samodejno posreduje polje storitev, ki ustrezajo dani vrsti. Izpusti storitve, ki imajo izklopljeno samodejno napeljavo.
+
+Če ne morete nadzorovati oblike komentarja phpDoc, lahko polje storitev posredujete neposredno v konfiguraciji z uporabo [`typed()` |services#Special Functions].
+
+
+Skalarni argumenti .[#toc-scalar-arguments]
+-------------------------------------------
+
+Samodejno napeljevanje lahko posreduje samo predmete in polja predmetov. Skalarne argumente (npr. nize, številke, logične vrednosti) [zapišite v konfiguracijo |services#Arguments].
+Druga možnost je, da ustvarite [objekt settings-object |best-practices:passing-settings-to-presenters], ki skalarno vrednost (ali več vrednosti) uokviri kot objekt, ki ga lahko nato ponovno posredujete z uporabo autowiringa.
+
+```php
+class MySettings
+{
+	public function __construct(
+		// readonly se lahko uporablja od PHP 8.1
+		public readonly bool $value,
+	)
+	{}
+}
+```
+
+Storitev ustvarite tako, da jo dodate v konfiguracijo:
+
+```neon
+services:
+	- MySettings('any value')
+```
+
+Vsi razredi jo bodo nato zahtevali prek samodejnega povezovanja.
+
+
+Oženje samodejnega napeljevanja .[#toc-narrowing-of-autowiring]
+---------------------------------------------------------------
+
+Pri posameznih storitvah lahko samodejno napeljavo zožite na določene razrede ali vmesnike.
+
+Običajno samodejno usmerjanje posreduje storitev vsakemu parametru metode, katere tipu ustreza storitev. Oženje pomeni, da določimo pogoje, ki jih morajo tipi, določeni za parametre metod, izpolnjevati, da se jim posreduje storitev.
+
+Poglejmo primer:
+
+```php
+class ParentClass
+{}
+
+class ChildClass extends ParentClass
+{}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+Če bi jih vse registrirali kot storitve, bi bila samodejna povezava neuspešna:
+
+```neon
+services:
+	parent: ParentClass
+	child: ChildClass
+	parentDep: ParentDependent  # IZJEMA, ujemata se tako starš kot otrok
+	childDep: ChildDependent    # konstruktorju posreduje storitev 'child'.
+```
+
+Storitev `parentDep` vrže izjemo `Multiple services of type ParentClass found: parent, child`, ker sta tako `parent` kot `child` vključena v njen konstruktor in se samodejna vključitev ne more odločiti, katero bo izbrala.
+
+Pri storitvi `child` lahko torej njeno samodejno vodenje zožimo na `ChildClass`:
+
+```neon
+services:
+	parent: ParentClass
+	child:
+		create: ChildClass
+		autowired: ChildClass   # alternative: 'autowired: self'
+
+	parentDep: ParentDependent  # IZJAVA, 'otrok' ne more biti samodejno ožičen
+	childDep: ChildDependent    # posreduje storitev "child" konstruktorju
+```
+
+Storitev `parentDep` je zdaj posredovana konstruktorju storitve `parentDep`, saj je zdaj edini ustrezni objekt. Storitev `child` ni več posredovana s samodejnim vodenjem. Da, storitev `child` je še vedno tipa `ParentClass`, vendar ne velja več pogoj za zožitev, ki je podan za tip parametra, tj. ne drži več, da je `ParentClass` *nadtip* `ChildClass`.
+
+V primeru `child` bi lahko `autowired: ChildClass` zapisali kot `autowired: self`, saj `self` pomeni trenutni tip storitve.
+
+Ključ `autowired` lahko vključuje več razredov in vmesnikov kot polje:
+
+```neon
+autowired: [BarClass, FooInterface]
+```
+
+Poskusimo v primer dodati vmesnike:
+
+```php
+interface FooInterface
+{}
+
+interface BarInterface
+{}
+
+class ParentClass implements FooInterface
+{}
+
+class ChildClass extends ParentClass implements BarInterface
+{}
+
+class FooDependent
+{
+	function __construct(FooInterface $obj)
+	{}
+}
+
+class BarDependent
+{
+	function __construct(BarInterface $obj)
+	{}
+}
+
+class ParentDependent
+{
+	function __construct(ParentClass $obj)
+	{}
+}
+
+class ChildDependent
+{
+	function __construct(ChildClass $obj)
+	{}
+}
+```
+
+Če storitve `child` ne omejimo, se bo prilegala konstruktorjem vseh razredov `FooDependent`, `BarDependent`, `ParentDependent` in `ChildDependent` in jo bo tja posredoval autowiring.
+
+Če pa njegovo autowiring omejimo na `ChildClass` z uporabo `autowired: ChildClass` (ali `self`), ga autowiring prenese le v konstruktor `ChildDependent`, saj zahteva argument tipa `ChildClass`, `ChildClass` pa *je tipa* `ChildClass`. Noben tip, ki je naveden za druge parametre, ni nadmnožica `ChildClass`, zato se storitev ne posreduje.
+
+Če jo omejimo na `ParentClass` z uporabo `autowired: ParentClass`, jo bo samodejno posredovanje spet posredovalo konstruktorju `ChildDependent` (ker je zahtevani tip `ChildClass` nadmnožica `ParentClass`) in tudi konstruktorju `ParentDependent`, ker je zahtevani tip `ParentClass` prav tako ustrezen.
+
+Če ga omejimo na `FooInterface`, se bo še vedno samodejno usmeril na `ParentDependent` (zahtevani tip `ParentClass` je nadtip `FooInterface`) in `ChildDependent`, dodatno pa še na konstruktor `FooDependent`, ne pa na `BarDependent`, saj `BarInterface` ni nadtip `FooInterface`.
+
+```neon
+services:
+	child:
+		create: ChildClass
+		autowired: FooInterface
+
+	fooDep: FooDependent        # posreduje otroka storitve konstruktorju
+	barDep: BarDependent        # IZJAVA, nobena storitev ne bi bila posredovana
+	parentDep: ParentDependent  # posreduje otroka storitve konstruktorju
+	childDep: ChildDependent    # posreduje otroka storitve konstruktorju
+```

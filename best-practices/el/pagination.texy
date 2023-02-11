@@ -1,0 +1,277 @@
+Σελιδοποίηση αποτελεσμάτων βάσης δεδομένων
+******************************************
+
+.[perex]
+Κατά την ανάπτυξη εφαρμογών ιστού, συχνά συναντάτε την απαίτηση να εκτυπώσετε έναν περιορισμένο αριθμό εγγραφών σε μια σελίδα.
+
+Βγαίνουμε από την κατάσταση όταν παραθέτουμε όλα τα δεδομένα χωρίς σελιδοποίηση. Για την επιλογή δεδομένων από τη βάση δεδομένων, έχουμε την κλάση ArticleRepository, η οποία περιέχει τον κατασκευαστή και τη μέθοδο `findPublishedArticles`, η οποία επιστρέφει όλα τα δημοσιευμένα άρθρα ταξινομημένα κατά φθίνουσα σειρά ημερομηνίας δημοσίευσης.
+
+```php
+namespace App\Model;
+
+use Nette;
+
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+
+	public function findPublishedArticles(): Nette\Database\ResultSet
+	{
+		return $this->database->query('
+			SELECT * FROM articles
+			WHERE created_at < ?
+			ORDER BY created_at DESC',
+			new \DateTime,
+		);
+	}
+}
+```
+
+Στον Presenter στη συνέχεια εισάγουμε την κλάση model και στη μέθοδο render θα ζητήσουμε τα δημοσιευμένα άρθρα που θα περάσουμε στο template:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(): void
+	{
+		$this->template->articles = $this->articleRepository->findPublishedArticles();
+	}
+}
+```
+
+Στο πρότυπο, θα φροντίσουμε για την απόδοση μιας λίστας άρθρων:
+
+```latte
+{block content}
+<h1>Articles</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+```
+
+
+Με αυτόν τον τρόπο, μπορούμε να γράψουμε όλα τα άρθρα, αλλά αυτό θα προκαλέσει προβλήματα όταν ο αριθμός των άρθρων αυξηθεί. Σε εκείνο το σημείο, θα είναι χρήσιμο να υλοποιήσουμε τον μηχανισμό σελιδοποίησης.
+
+Αυτό θα διασφαλίσει ότι όλα τα άρθρα θα χωρίζονται σε διάφορες σελίδες και θα εμφανίζουμε μόνο τα άρθρα μιας τρέχουσας σελίδας. Ο συνολικός αριθμός των σελίδων και η κατανομή των άρθρων υπολογίζεται από το ίδιο το [utils:Paginator], ανάλογα με το πόσα άρθρα έχουμε συνολικά και πόσα άρθρα θέλουμε να εμφανίσουμε στη σελίδα.
+
+Στο πρώτο βήμα, θα τροποποιήσουμε τη μέθοδο για τη λήψη άρθρων στην κλάση repository ώστε να επιστρέφει μόνο άρθρα μιας σελίδας. Θα προσθέσουμε επίσης μια νέα μέθοδο για να πάρουμε το συνολικό αριθμό των άρθρων στη βάση δεδομένων, τον οποίο θα χρειαστούμε για να ορίσουμε ένα Paginator:
+
+```php
+namespace App\Model;
+
+use Nette;
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+
+	public function findPublishedArticles(int $limit, int $offset): Nette\Database\ResultSet
+	{
+		return $this->database->query('
+			SELECT * FROM articles
+			WHERE created_at < ?
+			ORDER BY created_at DESC
+			LIMIT ?
+			OFFSET ?',
+			new \DateTime, $limit, $offset,
+		);
+	}
+
+	/**
+	 * Returns the total number of published articles
+	 */
+	public function getPublishedArticlesCount(): int
+	{
+		return $this->database->fetchField('SELECT COUNT(*) FROM articles WHERE created_at < ?', new \DateTime);
+	}
+}
+```
+
+Το επόμενο βήμα είναι να επεξεργαστούμε τον παρουσιαστή. Θα προωθήσουμε τον αριθμό της τρέχουσας σελίδας που εμφανίζεται στη μέθοδο render. Στην περίπτωση που αυτός ο αριθμός δεν αποτελεί μέρος της διεύθυνσης URL, πρέπει να ορίσουμε την προεπιλεγμένη τιμή στην πρώτη σελίδα.
+
+Επεκτείνουμε επίσης τη μέθοδο render για να λάβουμε την περίπτωση Paginator, να τη ρυθμίσουμε και να επιλέξουμε τα σωστά άρθρα που θα εμφανίζονται στο πρότυπο. Το HomepagePresenter θα μοιάζει με αυτό:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(int $page = 1): void
+	{
+		// Θα βρούμε το συνολικό αριθμό των δημοσιευμένων άρθρων
+		$articlesCount = $this->articleRepository->getPublishedArticlesCount();
+
+		// Θα δημιουργήσουμε την περίπτωση Paginator και θα τη ρυθμίσουμε
+		$paginator = new Nette\Utils\Paginator;
+		$paginator->setItemCount($articlesCount); // συνολικός αριθμός άρθρων
+		$paginator->setItemsPerPage(10); // στοιχεία ανά σελίδα
+		$paginator->setPage($page); // πραγματικός αριθμός σελίδων
+
+		// Θα βρούμε ένα περιορισμένο σύνολο άρθρων από τη βάση δεδομένων με βάση τους υπολογισμούς του Paginator
+		$articles = $this->articleRepository->findPublishedArticles($paginator->getLength(), $paginator->getOffset());
+
+		// τα οποία θα περάσουμε στο πρότυπο
+		$this->template->articles = $articles;
+		// καθώς και στον ίδιο τον Paginator για να εμφανίσει τις επιλογές σελιδοποίησης
+		$this->template->paginator = $paginator;
+	}
+}
+```
+
+Το πρότυπο επαναλαμβάνει ήδη τα άρθρα σε μία σελίδα, απλά προσθέστε συνδέσμους σελιδοποίησης:
+
+```latte
+{block content}
+<h1>Articles</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+
+<div class="pagination">
+	{if !$paginator->isFirst()}
+		<a n:href="default, 1">First</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->page-1">Previous</a>
+		&nbsp;|&nbsp;
+	{/if}
+
+	Page {$paginator->getPage()} of {$paginator->getPageCount()}
+
+	{if !$paginator->isLast()}
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->getPage() + 1">Next</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->getPageCount()">Last</a>
+	{/if}
+</div>
+```
+
+
+Αυτό είναι το πώς έχουμε προσθέσει σελιδοποίηση χρησιμοποιώντας Paginator. Εάν χρησιμοποιείται ο [Nette Database Explorer |database:explorer] αντί του [Nette Database |database:core] Core ως επίπεδο βάσης δεδομένων, είμαστε σε θέση να υλοποιήσουμε τη σελιδοποίηση ακόμη και χωρίς Paginator. Η κλάση `Nette\Database\Table\Selection` περιέχει τη μέθοδο [page |api:Nette\Database\Table\Selection::_ page] με λογική σελιδοποίησης που λαμβάνεται από το Paginator.
+
+Το αποθετήριο θα έχει την εξής μορφή:
+
+```php
+namespace App\Model;
+
+use Nette;
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Explorer $database,
+	) {
+	}
+
+
+	public function findPublishedArticles(): Nette\Database\Table\Selection
+	{
+		return $this->database->table('articles')
+			->where('created_at < ', new \DateTime)
+			->order('created_at DESC');
+	}
+}
+```
+
+Δεν χρειάζεται να δημιουργήσουμε Paginator στο Presenter, αντίθετα θα χρησιμοποιήσουμε τη μέθοδο του αντικειμένου `Selection` που επιστρέφεται από το αποθετήριο:
+
+```php
+namespace App\Presenters;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+class HomepagePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(int $page = 1): void
+	{
+		// Θα βρούμε δημοσιευμένα άρθρα
+		$articles = $this->articleRepository->findPublishedArticles();
+
+		// και το μέρος τους που περιορίζεται από τον υπολογισμό της μεθόδου σελίδας που θα περάσουμε στο πρότυπο
+		$lastPage = 0;
+		$this->template->articles = $articles->page($page, 10, $lastPage);
+
+		// καθώς και τα απαραίτητα δεδομένα για την εμφάνιση των επιλογών σελιδοποίησης
+		$this->template->page = $page;
+		$this->template->lastPage = $lastPage;
+	}
+}
+```
+
+Επειδή δεν χρησιμοποιούμε το Paginator, πρέπει να επεξεργαστούμε το τμήμα που εμφανίζει τους συνδέσμους σελιδοποίησης:
+
+```latte
+{block content}
+<h1>Articles</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+
+<div class="pagination">
+	{if $page > 1}
+		<a n:href="default, 1">First</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $page - 1">Previous</a>
+		&nbsp;|&nbsp;
+	{/if}
+
+	Page {$page} of {$lastPage}
+
+	{if $page < $lastPage}
+		&nbsp;|&nbsp;
+		<a n:href="default, $page + 1">Next</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $lastPage">Last</a>
+	{/if}
+</div>
+```
+
+Με αυτόν τον τρόπο, υλοποιήσαμε έναν μηχανισμό σελιδοποίησης χωρίς τη χρήση Paginator.
+
+{{priority: -1}}
+{{sitename: Best Practices}}

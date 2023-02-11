@@ -1,0 +1,285 @@
+Podaljšanje Latte
+*****************
+
+.[perex]
+Latte je zelo prilagodljiv in ga je mogoče razširiti na več načinov: dodajate lahko filtre, funkcije, oznake, nalagalnike itd. Pokazali vam bomo, kako to storiti.
+
+V tem poglavju so opisani različni načini razširitve sistema Latte. Če želite svoje spremembe ponovno uporabiti v različnih projektih ali če jih želite deliti z drugimi, morate nato [ustvariti tako imenovano razširitev. |creating-extension]
+
+
+Koliko poti vodi v Rim? .[#toc-how-many-roads-lead-to-rome]
+===========================================================
+
+Ker se lahko nekateri načini podaljševanja latte mešajo, poskušajmo najprej razložiti razlike med njimi. Kot primer poskusimo implementirati generator *Lorem ipsum*, ki mu posredujemo število besed za generiranje.
+
+Glavni konstrukt jezika Latte je oznaka. Generator lahko implementiramo tako, da razširimo program Latte z novo značko:
+
+```latte
+{lipsum 40}
+```
+
+Oznaka bo delovala odlično. Vendar generator v obliki oznake morda ne bo dovolj prilagodljiv, saj ga ne bo mogoče uporabiti v izrazu. Mimogrede, v praksi redko potrebujete generiranje značk; in to je dobra novica, saj so značke bolj zapleten način razširjanja.
+
+Ok, poskusite ustvariti filter namesto oznake:
+
+```latte
+{=40|lipsum}
+```
+
+Tudi to je veljavna možnost. Toda filter mora posredovano vrednost spremeniti v nekaj drugega. V tem primeru uporabimo vrednost `40`, ki označuje število ustvarjenih besed, kot argument filtra in ne kot vrednost, ki jo želimo pretvoriti.
+
+Zato poskusimo uporabiti funkcijo:
+
+```latte
+{lipsum(40)}
+```
+
+To je to! Za ta primer je ustvarjanje funkcije idealna razširitvena točka, ki jo lahko uporabimo. Pokličete jo lahko povsod, kjer je na primer sprejet izraz:
+
+```latte
+{var $text = lipsum(40)}
+```
+
+
+Filtri .[#toc-filters]
+======================
+
+Filter ustvarite tako, da registrirate njegovo ime in katerikoli klic PHP, na primer funkcijo:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFilter('shortify', fn(string $s) => mb_substr($s, 0, 10)); // skrajša besedilo na 10 znakov
+```
+
+V tem primeru bi bilo bolje, če bi filter dobil dodaten parameter:
+
+```php
+$latte->addFilter('shortify', fn(string $s, int $len = 10) => mb_substr($s, 0, $len));
+```
+
+Uporabljamo ga v predlogi, kot je ta:
+
+```latte
+<p>{$text|shortify}</p>
+<p>{$text|shortify:100}</p>
+```
+
+Kot lahko vidite, funkcija kot naslednje argumente prejme levo stran filtra pred cevjo `|` as the first argument and the arguments passed to the filter after `:`.
+
+Seveda lahko funkcija, ki predstavlja filter, sprejme poljubno število parametrov, podprti pa so tudi variabilni parametri.
+
+
+Filtri z uporabo razreda .[#toc-filters-using-the-class]
+--------------------------------------------------------
+
+Drugi način za opredelitev filtra je [uporaba razreda |develop#Parameters as a class]. Ustvarimo metodo z atributom `TemplateFilter`:
+
+```php
+class TemplateParameters
+{
+	public function __construct(
+		// parametri
+	) {}
+
+	#[Latte\Attributes\TemplateFilter]
+	public function shortify(string $s, int $len = 10): string
+	{
+		return mb_substr($s, 0, $len);
+	}
+}
+
+$params = new TemplateParameters(/* ... */);
+$latte->render('template.latte', $params);
+```
+
+Če uporabljate PHP 7.x in Latte 2.x, namesto atributa uporabite opombo `/** @filter */`.
+
+
+Nalaganje filtrov .[#toc-filter-loader]
+---------------------------------------
+
+Namesto registracije posameznih filtrov lahko ustvarite tako imenovani nalagalnik, ki je funkcija, ki se pokliče z imenom filtra kot argumentom in vrne njegov klicni parameter PHP ali nič.
+
+```php
+$latte->addFilterLoader([new Filters, 'load']);
+
+
+class Filters
+{
+	public function load(string $filter): ?callable
+	{
+		if (in_array($filter, get_class_methods($this))) {
+			return [$this, $filter];
+		}
+		return null;
+	}
+
+	public function shortify($s, $len = 10)
+	{
+		return mb_substr($s, 0, $len);
+	}
+
+	// ...
+}
+```
+
+
+Kontekstualni filtri .[#toc-contextual-filters]
+-----------------------------------------------
+
+Kontekstualni filter je filter, ki v prvem parametru sprejme predmet [api:Latte\Runtime\FilterInfo], nato pa mu sledijo drugi parametri kot pri klasičnih filtrih. Registrira se na enak način, Latte sam prepozna, da je filter kontekstualen:
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('foo', function (FilterInfo $info, string $str): string {
+	// ...
+});
+```
+
+Kontekstni filtri lahko zaznajo in spremenijo vrsto vsebine, ki jo prejmejo v spremenljivki `$info->contentType`. Če je filter klican klasično nad spremenljivko (npr. `{$var|foo}`), bo `$info->contentType` vsebovala ničlo.
+
+Filter mora najprej preveriti, ali je vrsta vsebine vhodnega niza podprta. Lahko ga tudi spremeni. Primer filtra, ki sprejme besedilo (ali ničlo) in vrne HTML:
+
+```php
+use Latte\Runtime\FilterInfo;
+
+$latte->addFilter('money', function (FilterInfo $info, float $amount): string {
+	// najprej preverimo, ali je tip vsebine vnosa besedilo.
+	if (!in_array($info->contentType, [null, ContentType::Text])) {
+		throw new Exception("Filter |money used in incompatible content type $info->contentType.");
+	}
+
+	// spremenimo tip vsebine v HTML
+	$info->contentType = ContentType::Html;
+	return "<i>$num Kč</i>";
+});
+```
+
+.[note]
+V tem primeru mora filter zagotoviti pravilno escapiranje podatkov.
+
+Vsi filtri, ki se uporabljajo nad [bloki |tags#block] (npr. kot `{block|foo}...{/block}`) morajo biti kontekstualni.
+
+
+Funkcije .[#toc-functions]
+==========================
+
+Privzeto lahko v Latte uporabljate vse izvorne funkcije PHP, razen če je to v peskovniku onemogočeno. Lahko pa določite tudi lastne funkcije. Te lahko prekrijejo izvorne funkcije.
+
+Funkcijo ustvarite tako, da vpišete njeno ime in kateri koli klic PHP:
+
+```php
+$latte = new Latte\Engine;
+$latte->addFunction('random', function (...$args) {
+	return $args[array_rand($args)];
+});
+```
+
+Uporaba je nato enaka kot pri klicanju funkcije PHP:
+
+```latte
+{random(apple, orange, lemon)} // prints for example: apple
+```
+
+
+Funkcije, ki uporabljajo razred .[#toc-functions-using-the-class]
+-----------------------------------------------------------------
+
+Drugi način opredelitve funkcije je [uporaba razreda |develop#Parameters as a class]. Ustvarimo metodo z atributom `TemplateFunction`:
+
+```php
+class TemplateParameters
+{
+	public function __construct(
+		// parametri
+	) {}
+
+	#[Latte\Attributes\TemplateFunction]
+	public function random(...$args)
+	{
+		return $args[array_rand($args)];
+	}
+}
+
+$params = new TemplateParameters(/* ... */);
+$latte->render('template.latte', $params);
+```
+
+Če uporabljate PHP 7.x in Latte 2.x, namesto atributa uporabite opombo `/** @function */`.
+
+
+Nalagalniki .[#toc-loaders]
+===========================
+
+Nalagalniki so odgovorni za nalaganje predlog iz vira, kot je datotečni sistem. Nastavijo se z metodo `setLoader()`:
+
+```php
+$latte->setLoader(new MyLoader);
+```
+
+Vgrajeni nalagalniki so:
+
+
+FileLoader .[#toc-fileloader]
+-----------------------------
+
+Privzeta naprava za nalaganje. Naloži predloge iz datotečnega sistema.
+
+Dostop do datotek lahko omejite z nastavitvijo osnovnega imenika:
+
+```php
+$latte->setLoader(new Latte\Loaders\FileLoader($templateDir));
+$latte->render('test.latte');
+```
+
+
+StringLoader .[#toc-stringloader]
+---------------------------------
+
+Naloži predloge iz nizov. Ta nalagalnik je zelo uporaben za testiranje enot. Uporablja se lahko tudi pri manjših projektih, kjer je morda smiselno vse predloge shraniti v eno samo datoteko PHP.
+
+```php
+$latte->setLoader(new Latte\Loaders\StringLoader([
+	'main.file' => '{include other.file}',
+	'other.file' => '{if true} {$var} {/if}',
+]));
+
+$latte->render('main.file');
+```
+
+Poenostavljena uporaba:
+
+```php
+$template = '{if true} {$var} {/if}';
+$latte->setLoader(new Latte\Loaders\StringLoader);
+$latte->render($template);
+```
+
+
+Ustvarjanje polnilnika po meri .[#toc-creating-a-custom-loader]
+---------------------------------------------------------------
+
+Loader je razred, ki implementira vmesnik [api:Latte\Loader].
+
+
+Oznake .[#toc-tags]
+===================
+
+Ena od najzanimivejših funkcij mehanizma za oblikovanje predlog je možnost opredelitve novih jezikovnih konstrukcij z uporabo oznak. To je tudi bolj zapletena funkcionalnost, zato morate razumeti, kako Latte notranje deluje.
+
+Vendar pa v večini primerov uporaba značk ni potrebna:
+- Če naj bi ustvarila kakšen izhod, namesto tega uporabite [funkcijo |#functions]
+- če naj bi spremenila nek vhodni podatek in ga vrnila, namesto tega uporabite [filter |#filters]
+- če naj bi urejala območje besedila, ga ovijte z [`{block}` |tags#block] in uporabite [filter |#Contextual Filters]
+- če ne bi smel ničesar izpisati, ampak samo poklicati funkcijo, jo pokličite z [`{do}` |tags#do]
+
+Če še vedno želite ustvariti oznako, odlično! Vse bistvene informacije so na voljo v poglavju [Ustvarjanje razširitve |creating-extension].
+
+
+Prehodi za prevajalnik .[#toc-compiler-passes]
+==============================================
+
+Prehodi za prevajalnik so funkcije, ki spreminjajo AST ali v njih zbirajo informacije. V programu Latte je na primer peskovnik izveden na ta način: prečka vsa vozlišča AST, poišče klice funkcij in metod ter jih nadomesti z nadzorovanimi klici.
+
+Tako kot pri oznakah gre za bolj zapleteno funkcionalnost, zato morate razumeti, kako Latte deluje pod pokrovom. Vse bistvene informacije najdete v poglavju [Ustvarjanje razširitve |creating-extension].

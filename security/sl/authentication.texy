@@ -1,0 +1,290 @@
+Preverjanje pristnosti uporabnikov
+**********************************
+
+<div class=perex>
+
+Malo ali nič spletne aplikacije ne potrebujejo mehanizma za prijavo uporabnika ali preverjanje njegovih pravic. V tem poglavju bomo govorili o:
+
+- prijavi in odjavi uporabnika
+- lastnih avtentifikatorjih in avtorizatorjih
+
+</div>
+
+→ [Namestitev in zahteve |@home#Installation]
+
+V primerih bomo uporabili objekt razreda [api:Nette\Security\User], ki predstavlja trenutnega uporabnika in ga dobite s posredovanjem z uporabo [vbrizgavanja odvisnosti |dependency-injection:passing-dependencies]. V predstavitvah preprosto pokličite `$user = $this->getUser()`.
+
+
+Preverjanje pristnosti .[#toc-authentication]
+=============================================
+
+Avtentikacija pomeni **prijavo uporabnika**, tj. postopek, med katerim se preveri identiteta uporabnika. Uporabnik se običajno identificira z uporabniškim imenom in geslom. Preverjanje opravi tako imenovani [avtentifikator |#authenticator]. Če prijava ni uspešna, se vrže `Nette\Security\AuthenticationException`.
+
+```php
+try {
+	$user->login($username, $password);
+} catch (Nette\Security\AuthenticationException $e) {
+	$this->flashMessage('The username or password you entered is incorrect.');
+}
+```
+
+Tako se uporabnik odjavi:
+
+```php
+$user->logout();
+```
+
+In preverjanje, ali je uporabnik prijavljen:
+
+```php
+echo $user->isLoggedIn() ? 'yes' : 'no';
+```
+
+Preprosto, kajne? Za vse varnostne vidike poskrbi Nette.
+
+V programu Presenter lahko v metodi `startup()` preverite prijavo in neprijavljenega uporabnika preusmerite na prijavno stran.
+
+```php
+protected function startup()
+{
+	parent::startup();
+	if (!$this->getUser()->isLoggedIn()) {
+		$this->redirect('Sign:in');
+	}
+}
+```
+
+
+Iztek veljavnosti .[#toc-expiration]
+====================================
+
+Prijava uporabnika poteče skupaj s [potekom veljavnosti shrambe |#Storage for Logged User], ki je običajno seja (glejte nastavitev [poteka seje |http:configuration#session] ).
+Lahko pa nastavite tudi krajši časovni interval, po katerem se uporabnik odjavi. V ta namen se uporablja metoda `setExpiration()`, ki se kliče pred `login()`. Kot parameter navedite niz z relativnim časom:
+
+```php
+// prijava poteče po 30 minutah neaktivnosti
+$user->setExpiration('30 minutes');
+
+// preklicati nastavitev izteka veljavnosti
+$user->setExpiration(null);
+```
+
+Metoda `$user->getLogoutReason()` pove, ali je bil uporabnik odjavljen, ker se je časovni interval iztekel. Vrne bodisi konstanto `Nette\Security\UserStorage::LogoutInactivity`, če se je čas iztekel, bodisi `UserStorage::LogoutManual`, če je bila klicana metoda `logout()`.
+
+
+Avtentifikator .[#toc-authenticator]
+====================================
+
+To je objekt, ki preveri podatke za prijavo, tj. običajno ime in geslo. Trivialna izvedba je razred [api:Nette\Security\SimpleAuthenticator], ki ga je mogoče opredeliti v [konfiguraciji |configuration]:
+
+```neon
+security:
+	users:
+		# ime: geslo
+		johndoe: secret123
+		kathy: evenmoresecretpassword
+```
+
+Ta rešitev je primernejša za namene testiranja. Pokazali vam bomo, kako ustvariti avtentifikator, ki bo preverjal poverilnice glede na tabelo podatkovne zbirke.
+
+Avtentifikator je objekt, ki implementira vmesnik [api:Nette\Security\Authenticator] z metodo `authenticate()`. Njegova naloga je, da vrne tako imenovano [identiteto |#identity] ali pa vrže izjemo `Nette\Security\AuthenticationException`. Prav tako bi bilo mogoče zagotoviti drobno kodo napake `Authenticator::IdentityNotFound` ali `Authenticator::InvalidCredential`.
+
+```php
+use Nette;
+use Nette\Security\SimpleIdentity;
+
+class MyAuthenticator implements Nette\Security\Authenticator
+{
+	public function __construct(
+		private Nette\Database\Explorer $database,
+		private Nette\Security\Passwords $passwords,
+	) {
+	}
+
+	public function authenticate(string $username, string $password): SimpleIdentity
+	{
+		$row = $this->database->table('users')
+			->where('username', $username)
+			->fetch();
+
+		if (!$row) {
+			throw new Nette\Security\AuthenticationException('User not found.');
+		}
+
+		if (!$this->passwords->verify($password, $row->password)) {
+			throw new Nette\Security\AuthenticationException('Invalid password.');
+		}
+
+		return new SimpleIdentity(
+			$row->id,
+			$row->role, // ali niz vlog
+			['name' => $row->username],
+		);
+	}
+}
+```
+
+Razred MyAuthenticator komunicira s podatkovno zbirko prek [Nette Database Explorerja |database:explorer] in dela s tabelo `users`, kjer stolpec `username` vsebuje uporabniško prijavno ime, stolpec `password` pa [hash |passwords]. Po preverjanju imena in gesla vrne identiteto z ID uporabnika, vlogo (stolpec `role` v tabeli), ki jo bomo omenili [kasneje |#roles], in polje z dodatnimi podatki (v našem primeru uporabniško ime).
+
+Avtentifikator bomo dodali v konfiguracijo [kot storitev |dependency-injection:services] vsebnika DI:
+
+```neon
+services:
+	- MyAuthenticator
+```
+
+
+$onLoggedIn, $onLoggedOut Dogodki
+---------------------------------
+
+Objekt `Nette\Security\User` ima [dogodka |nette:glossary#Events] `$onLoggedIn` in `$onLoggedOut`, zato lahko dodate povratne klice, ki se sprožijo po uspešni prijavi ali po odjavi uporabnika.
+
+
+```php
+$user->onLoggedIn[] = function () {
+	// uporabnik se je pravkar prijavil
+};
+```
+
+
+Identiteta .[#toc-identity]
+===========================
+
+Identiteta je niz informacij o uporabniku, ki jih vrne avtentifikator in se nato shranijo v sejo ter prikličejo z uporabo `$user->getIdentity()`. Tako lahko dobimo id, vloge in druge podatke o uporabniku, kot smo jih posredovali v avtentifikatorju:
+
+```php
+$user->getIdentity()->getId();
+// deluje tudi bližnjica $user->getId();
+
+$user->getIdentity()->getRoles();
+
+// do podatkov o uporabniku lahko dostopate kot do lastnosti
+// ime, ki smo ga posredovali v MyAuthenticator
+$user->getIdentity()->name;
+```
+
+Pomembno je, da ko se uporabnik odjavi z uporabo `$user->logout()`, **identiteta ni izbrisana** in je še vedno na voljo. Torej, če identiteta obstaja, sama po sebi ne zagotavlja, da je uporabnik tudi prijavljen. Če želimo identiteto izrecno izbrisati, uporabnika odjavimo s `logout(true)`.
+
+Zaradi tega lahko še vedno predvidevamo, kateri uporabnik je v računalniku, in na primer v e-trgovini prikažemo prilagojene ponudbe, vendar lahko njegove osebne podatke prikažemo šele po prijavi.
+
+Identiteta je objekt, ki implementira vmesnik [api:Nette\Security\IIdentity], privzeta implementacija je [api:Nette\Security\SimpleIdentity]. In kot smo že omenili, se identiteta hrani v seji, zato če na primer spremenimo vlogo katerega od prijavljenih uporabnikov, bodo stari podatki ostali v identiteti, dokler se ta ponovno ne prijavi.
+
+
+Shranjevanje za prijavljenega uporabnika .[#toc-storage-for-logged-user]
+========================================================================
+
+Dve osnovni informaciji o uporabniku, tj. ali je prijavljen in njegova [identiteta |#identity], sta običajno shranjeni v seji. Ki jih je mogoče spremeniti. Za shranjevanje teh informacij je odgovoren objekt, ki implementira vmesnik `Nette\Security\UserStorage`. Obstajata dve standardni izvedbi, prva prenaša podatke v seji, druga pa v piškotku. To sta razreda `Nette\Bridges\SecurityHttp\SessionStorage` in `CookieStorage`. Shranjevanje lahko izberete in konfigurirate zelo priročno v konfiguraciji [varnost › avtentikacija |configuration].
+
+Prav tako lahko natančno nadzirate, kako bo potekalo shranjevanje identitete (*sleep*) in obnavljanje (*wakeup*). Vse, kar potrebujete, je, da avtentifikator implementira vmesnik `Nette\Security\IdentityHandler`. Ta ima dve metodi: `sleepIdentity()` se pokliče, preden se identiteta zapiše v pomnilnik, `wakeupIdentity()` pa se pokliče, ko se identiteta prebere. Metodi lahko spremenita vsebino identitete ali jo nadomestita z novim objektom, ki se vrne. Metoda `wakeupIdentity()` lahko vrne celo `null`, ki uporabnika odjavi.
+
+Kot primer bomo prikazali rešitev pogostega vprašanja, kako posodobiti identitetne vloge takoj po obnovitvi iz seje. V metodi `wakeupIdentity()` identiteti posredujemo trenutne vloge, npr. iz zbirke podatkov:
+
+```php
+final class Authenticator implements
+	Nette\Security\Authenticator, Nette\Security\IdentityHandler
+{
+	public function sleepIdentity(IIdentity $identity): IIdentity
+	{
+		// tukaj lahko spremenite identiteto pred shranjevanjem po prijavi,
+		// vendar tega zdaj ne potrebujemo.
+		return $identity;
+	}
+
+	public function wakeupIdentity(IIdentity $identity): ?IIdentity
+	{
+		// posodabljanje vlog v identiteti
+		$userId = $identity->getId();
+		$identity->setRoles($this->facade->getUserRoles($userId));
+		return $identity;
+	}
+```
+
+Zdaj se vrnemo k shranjevanju na podlagi piškotkov. Z njo lahko ustvarite spletno mesto, na katerem se lahko uporabniki prijavijo, ne da bi jim bilo treba uporabljati seje. Torej ni treba pisati na disk. Navsezadnje tako deluje spletno mesto, ki ga zdaj berete, vključno s forumom. V tem primeru je implementacija spletne strani `IdentityHandler` nujna. V piškotek bomo shranili le naključni žeton, ki predstavlja prijavljenega uporabnika.
+
+Zato najprej v konfiguraciji nastavimo želeno shranjevanje z uporabo `security › authentication › storage: cookie`.
+
+V zbirko podatkov bomo dodali stolpec `authtoken`, v katerem bo imel vsak uporabnik [popolnoma naključen, edinstven in nezgrešljiv |utils:random] niz zadostne dolžine (vsaj 13 znakov). V shrambi `CookieStorage` je v piškotku shranjena le vrednost `$identity->getId()`, zato v metodi `sleepIdentity()` prvotno identiteto nadomestimo s posrednikom z `authtoken` v ID, nasprotno pa v metodi `wakeupIdentity()` obnovimo celotno identiteto iz zbirke podatkov v skladu z authtokenom:
+
+```php
+final class Authenticator implements
+	Nette\Security\Authenticator, Nette\Security\IdentityHandler
+{
+	public function authenticate(string $username, string $password): SimpleIdentity
+	{
+		$row = $this->db->fetch('SELECT * FROM user WHERE username = ?', $username);
+		// preverjanje gesla
+		...
+		// vrnemo identiteto z vsemi podatki iz zbirke podatkov
+		return new SimpleIdentity($row->id, null, (array) $row);
+	}
+
+	public function sleepIdentity(IIdentity $identity): SimpleIdentity
+	{
+		// vrnemo proxy identiteto, kjer je ID avtotoken
+		return new SimpleIdentity($identity->authtoken);
+	}
+
+	public function wakeupIdentity(IIdentity $identity): ?SimpleIdentity
+	{
+		// nadomestimo proxy identiteto s polno identiteto, kot v funkciji authenticate()
+		$row = $this->db->fetch('SELECT * FROM user WHERE authtoken = ?', $identity->getId());
+		return $row
+			? new SimpleIdentity($row->id, null, (array) $row)
+			: null;
+	}
+}
+```
+
+
+Več neodvisnih avtentikacij .[#toc-multiple-independent-authentications]
+========================================================================
+
+Na enem spletnem mestu in v eni seji je mogoče imeti več neodvisno prijavljenih uporabnikov. Če na primer želimo imeti ločeno avtentikacijo za frontend in backend, bomo za vsakega od njiju samo nastavili edinstven imenski prostor seje:
+
+```php
+$user->getStorage()->setNamespace('backend');
+```
+
+Upoštevati je treba, da je to treba nastaviti na vseh mestih, ki pripadajo istemu segmentu. Pri uporabi predstavnikov bomo imenski prostor nastavili v skupnem predniku - običajno je to BasePresenter. V ta namen bomo razširili metodo [checkRequirements() |api:Nette\Application\UI\Presenter::checkRequirements()]:
+
+```php
+public function checkRequirements($element): void
+{
+	$this->getUser()->getStorage()->setNamespace('backend');
+	parent::checkRequirements($element);
+}
+```
+
+
+Več overiteljev .[#toc-multiple-authenticators]
+-----------------------------------------------
+
+Delitev aplikacije na segmente z neodvisnim preverjanjem pristnosti običajno zahteva različne overitelje. Vendar pa bi registracija dveh razredov, ki implementirata avtentifikator, v konfiguracijske storitve sprožila napako, ker Nette ne bi vedel, kateri od njiju naj bo [samodejno povezan |dependency-injection:autowiring] z objektom `Nette\Security\User`. Zato moramo z objektom `autowired: self` omejiti avtentikacijo zanju, tako da se aktivira le, kadar je njun razred posebej zahtevan:
+
+```neon
+services:
+	-
+		create: FrontAuthenticator
+		autowired: self
+```
+
+```php
+class SignPresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private FrontAuthenticator $authenticator,
+	) {
+	}
+}
+```
+
+Avtentifikator moramo nastaviti objektu User le pred klicem metode [login() |api:Nette\Security\User::login()], kar običajno pomeni v povratnem klicu obrazca za prijavo:
+
+```php
+$form->onSuccess[] = function (Form $form, \stdClass $data) {
+	$user = $this->getUser();
+	$user->setAuthenticator($this->authenticator);
+	$user->login($data->username, $data->password);
+	// ...
+};
+```

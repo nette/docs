@@ -1,0 +1,312 @@
+État global et singletons
+*************************
+
+.[perex]
+Avertissement : les constructions suivantes sont des symptômes d'une mauvaise conception du code :
+
+- `Foo::getInstance()`
+- `DB::insert(...)`
+- `Article::setDb($db)`
+- `ClassName::$var` ou `static::$var`
+
+L'une de ces constructions apparaît-elle dans votre code ? Alors vous avez la possibilité de vous améliorer. Vous pensez peut-être qu'il s'agit de constructions courantes que nous voyons dans des exemples de solutions de diverses bibliothèques et de divers frameworks.
+Malheureusement, elles sont toujours un indicateur clair d'une mauvaise conception. Elles ont une chose en commun : l'utilisation d'un état global.
+
+Il ne s'agit certainement pas d'une sorte de pureté académique. L'utilisation de l'état global et des singletons a des effets destructeurs sur la qualité du code. Son comportement devient imprévisible, réduit la productivité des développeurs et oblige les interfaces de classe à mentir sur leurs véritables dépendances. Ce qui désoriente les programmeurs.
+
+Dans ce chapitre, nous allons montrer comment cela est possible.
+
+
+Interconnexion globale .[#toc-global-interlinking]
+--------------------------------------------------
+
+Le problème fondamental de l'état global est qu'il est accessible globalement. Il est donc possible d'écrire dans la base de données via la méthode globale (statique) `DB::insert()`.
+Dans un monde idéal, un objet ne devrait pouvoir communiquer qu'avec les autres objets qui lui ont été [directement transmis |passing-dependencies].
+Si je crée deux objets `A` et `B` et que je ne passe jamais une référence de `A` à `B`, ni `A`, ni `B` ne peuvent accéder à l'autre objet ou modifier son état.
+Il s'agit d'une caractéristique très souhaitable du code. C'est comme si vous aviez une batterie et une ampoule ; l'ampoule ne s'allume pas tant que vous ne les connectez pas ensemble.
+
+Ce n'est pas vrai pour les variables globales (statiques) ou les singletons. L'objet `A` pourrait accéder *sans fil* à l'objet `C` et le modifier sans passer de référence, en appelant `C::changeSomething()`.
+Si l'objet `B` s'empare également de la variable globale `C`, alors `A` et `B` peuvent interagir entre eux via `C`.
+
+L'utilisation de variables globales introduit dans le système une nouvelle forme de couplage *sans fil* qui n'est pas visible de l'extérieur.
+Elle crée un écran de fumée qui complique la compréhension et l'utilisation du code.
+Les développeurs doivent lire chaque ligne du code source pour vraiment comprendre les dépendances. Au lieu de se contenter de se familiariser avec l'interface des classes.
+De plus, il s'agit d'un couplage totalement inutile.
+
+.[note]
+En termes de comportement, il n'y a pas de différence entre une variable globale et une variable statique. Elles sont tout aussi nuisibles l'une que l'autre.
+
+
+L'action sinistre à distance .[#toc-the-spooky-action-at-a-distance]
+--------------------------------------------------------------------
+
+"L'action sinistre à distance" : c'est ainsi qu'Albert Einstein a appelé un phénomène de la physique quantique qui lui a donné la chair de poule en 1935.
+Il s'agit de l'intrication quantique, dont la particularité est que lorsque vous mesurez une information sur une particule, vous affectez immédiatement une autre particule, même si elles sont distantes de millions d'années-lumière.
+Ce qui semble violer la loi fondamentale de l'univers selon laquelle rien ne peut voyager plus vite que la lumière.
+
+Dans le monde des logiciels, nous pouvons parler d'une "action étrange à distance", une situation dans laquelle nous exécutons un processus que nous pensons isolé (parce que nous ne lui avons transmis aucune référence), mais des interactions inattendues et des changements d'état se produisent dans des endroits éloignés du système dont nous n'avons pas parlé à l'objet. Cela ne peut se produire qu'à travers l'état global.
+
+Imaginez que vous rejoignez une équipe de développement de projet qui dispose d'une base de code importante et mature. Votre nouveau chef vous demande d'implémenter une nouvelle fonctionnalité et, comme tout bon développeur, vous commencez par écrire un test. Mais comme vous êtes nouveau dans le projet, vous faites beaucoup de tests exploratoires du type "que se passe-t-il si j'appelle cette méthode". Et vous essayez d'écrire le test suivant :
+
+```php
+function testCreditCardCharge()
+{
+	$cc = new CreditCard('1234567890123456', 5, 2028); // votre numéro de carte
+	$cc->charge(100);
+}
+```
+
+Vous exécutez le code, peut-être plusieurs fois, et après un certain temps, vous remarquez sur votre téléphone des notifications de la banque indiquant qu'à chaque fois que vous l'exécutez, 100 $ ont été débités sur votre carte de crédit 🤦‍♂️.
+
+Comment diable le test a-t-il pu provoquer un débit réel ? Il n'est pas facile d'opérer avec une carte de crédit. Vous devez interagir avec un service web tiers, vous devez connaître l'URL de ce service web, vous devez vous connecter, et ainsi de suite.
+Aucune de ces informations n'est incluse dans le test. Pire encore, vous ne savez même pas où ces informations sont présentes, et donc comment simuler les dépendances externes pour que chaque exécution n'entraîne pas une nouvelle facturation de 100 dollars. Et en tant que nouveau développeur, comment étiez-vous censé savoir que ce que vous étiez sur le point de faire vous ferait perdre 100 dollars ?
+
+C'est une action effrayante à distance !
+
+Vous n'avez pas d'autre choix que de fouiller dans une grande quantité de code source, en demandant à des collègues plus anciens et plus expérimentés, jusqu'à ce que vous compreniez comment fonctionnent les connexions dans le projet.
+Cela est dû au fait qu'en regardant l'interface de la classe `CreditCard`, vous ne pouvez pas déterminer l'état global qui doit être initialisé. Même en regardant le code source de la classe, vous ne pourrez pas savoir quelle méthode d'initialisation appeler. Au mieux, vous pouvez trouver la variable globale à laquelle on accède et essayer de deviner comment l'initialiser à partir de là.
+
+Les classes d'un tel projet sont des menteurs pathologiques. La carte de paiement prétend que vous pouvez simplement l'instancier et appeler la méthode `charge()`. Cependant, elle interagit secrètement avec une autre classe, `PaymentGateway`. Même son interface indique qu'elle peut être initialisée de manière indépendante, mais en réalité, elle tire les informations d'identification d'un fichier de configuration et ainsi de suite.
+Il est clair pour les développeurs qui ont écrit ce code que `CreditCard` a besoin de `PaymentGateway`. Ils ont écrit le code de cette façon. Mais pour toute personne nouvelle dans le projet, c'est un mystère complet et cela entrave l'apprentissage.
+
+Comment remédier à cette situation ? Facile. **Laissez l'API déclarer les dépendances.**
+
+```php
+function testCreditCardCharge()
+{
+	$gateway = new PaymentGateway(/* ... */);
+	$cc = new CreditCard('1234567890123456', 5, 2028);
+	$cc->charge($gateway, 100);
+}
+```
+
+Remarquez comment les relations au sein du code deviennent soudainement évidentes. En déclarant que la méthode `charge()` a besoin de `PaymentGateway`, vous n'avez pas besoin de demander à qui que ce soit comment le code est interdépendant. Vous savez que vous devez créer une instance de cette méthode, et lorsque vous essayez de le faire, vous vous heurtez au fait que vous devez fournir des paramètres d'accès. Sans eux, le code ne fonctionnerait même pas.
+
+Et surtout, vous pouvez maintenant simuler la passerelle de paiement afin de ne pas être facturé 100 $ à chaque fois que vous exécutez un test.
+
+L'état global permet à vos objets d'accéder secrètement à des éléments qui ne sont pas déclarés dans leurs API et, par conséquent, fait de vos API des menteurs pathologiques.
+
+Vous n'y avez peut-être jamais pensé de cette façon, mais chaque fois que vous utilisez l'état global, vous créez des canaux de communication sans fil secrets. Les actions à distance effrayantes obligent les développeurs à lire chaque ligne de code pour comprendre les interactions potentielles, réduisent la productivité des développeurs et désorientent les nouveaux membres de l'équipe.
+Si vous êtes celui qui a créé le code, vous connaissez les véritables dépendances, mais tous ceux qui viennent après vous ne savent rien.
+
+N'écrivez pas de code qui utilise l'état global, préférez passer les dépendances. C'est l'injection de dépendances.
+
+
+La fragilité de l'État mondial .[#toc-brittleness-of-the-global-state]
+----------------------------------------------------------------------
+
+Dans le code qui utilise un état global et des singletons, on ne sait jamais avec certitude quand et par qui cet état a été modifié. Ce risque est déjà présent à l'initialisation. Le code suivant est censé créer une connexion à une base de données et initialiser la passerelle de paiement, mais il continue à lancer une exception et il est extrêmement fastidieux d'en trouver la cause :
+
+```php
+PaymentGateway::init();
+DB::init('mysql:', 'user', 'password');
+```
+
+Vous devez parcourir le code en détail pour découvrir que l'objet `PaymentGateway` accède à d'autres objets sans fil, dont certains nécessitent une connexion à une base de données. Ainsi, vous devez initialiser la base de données avant `PaymentGateway`. Cependant, l'écran de fumée de l'état global vous cache cela. Combien de temps gagneriez-vous si l'API de chaque classe ne mentait pas et ne déclarait pas ses dépendances ?
+
+```php
+$db = new DB('mysql:', 'user', 'password');
+$gateway = new PaymentGateway($db, ...);
+```
+
+Un problème similaire se pose lors de l'utilisation de l'accès global à une connexion de base de données :
+
+```php
+use Illuminate\Support\Facades\DB;
+
+class Article
+{
+	public function save(): void
+	{
+		DB::insert(/* ... */);
+	}
+}
+```
+
+Lorsque l'on appelle la méthode `save()`, on ne sait pas si une connexion à la base de données a déjà été créée et qui est responsable de sa création. Par exemple, si nous voulions modifier la connexion à la base de données à la volée, peut-être à des fins de test, nous devrions probablement créer des méthodes supplémentaires telles que `DB::reconnect(...)` ou `DB::reconnectForTest()`.
+
+Prenons un exemple :
+
+```php
+$article = new Article;
+// ...
+DB::reconnectForTest();
+Foo::doSomething();
+$article->save();
+```
+
+Comment pouvons-nous être sûrs que la base de données de test est réellement utilisée lors de l'appel à `$article->save()`? Et si la méthode `Foo::doSomething()` modifiait la connexion globale à la base de données ? Pour le savoir, nous devrions examiner le code source de la classe `Foo` et probablement de nombreuses autres classes. Toutefois, cette approche ne fournirait qu'une réponse à court terme, car la situation pourrait changer à l'avenir.
+
+Et si nous déplacions la connexion à la base de données vers une variable statique à l'intérieur de la classe `Article`?
+
+```php
+class Article
+{
+	private static DB $db;
+
+	public static function setDb(DB $db): void
+	{
+		self::$db = $db;
+	}
+
+	public function save(): void
+	{
+		self::$db->insert(/* ... */);
+	}
+}
+```
+
+Cela ne change rien du tout. Le problème est un état global et la classe dans laquelle il se cache n'a pas d'importance. Dans ce cas, comme dans le précédent, nous n'avons aucune idée de la base de données qui est écrite lorsque la méthode `$article->save()` est appelée. N'importe qui à l'extrémité distante de l'application pourrait changer la base de données à tout moment en utilisant `Article::setDb()`. Sous nos yeux.
+
+L'état global rend notre application **extrêmement fragile**.
+
+Cependant, il existe un moyen simple de résoudre ce problème. Il suffit de faire en sorte que l'API déclare des dépendances pour garantir une bonne fonctionnalité.
+
+```php
+class Article
+{
+	public function __construct(
+		private DB $db,
+	) {
+	}
+
+	public function save(): void
+	{
+		$this->db->insert(/* ... */);
+	}
+}
+
+$article = new Article($db);
+// ...
+Foo::doSomething();
+$article->save();
+```
+
+Cette approche élimine le souci de modifications cachées et inattendues des connexions à la base de données. Maintenant, nous sommes sûrs de l'endroit où l'article est stocké et aucune modification du code dans une autre classe sans rapport ne peut plus changer la situation. Le code n'est plus fragile, mais stable.
+
+N'écrivez pas de code qui utilise l'état global, préférez le passage des dépendances. Ainsi, l'injection de dépendances.
+
+
+Singleton .[#toc-singleton]
+---------------------------
+
+Le singleton est un modèle de conception qui, selon la [définition de |https://en.wikipedia.org/wiki/Singleton_pattern] la célèbre publication Gang of Four, limite une classe à une seule instance et lui offre un accès global. L'implémentation de ce patron ressemble généralement au code suivant :
+
+```php
+class Singleton
+{
+	private static self $instance;
+
+	public static function getInstance(): self
+	{
+		self::$instance ??= new self;
+		return self::$instance;
+	}
+
+	// et d'autres méthodes qui exécutent les fonctions de la classe
+}
+```
+
+Malheureusement, le singleton introduit un état global dans l'application. Et comme nous l'avons montré ci-dessus, l'état global n'est pas souhaitable. C'est pourquoi le singleton est considéré comme un anti-modèle.
+
+N'utilisez pas les singletons dans votre code et remplacez-les par d'autres mécanismes. Vous n'avez vraiment pas besoin de singletons. Toutefois, si vous devez garantir l'existence d'une seule instance d'une classe pour l'ensemble de l'application, confiez cette tâche au [conteneur DI |container].
+Ainsi, créez un singleton d'application, ou service. Cela empêchera la classe de fournir sa propre unicité (c'est-à-dire qu'elle n'aura pas de méthode `getInstance()` et de variable statique) et n'exécutera que ses fonctions. Ainsi, elle cessera de violer le principe de responsabilité unique.
+
+
+État global versus tests .[#toc-global-state-versus-tests]
+----------------------------------------------------------
+
+Lorsque nous écrivons des tests, nous supposons que chaque test est une unité isolée et qu'aucun état externe n'y entre. Et aucun état ne quitte les tests. Lorsqu'un test se termine, tout état associé au test devrait être supprimé automatiquement par le ramasse-miettes. Cela rend les tests isolés. Par conséquent, nous pouvons exécuter les tests dans n'importe quel ordre.
+
+Cependant, si des états/singletons globaux sont présents, toutes ces belles hypothèses s'effondrent. Un état peut entrer et sortir d'un test. Soudainement, l'ordre des tests peut avoir de l'importance.
+
+Pour tester les singletons, les développeurs doivent souvent assouplir leurs propriétés, peut-être en permettant à une instance d'être remplacée par une autre. De telles solutions sont, au mieux, des bidouillages qui produisent un code difficile à maintenir et à comprendre. Tout test ou méthode `tearDown()` qui affecte un état global doit annuler ces changements.
+
+L'état global est le plus gros casse-tête des tests unitaires !
+
+Comment remédier à cette situation ? Facile. N'écrivez pas de code qui utilise des singletons, préférez passer des dépendances. C'est-à-dire l'injection de dépendances.
+
+
+Constantes globales .[#toc-global-constants]
+--------------------------------------------
+
+L'état global ne se limite pas à l'utilisation des singletons et des variables statiques, mais peut également s'appliquer aux constantes globales.
+
+Les constantes dont la valeur ne nous fournit aucune information nouvelle (`M_PI`) ou utile (`PREG_BACKTRACK_LIMIT_ERROR`) sont clairement OK.
+À l'inverse, les constantes qui servent à faire passer des informations *sans fil* à l'intérieur du code ne sont rien d'autre qu'une dépendance cachée. Comme `LOG_FILE` dans l'exemple suivant.
+L'utilisation de la constante `FILE_APPEND` est parfaitement correcte.
+
+```php
+const LOG_FILE = '...';
+
+class Foo
+{
+	public function doSomething()
+	{
+		// ...
+		file_put_contents(LOG_FILE, $message . "\n", FILE_APPEND);
+		// ...
+	}
+}
+```
+
+Dans ce cas, nous devons déclarer le paramètre dans le constructeur de la classe `Foo` pour qu'il fasse partie de l'API :
+
+```php
+class Foo
+{
+	public function __construct(
+		private string $logFile,
+	) {
+	}
+
+	public function doSomething()
+	{
+		// ...
+		file_put_contents($this->logFile, $message . "\n", FILE_APPEND);
+		// ...
+	}
+}
+```
+
+Nous pouvons maintenant transmettre des informations sur le chemin d'accès au fichier de journalisation et le modifier facilement si nécessaire, ce qui facilite les tests et la maintenance du code.
+
+
+Fonctions globales et méthodes statiques .[#toc-global-functions-and-static-methods]
+------------------------------------------------------------------------------------
+
+Nous tenons à souligner que l'utilisation de méthodes statiques et de fonctions globales n'est pas problématique en soi. Nous avons expliqué le caractère inapproprié de l'utilisation de `DB::insert()` et de méthodes similaires, mais il s'agissait toujours d'un état global stocké dans une variable statique. La méthode `DB::insert()` nécessite l'existence d'une variable statique car elle stocke la connexion à la base de données. Sans cette variable, il serait impossible de mettre en œuvre la méthode.
+
+L'utilisation de méthodes et de fonctions statiques déterministes, telles que `DateTime::createFromFormat()`, `Closure::fromCallable`, `strlen()` et bien d'autres, est parfaitement compatible avec l'injection de dépendances. Ces fonctions renvoient toujours les mêmes résultats à partir des mêmes paramètres d'entrée et sont donc prévisibles. Elles n'utilisent pas d'état global.
+
+Cependant, il existe des fonctions en PHP qui ne sont pas déterministes. C'est le cas, par exemple, de la fonction `htmlspecialchars()`. Son troisième paramètre, `$encoding`, s'il n'est pas spécifié, prend par défaut la valeur de l'option de configuration `ini_get('default_charset')`. Il est donc recommandé de toujours spécifier ce paramètre pour éviter un éventuel comportement imprévisible de la fonction. C'est ce que fait systématiquement Nette.
+
+Certaines fonctions, telles que `strtolower()`, `strtoupper()`, et autres, ont eu un comportement non déterministe dans un passé récent et ont dépendu du paramètre `setlocale()`. Cela a causé de nombreuses complications, le plus souvent en travaillant avec la langue turque.
+En effet, la langue turque fait la distinction entre les majuscules et les minuscules `I` avec et sans point. Ainsi, `strtolower('I')` renvoyait le caractère `ı` et `strtoupper('i')` renvoyait le caractère `İ`, ce qui conduisait les applications à provoquer un certain nombre d'erreurs mystérieuses.
+Toutefois, ce problème a été corrigé dans la version 8.2 de PHP et les fonctions ne dépendent plus de la locale.
+
+C'est un bel exemple de la manière dont l'état global a tourmenté des milliers de développeurs dans le monde. La solution a été de le remplacer par l'injection de dépendances.
+
+
+Quand est-il possible d'utiliser l'état global ? .[#toc-when-is-it-possible-to-use-global-state]
+------------------------------------------------------------------------------------------------
+
+Dans certaines situations spécifiques, il est possible d'utiliser l'état global. Par exemple, lorsque vous déboguez un code et que vous avez besoin d'extraire la valeur d'une variable ou de mesurer la durée d'une partie spécifique du programme. Dans de tels cas, qui concernent des actions temporaires qui seront ultérieurement supprimées du code, il est légitime d'utiliser un dumper ou un chronomètre disponible globalement. Ces outils ne font pas partie de la conception du code.
+
+Un autre exemple est celui des fonctions permettant de travailler avec des expressions régulières `preg_*`, qui stockent en interne les expressions régulières compilées dans un cache statique en mémoire. Lorsque vous appelez la même expression régulière plusieurs fois dans différentes parties du code, elle n'est compilée qu'une seule fois. Le cache permet de gagner en performance et est totalement invisible pour l'utilisateur, de sorte qu'une telle utilisation peut être considérée comme légitime.
+
+
+Résumé .[#toc-summary]
+----------------------
+
+Nous avons montré pourquoi il est logique
+
+1) Supprimer toutes les variables statiques du code
+2) Déclarer les dépendances
+3) Et utiliser l'injection de dépendances
+
+Lorsque vous envisagez la conception d'un code, gardez à l'esprit que chaque `static $foo` représente un problème. Pour que votre code soit un environnement respectueux de l'injection de dépendances, il est essentiel d'éradiquer complètement l'état global et de le remplacer par l'injection de dépendances.
+
+Au cours de ce processus, vous constaterez peut-être que vous devez diviser une classe parce qu'elle a plus d'une responsabilité. Ne vous en préoccupez pas ; efforcez-vous de respecter le principe de la responsabilité unique.
+
+*Je tiens à remercier Miško Hevery, dont les articles tels que [Flaw : Brittle Global State & Singletons |http://misko.hevery.com/code-reviewers-guide/flaw-brittle-global-state-singletons/] constituent la base de ce chapitre*.

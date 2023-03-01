@@ -1,0 +1,304 @@
+Globální stav a singletony
+**************************
+
+.[perex]
+Varování: Následující konstrukce jsou příznakem špatně navrženého kódu:
+
+- `Foo::getInstance()`
+- `DB::insert(...)`
+- `Article::setDb($db)`
+- `ClassName::$var` nebo `static::$var`
+
+Vyskytují se některé z těchto konstrukcí ve vašem kódu? Pak máte příležitost k jeho zlepšení. Možná si říkáte, že jde o běžné konstrukce, které vídáte třeba i v ukázkových řešeních různých knihoven a frameworků. Pokud je tomu tak, pak návrh jejich kódu není dobrý.
+
+Nyní rozhodně nemluvíme o jakési akademické čistotě. Všechny tyto konstrukce mají jedno společné: využívají globální stav. A ten má destruktivní dopad na kvalitu kódu. Třídy lžou o svých závislostech. Kód se stává nepředvídatelným. Mate programátory a snižuje jejich efektivitu.
+
+V této kapitole si vysvětlíme, proč tomu tak je, a jak se globálnímu stavu vyhnout.
+
+
+Globální provázání
+------------------
+
+V ideálním světě by měl být objekt schopen komunikovat pouze s objekty, které mu byly [přímo předány |passing-dependencies]. Pokud vytvořím dva objekty `A` a `B` a nikdy nepředám referenci mezi nimi, pak se ani `A`, ani `B`, nemohou dostat k druhému objektu nebo změnit jeho stav. To je velmi žádoucí vlastnost kódu. Je to podobné, jako když máte baterii a žárovku; žárovka nebude svítit, dokud ji s baterií nepropojíte drátem.
+
+To ale neplatí u globálních (statických) proměnných nebo singletonů. Objekt `A` by se mohl *bezdrátově* dostat k objektu `C` a modifikovat jej bez jakéhokoliv předání reference, tím, že zavolá `C::changeSomething()`. Pokud se objekt `B` také chopí globálního `C`, pak se `A` a `B` mohou navzájem ovlivňovat prostřednictvím `C`.
+
+Použití globálních proměnných do systému vnáší novou formu *bezdrátové* provázanosti, která není zvenčí vidět. Vytváří kouřovou clonu komplikující pochopení a používání kódu. Aby vývojáři závislostem skutečně porozuměli, musí přečíst každý řádek zdrojového kódu. Místo pouhého seznámení se s rozhraním tříd. Jde navíc o provázanost zcela zbytečnou. Globální stav se používá kvůli tomu, že je snadno odkudkoliv přístupný a umožňuje třeba zapsat do databáze přes globální (statickou) metodu `DB::insert()`. Ale jak si ukážeme, výhoda, kterou to přináší, je nepatrná, naopak komplikace to způsobuje fatální.
+
+.[note]
+Z hlediska chování není rozdíl mezi globální a statickou proměnnou. Jsou stejně škodlivé.
+
+
+Strašidelné působení na dálku
+-----------------------------
+
+"Strašidelné působení na dálku" - tak slavně nazval roku 1935 Albert Einstein jev v kvantové fyzice, který mu naháněl husí kůži.
+Jedná se o kvantové propojení, jehož zvláštností je, že když změříte informaci o jedné částici, okamžitě tím ovlivníte částici druhou, i když jsou od sebe vzdáleny miliony světelných let.
+Což zdánlivě porušuje základní zákon vesmíru, že nic se nemůže šířit rychleji než světlo.
+
+V softwarovém světě můžeme "strašidelným působení na dálku" nazvat situaci, kdy spustíme nějaký proces, o kterém se domníváme, že je izolovaný (protože jsme mu nepředali žádné reference), ale ve vzdálených místech systému dojde k neočekávaným interakcím a změnám stavu, o kterých jsme neměli tušení. K tomu může dojít pouze prostřednictvím globálního stavu.
+
+Představte si, že se připojíte k týmu vývojářů projektu, který má rozsáhlou vyspělou kódovou základnu. Váš nový vedoucí vás požádá o implementaci nové funkce a vy jako správný vývojář začnete psaním testu. Protože jste ale v projektu noví, děláte spoustu průzkumných testů typu "co se stane, když zavolám tuto metodu". A zkusíte napsat následující test:
+
+```php
+function testCreditCardCharge()
+{
+	$cc = new CreditCard('1234567890123456', 5, 2028); // číslo vaší karty
+	$cc->charge(100);
+}
+```
+
+Spustíte kód, třeba několikrát, a po nějaké době si všimnete na mobilu notifikací z banky, že při každém spuštění se strhlo 100 dolarů z vaší platební karty 🤦‍♂️
+
+Jak proboha mohl test způsobit skutečné stržení peněz? Operovat s platební kartou není snadné. Musíte komunikovat s webovou službou třetí strany, musíte znát URL této webové služby, musíte se přihlásit a tak dále.
+Žádná z těchto informací není v testu obsažena. Ba co hůř, ani nevíte, kde jsou tyto informace přítomny, a tedy ani jak mockovat externí závislosti, aby každé spuštění nevedlo k tomu, že se znovu strhne 100 dolarů. A jak jste měl jako nový vývojář vědět, že to, co se chystáte udělat, povede k tomu, že budete o 100 dolarů chudší?
+
+To je strašidelné působení na dálku!
+
+Nezbývá vám, než se dlouze hrabat ve spoustě zdrojových kódů, ptát se starších a zkušenějších kolegů, než pochopíte, jak vazby v projektu fungují.
+To je způsobeno tím, že při pohledu na rozhraní třídy `CreditCard` nelze zjistit globální stav, který je třeba inicializovat. Dokonce ani pohled do zdrojového kódu třídy vám neprozradí, kterou inicializační metodu máte zavolat. V nejlepším případě můžete najít globální proměnnou, ke které se přistupuje, a z ní se pokusit odhadnout, jak ji inicializovat.
+
+Třídy v takovém projektu jsou patologickými lháři. Platební karta předstírá, že ji stačí instancovat a zavolat metodu `charge()`. Ve skrytu však spolupracuje s jinou třídou `PaymentGateway`, která představuje platební bránu. I její rozhraní říká, že ji lze inicializovat samostatně, ale ve skutečnosti si vytáhne credentials z nějakého konfiguračního souboru a tak dále.
+Vývojářům, kteří tento kód napsali, je jasné, že `CreditCard` potřebuje `PaymentGateway`. Napsali kód tímto způsobem. Ale pro každého, kdo je v projektu nový, je to naprostá záhada a brání to učení.
+
+Jak situaci opravit? Snadno. **Nechte API deklarovat závislosti.**
+
+```php
+function testCreditCardCharge()
+{
+	$gateway = new PaymentGateway(/* ... */);
+	$cc = new CreditCard('1234567890123456', 5, 2028);
+	$cc->charge($gateway, 100);
+}
+```
+
+Všimněte si, jak jsou najednou provázanosti uvnitř kódu zřejmé. Tím, že metoda `charge()` deklaruje, že potřebuje `PaymentGateway`, nemusíte se na to, jak je kód provázaný, nikoho ptát. Víte, že musíte vytvořit její instanci, a když se o to pokusíte, narazíte na to, že musíte dodat přístupové parametry. Bez nich by kód nešel ani spustit.
+
+A hlavně nyní můžete platební bránu mockovat, takže se vám při každém spuštění testu nebude účtovat 100 dolarů.
+
+Globální stav způsobuje, že se vaše objekty mohou tajně dostat k věcem, které nejsou deklarovány v jejich API, a v důsledku toho dělají z vašich API patologické lháře.
+
+Možná jste o tom dříve takto nepřemýšleli, ale kdykoli používáte globální stav, vytváříte tajné bezdrátové komunikační kanály. Strašidelná akce na dálku nutí vývojáře číst každý řádek kódu, aby pochopili potenciální interakce, snižuje produktivitu vývojářů a mate nové členy týmu.
+Pokud jste vy ten, kdo kód vytvořil, znáte skutečné závislosti, ale každý, kdo přijde po vás, je bezradný.
+
+Nepište kód, který využívá globální stav, dejte přednost předávání závislostí. Tedy dependency injection.
+
+
+Křehkost globálního stavu
+-------------------------
+
+V kódu, který používá globální stav a singletony, není nikdy jisté, kdy a kdo tento stav změnil. Toto riziko se objevuje již při inicializaci. Následující kód má vytvořit databázové spojení a inicializovat platební bránu, avšak neustále vyhazuje výjimku a hledání příčiny je nesmírně zdlouhavé:
+
+```php
+PaymentGateway::init();
+DB::init('mysql:', 'user', 'password');
+```
+
+Musíte podrobně procházet kód, abyste zjistili, že objekt `PaymentGateway` přistupuje bezdrátově k dalším objektům, z nichž některé vyžadují databázové připojení. Tedy je nutné inicializovat databázi dříve než `PaymentGateway`. Nicméně kouřová clona globálního stavu toto před vámi skrývá. Kolik času byste ušetřili, kdyby API jednotlivých tříd neklamalo a deklarovalo své závislosti?
+
+```php
+$db = new DB('mysql:', 'user', 'password');
+$gateway = new PaymentGateway($db, ...);
+```
+
+Podobný problém se objevuje i při použití globálního přístupu k databázovému spojení:
+
+```php
+use Illuminate\Support\Facades\DB;
+
+class Article
+{
+	public function save(): void
+	{
+		DB::insert(/* ... */);
+	}
+}
+```
+
+Při volání metody `save()` není jisté, zda bylo již vytvořeno připojení k databázi a kdo nese odpovědnost za jeho vytvoření. Pokud chceme například měnit databázové připojení za běhu, třeba kvůli testům, museli bychom nejspíš vytvořit další metody jako například `DB::reconnect(...)` nebo `DB::reconnectForTest()`.
+
+Zvažme příklad:
+
+```php
+$article = new Article;
+// ...
+DB::reconnectForTest();
+Foo::doSomething();
+$article->save();
+```
+
+Kde máme jistotu, že při volání `$article->save()` se opravdu používá testovací databáze? Co když metoda `Foo::doSomething()` změnila globální databázové připojení? Pro zjištění bychom museli prozkoumat zdrojový kód třídy `Foo` a pravděpodobně i mnoha dalších tříd. Tento přístup by však přinesl pouze krátkodobou odpověď, jelikož se situace může v budoucnu změnit.
+
+A co když připojení k databázi přesuneme do statické proměnné uvnitř třídy `Article`?
+
+```php
+class Article
+{
+	private static DB $db;
+
+	public static function setDb(DB $db): void
+	{
+		self::$db = $db;
+	}
+
+	public function save(): void
+	{
+		self::$db->insert(/* ... */);
+	}
+}
+```
+
+Tím se vůbec nic nezměnilo. Problémem je globální stav a je úplně jedno, ve které třídě se skrývá. V tomto případě, stejně jako v předchozím, nemáme při volání metody `$article->save()` žádné vodítko k tomu, do jaké databáze se zapíše. Kdokoliv na druhém konci aplikace mohl kdykoliv pomocí `Article::setDb()` databázi změnit. Nám pod rukama.
+
+Globálnímu stav činní naši aplikaci **nesmírně křehkou**.
+
+Existuje však jednoduchý způsob, jak s tímto problémem naložit. Stačí nechat API deklarovat závislosti, čímž se zajistí správná funkčnost.
+
+```php
+class Article
+{
+	public function __construct(
+		private DB $db,
+	) {
+	}
+
+	public function save(): void
+	{
+		$this->db->insert(/* ... */);
+	}
+}
+
+$article = new Article($db);
+// ...
+Foo::doSomething();
+$article->save();
+```
+
+Díky tomuto přístupu odpadá obava o skryté a neočekávané změny připojení k databázi. Nyní máme jistotu, kam se článek ukládá a žádné úpravy kódu uvnitř jiné nesouvisející třídy již nemohou situaci změnit. Kód už není křehký, ale stabilní.
+
+Nepište kód, který využívá globální stav, dejte přednost předávání závislostí. Tedy dependency injection.
+
+
+Singleton
+---------
+
+Singleton je návrhový vzor, který podle "definice":https://en.wikipedia.org/wiki/Singleton_pattern ze známé publikace Gang of Four omezuje třídu na jedinou instanci a nabízí k ní globální přístup. Implementace tohoto vzoru se obvykle podobá následujícímu kódu:
+
+```php
+class Singleton
+{
+	private static self $instance;
+
+	public static function getInstance(): self
+	{
+		self::$instance ??= new self;
+		return self::$instance;
+	}
+
+	// a další metody plnící funkce dané třídy
+}
+```
+
+Bohužel, singleton zavádí do aplikace globální stav. A jak jsme si ukázali výše, globální stav je nežádoucí. Proto je singleton považován za antipattern.
+
+Nepoužívejte ve svém kódu singletony a nahraďte je jinými mechanismy. Singletony opravdu nepotřebujete. Pokud však potřebujete zaručit existenci jediné instance třídy pro celou aplikaci, nechte to na [DI kontejneru |container].
+Vytvořte tak aplikační singleton, neboli službu. Tím se třída přestane věnovat zajištění své vlastní jedinečnosti (tj. nebude mít metodu `getInstance()` a statickou proměnnou) a bude plnit pouze své funkce. Tak přestane porušovat princip jediné odpovědnosti.
+
+
+Globální stav versus testy
+--------------------------
+
+Při psaní testů předpokládáme, že každý test je izolovanou jednotkou a že do něj nevstupuje žádný externí stav. A žádný stav testy neopouští. Po dokončení testu by měl být veškerý související stav s testem odstraněn automaticky garbage collectorem. Díky tomu jsou testy izolované. Proto můžeme testy spouštět v libovolném pořadí.
+
+Pokud jsou však přítomny globální stavy/singletony, všechny tyto příjemné předpoklady se rozpadají. Stav může do testu vstupovat a vystupovat z něj. Najednou může záležet na pořadí testů.
+
+Abychom vůbec mohli testovat singletony, vývojáři často musí rozvolnit jejich vlastnosti, třeba tím, že dovolí instanci nahradit jinou. Taková řešení jsou v nejlepším případě hackem, který vytváří obtížně udržovatelný a srozumitelný kód. Každý test nebo metoda `tearDown()`, která ovlivní jakýkoli globální stav, musí tyto změny vrátit zpět.
+
+Globální stav je největší bolestí hlavy při unit testování!
+
+Jak situaci opravit? Snadno. Nepište kód, který využívá singletony, dejte přednost předávání závislostí. Tedy dependency injection.
+
+
+Globální konstanty
+------------------
+
+Globální stav se neomezuje pouze na používání singletonů a statických proměnných, ale může se týkat také globálních konstant.
+
+Konstanty, jejichž hodnota nám nepřináší žádnou novou (`M_PI`) nebo užitečnou (`PREG_BACKTRACK_LIMIT_ERROR`) informaci, jsou jednoznačně v pořádku.
+Naopak konstanty, které slouží jako způsob, jak *bezdrátově* předat informaci dovnitř kódu, nejsou ničím jiným než skrytou závislostí. Jako třeba `LOG_FILE` v následujícím příkladu.
+Použití konstanty `FILE_APPEND` je zcela korektní.
+
+```php
+const LOG_FILE = '...';
+
+class Foo
+{
+	public function doSomething()
+	{
+		// ...
+		file_put_contents(LOG_FILE, $message . "\n", FILE_APPEND);
+		// ...
+	}
+}
+```
+
+V tomto případě bychom měli deklarovat parametr v konstruktoru třídy `Foo`, aby se stal součástí API:
+
+```php
+class Foo
+{
+	public function __construct(
+		private string $logFile,
+	) {
+	}
+
+	public function doSomething()
+	{
+		// ...
+		file_put_contents($this->logFile, $message . "\n", FILE_APPEND);
+		// ...
+	}
+}
+```
+
+Nyní můžeme předat informaci o cestě k souboru pro logování a snadno ji měnit podle potřeby, což usnadňuje testování a údržbu kódu.
+
+
+Globální funkce a statické metody
+---------------------------------
+
+Chceme zdůranit, že samotné používání statických metod a globálních funkcí není problematické. Vysvětlovali jsme, v čem spočívá nevhodnost použití `DB::insert()` a podobných metod, ale vždy se jednalo pouze o záležitost globálního stavu, který je uložen v nějaké statické proměnné. Metoda `DB::insert()` vyžaduje existenci statické proměnné, protože v ní je uloženo připojení k databázi. Bez této proměnné by bylo nemožné metodu implementovat.
+
+Používání deterministických statických metod a funkcí, jako například `DateTime::createFromFormat()`, `Closure::fromCallable`, `strlen()` a mnoha dalších, je v naprostém souladu s dependency injection. Tyto funkce vždy vracejí stejné výsledky ze stejných vstupních parametrů a jsou tedy předvídatelné. Nepoužívají žádný globální stav.
+
+Existují ovšem i funkce v PHP, které nejsou deterministické. K nim patří například funkce `htmlspecialchars()`. Její třetí parametr `$encoding`, pokud není uveden, jako výchozí hodnotu má hodnotu konfigurační volby `ini_get('default_charset')`. Proto se doporučuje tento parametr vždy uvádět a předejít tak případnému nepředvídatelnému chování funkce. Nette to důsledně dělá.
+
+Některé funkce, jako například `strtolower()`, `strtoupper()` a podobné, se v nedávné minulosti nedeterministicky chovaly a byly závislé na nastavení `setlocale()`. To způsobovalo mnoho komplikací, nejčastěji při práci s tureckým jazykem.
+Ten totiž rozlišuje malé i velké písmeno `I` s tečkou i bez tečky. Takže `strtolower('I')` vracelo znak `ı` a `strtoupper('i')` znak `İ`, což vedlo k tomu, že aplikace začaly způsobovat řadu záhadných chyb.
+Tento problém byl však odstraněn v PHP verze 8.2 a funkce již nejsou závislé na locale.
+
+Jde o pěkný příklad, jak globální stav potrápil tisíce vývojářů na celém světě. Řešením bylo nahradit jej za dependency injection.
+
+
+Kdy je možné použít globální stav?
+----------------------------------
+
+Existují určité specifické situace, kdy je možné využít globální stav. Například při ladění kódu, když potřebujete vypsat hodnotu proměnné nebo změřit dobu trvání určité části programu. V takových případech, které se týkají dočasných akcí, jež budou později odstraněny z kódu, je možné legitimně využít globálně dostupný dumper nebo stopky. Tyto nástroje totiž nejsou součástí návrhu kódu.
+
+Dalším příkladem jsou funkce pro práci s regulárními výrazy `preg_*`, které interně ukládají zkompilované regulární výrazy do statické cache v paměti. Když tedy voláte stejný regulární výraz vícekrát na různých místech kódu, zkompiluje se pouze jednou. Cache šetří výkon a zároveň je pro uživatele zcela neviditelná, proto lze takové využití považovat za legitimní.
+
+
+Shrnutí
+-------
+
+Probrali jsme si, proč má smysl:
+
+1) Odstranit veškeré statické proměnné z kódu
+2) Deklarovat závislosti
+3) A používat dependency injection
+
+Když promýšlíte návrh kódu, myslete na to, že každé `static $foo` představuje problém. Aby váš kód byl prostředím respektujícím DI, je nezbytné úplně vymýtit globální stav a nahradit ho pomocí dependency injection.
+
+Během tohoto procesu možná zjistíte, že je třeba třídu rozdělit, protože má více než jednu odpovědnost. Nebojte se toho; usilujte o princip jedné odpovědnosti.
+
+*Rád bych poděkoval Miškovi Heverymu, jehož články, jako je [Flaw: Brittle Global State & Singletons |http://misko.hevery.com/code-reviewers-guide/flaw-brittle-global-state-singletons/], jsou základem této kapitoly.*

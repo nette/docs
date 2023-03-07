@@ -1,0 +1,226 @@
+Let's Create a Contact Form
+***************************
+
+.[perex]
+Let's take a look at how to create a contact form in Nette, including sending it to an email. So let's do it!
+
+First we have to create a new project. As the [Getting Started |nette:installation] page explains. And then we can start creating the form.
+
+The easiest way is to create the [form directly in Presenter |forms:in-presenter]. We can use the pre-made `HomePresenter`. We will add the `contactForm` component representing the form. We do this by writing the `createComponentContactForm()` factory method into the code that will produce the component:
+
+```php
+use Nette\Application\UI\Form;
+use Nette\Application\UI\Presenter;
+
+class HomePresenter extends Presenter
+{
+	protected function createComponentContactForm(): Form
+	{
+		$form = new Form;
+		$form->addText('name', 'Name:')
+			->setRequired('Enter your name');
+		$form->addEmail('email', 'E-mail:')
+			->setRequired('Enter your e-mail');
+		$form->addTextarea('message', 'Message:')
+			->setRequired('Enter message');
+		$form->addSubmit('send', 'Send');
+		$form->onSuccess[] = [$this, 'contactFormSucceeded'];
+		return $form;
+	}
+
+	public function contactFormSucceeded(Form $form, $data): void
+	{
+		// sending an email
+	}
+}
+```
+
+As you can see, we have created two methods. The first method `createComponentContactForm()` creates a new form. This has fields for name, email and message, which we add using the `addText()`, `addEmail()` and `addTextArea()` methods. We also added a button to submit the form.
+But what if the user doesn't fill in some fields? In that case, we should let him know that it is a required field. We did this with the `setRequired()` method.
+Finally, we also added an [event |nette:glossary#events] `onSuccess`, which is triggered if the form is submitted successfully. In our case, it calls the `contactFormSucceeded` method , which takes care of processing the submitted form. We'll add that to the code in a moment.
+
+Let the `contantForm` component be rendered in the `templates/Home/default.latte` template:
+
+```latte
+{block content}
+<h1>Contant Form</h1>
+{control contactForm}
+```
+
+To send the email itself, we create a new class called `ContactFacade` and place it in the `app/Model/ContactFacade.php` file:
+
+```php
+<?php
+declare(strict_types=1);
+
+namespace App\Model;
+
+use Nette\Mail\Mailer;
+use Nette\Mail\Message;
+
+class ContactFacade
+{
+	public function __construct(
+		private Mailer $mailer,
+	) {
+	}
+
+	public function sendMessage(string $email, string $name, string $message): void
+	{
+		$mail = new Message;
+		$mail->addTo('admin@example.com') // your email
+			->setFrom($email, $name)
+			->setSubject('Message from the contact form')
+			->setBody($message);
+
+		$this->mailer->send($mail);
+	}
+}
+```
+
+The `sendMessage()` method will create and send the email. It uses a so-called mailer to do this, which it passes as a dependency via the constructor. Read more about [sending emails |mail:].
+
+Now, we'll go back to the presenter and complete the `contactFormSucceeded()` method. It calls the `sendMessage()` method of the `ContactFacade` class and passes it the form data. And how do we get the `ContactFacade` object ? We'll have it passed to us by the constructor:
+
+```php
+use App\Model\ContactFacade;
+use Nette\Application\UI\Form;
+use Nette\Application\UI\Presenter;
+
+class HomePresenter extends Presenter
+{
+	public function __construct(
+		private ContactFacade $facade,
+	) {
+	}
+
+	protected function createComponentContactForm(): Form
+	{
+		// ...
+	}
+
+	public function contactFormSucceeded(stdClass $data): void
+	{
+		$this->facade->sendMessage($data->email, $data->name, $data->message);
+		$this->flashMessage('The message has been sent');
+		$this->redirect('this');
+	}
+}
+```
+
+After the email is sent, we show the user the so-called [flash message |application:components#flash-messages], confirming that the message has been sent, and then redirect to the next page so that the form cannot be resubmitted using *refresh* in the browser.
+
+
+Well, if everything works, you should be able to send an email from your contact form. Congratulations!
+
+
+HTML Email Template
+-------------------
+
+For now, a plain text email containing only the message sent by the form is sent. But we can use HTML in the email and make it more attractive. We will create a template for it in Latte, which we will save into `app/Model/contactEmail.latte`:
+
+```latte
+<html>
+	<title>Message from the contact form</title>
+
+	<body>
+		<p><strong>Name:</strong> {$name}</p>
+		<p><strong>E-mail:</strong> {$email}</p>
+		<p><strong>Message:</strong> {$message}</p>
+	</body>
+</html>
+```
+
+It remains to modify `ContactFacade` to use this template. In the constructor, we request the `LatteFactory` class, which can produce the `Latte\Engine` object, a [Latte template renderer |latte:develop#how-to-render-a-template]. We use the `renderToString()` method to render the template to a file, the first parameter is the path to the template and the second is the variables.
+
+```php
+namespace App\Model;
+
+use Nette\Bridges\ApplicationLatte\LatteFactory;
+use Nette\Mail\Mailer;
+use Nette\Mail\Message;
+
+class ContactFacade
+{
+	public function __construct(
+		private Mailer $mailer,
+		private LatteFactory $latteFactory,
+	) {
+	}
+
+	public function sendMessage(string $email, string $name, string $message): void
+	{
+		$latte = $this->latteFactory->create();
+		$body = $latte->renderToString(__DIR__ . '/contactEmail.latte', [
+			'email' => $email,
+			'name' => $name,
+			'message' => $message,
+		]);
+
+		$mail = new Message;
+		$mail->addTo('admin@example.com') // your email
+			->setFrom($email, $name)
+			->setHtmlBody($body);
+
+		$this->mailer->send($mail);
+	}
+}
+```
+
+We then pass the generated HTML email to the `setHtmlBody()` method instead of the original `setBody()`. We also don't need to specify the subject of the email in `setSubject()`, because the library takes it from the element `<title>` in template.
+
+
+Configuring
+-----------
+
+In the `ContactFacade` class code, our admin email `admin@example.com` is still hardcoded. It would be better to move it to the configuration file. How to do it?
+
+First, we modify the `ContactFacade` class and replace the email string with a variable passed by the constructor:
+
+```php
+class ContactFacade
+{
+	public function __construct(
+		private Mailer $mailer,
+		private LatteFactory $latteFactory,
+		private string $adminEmail,
+	) {
+	}
+
+	public function sendMessage(string $email, string $name, string $message): void
+	{
+		// ...
+		$mail = new Message;
+		$mail->addTo($this->adminEmail)
+			->setFrom($email, $name)
+			->setHtmlBody($body);
+		// ...
+	}
+}
+```
+
+And the second step is to put the value of this variable in the configuration. In the `app/config/services.neon` file we add:
+
+```neon
+services:
+	- App\Model\ContactFacade(adminEmail: admin@example.com)
+```
+
+And that's it. If there are a lot of items in the `services` section and you feel like the email is getting lost among them, we can make it a variable. We'll modify the entry to:
+
+```neon
+services:
+	- App\Model\ContactFacade(adminEmail: %adminEmail%)
+```
+
+And define this variable in the `app/config/common.neon` file:
+
+```neon
+parameters:
+	adminEmail: admin@example.com
+```
+
+And it's done!
+
+
+{{sitename: Best Practices}}

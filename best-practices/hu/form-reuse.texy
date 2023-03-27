@@ -2,43 +2,208 @@ Formanyomtatványok újrafelhasználása több helyen
 ************************************************
 
 .[perex]
-Hogyan lehet ugyanazt az űrlapot több helyen újra felhasználni, és nem duplikálni a kódot? A Nette-ben ez nagyon könnyen megoldható, és többféle módszer közül választhat.
+A Nette-ben több lehetőséged is van arra, hogy ugyanazt az űrlapot több helyen újra felhasználd anélkül, hogy a kódot duplikálnád. Ebben a cikkben áttekintjük a különböző megoldásokat, beleértve azokat is, amelyeket érdemes elkerülni.
 
 
 Form Factory .[#toc-form-factory]
 =================================
 
-Hozzunk létre egy olyan osztályt, amely képes űrlapot létrehozni. Az ilyen osztályt gyárnak nevezzük. Azon a helyen, ahol az űrlapot használni akarjuk (pl. a prezenterben), kérjük a [gyárat függőségként |dependency-injection:passing-dependencies].
+Egy komponens több helyen történő használatának egyik alapvető megközelítése, hogy létrehozunk egy metódust vagy osztályt, amely létrehozza a komponenst, majd ezt a metódust az alkalmazás különböző helyein hívjuk meg. Az ilyen metódust vagy osztályt *gyárnak* nevezzük. Kérjük, ne keverjük össze a *factory method* tervezési mintával, amely a gyárak használatának egy speciális módját írja le, és nem kapcsolódik ehhez a témához.
 
-A factory része az a kód, amely az űrlap sikeres elküldése után átadja az adatokat a további feldolgozáshoz. Általában a modell rétegnek. Azt is ellenőrzi, hogy minden rendben ment-e, és az esetleges hibákat [visszaadja |forms:validation#Processing-errors] az űrlapnak. A modellt a következő példában a `Facade` osztály képviseli:
+Példaként hozzunk létre egy gyárat, amely egy szerkesztési űrlapot készít:
 
 ```php
 use Nette\Application\UI\Form;
 
+class FormFactory
+{
+	public function createEditForm(): Form
+	{
+		$form = new Form;
+		$form->addText('title', 'Title:');
+		// itt további űrlapmezők kerülnek hozzáadásra
+		$form->addSubmit('send', 'Save');
+		return $form;
+	}
+}
+```
+
+Ezt a gyárat az alkalmazás különböző helyein használhatja, például prezenterekben vagy komponensekben. Ezt pedig úgy tesszük, hogy [függőségként kérjük be |dependency-injection:passing-dependencies]. Tehát először írjuk be az osztályt a konfigurációs fájlba:
+
+```neon
+services:
+	- FormFactory
+```
+
+És aztán használjuk a prezenterben:
+
+
+```php
+class MyPresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private FormFactory $formFactory,
+	) {
+	}
+
+	protected function createComponentEditForm(): Form
+	{
+		$form = $this->formFactory->createEditForm();
+		$form->onSuccess[] = function () {
+			// a küldött adatok feldolgozása
+		};
+		return $form;
+	}
+}
+```
+
+A form factory-t további metódusokkal bővíthetjük, hogy más típusú űrlapokat hozzunk létre az alkalmazásunknak megfelelően. És természetesen hozzáadhat egy olyan metódust is, amely egy elemek nélküli alap űrlapot hoz létre, amelyet a többi metódus használni fog:
+
+```php
+class FormFactory
+{
+	public function createForm(): Form
+	{
+		$form = new Form;
+		return $form;
+	}
+
+	public function createEditForm(): Form
+	{
+		$form = $this->createForm();
+		$form->addText('title', 'Title:');
+		// itt további űrlapmezők kerülnek hozzáadásra
+		$form->addSubmit('send', 'Save');
+		return $form;
+	}
+}
+```
+
+A `createForm()` metódus egyelőre semmi hasznosat nem csinál, de ez hamarosan megváltozik.
+
+
+Gyári függőségek .[#toc-factory-dependencies]
+=============================================
+
+Idővel nyilvánvalóvá válik, hogy az űrlapoknak többnyelvűnek kell lenniük. Ez azt jelenti, hogy minden űrlaphoz be kell állítanunk egy [fordítót |forms:rendering#Translating]. Ehhez módosítjuk a `FormFactory` osztályt, hogy a konstruktorban függőségként elfogadja a `Translator` objektumot, és átadja azt az űrlapnak:
+
+```php
+use Nette\Localization\Translator;
+
+class FormFactory
+{
+	public function __construct(
+		private Translator $translator,
+	) {
+	}
+
+	public function createForm(): Form
+	{
+		$form = new Form;
+		$form->setTranslator($this->translator);
+		return $form;
+	}
+
+	//...
+}
+```
+
+Mivel a `createForm()` metódust más, konkrét űrlapokat létrehozó metódusok is meghívják, a fordítót csak ebben a metódusban kell beállítanunk. És kész is vagyunk. Nem kell semmilyen prezenter vagy komponens kódot módosítani, ami nagyszerű.
+
+
+További gyári osztályok .[#toc-more-factory-classes]
+====================================================
+
+Alternatívaként több osztályt is létrehozhat minden egyes űrlaphoz, amelyet az alkalmazásban használni szeretne.
+Ez a megközelítés növelheti a kód olvashatóságát és megkönnyítheti az űrlapok kezelését. Hagyja meg az eredeti `FormFactory` címet, hogy csak egy tiszta űrlapot hozzon létre alapvető konfigurációval (például fordítástámogatással), és hozzon létre egy új gyári `EditFormFactory` címet a szerkesztési űrlaphoz.
+
+```php
+class FormFactory
+{
+	public function __construct(
+		private Translator $translator,
+	) {
+	}
+
+	public function create(): Form
+	{
+		$form = new Form;
+		$form->setTranslator($this->translator);
+		return $form;
+	}
+}
+
+
+// ✅ a kompozíció használata
 class EditFormFactory
 {
 	public function __construct(
+		private FormFactory $formFactory,
+	) {
+	}
+
+	public function create(): Form
+	{
+		$form = $this->formFactory->create();
+		// itt további űrlapmezők kerülnek hozzáadásra
+		$form->addSubmit('send', 'Save');
+		return $form;
+	}
+}
+```
+
+Nagyon fontos, hogy a `FormFactory` és a `EditFormFactory` osztályok közötti kötés kompozícióval, nem pedig objektumörökléssel valósuljon meg:
+
+```php
+// ⛔ NO! AZ ÖRÖKSÉG NEM TARTOZIK IDE
+class EditFormFactory extends FormFactory
+{
+	public function create(): Form
+	{
+		$form = parent::create();
+		$form->addText('title', 'Title:');
+		// további űrlapmezők kerülnek ide
+		$form->addSubmit('send', 'Save');
+		return $form;
+	}
+}
+```
+
+Az öröklés használata ebben az esetben teljesen kontraproduktív lenne. Nagyon gyorsan problémákba ütközne. Például, ha paramétereket akarnánk hozzáadni a `create()` metódushoz; a PHP hibát jelezne, hogy a metódus aláírása eltér a szülőétől.
+Vagy ha a konstruktoron keresztül átadnánk egy függőséget a `EditFormFactory` osztálynak. Ez azt okozná, amit mi [konstruktor pokolnak |dependency-injection:passing-dependencies#Constructor hell] hívunk.
+
+Általánosságban elmondható, hogy jobb a kompozíciót előnyben részesíteni az örökléssel szemben.
+
+
+Form kezelés .[#toc-form-handling]
+==================================
+
+A sikeres elküldés után meghívott űrlapkezelő lehet egy gyári osztály része is. Ez úgy fog működni, hogy a beküldött adatokat átadja a modellnek feldolgozásra. Az esetleges hibákat [visszaadja |forms:validation#Processing Errors] az űrlapnak. A következő példában a modellt a `Facade` osztály képviseli:
+
+```php
+class EditFormFactory
+{
+	public function __construct(
+		private FormFactory $formFactory,
 		private Facade $facade,
 	) {
 	}
 
-	public function create(/* paraméterek */): Form
+	public function create(): Form
 	{
-		$form = new Form;
-
-		// elemek hozzáadása az űrlaphoz
-
-		$form->addSubmit('send', 'Submit');
+		$form = $this->formFactory->create();
+		$form->addText('title', 'Title:');
+		// itt további űrlapmezők kerülnek hozzáadásra
+		$form->addSubmit('send', 'Save');
 		$form->onSuccess[] = [$this, 'processForm'];
-
 		return $form;
 	}
 
-	public function processForm(Form $form, array $values): void
+	public function processForm(Form $form, array $data): void
 	{
 		try {
-			// űrlap feldolgozása
-			$this->facade->process($values);
+			// a beküldött adatok feldolgozása
+			$this->facade->process($data);
 
 		} catch (AnyModelException $e) {
 			$form->addError('...');
@@ -47,17 +212,7 @@ class EditFormFactory
 }
 ```
 
-A gyár természetesen lehet parametrikus, azaz kaphat olyan paramétereket, amelyek befolyásolják a létrehozandó űrlap megjelenését.
-
-Most bemutatjuk a factory átadását a prezenternek. Először is írjuk be a konfigurációs fájlba:
-
-```neon
-services:
-	- EditFormFactory
-```
-
-Majd pedig bekérjük a prezenterben. Ott is következik a következő lépés a beküldött űrlap feldolgozása, és ez az átirányítás a következő oldalra:
-
+Hagyjuk, hogy a prezenter maga kezelje az átirányítást. A `onSuccess` eseményhez hozzáad egy másik kezelőt, amely elvégzi az átirányítást. Ez lehetővé teszi, hogy az űrlapot különböző prezenterekben lehessen használni, és mindegyik más helyre irányíthasson át.
 
 ```php
 class MyPresenter extends Nette\Application\UI\Presenter
@@ -70,24 +225,48 @@ class MyPresenter extends Nette\Application\UI\Presenter
 	protected function createComponentEditForm(): Form
 	{
 		$form = $this->formFactory->create();
-
-		$form->onSuccess[] = function (Form $form) {
-			$this->redirect('this');
+		$form->onSuccess[] = function () {
+			$this->flashMessage('Záznam byl uložen');
+			$this->redirect('Homepage:');
 		};
-
 		return $form;
 	}
 }
 ```
 
-Mivel az átirányítást a bemutató kezelője kezeli, a komponens több helyen is használható, és mindegyik helyen máshová irányítható át.
+Ez a megoldás kihasználja az űrlapok azon tulajdonságát, hogy amikor a `addError()` meghívásra kerül egy űrlapon vagy annak elemén, a következő `onSuccess` kezelő nem hívódik meg.
 
 
-Komponens űrlappal .[#toc-component-with-form]
-==============================================
+Öröklés a Form osztályból .[#toc-inheriting-from-the-form-class]
+================================================================
 
-Egy másik lehetőség egy új [komponens |application:components] létrehozása, amely egy űrlapot tartalmaz. Ez lehetőséget ad arra, hogy például az űrlapot meghatározott módon rendereljük, mivel a komponens tartalmaz egy sablont.
-Vagy használhatunk jeleket az AJAX-kommunikációhoz és az információk betöltéséhez az űrlapba, például az automatikus kitöltéshez stb.
+Egy épített űrlap nem lehet egy űrlap gyermeke. Más szóval, ne használja ezt a megoldást:
+
+```php
+// ⛔ NO! AZ ÖRÖKSÉG NEM TARTOZIK IDE
+class EditForm extends Form
+{
+	public function __construct(Translator $translator)
+	{
+		parent::__construct();
+		$form->addText('title', 'Title:');
+		// további űrlapmezők kerülnek ide
+		$form->addSubmit('send', 'Save');
+		$form->setTranslator($translator);
+	}
+}
+```
+
+Ahelyett, hogy az űrlapot a konstruktorban építenéd fel, használd a gyárat.
+
+Fontos tisztában lenni azzal, hogy a `Form` osztály elsősorban egy űrlap összeállításának eszköze, azaz egy űrlapépítő. Az összerakott űrlap pedig a termékének tekinthető. A termék azonban nem az építő speciális esete; nincs köztük *is a* kapcsolat, ami az öröklés alapját képezi.
+
+
+Form komponens .[#toc-form-component]
+=====================================
+
+Egy teljesen más megközelítés egy olyan [komponens |application:components] létrehozása, amely egy űrlapot tartalmaz. Ez új lehetőségeket ad, például az űrlap meghatározott módon történő megjelenítésére, mivel a komponens tartalmaz egy sablont.
+Vagy jeleket lehet használni az AJAX-kommunikációhoz és az információk betöltéséhez az űrlapba, például a hintinghez stb.
 
 
 ```php
@@ -105,20 +284,19 @@ class EditControl extends Nette\Application\UI\Control
 	protected function createComponentForm(): Form
 	{
 		$form = new Form;
-
-		// elemek hozzáadása az űrlaphoz
-
-		$form->addSubmit('send', 'Submit');
+		$form->addText('title', 'Title:');
+		// itt további űrlapmezők kerülnek hozzáadásra
+		$form->addSubmit('send', 'Save');
 		$form->onSuccess[] = [$this, 'processForm'];
 
 		return $form;
 	}
 
-	public function processForm(Form $form, array $values): void
+	public function processForm(Form $form, array $data): void
 	{
 		try {
-			// űrlap feldolgozása
-			$this->facade->process($values);
+			// a beküldött adatok feldolgozása
+			$this->facade->process($data);
 
 		} catch (AnyModelException $e) {
 			$form->addError('...');
@@ -126,13 +304,12 @@ class EditControl extends Nette\Application\UI\Control
 		}
 
 		// eseményhívás
-		$this->onSave($this, $values);
+		$this->onSave($this, $data);
 	}
 }
 ```
 
-Ezután létrehozzuk a gyárat, amely ezt a komponenst fogja előállítani. Csak [írjuk meg az interfészét |application:components#Components with Dependencies]:
-
+Hozzunk létre egy gyárat, amely ezt a komponenst fogja előállítani. Elég, ha [megírjuk az interfészét |application:components#Components with Dependencies]:
 
 ```php
 interface EditControlFactory
@@ -148,7 +325,7 @@ services:
 	- EditControlFactory
 ```
 
-És most már igényelhetjük a gyárat, és használhatjuk a prezenterben:
+És most már kérhetjük a gyárat, és használhatjuk a prezenterben:
 
 ```php
 class MyPresenter extends Nette\Application\UI\Presenter
@@ -165,7 +342,7 @@ class MyPresenter extends Nette\Application\UI\Presenter
 		$control->onSave[] = function (EditControl $control, $data) {
 			$this->redirect('this');
 			// vagy átirányítás a szerkesztés eredményére, pl.:
-			// $this->redirect('detail', ['id' => $data->id]);
+			// $this->redirect('részlet', ['id' => $data->id]);
 		};
 
 		return $control;
@@ -173,5 +350,4 @@ class MyPresenter extends Nette\Application\UI\Presenter
 }
 ```
 
-{{priority: -1}}
 {{sitename: Legjobb gyakorlatok}}

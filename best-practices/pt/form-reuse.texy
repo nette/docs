@@ -1,44 +1,209 @@
-Formulários de Reutilização em Vários Lugares
+Reutilização de formulários em vários lugares
 *********************************************
 
 .[perex]
-Como reutilizar a mesma forma em vários lugares e não duplicar o código? Isto é realmente fácil de fazer em Nette e você tem várias maneiras de escolher.
+Em Nette, você tem várias opções para reutilizar a mesma forma em vários lugares sem duplicar o código. Neste artigo, analisaremos as diferentes soluções, inclusive as que você deve evitar.
 
 
 Fábrica de formulários .[#toc-form-factory]
 ===========================================
 
-Vamos criar uma classe que possa criar uma forma. Tal classe é chamada de fábrica. No local onde queremos usar o formulário (por exemplo, no apresentador), solicitamos a [fábrica como dependência |dependency-injection:passing-dependencies].
+Uma abordagem básica para usar o mesmo componente em vários lugares é criar um método ou classe que gere o componente, e depois chamar esse método em lugares diferentes na aplicação. Tal método ou classe é chamado de *fábrica*. Por favor, não confunda com o padrão de projeto *método de fábrica*, que descreve uma forma específica de usar fábricas e não está relacionado a este tópico.
 
-Parte da fábrica é o código que passa os dados para processamento posterior quando o formulário é enviado com sucesso. Normalmente para a camada do modelo. Ele também verifica se tudo correu bem, e [passa de volta |forms:validation#Processing-errors] quaisquer erros para o formulário. O modelo no exemplo a seguir é representado pela classe `Facade`:
+Como exemplo, vamos criar uma fábrica que irá construir um formulário de edição:
 
 ```php
 use Nette\Application\UI\Form;
 
+class FormFactory
+{
+	public function createEditForm(): Form
+	{
+		$form = new Form;
+		$form->addText('title', 'Title:');
+		// campos adicionais do formulário são adicionados aqui
+		$form->addSubmit('send', 'Save');
+		return $form;
+	}
+}
+```
+
+Agora você pode usar esta fábrica em diferentes lugares em sua aplicação, por exemplo, em apresentadores ou componentes. E o fazemos [solicitando-o como uma dependência |dependency-injection:passing-dependencies]. Portanto, primeiro, escreveremos a classe no arquivo de configuração:
+
+```neon
+services:
+	- FormFactory
+```
+
+E depois a usamos no apresentador:
+
+
+```php
+class MyPresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private FormFactory $formFactory,
+	) {
+	}
+
+	protected function createComponentEditForm(): Form
+	{
+		$form = $this->formFactory->createEditForm();
+		$form->onSuccess[] = function () {
+			// processamento dos dados enviados
+		};
+		return $form;
+	}
+}
+```
+
+Você pode ampliar a fábrica de formulários com métodos adicionais para criar outros tipos de formulários que se adaptem à sua aplicação. E, é claro, você pode adicionar um método que cria um formulário básico sem elementos, que os outros métodos utilizarão:
+
+```php
+class FormFactory
+{
+	public function createForm(): Form
+	{
+		$form = new Form;
+		return $form;
+	}
+
+	public function createEditForm(): Form
+	{
+		$form = $this->createForm();
+		$form->addText('title', 'Title:');
+		// campos adicionais do formulário são adicionados aqui
+		$form->addSubmit('send', 'Save');
+		return $form;
+	}
+}
+```
+
+O método `createForm()` ainda não faz nada de útil, mas isso vai mudar rapidamente.
+
+
+Dependências de Fábrica .[#toc-factory-dependencies]
+====================================================
+
+Com o tempo, tornar-se-á evidente que precisamos de formulários para sermos multilíngues. Isto significa que precisamos criar um [tradutor |forms:rendering#Translating] para todos os formulários. Para fazer isso, modificamos a classe `FormFactory` para aceitar o objeto `Translator` como uma dependência no construtor, e o passamos para o formulário:
+
+```php
+use Nette\Localization\Translator;
+
+class FormFactory
+{
+	public function __construct(
+		private Translator $translator,
+	) {
+	}
+
+	public function createForm(): Form
+	{
+		$form = new Form;
+		$form->setTranslator($this->translator);
+		return $form;
+	}
+
+	//...
+}
+```
+
+Como o método `createForm()` também é chamado por outros métodos que criam formas específicas, só precisamos colocar o tradutor nesse método. E estamos terminados. Não há necessidade de alterar nenhum apresentador ou código de componente, o que é ótimo.
+
+
+Mais Classes de Fábrica .[#toc-more-factory-classes]
+====================================================
+
+Alternativamente, você pode criar múltiplas classes para cada formulário que deseja utilizar em sua aplicação.
+Esta abordagem pode aumentar a legibilidade do código e tornar os formulários mais fáceis de gerenciar. Deixe o original `FormFactory` para criar apenas um formulário puro com configuração básica (por exemplo, com suporte a tradução) e crie uma nova fábrica `EditFormFactory` para o formulário de edição.
+
+```php
+class FormFactory
+{
+	public function __construct(
+		private Translator $translator,
+	) {
+	}
+
+	public function create(): Form
+	{
+		$form = new Form;
+		$form->setTranslator($this->translator);
+		return $form;
+	}
+}
+
+
+// ✅ uso da composição
 class EditFormFactory
 {
 	public function __construct(
+		private FormFactory $formFactory,
+	) {
+	}
+
+	public function create(): Form
+	{
+		$form = $this->formFactory->create();
+		// campos adicionais do formulário são adicionados aqui
+		$form->addSubmit('send', 'Save');
+		return $form;
+	}
+}
+```
+
+É muito importante que a ligação entre as classes `FormFactory` e `EditFormFactory` seja implementada por composição e não por herança de objetos:
+
+```php
+// ⛔ NÃO! A HERANÇA NÃO PERTENCE AQUI
+class EditFormFactory extends FormFactory
+{
+	public function create(): Form
+	{
+		$form = parent::create();
+		$form->addText('title', 'Title:');
+		// campos adicionais do formulário são adicionados aqui
+		$form->addSubmit('send', 'Save');
+		return $form;
+	}
+}
+```
+
+Usar a herança neste caso seria completamente contraproducente. Você se depararia com problemas muito rapidamente. Por exemplo, se você quisesse adicionar parâmetros ao método `create()`; o PHP relataria um erro de que sua assinatura era diferente da dos pais.
+Ou ao passar uma dependência para a classe `EditFormFactory` através do construtor. Isto causaria o que chamamos de [inferno do construtor |dependency-injection:passing-dependencies#Constructor hell].
+
+Em geral, é melhor preferir a composição do que a herança.
+
+
+Manuseio de formulários .[#toc-form-handling]
+=============================================
+
+O manipulador de formulários que é chamado após uma apresentação bem-sucedida também pode fazer parte de uma classe de fábrica. Ele funcionará passando os dados enviados para o modelo para processamento. Ele passará quaisquer erros de [volta para o |forms:validation#Processing Errors] formulário. O modelo no exemplo a seguir é representado pela classe `Facade`:
+
+```php
+class EditFormFactory
+{
+	public function __construct(
+		private FormFactory $formFactory,
 		private Facade $facade,
 	) {
 	}
 
-	public function create(/* parameters */): Form
+	public function create(): Form
 	{
-		$form = new Form;
-
-		// adicionar elementos ao formulário
-
-		$form->addSubmit('send', 'Submit');
+		$form = $this->formFactory->create();
+		$form->addText('title', 'Title:');
+		// campos adicionais do formulário são adicionados aqui
+		$form->addSubmit('send', 'Save');
 		$form->onSuccess[] = [$this, 'processForm'];
-
 		return $form;
 	}
 
-	public function processForm(Form $form, array $values): void
+	public function processForm(Form $form, array $data): void
 	{
 		try {
-			// processamento de formulários
-			$this->facade->process($values);
+			// processamento dos dados apresentados
+			$this->facade->process($data);
 
 		} catch (AnyModelException $e) {
 			$form->addError('...');
@@ -47,17 +212,7 @@ class EditFormFactory
 }
 ```
 
-É claro que a fábrica pode ser paramétrica, ou seja, pode receber parâmetros que afetarão a aparência da forma que está sendo criada.
-
-Vamos agora demonstrar a passagem da fábrica para o apresentador. Primeiro, a escrevemos no arquivo de configuração:
-
-```neon
-services:
-	- EditFormFactory
-```
-
-E depois solicite-o no apresentador. Também segue o próximo passo de processamento do formulário apresentado e que é redirecionado para a página seguinte:
-
+Deixe o apresentador cuidar do redirecionamento em si. Ele adicionará outro manipulador ao evento `onSuccess`, que realizará o redirecionamento. Isto permitirá que o formulário seja utilizado em diferentes apresentadores, e cada um poderá ser redirecionado para um local diferente.
 
 ```php
 class MyPresenter extends Nette\Application\UI\Presenter
@@ -70,24 +225,48 @@ class MyPresenter extends Nette\Application\UI\Presenter
 	protected function createComponentEditForm(): Form
 	{
 		$form = $this->formFactory->create();
-
-		$form->onSuccess[] = function (Form $form) {
-			$this->redirect('this');
+		$form->onSuccess[] = function () {
+			$this->flashMessage('Záznam byl uložen');
+			$this->redirect('Homepage:');
 		};
-
 		return $form;
 	}
 }
 ```
 
-Como o redirecionamento é feito pelo apresentador, o componente pode ser usado em vários lugares e redirecionado para outro lugar em cada lugar.
+Esta solução aproveita a propriedade dos formulários que, quando `addError()` é chamado em um formulário ou em seu elemento, o próximo manipulador `onSuccess` não é invocado.
 
 
-Componente com forma .[#toc-component-with-form]
-================================================
+Herdando da classe do formulário .[#toc-inheriting-from-the-form-class]
+=======================================================================
 
-Outra maneira é criar um novo [componente |application:components] que contenha uma forma. Isto nos dá a capacidade de renderizar o formulário de uma forma específica, por exemplo, uma vez que o componente inclui um modelo.
-Ou podemos usar sinais para comunicação AJAX e carregar informações no formulário, por exemplo, para auto-completar, etc.
+Uma forma construída não deve ser uma criança de uma forma. Em outras palavras, não use esta solução:
+
+```php
+// ⛔ NÃO! A HERANÇA NÃO PERTENCE AQUI
+class EditForm extends Form
+{
+	public function __construct(Translator $translator)
+	{
+		parent::__construct();
+		$form->addText('title', 'Title:');
+		// campos adicionais do formulário são adicionados aqui
+		$form->addSubmit('send', 'Save');
+		$form->setTranslator($translator);
+	}
+}
+```
+
+Em vez de construir a forma na construtora, use a fábrica.
+
+É importante perceber que a classe `Form` é principalmente uma ferramenta para montagem de um formulário, ou seja, um construtor de formulários. E a forma montada pode ser considerada seu produto. Entretanto, o produto não é um caso específico do construtor; não há *é uma* relação entre eles, o que forma a base da herança.
+
+
+Componente do formulário .[#toc-form-component]
+===============================================
+
+Uma abordagem completamente diferente é criar um [componente |application:components] que inclua uma forma. Isto dá novas possibilidades, por exemplo, de tornar o formulário de uma forma específica, uma vez que o componente inclui um modelo.
+Ou sinais podem ser usados para comunicação AJAX e carregamento de informações no formulário, por exemplo, para insinuação, etc.
 
 
 ```php
@@ -105,20 +284,19 @@ class EditControl extends Nette\Application\UI\Control
 	protected function createComponentForm(): Form
 	{
 		$form = new Form;
-
-		// adicionar elementos ao formulário
-
-		$form->addSubmit('send', 'Submit');
+		$form->addText('title', 'Title:');
+		// campos adicionais do formulário são adicionados aqui
+		$form->addSubmit('send', 'Save');
 		$form->onSuccess[] = [$this, 'processForm'];
 
 		return $form;
 	}
 
-	public function processForm(Form $form, array $values): void
+	public function processForm(Form $form, array $data): void
 	{
 		try {
-			// processamento de formulários
-			$this->facade->process($values);
+			// processamento dos dados apresentados
+			$this->facade->process($data);
 
 		} catch (AnyModelException $e) {
 			$form->addError('...');
@@ -126,13 +304,12 @@ class EditControl extends Nette\Application\UI\Control
 		}
 
 		// invocação de eventos
-		$this->onSave($this, $values);
+		$this->onSave($this, $data);
 	}
 }
 ```
 
-Em seguida, vamos criar a fábrica que produzirá este componente. Basta [escrever sua interface |application:components#Components with Dependencies]:
-
+Vamos criar uma fábrica que produzirá este componente. É o suficiente para [escrever sua interface |application:components#Components with Dependencies]:
 
 ```php
 interface EditControlFactory
@@ -141,14 +318,14 @@ interface EditControlFactory
 }
 ```
 
-E acrescente ao arquivo de configuração:
+E adicione-a ao arquivo de configuração:
 
 ```neon
 services:
 	- EditControlFactory
 ```
 
-E agora podemos exigir a fábrica e utilizá-la no apresentador:
+E agora podemos solicitar a fábrica e utilizá-la no apresentador:
 
 ```php
 class MyPresenter extends Nette\Application\UI\Presenter
@@ -164,7 +341,7 @@ class MyPresenter extends Nette\Application\UI\Presenter
 
 		$control->onSave[] = function (EditControl $control, $data) {
 			$this->redirect('this');
-			// or redirect to the result of the edit, e.g.:
+			// ou redirecionar para o resultado da edição, por exemplo
 			// $this->redirect('detail', ['id' => $data->id]);
 		};
 
@@ -173,5 +350,4 @@ class MyPresenter extends Nette\Application\UI\Presenter
 }
 ```
 
-{{priority: -1}}
 {{sitename: Melhores Práticas}}

@@ -2,43 +2,208 @@ Riutilizzare i moduli in più luoghi
 ***********************************
 
 .[perex]
-Come riutilizzare lo stesso modulo in più punti senza duplicare il codice? Questo è molto facile da fare in Nette e ci sono diversi modi tra cui scegliere.
+In Nette, esistono diverse opzioni per riutilizzare lo stesso modulo in più punti senza duplicare il codice. In questo articolo esamineremo le diverse soluzioni, comprese quelle da evitare.
 
 
 Fabbrica di moduli .[#toc-form-factory]
 =======================================
 
-Creiamo una classe che possa creare un modulo. Una classe di questo tipo è chiamata factory. Nel luogo in cui vogliamo usare il form (per esempio, nel presentatore), richiediamo il [factory come dipendenza |dependency-injection:passing-dependencies].
+Un approccio di base per utilizzare lo stesso componente in più punti è quello di creare un metodo o una classe che generi il componente e poi richiamare tale metodo in diversi punti dell'applicazione. Un metodo o una classe di questo tipo si chiama *factory*. Non bisogna confondersi con il modello di progettazione *factory method*, che descrive un modo specifico di usare le fabbriche e non è correlato a questo argomento.
 
-Parte del factory è il codice che passa i dati per un'ulteriore elaborazione quando il form viene inviato con successo. Di solito al livello del modello. Inoltre, controlla se tutto è andato bene e [restituisce |forms:validation#Processing-errors] eventuali errori al form. Il modello nell'esempio seguente è rappresentato dalla classe `Facade`:
+Come esempio, creiamo un factory che costruisca un form di modifica:
 
 ```php
 use Nette\Application\UI\Form;
 
+class FormFactory
+{
+	public function createEditForm(): Form
+	{
+		$form = new Form;
+		$form->addText('title', 'Title:');
+		// I campi aggiuntivi del modulo sono aggiunti qui
+		$form->addSubmit('send', 'Save');
+		return $form;
+	}
+}
+```
+
+Ora è possibile utilizzare questo factory in diversi punti dell'applicazione, ad esempio nei presenter o nei componenti. Per farlo, lo [richiediamo come dipendenza |dependency-injection:passing-dependencies]. Quindi, per prima cosa, scriveremo la classe nel file di configurazione:
+
+```neon
+services:
+	- FormFactory
+```
+
+e poi la usiamo nel presentatore:
+
+
+```php
+class MyPresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private FormFactory $formFactory,
+	) {
+	}
+
+	protected function createComponentEditForm(): Form
+	{
+		$form = $this->formFactory->createEditForm();
+		$form->onSuccess[] = function () {
+			// elaborazione dei dati inviati
+		};
+		return $form;
+	}
+}
+```
+
+È possibile estendere il factory di form con metodi aggiuntivi per creare altri tipi di form, in base alle proprie applicazioni. E, naturalmente, si può aggiungere un metodo che crea un modulo di base senza elementi, che verrà utilizzato dagli altri metodi:
+
+```php
+class FormFactory
+{
+	public function createForm(): Form
+	{
+		$form = new Form;
+		return $form;
+	}
+
+	public function createEditForm(): Form
+	{
+		$form = $this->createForm();
+		$form->addText('title', 'Title:');
+		// I campi aggiuntivi del modulo sono aggiunti qui
+		$form->addSubmit('send', 'Save');
+		return $form;
+	}
+}
+```
+
+Il metodo `createForm()` non fa ancora nulla di utile, ma questo cambierà rapidamente.
+
+
+Dipendenze della fabbrica .[#toc-factory-dependencies]
+======================================================
+
+Col tempo, ci si renderà conto che i moduli devono essere multilingue. Ciò significa che dobbiamo impostare un [traduttore |forms:rendering#Translating] per tutti i moduli. Per farlo, modifichiamo la classe `FormFactory` in modo che accetti l'oggetto `Translator` come dipendenza nel costruttore e lo passi al form:
+
+```php
+use Nette\Localization\Translator;
+
+class FormFactory
+{
+	public function __construct(
+		private Translator $translator,
+	) {
+	}
+
+	public function createForm(): Form
+	{
+		$form = new Form;
+		$form->setTranslator($this->translator);
+		return $form;
+	}
+
+	//...
+}
+```
+
+Poiché il metodo `createForm()` viene richiamato anche da altri metodi che creano moduli specifici, dobbiamo impostare il traduttore solo in quel metodo. E il gioco è fatto. Non è necessario modificare il codice del presentatore o del componente, il che è fantastico.
+
+
+Altre classi di fabbrica .[#toc-more-factory-classes]
+=====================================================
+
+In alternativa, è possibile creare più classi per ogni modulo che si desidera utilizzare nell'applicazione.
+Questo approccio può aumentare la leggibilità del codice e rendere i moduli più facili da gestire. Lasciate l'originale `FormFactory` per creare solo un form puro con una configurazione di base (ad esempio, con il supporto per la traduzione) e create un nuovo factory `EditFormFactory` per il form di modifica.
+
+```php
+class FormFactory
+{
+	public function __construct(
+		private Translator $translator,
+	) {
+	}
+
+	public function create(): Form
+	{
+		$form = new Form;
+		$form->setTranslator($this->translator);
+		return $form;
+	}
+}
+
+
+// ✅ uso della composizione
 class EditFormFactory
 {
 	public function __construct(
+		private FormFactory $formFactory,
+	) {
+	}
+
+	public function create(): Form
+	{
+		$form = $this->formFactory->create();
+		// i campi aggiuntivi del modulo sono aggiunti qui
+		$form->addSubmit('send', 'Save');
+		return $form;
+	}
+}
+```
+
+È molto importante che il legame tra le classi `FormFactory` e `EditFormFactory` sia implementato tramite composizione, non tramite ereditarietà degli oggetti:
+
+```php
+// NO! L'EREDITÀ NON È QUI
+class EditFormFactory extends FormFactory
+{
+	public function create(): Form
+	{
+		$form = parent::create();
+		$form->addText('title', 'Title:');
+		// i campi aggiuntivi del modulo sono aggiunti qui
+		$form->addSubmit('send', 'Save');
+		return $form;
+	}
+}
+```
+
+L'uso dell'ereditarietà in questo caso sarebbe completamente controproducente. Si incorrerebbe in problemi molto rapidamente. Per esempio, se si volessero aggiungere parametri al metodo `create()`, PHP segnalerebbe un errore perché la sua firma è diversa da quella del genitore.
+Oppure quando si passa una dipendenza alla classe `EditFormFactory` tramite il costruttore. Questo causerebbe quello che chiamiamo l'[inferno dei costruttori |dependency-injection:passing-dependencies#Constructor hell].
+
+In generale, è meglio preferire la composizione all'ereditarietà.
+
+
+Gestione dei moduli .[#toc-form-handling]
+=========================================
+
+Il gestore del form che viene chiamato dopo un invio riuscito può anche far parte di una classe factory. Funzionerà passando i dati inviati al modello per l'elaborazione. Passerà gli eventuali errori [al |forms:validation#Processing Errors] modulo. Il modello dell'esempio seguente è rappresentato dalla classe `Facade`:
+
+```php
+class EditFormFactory
+{
+	public function __construct(
+		private FormFactory $formFactory,
 		private Facade $facade,
 	) {
 	}
 
-	public function create(/* parameters */): Form
+	public function create(): Form
 	{
-		$form = new Form;
-
-		// aggiungere elementi al form
-
-		$form->addSubmit('send', 'Submit');
+		$form = $this->formFactory->create();
+		$form->addText('title', 'Title:');
+		// i campi aggiuntivi del modulo vengono aggiunti qui
+		$form->addSubmit('send', 'Save');
 		$form->onSuccess[] = [$this, 'processForm'];
-
 		return $form;
 	}
 
-	public function processForm(Form $form, array $values): void
+	public function processForm(Form $form, array $data): void
 	{
 		try {
-			// elaborazione del form
-			$this->facade->process($values);
+			// elaborazione dei dati inviati
+			$this->facade->process($data);
 
 		} catch (AnyModelException $e) {
 			$form->addError('...');
@@ -47,17 +212,7 @@ class EditFormFactory
 }
 ```
 
-Naturalmente, il factory può essere parametrico, cioè può ricevere parametri che influiscono sull'aspetto del form creato.
-
-Dimostreremo ora di passare il factory al presentatore. Per prima cosa, lo scriviamo nel file di configurazione:
-
-```neon
-services:
-	- EditFormFactory
-```
-
-e poi lo richiediamo al presentatore. Segue anche la fase successiva di elaborazione del modulo inviato, ovvero il reindirizzamento alla pagina successiva:
-
+Lasciamo che sia il presentatore stesso a gestire il reindirizzamento. Aggiungerà un altro gestore all'evento `onSuccess`, che eseguirà il reindirizzamento. Ciò consentirà di utilizzare il modulo in diversi presentatori, ognuno dei quali potrà reindirizzare a una posizione diversa.
 
 ```php
 class MyPresenter extends Nette\Application\UI\Presenter
@@ -70,24 +225,48 @@ class MyPresenter extends Nette\Application\UI\Presenter
 	protected function createComponentEditForm(): Form
 	{
 		$form = $this->formFactory->create();
-
-		$form->onSuccess[] = function (Form $form) {
-			$this->redirect('this');
+		$form->onSuccess[] = function () {
+			$this->flashMessage('Záznam byl uložen');
+			$this->redirect('Homepage:');
 		};
-
 		return $form;
 	}
 }
 ```
 
-Poiché il reindirizzamento è gestito dal gestore del presentatore, il componente può essere utilizzato in più luoghi e reindirizzato altrove in ogni luogo.
+Questa soluzione sfrutta la proprietà dei moduli per cui, quando `addError()` viene chiamato su un modulo o su un suo elemento, il gestore successivo `onSuccess` non viene invocato.
 
 
-Componente con modulo .[#toc-component-with-form]
-=================================================
+Ereditare dalla classe Form .[#toc-inheriting-from-the-form-class]
+==================================================================
 
-Un altro modo è quello di creare un nuovo [componente |application:components] che contenga un modulo. Questo ci dà la possibilità di rendere il modulo in un modo specifico, ad esempio, dato che il componente include un modello.
-Oppure si possono usare segnali per la comunicazione AJAX e il caricamento di informazioni nel modulo, ad esempio per il completamento automatico, ecc.
+Un modulo costruito non dovrebbe essere figlio di un modulo. In altre parole, non utilizzate questa soluzione:
+
+```php
+// NO! L'EREDITÀ NON È QUI
+class EditForm extends Form
+{
+	public function __construct(Translator $translator)
+	{
+		parent::__construct();
+		$form->addText('title', 'Title:');
+		// i campi aggiuntivi del modulo sono aggiunti qui
+		$form->addSubmit('send', 'Save');
+		$form->setTranslator($translator);
+	}
+}
+```
+
+Invece di costruire il modulo nel costruttore, utilizzare il factory.
+
+È importante capire che la classe `Form` è principalmente uno strumento per assemblare un modulo, cioè un costruttore di moduli. Il modulo assemblato può essere considerato il suo prodotto. Tuttavia, il prodotto non è un caso specifico del costruttore; non c'è una relazione *è a* tra loro, che è alla base dell'ereditarietà.
+
+
+Componente Form .[#toc-form-component]
+======================================
+
+Un approccio completamente diverso consiste nel creare un [componente |application:components] che includa un modulo. Questo offre nuove possibilità, ad esempio per rendere il modulo in un modo specifico, dato che il componente include un modello.
+Oppure si possono usare segnali per la comunicazione AJAX e il caricamento di informazioni nel modulo, ad esempio per i suggerimenti, ecc.
 
 
 ```php
@@ -105,34 +284,32 @@ class EditControl extends Nette\Application\UI\Control
 	protected function createComponentForm(): Form
 	{
 		$form = new Form;
-
-		// aggiungere elementi al form
-
-		$form->addSubmit('send', 'Submit');
+		$form->addText('title', 'Title:');
+		// i campi aggiuntivi del modulo vengono aggiunti qui
+		$form->addSubmit('send', 'Save');
 		$form->onSuccess[] = [$this, 'processForm'];
 
 		return $form;
 	}
 
-	public function processForm(Form $form, array $values): void
+	public function processForm(Form $form, array $data): void
 	{
 		try {
-			// elaborazione del form
-			$this->facade->process($values);
+			// elaborazione dei dati inviati
+			$this->facade->process($data);
 
 		} catch (AnyModelException $e) {
 			$form->addError('...');
 			return;
 		}
 
-		// invocazione dell'evento
-		$this->onSave($this, $values);
+		// invocazione di eventi
+		$this->onSave($this, $data);
 	}
 }
 ```
 
-Successivamente, creeremo il factory che produrrà questo componente. Basta [scrivere la sua interfaccia |application:components#Components with Dependencies]:
-
+Creiamo un factory che produca questo componente. È sufficiente [scrivere la sua interfaccia |application:components#Components with Dependencies]:
 
 ```php
 interface EditControlFactory
@@ -141,14 +318,14 @@ interface EditControlFactory
 }
 ```
 
-E aggiungerla al file di configurazione:
+e aggiungerla al file di configurazione:
 
 ```neon
 services:
 	- EditControlFactory
 ```
 
-Ora possiamo richiedere il factory e usarlo nel presenter:
+Ora possiamo richiedere il factory e utilizzarlo nel presenter:
 
 ```php
 class MyPresenter extends Nette\Application\UI\Presenter
@@ -164,7 +341,7 @@ class MyPresenter extends Nette\Application\UI\Presenter
 
 		$control->onSave[] = function (EditControl $control, $data) {
 			$this->redirect('this');
-			// oppure reindirizzare al risultato della modifica, ad esempio:
+			// o reindirizzare al risultato della modifica, ad es:
 			// $this->redirect('detail', ['id' => $data->id]);
 		};
 
@@ -173,5 +350,4 @@ class MyPresenter extends Nette\Application\UI\Presenter
 }
 ```
 
-{{priority: -1}}
 {{sitename: Migliori pratiche}}

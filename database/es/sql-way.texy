@@ -1,0 +1,515 @@
+Vía SQL
+*******
+
+.[perex]
+Puede trabajar con Nette Database de dos formas: escribiendo consultas SQL (forma SQL) o dejando que SQL se genere automáticamente[(forma Explorer |explorer]). El modo SQL le permite crear consultas de forma segura manteniendo un control total sobre su estructura.
+
+.[note]
+Ver [Conexión y Configuración |guide#Connection and Configuration] para más detalles sobre la configuración de la conexión a la base de datos.
+
+
+Consultas básicas .[#toc-basic-querying]
+========================================
+
+El método `query()` ejecuta consultas a la base de datos y devuelve un objeto [ResultSet | api:Nette\Database\ResultSet] que representa el resultado. Si la consulta falla, el método [lanza una excepción | exceptions].
+Puede recorrer el resultado de la consulta mediante un bucle `foreach` o utilizar una de las [funciones de ayuda | #Fetching Data].
+
+```php
+$result = $database->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+}
+```
+
+Para insertar valores de forma segura en las consultas SQL, utilice consultas parametrizadas. Nette Database lo hace muy sencillo: basta con añadir una coma y el valor a la consulta SQL.
+
+```php
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+```
+
+Para varios parámetros, puede intercalar la consulta SQL con los parámetros:
+
+```php
+$database->query('SELECT * FROM users WHERE name = ?', $name, 'AND age > ?', $age);
+```
+
+O escribir primero toda la consulta SQL y luego intercalar todos los parámetros:
+
+```php
+$database->query('SELECT * FROM users WHERE name = ? AND age > ?', $name, $age);
+```
+
+
+Protección contra la inyección SQL .[#toc-protection-against-sql-injection]
+===========================================================================
+
+¿Por qué es importante utilizar consultas parametrizadas? Porque le protegen de los ataques de inyección SQL, en los que los atacantes pueden inyectar comandos SQL maliciosos para manipular o acceder a los datos de la base de datos.
+
+.[warning]
+**Utiliza siempre consultas parametrizadas para protegerte de la inyección SQL.
+
+```php
+// ❌ CÓDIGO INSEGURO - vulnerable a la inyección SQL.
+$database->query("SELECT * FROM users WHERE name = '$name'");
+
+// ✅ Consulta parametrizada segura
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+```
+
+Familiarícese con los [posibles riesgos de seguridad | security].
+
+
+Técnicas de consulta .[#toc-query-techniques]
+=============================================
+
+
+Condiciones WHERE .[#toc-where-conditions]
+------------------------------------------
+
+Puede escribir las condiciones de `WHERE` como una matriz asociativa, donde las claves son nombres de columnas y los valores son los datos a comparar. Nette Database selecciona automáticamente el operador SQL más apropiado en función del tipo de valor.
+
+```php
+$database->query('SELECT * FROM users WHERE', [
+	'name' => 'John',
+	'active' => true,
+]);
+// WHERE `name` = 'John' AND `active` = 1
+```
+
+También puede especificar explícitamente el operador en la clave:
+
+```php
+$database->query('SELECT * FROM users WHERE', [
+	'age >' => 25,           // utiliza el operador >.
+	'name LIKE' => '%John%', // utiliza el operador LIKE
+	'email NOT LIKE' => '%example.com%', // utiliza el operador NOT LIKE
+]);
+// WHERE `edad` > 25 AND `nombre` LIKE '%John%' AND `email` NOT LIKE '%ejemplo.com%'
+```
+
+Los casos especiales, como los valores de `null` o las matrices, se gestionan automáticamente:
+
+```php
+$database->query('SELECT * FROM products WHERE', [
+	'name' => 'Laptop',         // utiliza el operador =
+	'category_id' => [1, 2, 3], // utiliza IN
+	'description' => null,      // usos IS NULL
+]);
+// WHERE `name` = 'Laptop' AND `category_id` IN (1, 2, 3) AND `description` IS NULL
+```
+
+Para condiciones negativas, utilice el operador `NOT`:
+
+```php
+$database->query('SELECT * FROM products WHERE', [
+	'name NOT' => 'Laptop',         // utiliza el operador <>
+	'category_id NOT' => [1, 2, 3], // utiliza NOT IN
+	'description NOT' => null,      // utiliza IS NOT NULL
+	'id' => [],                     // omitido
+]);
+// WHERE `name` <> 'Laptop' AND `category_id` NOT IN (1, 2, 3) AND `description` IS NOT NULL
+```
+
+Por defecto, las condiciones se combinan utilizando el operador `AND`. Puede cambiar este comportamiento utilizando el [marcador de posición ?or | #SQL Construction Hints].
+
+
+Reglas ORDER BY .[#toc-order-by-rules]
+--------------------------------------
+
+La cláusula `ORDER BY` puede definirse como una matriz, donde las claves representan columnas y los valores son booleanos que indican un orden ascendente:
+
+```php
+$database->query('SELECT id FROM author ORDER BY', [
+	'id' => true,  // ascendente
+	'name' => false, // descendente
+]);
+// SELECT id FROM autor ORDER BY `id`, `nombre` DESC
+```
+
+
+Inserción de datos (INSERT) .[#toc-inserting-data-insert]
+---------------------------------------------------------
+
+Para insertar registros, utilice la sentencia SQL `INSERT`.
+
+```php
+$values = [
+	'name' => 'John Doe',
+	'email' => 'john@example.com',
+];
+$database->query('INSERT INTO users ?', $values);
+$userId = $database->getInsertId();
+```
+
+El método `getInsertId()` devuelve el ID de la última fila insertada. Para determinadas bases de datos (por ejemplo, PostgreSQL), debe especificar el nombre de la secuencia utilizando `$database->getInsertId($sequenceId)`.
+
+También puede pasar [valores especiales |#special values], como archivos, objetos DateTime o tipos enum, como parámetros.
+
+Inserción de varios registros a la vez:
+
+```php
+$database->query('INSERT INTO users ?', [
+	['name' => 'User 1', 'email' => 'user1@mail.com'],
+	['name' => 'User 2', 'email' => 'user2@mail.com'],
+]);
+```
+
+Realizar un INSERT por lotes es mucho más rápido porque sólo se ejecuta una consulta a la base de datos en lugar de varias consultas individuales.
+
+**Nota de seguridad:** Nunca utilice datos no validados como `$values`. Familiarícese con los [posibles riesgos |security#safe-work-with-columns].
+
+
+Actualización de datos (UPDATE) .[#toc-updating-data-update]
+------------------------------------------------------------
+
+Para actualizar registros, utilice la sentencia SQL `UPDATE`.
+
+```php
+// Actualizar un único registro
+$values = [
+	'name' => 'John Smith',
+];
+$result = $database->query('UPDATE users SET ? WHERE id = ?', $values, 1);
+```
+
+Puede comprobar el número de filas afectadas utilizando `$result->getRowCount()`.
+
+Puede utilizar los operadores `+=` y `-=` en `UPDATE`:
+
+```php
+$database->query('UPDATE users SET ? WHERE id = ?', [
+	'login_count+=' => 1, // increment login_count
+], 1);
+```
+
+Para insertar o actualizar un registro si ya existe, utilice la técnica `ON DUPLICATE KEY UPDATE`:
+
+```php
+$values = [
+	'name' => $name,
+	'year' => $year,
+];
+$database->query('INSERT INTO users ? ON DUPLICATE KEY UPDATE ?',
+	$values + ['id' => $id],
+	$values,
+);
+// INSERT INTO users (`id`, `name`, `year`) VALUES (123, 'Jim', 1978)
+//  ON DUPLICATE KEY UPDATE `nombre` = 'Jim', `año` = 1978
+```
+
+Observe que Nette Database reconoce el contexto del comando SQL en el que se utiliza un parámetro con una matriz y genera el código SQL en consecuencia. Por ejemplo, construyó `(id, name, year) VALUES (123, 'Jim', 1978)` a partir del primer array, mientras que convirtió el segundo en `name = 'Jim', year = 1978`. Esto se explica con más detalle en la sección [Sugerencias para la construcción de SQL |#SQL Construction Hints].
+
+
+Borrado de datos (DELETE) .[#toc-deleting-data-delete]
+------------------------------------------------------
+
+Para borrar registros, utilice la sentencia SQL `DELETE`. Ejemplo con el número de filas borradas:
+
+```php
+$count = $database->query('DELETE FROM users WHERE id = ?', 1)
+	->getRowCount();
+```
+
+
+Sugerencias de construcción SQL .[#toc-sql-construction-hints]
+--------------------------------------------------------------
+
+Los marcadores de posición SQL permiten controlar cómo se incorporan los valores de los parámetros en las expresiones SQL:
+
+| Sugerencia | Descripción | Usado Automáticamente Para
+|------------|-------------------------------------------------|-----------------------------
+| `?name` | Se utiliza para nombres de tabla o columna | -
+| `?values` | Genera `(key, ...) VALUES (value, ...)` | `INSERT ... ?`, `REPLACE ... ?`
+| `?set` | Genera asignaciones `key = value, ...` | `SET ?`, `KEY UPDATE ?`
+| `?and` | Une condiciones en un array con `AND` | `WHERE ?`, `HAVING ?`
+| `?or` | Une condiciones en una matriz con `OR` | -
+| `?order` | Genera la cláusula `ORDER BY` | `ORDER BY ?`, `GROUP BY ?`
+
+Para insertar dinámicamente nombres de tabla o columna, utilice el marcador de posición `?name`. Nette Database garantiza el correcto escape de acuerdo con las convenciones de la base de datos (p. ej., encierre entre corchetes para MySQL).
+
+```php
+$table = 'users';
+$column = 'name';
+$database->query('SELECT ?name FROM ?name WHERE id = 1', $column, $table);
+// SELECT `name` FROM `users` WHERE id = 1 (en MySQL)
+```
+
+**Advertencia:** Utilice el marcador de posición `?name` únicamente para nombres de tabla y columna validados. De lo contrario, se arriesga a [sufrir vulnerabilidades de seguridad | security#Dynamic Identifiers].
+
+Normalmente no es necesario especificar otras sugerencias, ya que Nette utiliza la autodetección inteligente al construir consultas SQL (véase la tercera columna de la tabla). Sin embargo, puede utilizarlas en situaciones en las que desee combinar condiciones utilizando `OR` en lugar de `AND`:
+
+```php
+$database->query('SELECT * FROM users WHERE ?or', [
+	'name' => 'John',
+	'email' => 'john@example.com',
+]);
+// SELECT * FROM usuarios WHERE `nombre` = 'Juan' OR `email` = 'john@example.com'
+```
+
+
+Valores especiales .[#toc-special-values]
+-----------------------------------------
+
+Además de los tipos escalares estándar (por ejemplo, `string`, `int`, `bool`), también puede pasar valores especiales como parámetros:
+
+- Ficheros: Utilice `fopen('file.png', 'r')` para insertar el contenido binario de un archivo.
+- Fecha y hora: los objetos `DateTime` se convierten automáticamente al formato de fecha de la base de datos.
+- Valores Enum: Las instancias de `enum` se convierten a sus valores correspondientes.
+- Literales SQL: Creados con `Connection::literal('NOW()')`, se insertan directamente en la consulta.
+
+```php
+$database->query('INSERT INTO articles ?', [
+	'title' => 'My Article',
+	'published_at' => new DateTime,
+	'content' => fopen('image.png', 'r'),
+	'state' => Status::Draft,
+]);
+```
+
+Para las bases de datos que carecen de soporte nativo para el tipo `datetime` (por ejemplo, SQLite y Oracle), los valores de `DateTime` se convierten según la opción de configuración `formatDateTime` (por defecto: `U` para Unix timestamp).
+
+
+Literales SQL .[#toc-sql-literals]
+----------------------------------
+
+En algunos casos, puede necesitar insertar código SQL sin procesar como un valor sin tratarlo como una cadena o escaparlo. Para ello, utilice objetos de la clase `Nette\Database\SqlLiteral`, que pueden crearse utilizando el método `Connection::literal()`.
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year >' => $database::literal('YEAR()'),
+]);
+// SELECT * FROM usuarios WHERE (`nombre` = 'Jim') AND (`año` > AÑO())
+```
+
+Como alternativa:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > YEAR()'),
+]);
+// SELECT * FROM usuarios WHERE (`nombre` = 'Jim') AND (año > YEAR())
+```
+
+Los literales SQL también pueden contener parámetros:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > ? AND year &lt; ?', $min, $max),
+]);
+// SELECT * FROM usuarios WHERE `nombre` = 'Jim' AND (año > 1978 AND año < 2017)
+```
+
+Esto permite combinaciones flexibles:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('?or', [
+		'active' => true,
+		'role' => $role,
+	]),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (`active` = 1 OR `role` = 'admin')
+```
+
+
+Obtención de datos .[#toc-fetching-data]
+========================================
+
+
+Atajos para consultas SELECT .[#toc-shortcuts-for-select-queries]
+-----------------------------------------------------------------
+
+Para simplificar la recuperación de datos, la clase `Connection` proporciona varios métodos abreviados que combinan una llamada a `query()` con otra posterior a `fetch*()`. Estos métodos aceptan los mismos parámetros que `query()`, es decir, una consulta SQL y parámetros opcionales.
+ [A continuación se ofrece |#fetch()] una descripción detallada de los métodos de `fetch*()`.
+
+| `fetch($sql, ...$params): ?Row` Ejecuta la consulta y obtiene la primera fila como un objeto `Row`.
+| `fetchAll($sql, ...$params): array` Ejecuta la consulta y obtiene todas las filas como una matriz de objetos `Row`.
+| `fetchPairs($sql, ...$params): array` Ejecuta la consulta y obtiene una matriz asociativa en la que la primera columna es la clave y la segunda el valor.
+| `fetchField($sql, ...$params): mixed` Ejecuta la consulta y obtiene el valor de la primera celda de la primera fila.
+| `fetchList($sql, ...$params): ?array` Ejecuta la consulta y obtiene la primera fila como una matriz indexada.
+
+Ejemplo:
+
+```php
+// fetchField() - devuelve el valor de la primera celda
+$count = $database->query('SELECT COUNT(*) FROM articles')
+	->fetchField();
+```
+
+
+`foreach` - Iteración sobre filas
+---------------------------------
+
+Después de ejecutar una consulta, se devuelve un objeto [ResultSet |api:Nette\Database\ResultSet], que permite iterar sobre los resultados de varias maneras. La forma más sencilla y eficiente de recuperar filas es iterar en un bucle `foreach`. Este método procesa las filas de una en una y evita almacenar todos los datos en memoria a la vez.
+
+```php
+$result = $database->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+	//...
+}
+```
+
+.[note]
+El bucle `ResultSet` sólo puede iterarse una vez. Si necesita iterar sobre él varias veces, primero debe cargar los datos en un array, por ejemplo, utilizando el método `fetchAll()`.
+
+
+fetch(): ?Row .[method]
+-----------------------
+
+Ejecuta la consulta y obtiene una única fila como objeto `Row`. Si no hay más filas disponibles, devuelve `null`. Este método avanza el puntero interno a la siguiente fila.
+
+```php
+$result = $database->query('SELECT * FROM users');
+$row = $result->fetch(); // recupera la primera fila
+if ($row) {
+	echo $row->name;
+}
+```
+
+
+fetchAll(): array .[method]
+---------------------------
+
+Obtiene todas las filas restantes de `ResultSet` como una matriz de objetos `Row`.
+
+```php
+$result = $database->query('SELECT * FROM users');
+$rows = $result->fetchAll(); // recupera todas las filas
+foreach ($rows as $row) {
+	echo $row->name;
+}
+```
+
+
+fetchPairs(string|int|null $key = null, string|int|null $value = null): array .[method]
+---------------------------------------------------------------------------------------
+
+Obtiene los resultados como una matriz asociativa. El primer argumento especifica la columna a utilizar como clave, y el segundo especifica la columna a utilizar como valor:
+
+```php
+$result = $database->query('SELECT id, name FROM users');
+$names = $result->fetchPairs('id', 'name');
+// [1 => 'Juan Pérez', 2 => 'Juana Pérez', ...]
+```
+
+Si sólo se proporciona el primer parámetro, el valor será la fila completa (como objeto `Row` ):
+
+```php
+$rows = $result->fetchPairs('id');
+// [1 => Fila(id: 1, nombre: 'Juan'), 2 => Fila(id: 2, nombre: 'Juana'), ...]
+```
+
+En caso de claves duplicadas, se utiliza el valor de la última fila. Si se utiliza `null` como clave, la matriz se indexará numéricamente a partir de cero (en cuyo caso no se producen colisiones):
+
+```php
+$names = $result->fetchPairs(null, 'name');
+// [0 => 'Juan Nadie', 1 => 'Juana Nadie', ...]
+```
+
+
+fetchPairs(Closure $callback): array .[method]
+----------------------------------------------
+
+Como alternativa, puede proporcionar una llamada de retorno que determine los pares clave-valor o los valores de cada fila.
+
+```php
+$result = $database->query('SELECT * FROM users');
+$items = $result->fetchPairs(fn($row) => "$row->id - $row->name");
+// ['1 - Juan', '2 - Juana', ...]
+
+// La llamada de retorno también puede devolver un array con un par clave y valor:
+$names = $result->fetchPairs(fn($row) => [$row->name, $row->age]);
+// ['Juan' => 46, 'Juana' => 21, ...]
+```
+
+
+fetchField(): mixed .[method]
+-----------------------------
+
+Obtiene el valor de la primera celda de la fila actual. Si no hay más filas disponibles, devuelve `null`. Este método avanza el puntero interno a la siguiente fila.
+
+```php
+$result = $database->query('SELECT name FROM users');
+$name = $result->fetchField(); // obtiene el nombre de la primera fila
+```
+
+
+fetchList(): ?array .[method]
+-----------------------------
+
+Obtiene la fila como una matriz indexada. Si no hay más filas disponibles, devuelve `null`. Este método avanza el puntero interno a la siguiente fila.
+
+```php
+$result = $database->query('SELECT name, email FROM users');
+$row = $result->fetchList(); // ['John', 'john@example.com']
+```
+
+
+getRowCount(): ?int .[method]
+-----------------------------
+
+Devuelve el número de filas afectadas por la última consulta `UPDATE` o `DELETE`. En el caso de las consultas a `SELECT`, devuelve el número de filas obtenidas, pero es posible que no siempre se conozca, en cuyo caso devuelve `null`.
+
+
+getColumnCount(): ?int .[method]
+--------------------------------
+
+Devuelve el número de columnas de `ResultSet`.
+
+
+Información de consulta .[#toc-query-information]
+=================================================
+
+Para obtener detalles sobre la última consulta ejecutada, utilice:
+
+```php
+echo $database->getLastQueryString(); // genera la consulta SQL
+
+$result = $database->query('SELECT * FROM articles');
+echo $result->getQueryString();    // muestra la consulta SQL
+echo $result->getTime();           // muestra el tiempo de ejecución en segundos
+```
+
+Para mostrar el resultado en forma de tabla HTML, utilice:
+
+```php
+$result = $database->query('SELECT * FROM articles');
+$result->dump();
+```
+
+También puede obtener información sobre los tipos de columnas en `ResultSet`:
+
+```php
+$result = $database->query('SELECT * FROM articles');
+$types = $result->getColumnTypes();
+
+foreach ($types as $column => $type) {
+	echo "$column is of type $type->type"; // por ejemplo, 'id es de tipo int'
+}
+```
+
+
+Registro de consultas .[#toc-query-logging]
+-------------------------------------------
+
+Puede implementar un registro de consultas personalizado. El evento `onQuery` es un array de callbacks que se invocan después de cada ejecución de consulta:
+
+```php
+$database->onQuery[] = function ($database, $result) use ($logger) {
+	$logger->info('Query: ' . $result->getQueryString());
+	$logger->info('Time: ' . $result->getTime());
+
+	if ($result->getRowCount() > 1000) {
+		$logger->warning('Large result set: ' . $result->getRowCount() . ' rows');
+	}
+};
+```

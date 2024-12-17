@@ -1,0 +1,185 @@
+Bezpečnostní rizika
+*******************
+
+<div class=perex>
+
+Databáze často obsahuje citlivá data a umožňuje provádět nebezpečné operace. Pro bezpečnou práci s Nette Database je klíčové:
+
+- Porozumět rozdílu mezi bezpečným a nebezpečným API
+- Používat parametrizované dotazy
+- Správně validovat vstupní data
+
+</div>
+
+
+Co je SQL Injection?
+====================
+
+SQL injection je nejzávažnější bezpečnostní riziko při práci s databází. Vzniká, když se neošetřený vstup od uživatele stane součástí SQL dotazu. Útočník může vložit vlastní SQL příkazy a tím:
+- Získat neoprávněný přístup k datům
+- Modifikovat nebo smazat data v databázi
+- Obejít autentizaci
+
+```php
+// ❌ NEBEZPEČNÝ KÓD - zranitelný vůči SQL injection
+$database->query("SELECT * FROM users WHERE name = '$_GET[name]'");
+
+// Útočník může zadat například hodnotu: ' OR '1'='1
+// Výsledný dotaz pak bude: SELECT * FROM users WHERE name = '' OR '1'='1'
+// Což vrátí všechny uživatele
+```
+
+Totéž se týká i Database Explorer:
+
+```php
+// ❌ NEBEZPEČNÝ KÓD - zranitelný vůči SQL injection
+$table->where('name = ' . $_GET['name']);
+$table->where("name = '$_GET[name]'");
+```
+
+
+Parametrizované dotazy
+======================
+
+Základní obranou proti SQL injection jsou parametrizované dotazy. Nette Database nabízí několik způsobů jejich použití.
+
+Nejjednodušší způsob je použití **zástupných otazníků**:
+
+```php
+// ✅ Bezpečný parametrizovaný dotaz
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+// ✅ Bezpečná podmínka v Exploreru
+$table->where('name = ?', $name);
+```
+
+Tohle platí pro všechny další metody v [Database Explorer|explorer], které umožňují vkládat výrazy se zástupnými otazníky a parametry.
+
+Pro příkazy INSERT, UPDATE nebo klauzuli WHERE můžeme předat hodnoty v poli:
+
+```php
+// ✅ Bezpečný INSERT
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'email' => $email,
+]);
+
+// ✅ Bezpečný INSERT v Exploreru
+$table->insert([
+	'name' => $name,
+	'email' => $email,
+]);
+```
+
+
+Validace hodnot parametrů
+=========================
+
+Parametrizované dotazy jsou základním stavebním kamenem bezpečné práce s databází. Avšak hodnoty, které do nich vkládáme, musí projít několika úrovněmi kontrol:
+
+
+Typová kontrola
+---------------
+
+**Nejdůležitější je zajistit správný datový typ parametrů** - to je nutná podmínka pro bezpečné použití Nette Database. Databáze předpokládá, že všechna vstupní data mají správný datový typ odpovídající danému sloupci.
+
+Například pokud by `$name` v předchozích příkladech bylo neočekávaně pole místo řetězce, Nette Database by se pokusilo vložit všechny jeho prvky do SQL dotazu, což by vedlo k chybě. Proto **nikdy nepoužívejte** nevalidovaná data z `$_GET`, `$_POST` nebo `$_COOKIE` přímo v databázových dotazech.
+
+
+Formátová kontrola
+------------------
+
+Na druhé úrovni kontrolujeme formát dat - například zda jsou řetězce v UTF-8 kódování a jejich délka odpovídá definici sloupce, nebo zda jsou číselné hodnoty v povoleném rozsahu pro daný datový typ sloupce.
+
+U této úrovně validace se můžeme částečně spolehnout i na databázi samotnou - mnoho databází odmítne nevalidní data. Nicméně chování se může lišit, některé mohou dlouhé řetězce tiše zkrátit nebo čísla mimo rozsah oříznout.
+
+
+Doménová kontrola
+-----------------
+
+Třetí úroveň představují logické kontroly specifické pro vaši aplikaci. Například ověření, že hodnoty ze select boxů odpovídají nabízeným možnostem, že čísla jsou v očekávaném rozsahu (např. věk 0-150 let) nebo že vzájemné závislosti mezi hodnotami dávají smysl.
+
+
+Doporučené způsoby validace
+---------------------------
+
+- Používejte [Nette Formuláře|forms:], které automaticky zajistí správnou validaci všech vstupů
+- Používejte [Presentery|application:] a uvádějte u parametrů v `action*()` a `render*()` metodách datové typy
+- Nebo implementujte vlastní validační vrstvu pomocí standardních PHP nástrojů jako `filter_var()`
+
+
+Bezpečná práce se sloupci
+=========================
+
+V předchozí sekci jsme si ukázali, jak správně validovat hodnoty parametrů. Při použití polí v SQL dotazech však musíme věnovat stejnou pozornost i jejich klíčům.
+
+```php
+// ❌ NEBEZPEČNÝ KÓD - nejsou ošetřené klíče v poli
+$database->query('INSERT INTO users', $_POST);
+```
+
+U příkazů INSERT a UPDATE je to zásadní bezpečnostní chyba - útočník může do databáze vložit nebo změnit jakýkoliv sloupec. Mohl by si například nastavit `is_admin = 1` nebo vložit libovolná data do citlivých sloupců (tzv Mass Assignment Vulnerability).
+
+Ve WHERE podmínkách je to ještě nebezpečnější, protože mohou obsahovat operátory:
+
+```php
+// ❌ NEBEZPEČNÝ KÓD - nejsou ošetřené klíče v poli
+$_POST['salary >'] = 100000;
+$database->query('SELECT * FROM users WHERE', $_POST);
+// vykoná dotaz WHERE (`salary` > 100000)
+```
+
+Útočník může tento přístup využít k systematickému zjišťování platů zaměstnanců. Začne například dotazem na platy nad 100.000, pak pod 50.000 a postupným zužováním rozsahu může odhalit přibližné platy všech zaměstnanců. Tento typ útoku se nazývá SQL enumeration.
+
+Metody `where()` a `whereOr()` jsou ještě [mnohem flexibilnější|explorer#where] a podporují v klíčích a hodnotách SQL výrazy včetně operátorů a funkcí. To dává útočníkovi možnost provést SQL injection:
+
+```php
+// ❌ NEBEZPEČNÝ KÓD - útočník může vložit vlastní SQL
+$_POST = ['0) UNION SELECT name, salary FROM users WHERE (1'];
+$table->where($_POST);
+// vykoná dotaz WHERE (0) UNION SELECT name, salary FROM users WHERE (1)
+```
+
+Tento útok ukončí původní podmínku pomocí `0)`, připojí vlastní `SELECT` pomocí `UNION` aby získal citlivá data z tabulky `users` a uzavře syntakticky správný dotaz pomocí `WHERE (1)`.
+
+
+Whitelist sloupců
+-----------------
+
+Pro bezpečnou práci s názvy sloupců potřebujeme mechanismus, který zajistí, že uživatel může pracovat pouze s povolenými sloupci a nemůže přidat vlastní. Mohli bychom se pokusit detekovat a blokovat nebezpečné názvy sloupců (blacklist), ale tento přístup je nespolehlivý - útočník může vždy přijít s novým způsobem, jak nebezpečný název sloupce zapsat, který jsme nepředvídali.
+
+Proto je mnohem bezpečnější obrátit logiku a definovat explicitní seznam povolených sloupců (whitelist):
+
+```php
+// Sloupce, které může uživatel upravovat
+$allowedColumns = ['name', 'email', 'active'];
+
+// Odstraníme všechny nepovolené sloupce ze vstupu
+$filteredData = array_intersect_key($userData, $allowedColumns);
+
+// ✅ Nyní můžeme bezpečně použít v dotazech, jako například:
+$database->query('INSERT INTO users', $filteredData);
+$table->update($filteredData);
+$table->where($filteredData);
+```
+
+
+Dynamické identifikátory
+========================
+
+Pro dynamické názvy tabulek a sloupců použijte zástupný symbol `?name`. Ten zajistí správné escapování identifikátorů podle syntaxe dané databáze (např. pomocí zpětných uvozovek v MySQL):
+
+```php
+// ✅ Bezpečné použití důvěryhodných identifikátorů
+$table = 'users';
+$column = 'name';
+$database->query('SELECT ?name FROM ?name', $column, $table);
+// Výsledek v MySQL: SELECT `name` FROM `users`
+```
+
+Důležité: symbol `?name` používejte pouze pro důvěryhodné hodnoty definované v kódu aplikace. Pro hodnoty od uživatele použijte opět [whitelist|#Whitelist sloupců]. Jinak se vystavujete bezpečnostním rizikům:
+
+```php
+// ❌ NEBEZPEČNÉ - nikdy nepoužívejte vstup od uživatele
+$database->query('SELECT ?name FROM users', $_GET['column']);
+```

@@ -1,0 +1,515 @@
+SQL Way
+*******
+
+.[perex]
+You can work with Nette Database in two ways: by writing SQL queries (SQL way) or by letting SQL be generated automatically ([Explorer way |explorer]). SQL way allows you to safely build queries while keeping full control over their structure.
+
+.[note]
+See [Connection and Configuration |guide#Connection and Configuration] for details about database connection setup.
+
+
+Basic Querying
+==============
+
+The `query()` method executes database queries and returns a [ResultSet | api:Nette\Database\ResultSet] object representing the result. If the query fails, the method [throws an exception | exceptions].
+You can loop through the query result using a `foreach` loop or use one of the [helper functions | #Fetching Data].
+
+```php
+$result = $database->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+}
+```
+
+To safely insert values into SQL queries, use parameterized queries. Nette Database makes this very straightforward: just append a comma and the value to the SQL query.
+
+```php
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+```
+
+For multiple parameters, you can either interleave the SQL query with parameters:
+
+```php
+$database->query('SELECT * FROM users WHERE name = ?', $name, 'AND age > ?', $age);
+```
+
+Or write the entire SQL query first and then append all parameters:
+
+```php
+$database->query('SELECT * FROM users WHERE name = ? AND age > ?', $name, $age);
+```
+
+
+Protection Against SQL Injection
+================================
+
+Why is it important to use parameterized queries? Because they protect you from SQL injection attacks, where attackers can inject malicious SQL commands to manipulate or access database data.
+
+.[warning]
+**Never insert variables directly into an SQL query!** Always use parameterized queries to protect yourself against SQL injection.
+
+```php
+// ❌ UNSAFE CODE - vulnerable to SQL injection
+$database->query("SELECT * FROM users WHERE name = '$name'");
+
+// ✅ Safe parameterized query
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+```
+
+Be sure to familiarize yourself with [potential security risks |security].
+
+
+Query Techniques
+================
+
+
+WHERE Conditions
+----------------
+
+You can write `WHERE` conditions as an associative array, where the keys are column names and the values are the data to compare. Nette Database automatically selects the most appropriate SQL operator based on the value type.
+
+```php
+$database->query('SELECT * FROM users WHERE', [
+	'name' => 'John',
+	'active' => true,
+]);
+// WHERE `name` = 'John' AND `active` = 1
+```
+
+You can also explicitly specify the operator in the key:
+
+```php
+$database->query('SELECT * FROM users WHERE', [
+	'age >' => 25,           // uses the > operator
+	'name LIKE' => '%John%', // uses the LIKE operator
+	'email NOT LIKE' => '%example.com%', // uses the NOT LIKE operator
+]);
+// WHERE `age` > 25 AND `name` LIKE '%John%' AND `email` NOT LIKE '%example.com%'
+```
+
+Special cases like `null` values or arrays are handled automatically:
+
+```php
+$database->query('SELECT * FROM products WHERE', [
+	'name' => 'Laptop',         // uses the = operator
+	'category_id' => [1, 2, 3], // uses IN
+	'description' => null,      // uses IS NULL
+]);
+// WHERE `name` = 'Laptop' AND `category_id` IN (1, 2, 3) AND `description` IS NULL
+```
+
+For negative conditions, use the `NOT` operator:
+
+```php
+$database->query('SELECT * FROM products WHERE', [
+	'name NOT' => 'Laptop',         // uses the <> operator
+	'category_id NOT' => [1, 2, 3], // uses NOT IN
+	'description NOT' => null,      // uses IS NOT NULL
+	'id' => [],                     // skipped
+]);
+// WHERE `name` <> 'Laptop' AND `category_id` NOT IN (1, 2, 3) AND `description` IS NOT NULL
+```
+
+By default, conditions are combined using the `AND` operator. You can change this behavior using the [placeholder ?or | #SQL Construction Hints].
+
+
+ORDER BY Rules
+--------------
+
+The `ORDER BY` clause can be defined as an array, where keys represent columns and values are booleans indicating ascending order:
+
+```php
+$database->query('SELECT id FROM author ORDER BY', [
+	'id' => true,  // ascending
+	'name' => false, // descending
+]);
+// SELECT id FROM author ORDER BY `id`, `name` DESC
+```
+
+
+Inserting Data (INSERT)
+-----------------------
+
+To insert records, use the SQL `INSERT` statement.
+
+```php
+$values = [
+	'name' => 'John Doe',
+	'email' => 'john@example.com',
+];
+$database->query('INSERT INTO users ?', $values);
+$userId = $database->getInsertId();
+```
+
+The `getInsertId()` method returns the ID of the last inserted row. For certain databases (e.g., PostgreSQL), you must specify the sequence name using `$database->getInsertId($sequenceId)`.
+
+You can also pass [#special values], such as files, DateTime objects, or enum types, as parameters.
+
+Inserting multiple records at once:
+
+```php
+$database->query('INSERT INTO users ?', [
+	['name' => 'User 1', 'email' => 'user1@mail.com'],
+	['name' => 'User 2', 'email' => 'user2@mail.com'],
+]);
+```
+
+Performing a batch INSERT is much faster because only a single database query is executed instead of multiple individual queries.
+
+**Security Note:** Never use unvalidated data as `$values`. Familiarize yourself with [possible risks |security#safe-work-with-columns].
+
+
+Updating Data (UPDATE)
+----------------------
+
+To update records, use the SQL `UPDATE` statement.
+
+```php
+// Update a single record
+$values = [
+	'name' => 'John Smith',
+];
+$result = $database->query('UPDATE users SET ? WHERE id = ?', $values, 1);
+```
+
+You can check the number of affected rows using `$result->getRowCount()`.
+
+You can use the `+=` and `-=` operators in `UPDATE`:
+
+```php
+$database->query('UPDATE users SET ? WHERE id = ?', [
+	'login_count+=' => 1, // increment login_count
+], 1);
+```
+
+To insert or update a record if it already exists, use the `ON DUPLICATE KEY UPDATE` technique:
+
+```php
+$values = [
+	'name' => $name,
+	'year' => $year,
+];
+$database->query('INSERT INTO users ? ON DUPLICATE KEY UPDATE ?',
+	$values + ['id' => $id],
+	$values,
+);
+// INSERT INTO users (`id`, `name`, `year`) VALUES (123, 'Jim', 1978)
+//   ON DUPLICATE KEY UPDATE `name` = 'Jim', `year` = 1978
+```
+
+Note that Nette Database recognizes the context of the SQL command in which a parameter with an array is used and generates the SQL code accordingly. For example, it constructed `(id, name, year) VALUES (123, 'Jim', 1978)` from the first array, while it converted the second into `name = 'Jim', year = 1978`. This is covered in more detail in the section [Hints for constructing SQL |#SQL Construction Hints].
+
+
+Deleting Data (DELETE)
+----------------------
+
+To delete records, use the SQL `DELETE` statement. Example with the number of deleted rows:
+
+```php
+$count = $database->query('DELETE FROM users WHERE id = ?', 1)
+	->getRowCount();
+```
+
+
+SQL Construction Hints
+----------------------
+
+SQL placeholders allow you to control how parameter values are incorporated into SQL expressions:
+
+| Hint       | Description                                     | Automatically Used For
+|------------|-------------------------------------------------|-----------------------------
+| `?name`    | Used for table or column names                  | -
+| `?values`  | Generates `(key, ...) VALUES (value, ...)`      | `INSERT ... ?`, `REPLACE ... ?`
+| `?set`     | Generates assignments `key = value, ...`        | `SET ?`, `KEY UPDATE ?`
+| `?and`     | Joins conditions in an array with `AND`         | `WHERE ?`, `HAVING ?`
+| `?or`      | Joins conditions in an array with `OR`          | -
+| `?order`   | Generates the `ORDER BY` clause                 | `ORDER BY ?`, `GROUP BY ?`
+
+For dynamically inserting table or column names, use the `?name` placeholder. Nette Database ensures proper escaping according to the database's conventions (e.g., enclosing in backticks for MySQL).
+
+```php
+$table = 'users';
+$column = 'name';
+$database->query('SELECT ?name FROM ?name WHERE id = 1', $column, $table);
+// SELECT `name` FROM `users` WHERE id = 1 (in MySQL)
+```
+
+**Warning:** Only use the `?name` placeholder for validated table and column names. Otherwise, you risk [security vulnerabilities |security#Dynamic Identifiers].
+
+Other hints are usually not necessary to specify, as Nette uses smart auto-detection when constructing SQL queries (see the third column of the table). However, you can use them in situations where you want to combine conditions using `OR` instead of `AND`:
+
+```php
+$database->query('SELECT * FROM users WHERE ?or', [
+	'name' => 'John',
+	'email' => 'john@example.com',
+]);
+// SELECT * FROM users WHERE `name` = 'John' OR `email` = 'john@example.com'
+```
+
+
+Special Values
+--------------
+
+In addition to standard scalar types (e.g., `string`, `int`, `bool`), you can also pass special values as parameters:
+
+- Files: Use `fopen('file.png', 'r')` to insert the binary content of a file.
+- Date and Time: `DateTime` objects are automatically converted to the database's date format.
+- Enum Values: Instances of `enum` are converted to their corresponding values.
+- SQL Literals: Created using `Connection::literal('NOW()')`, these are inserted directly into the query.
+
+```php
+$database->query('INSERT INTO articles ?', [
+	'title' => 'My Article',
+	'published_at' => new DateTime,
+	'content' => fopen('image.png', 'r'),
+	'state' => Status::Draft,
+]);
+```
+
+For databases that lack native support for the `datetime` type (e.g., SQLite and Oracle), `DateTime` values are converted according to the `formatDateTime` configuration option (default: `U` for Unix timestamp).
+
+
+SQL Literals
+------------
+
+In some cases, you may need to insert raw SQL code as a value without treating it as a string or escaping it. For this, use objects of the `Nette\Database\SqlLiteral` class, which can be created using the `Connection::literal()` method.
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year >' => $database::literal('YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (`year` > YEAR())
+```
+
+Alternatively:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (year > YEAR())
+```
+
+SQL literals can also contain parameters:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > ? AND year < ?', $min, $max),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (year > 1978 AND year < 2017)
+```
+
+This allows for flexible combinations:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('?or', [
+		'active' => true,
+		'role' => $role,
+	]),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (`active` = 1 OR `role` = 'admin')
+```
+
+
+Fetching Data
+=============
+
+
+Shortcuts for SELECT Queries
+----------------------------
+
+To simplify data retrieval, the `Connection` class provides several shortcuts that combine a `query()` call with a subsequent `fetch*()` call. These methods accept the same parameters as `query()`, i.e., an SQL query and optional parameters.
+A detailed description of the `fetch*()` methods can be found [below|#fetch()].
+
+| `fetch($sql, ...$params): ?Row`       | Executes the query and fetches the first row as a `Row` object.
+| `fetchAll($sql, ...$params): array`   | Executes the query and fetches all rows as an array of `Row` objects.
+| `fetchPairs($sql, ...$params): array` | Executes the query and fetches an associative array where the first column is the key and the second is the value.
+| `fetchField($sql, ...$params): mixed` | Executes the query and fetches the value of the first cell in the first row.
+| `fetchList($sql, ...$params): ?array` | Executes the query and fetches the first row as an indexed array.
+
+Example:
+
+```php
+// fetchField() - returns the value of the first cell
+$count = $database->query('SELECT COUNT(*) FROM articles')
+	->fetchField();
+```
+
+
+`foreach` - Iterating Over Rows
+-------------------------------
+
+After executing a query, a [ResultSet|api:Nette\Database\ResultSet] object is returned, which allows you to iterate over the results in various ways. The simplest and most memory-efficient way to fetch rows is by iterating in a `foreach` loop. This method processes rows one at a time and avoids storing all data in memory at once.
+
+```php
+$result = $database->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+	// ...
+}
+```
+
+.[note]
+The `ResultSet` can only be iterated once. If you need to iterate over it multiple times, you must first load the data into an array, for example, using the `fetchAll()` method.
+
+
+fetch(): ?Row .[method]
+-----------------------
+
+Executes the query and fetches a single row as a `Row` object. If no more rows are available, it returns `null`. This method advances the internal pointer to the next row.
+
+```php
+$result = $database->query('SELECT * FROM users');
+$row = $result->fetch(); // fetches the first row
+if ($row) {
+	echo $row->name;
+}
+```
+
+
+fetchAll(): array .[method]
+---------------------------
+
+Fetches all remaining rows from the `ResultSet` as an array of `Row` objects.
+
+```php
+$result = $database->query('SELECT * FROM users');
+$rows = $result->fetchAll(); // fetches all rows
+foreach ($rows as $row) {
+	echo $row->name;
+}
+```
+
+
+fetchPairs(string|int|null $key = null, string|int|null $value = null): array .[method]
+---------------------------------------------------------------------------------------
+
+Fetches results as an associative array. The first argument specifies the column to use as the key, and the second specifies the column to use as the value:
+
+```php
+$result = $database->query('SELECT id, name FROM users');
+$names = $result->fetchPairs('id', 'name');
+// [1 => 'John Doe', 2 => 'Jane Doe', ...]
+```
+
+If only the first parameter is provided, the value will be the entire row (as a `Row` object):
+
+```php
+$rows = $result->fetchPairs('id');
+// [1 => Row(id: 1, name: 'John'), 2 => Row(id: 2, name: 'Jane'), ...]
+```
+
+In case of duplicate keys, the value from the last row is used. When using `null` as the key, the array will be indexed numerically from zero (in which case no collisions occur):
+
+```php
+$names = $result->fetchPairs(null, 'name');
+// [0 => 'John Doe', 1 => 'Jane Doe', ...]
+```
+
+
+fetchPairs(Closure $callback): array .[method]
+----------------------------------------------
+
+Alternatively, you can provide a callback that determines the key-value pairs or values for each row.
+
+```php
+$result = $database->query('SELECT * FROM users');
+$items = $result->fetchPairs(fn($row) => "$row->id - $row->name");
+// ['1 - John', '2 - Jane', ...]
+
+// The callback can also return an array with a key & value pair:
+$names = $result->fetchPairs(fn($row) => [$row->name, $row->age]);
+// ['John' => 46, 'Jane' => 21, ...]
+```
+
+
+fetchField(): mixed .[method]
+-----------------------------
+
+Fetches the value of the first cell in the current row. If no more rows are available, it returns `null`. This method advances the internal pointer to the next row.
+
+```php
+$result = $database->query('SELECT name FROM users');
+$name = $result->fetchField(); // fetches the name from the first row
+```
+
+
+fetchList(): ?array .[method]
+-----------------------------
+
+Fetches the row as an indexed array. If no more rows are available, it returns `null`. This method advances the internal pointer to the next row.
+
+```php
+$result = $database->query('SELECT name, email FROM users');
+$row = $result->fetchList(); // ['John', 'john@example.com']
+```
+
+
+getRowCount(): ?int .[method]
+-----------------------------
+
+Returns the number of rows affected by the last `UPDATE` or `DELETE` query. For `SELECT` queries, it returns the number of rows fetched, but this may not always be known—in such cases, it returns `null`.
+
+
+getColumnCount(): ?int .[method]
+--------------------------------
+
+Returns the number of columns in the `ResultSet`.
+
+
+Query Information
+=================
+
+To retrieve details about the most recently executed query, use:
+
+```php
+echo $database->getLastQueryString(); // outputs the SQL query
+
+$result = $database->query('SELECT * FROM articles');
+echo $result->getQueryString();    // outputs the SQL query
+echo $result->getTime();           // outputs the execution time in seconds
+```
+
+To display the result as an HTML table, use:
+
+```php
+$result = $database->query('SELECT * FROM articles');
+$result->dump();
+```
+
+You can also retrieve information about column types from the `ResultSet`:
+
+```php
+$result = $database->query('SELECT * FROM articles');
+$types = $result->getColumnTypes();
+
+foreach ($types as $column => $type) {
+	echo "$column is of type $type->type"; // e.g., 'id is of type int'
+}
+```
+
+
+Query Logging
+-------------
+
+You can implement custom query logging. The `onQuery` event is an array of callbacks that are invoked after each query execution:
+
+```php
+$database->onQuery[] = function ($database, $result) use ($logger) {
+	$logger->info('Query: ' . $result->getQueryString());
+	$logger->info('Time: ' . $result->getTime());
+
+	if ($result->getRowCount() > 1000) {
+		$logger->warning('Large result set: ' . $result->getRowCount() . ' rows');
+	}
+};
+```

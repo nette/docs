@@ -1,0 +1,185 @@
+Riscos de segurança
+*******************
+
+<div class=perex>
+
+Os bancos de dados geralmente contêm dados confidenciais e permitem a realização de operações perigosas. Para trabalhar com segurança com o Nette Database, os principais aspectos são:
+
+- Entender a diferença entre API segura e insegura
+- Usar consultas parametrizadas
+- Validar adequadamente os dados de entrada
+
+</div>
+
+
+O que é injeção de SQL? .[#toc-what-is-sql-injection]
+=====================================================
+
+A injeção de SQL é o risco de segurança mais grave quando se trabalha com bancos de dados. Ela ocorre quando a entrada não filtrada do usuário se torna parte de uma consulta SQL. Um invasor pode inserir seus próprios comandos SQL e, assim:
+- Extrair dados não autorizados
+- Modificar ou excluir dados no banco de dados
+- Contornar a autenticação
+
+```php
+// DANGEROUS CODE - vulnerável à injeção de SQL
+$database->query("SELECT * FROM users WHERE name = '$_GET[name]'");
+
+// Um invasor pode inserir um valor como: ' OR '1'='1
+// A consulta resultante seria: SELECT * FROM users WHERE name = '' OR '1'='1'
+// Que retorna todos os usuários
+```
+
+O mesmo se aplica ao Database Explorer:
+
+```php
+// CÓDIGO PERIGOSO - vulnerável à injeção de SQL
+$table->where('name = ' . $_GET['name']);
+$table->where("name = '$_GET[name]'");
+```
+
+
+Consultas parametrizadas seguras .[#toc-secure-parameterized-queries]
+=====================================================================
+
+A defesa fundamental contra a injeção de SQL são as consultas parametrizadas. O Nette Database oferece várias maneiras de usá-las.
+
+A maneira mais simples é usar **colocadores de ponto de interrogação**:
+
+```php
+// Consulta parametrizada segura
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+// Condição segura no Explorer
+$table->where('name = ?', $name);
+```
+
+Isso se aplica a todos os outros métodos do [Database Explorer |explorer] que permitem a inserção de expressões com marcadores de posição e parâmetros de ponto de interrogação.
+
+Para as cláusulas `INSERT`, `UPDATE` ou `WHERE`, você pode passar valores em uma matriz:
+
+```php
+// INSERÇÃO segura
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'email' => $email,
+]);
+
+// INSERÇÃO segura no Explorer
+$table->insert([
+	'name' => $name,
+	'email' => $email,
+]);
+```
+
+
+Validação do valor do parâmetro .[#toc-parameter-value-validation]
+==================================================================
+
+As consultas parametrizadas são a base do trabalho seguro com bancos de dados. Entretanto, os valores passados para elas devem passar por vários níveis de validação:
+
+
+Verificação de tipo .[#toc-type-checking]
+-----------------------------------------
+
+**É fundamental garantir o tipo de dados correto dos parâmetros** - essa é uma condição necessária para usar o Nette Database com segurança. O banco de dados pressupõe que todos os dados de entrada tenham o tipo de dados correto correspondente à coluna.
+
+Por exemplo, se `$name` nos exemplos anteriores se tornasse inesperadamente uma matriz em vez de uma cadeia de caracteres, o Nette Database tentaria inserir todos os seus elementos na consulta SQL, o que resultaria em um erro. Portanto, **nunca use** dados não validados de `$_GET`, `$_POST` ou `$_COOKIE` diretamente em consultas de banco de dados.
+
+
+Validação de formato .[#toc-format-validation]
+----------------------------------------------
+
+O segundo nível verifica o formato dos dados, por exemplo, garantindo que as cadeias de caracteres sejam codificadas em UTF-8 e que seu comprimento corresponda à definição da coluna, ou verificando se os valores numéricos estão dentro do intervalo permitido para o tipo de dados da coluna.
+
+Nesse nível, você pode confiar parcialmente no próprio banco de dados - muitos bancos de dados rejeitam dados inválidos. Entretanto, o comportamento pode variar: alguns podem truncar cadeias longas silenciosamente ou cortar números que estejam fora do intervalo.
+
+
+Validação específica de domínio .[#toc-domain-specific-validation]
+------------------------------------------------------------------
+
+O terceiro nível envolve verificações lógicas específicas do seu aplicativo. Por exemplo, verificar se os valores das caixas de seleção correspondem às opções disponíveis, se os números estão dentro de um intervalo esperado (por exemplo, idade de 0 a 150 anos) ou se as relações entre os valores fazem sentido.
+
+
+Métodos de validação recomendados .[#toc-recommended-validation-methods]
+------------------------------------------------------------------------
+
+- Use o [Nette Forms |forms:], que trata automaticamente da validação adequada de todas as entradas.
+- Use [Presenters |application:] e declare os tipos de dados de parâmetros nos métodos `action*()` e `render*()`.
+- Ou implemente uma camada de validação personalizada usando ferramentas PHP padrão, como `filter_var()`.
+
+
+Trabalho seguro com colunas .[#toc-safe-work-with-columns]
+==========================================================
+
+Na seção anterior, abordamos como validar corretamente os valores dos parâmetros. No entanto, ao usar matrizes em consultas SQL, é necessário prestar a mesma atenção às suas chaves.
+
+```php
+// CÓDIGO PERIGOSO - chaves de matriz não são higienizadas
+$database->query('INSERT INTO users', $_POST);
+```
+
+Para os comandos INSERT e UPDATE, essa é uma falha de segurança importante: um invasor pode inserir ou modificar qualquer coluna no banco de dados. Ele poderia, por exemplo, definir `is_admin = 1` ou inserir dados arbitrários em colunas confidenciais (conhecido como vulnerabilidade de atribuição em massa).
+
+Nas condições WHERE, isso é ainda mais perigoso porque elas podem conter operadores:
+
+```php
+// CÓDIGO PERIGOSO - chaves de matriz não são higienizadas
+$_POST['salary >'] = 100000;
+$database->query('SELECT * FROM users WHERE', $_POST);
+// executa a consulta WHERE (`salário` > 100000)
+```
+
+Um invasor pode usar essa abordagem para descobrir sistematicamente os salários dos funcionários. Ele pode começar com uma consulta de salários acima de 100.000, depois abaixo de 50.000 e, ao reduzir gradualmente o intervalo, pode revelar os salários aproximados de todos os funcionários. Esse tipo de ataque é chamado de enumeração SQL.
+
+Os métodos `where()` e `whereOr()` são ainda [mais flexíveis |explorer#where] e suportam expressões SQL, incluindo operadores e funções, tanto nas chaves quanto nos valores. Isso dá ao invasor a capacidade de realizar injeções complexas de SQL:
+
+```php
+// CÓDIGO PERIGOSO - o invasor pode inserir seu próprio SQL
+$_POST = ['0) UNION SELECT name, salary FROM users WHERE (1'];
+$table->where($_POST);
+// executa a consulta WHERE (0) UNION SELECT nome, salário FROM usuários WHERE (1)
+```
+
+Esse ataque encerra a condição original com `0)`, anexa seu próprio `SELECT` usando `UNION` para obter dados confidenciais da tabela `users` e encerra com uma consulta sintaticamente correta usando `WHERE (1)`.
+
+
+Lista de permissões de colunas .[#toc-column-whitelist]
+-------------------------------------------------------
+
+Para trabalhar com segurança com nomes de colunas, é necessário um mecanismo que garanta que os usuários só possam interagir com as colunas permitidas e não possam adicionar suas próprias colunas. A tentativa de detectar e bloquear nomes de colunas perigosos (lista negra) não é confiável - um invasor sempre pode inventar uma nova maneira de escrever um nome de coluna perigoso que você não previu.
+
+Portanto, é muito mais seguro inverter a lógica e definir uma lista explícita de colunas permitidas (whitelisting):
+
+```php
+// Colunas que o usuário tem permissão para modificar
+$allowedColumns = ['name', 'email', 'active'];
+
+// Remover todas as colunas não autorizadas da entrada
+$filteredData = array_intersect_key($userData, array_flip($allowedColumns));
+
+// Agora é seguro usar em consultas, como:
+$database->query('INSERT INTO users', $filteredData);
+$table->update($filteredData);
+$table->where($filteredData);
+```
+
+
+Identificadores dinâmicos .[#toc-dynamic-identifiers]
+=====================================================
+
+Para nomes dinâmicos de tabelas e colunas, use o espaço reservado `?name`. Isso garante o escape adequado dos identificadores de acordo com a sintaxe do banco de dados fornecido (por exemplo, usando backticks no MySQL):
+
+```php
+// Uso seguro de identificadores confiáveis
+$table = 'users';
+$column = 'name';
+$database->query('SELECT ?name FROM ?name', $column, $table);
+// Resultado no MySQL: SELECT `nome` FROM `usuários`
+```
+
+Importante: use o símbolo `?name` somente para valores confiáveis definidos no código do aplicativo. Para valores fornecidos pelo usuário, use uma [lista branca |#Column Whitelist] novamente. Caso contrário, você corre o risco de sofrer vulnerabilidades de segurança:
+
+```php
+// PERIGOSO - nunca use a entrada do usuário
+$database->query('SELECT ?name FROM users', $_GET['column']);
+```

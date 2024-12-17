@@ -1,0 +1,515 @@
+Način SQL
+*********
+
+.[perex]
+S podatkovno bazo Nette lahko delate na dva načina: s pisanjem poizvedb SQL (način SQL) ali s samodejnim generiranjem SQL[(način Explorer) |explorer]. Način SQL vam omogoča varno sestavljanje poizvedb, pri čemer ohranite popoln nadzor nad njihovo strukturo.
+
+.[note]
+Za podrobnosti o nastavitvi povezave s podatkovno bazo glejte [Povezava in konfiguracija |guide#Connection and Configuration].
+
+
+Osnovno poizvedovanje .[#toc-basic-querying]
+============================================
+
+Metoda `query()` izvede poizvedbe po zbirki podatkov in vrne objekt [ResultSet | api:Nette\Database\ResultSet], ki predstavlja rezultat. Če poizvedba ni uspešna, metoda [vrže izjemo | exceptions].
+Skozi rezultat poizvedbe se lahko zavrtite z zanko `foreach` ali pa uporabite eno od [pomožnih funkcij | #Fetching Data].
+
+```php
+$result = $database->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+}
+```
+
+Za varno vstavljanje vrednosti v poizvedbe SQL uporabite parametrirane poizvedbe. V podatkovni zbirki Nette je to zelo preprosto: poizvedbi SQL preprosto dodajte vejico in vrednost.
+
+```php
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+```
+
+Za več parametrov lahko poizvedbo SQL prepletete s parametri:
+
+```php
+$database->query('SELECT * FROM users WHERE name = ?', $name, 'AND age > ?', $age);
+```
+
+ali pa najprej napišete celotno poizvedbo SQL in nato dodate vse parametre:
+
+```php
+$database->query('SELECT * FROM users WHERE name = ? AND age > ?', $name, $age);
+```
+
+
+Zaščita pred vdorom SQL .[#toc-protection-against-sql-injection]
+================================================================
+
+Zakaj je pomembno uporabljati parametrirane poizvedbe? Ker vas ščitijo pred napadi z vbrizgavanjem SQL, pri katerih lahko napadalci vnesejo zlonamerne ukaze SQL in tako manipulirajo s podatki v zbirki podatkov ali dostopajo do njih.
+
+.[warning]
+** Nikoli ne vstavljajte spremenljivk neposredno v poizvedbo SQL!** Za zaščito pred vbrizgavanjem SQL vedno uporabljajte parametrirane poizvedbe.
+
+```php
+// ❌ NEVARNA KODA - ranljiva za vbrizgavanje SQL
+$database->query("SELECT * FROM users WHERE name = '$name'");
+
+// ✅ Varna poizvedba s parametri
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+```
+
+Seznanite se z [morebitnimi varnostnimi tveganji | security].
+
+
+Tehnike poizvedovanja .[#toc-query-techniques]
+==============================================
+
+
+Pogoji WHERE .[#toc-where-conditions]
+-------------------------------------
+
+Pogoje `WHERE` lahko zapišete kot asociativno polje, kjer so ključi imena stolpcev, vrednosti pa podatki za primerjavo. Podatkovna baza Nette samodejno izbere najprimernejši operator SQL glede na vrsto vrednosti.
+
+```php
+$database->query('SELECT * FROM users WHERE', [
+	'name' => 'John',
+	'active' => true,
+]);
+// Kjer je `ime` = 'John' IN `aktivno` = 1
+```
+
+Operater lahko tudi izrecno določite v ključu:
+
+```php
+$database->query('SELECT * FROM users WHERE', [
+	'age >' => 25,           // uporablja operator >
+	'name LIKE' => '%John%', // uporablja operator LIKE
+	'email NOT LIKE' => '%example.com%', // uporablja operator NOT LIKE
+]);
+// Kjer `starost` > 25 IN `imamo` LIKE '%John%' IN `pošta` NI LIKE '%example.com%'
+```
+
+Posebni primeri, kot so vrednosti `null` ali polja, se obravnavajo samodejno:
+
+```php
+$database->query('SELECT * FROM products WHERE', [
+	'name' => 'Laptop',         // uporablja operator =
+	'category_id' => [1, 2, 3], // uporablja IN
+	'description' => null,      // uporablja IS NULL
+]);
+// Kjer `name` = 'Laptop' IN `category_id` IN (1, 2, 3) IN `description` JE NULL
+```
+
+Za negativne pogoje uporabite operator `NOT`:
+
+```php
+$database->query('SELECT * FROM products WHERE', [
+	'name NOT' => 'Laptop',         // uporablja operator <>
+	'category_id NOT' => [1, 2, 3], // uporablja izraz NOT IN
+	'description NOT' => null,      // uporablja IS NOT NULL
+	'id' => [],                     // preskočeno
+]);
+// KER `name` <> 'Laptop' IN `category_id` NI V (1, 2, 3) IN `description` NI NULL
+```
+
+Privzeto se pogoji kombinirajo z operatorjem `AND`. To obnašanje lahko spremenite z uporabo [nadomestnega elementa ?or | #SQL Construction Hints].
+
+
+ORDER BY Pravila .[#toc-order-by-rules]
+---------------------------------------
+
+Klavzulo `ORDER BY` je mogoče definirati kot polje, kjer ključi predstavljajo stolpce, vrednosti pa so logične vrednosti, ki označujejo naraščajoči vrstni red:
+
+```php
+$database->query('SELECT id FROM author ORDER BY', [
+	'id' => true,  // naraščajoče
+	'name' => false, // padajoče
+]);
+// SELECT id FROM avtor ORDER BY `id`, `name` DESC
+```
+
+
+Vstavljanje podatkov (INSERT) .[#toc-inserting-data-insert]
+-----------------------------------------------------------
+
+Za vstavljanje zapisov uporabite stavek SQL `INSERT`.
+
+```php
+$values = [
+	'name' => 'John Doe',
+	'email' => 'john@example.com',
+];
+$database->query('INSERT INTO users ?', $values);
+$userId = $database->getInsertId();
+```
+
+Metoda `getInsertId()` vrne ID zadnje vstavljene vrstice. Pri nekaterih podatkovnih zbirkah (npr. PostgreSQL) morate določiti ime zaporedja z uporabo stavka `$database->getInsertId($sequenceId)`.
+
+Kot parametre lahko posredujete tudi [posebne vrednosti, |#special values] kot so datoteke, objekti DateTime ali vrste enum.
+
+Vstavljanje več zapisov naenkrat:
+
+```php
+$database->query('INSERT INTO users ?', [
+	['name' => 'User 1', 'email' => 'user1@mail.com'],
+	['name' => 'User 2', 'email' => 'user2@mail.com'],
+]);
+```
+
+Izvedba paketnega vnosa INSERT je veliko hitrejša, saj se namesto več posameznih poizvedb izvede le ena poizvedba po zbirki podatkov.
+
+**Varnostna opomba:** Nikoli ne uporabljajte nepreverjenih podatkov kot `$values`. Seznanite se z [možnimi tveganji |security#safe-work-with-columns].
+
+
+Posodabljanje podatkov (UPDATE) .[#toc-updating-data-update]
+------------------------------------------------------------
+
+Za posodobitev zapisov uporabite stavek SQL `UPDATE`.
+
+```php
+// Posodobitev enega zapisa
+$values = [
+	'name' => 'John Smith',
+];
+$result = $database->query('UPDATE users SET ? WHERE id = ?', $values, 1);
+```
+
+Število prizadetih vrstic lahko preverite z uporabo stavka `$result->getRowCount()`.
+
+Operatorja `+=` in `-=` lahko uporabite v `UPDATE`:
+
+```php
+$database->query('UPDATE users SET ? WHERE id = ?', [
+	'login_count+=' => 1, // povečati število prijav
+], 1);
+```
+
+Če želite vstaviti ali posodobiti zapis, če že obstaja, uporabite tehniko `ON DUPLICATE KEY UPDATE`:
+
+```php
+$values = [
+	'name' => $name,
+	'year' => $year,
+];
+$database->query('INSERT INTO users ? ON DUPLICATE KEY UPDATE ?',
+	$values + ['id' => $id],
+	$values,
+);
+// INSERT INTO users (`id`, `name`, `year`) VALUES (123, 'Jim', 1978)
+//  ON DUPLICATE KEY UPDATE `name` = 'Jim', `year` = 1978
+```
+
+Upoštevajte, da podatkovna baza Nette prepozna kontekst ukaza SQL, v katerem je uporabljen parameter s poljem, in ustrezno generira kodo SQL. Na primer, iz prvega polja je sestavila `(id, name, year) VALUES (123, 'Jim', 1978)`, medtem ko je drugo polje pretvorila v `name = 'Jim', year = 1978`. To je podrobneje obravnavano v razdelku [Namigi za konstruiranje kode SQL |#SQL Construction Hints].
+
+
+Brisanje podatkov (DELETE) .[#toc-deleting-data-delete]
+-------------------------------------------------------
+
+Za brisanje zapisov uporabite stavek SQL `DELETE`. Primer s številom izbrisanih vrstic:
+
+```php
+$count = $database->query('DELETE FROM users WHERE id = ?', 1)
+	->getRowCount();
+```
+
+
+Namigi za gradnjo SQL .[#toc-sql-construction-hints]
+----------------------------------------------------
+
+Namestna imena SQL omogočajo nadzor nad tem, kako se vrednosti parametrov vključijo v izraze SQL:
+
+| Namig | Opis | Samodejno uporabljeno za
+|------------|-------------------------------------------------|-----------------------------
+| `?name` | Uporablja se za imena tabel ali stolpcev | -
+| `?values` | Ustvari `(key, ...) VALUES (value, ...)` | `INSERT ... ?`, `REPLACE ... ?`
+| `?set` | Ustvari naloge `key = value, ...` | `SET ?`, `KEY UPDATE ?`
+| `?and` | Združuje pogoje v polju s `AND` | `WHERE ?`, `HAVING ?`
+| `?or` | Združuje pogoje v polju z `OR` | -
+| `?order` | Ustvari določilo `ORDER BY` | `ORDER BY ?`, `GROUP BY ?`
+
+Za dinamično vstavljanje imen tabel ali stolpcev uporabite nadomestek `?name`. Podatkovna baza Nette poskrbi za pravilno izločanje v skladu s konvencijami podatkovne baze (npr. zapiranje v zaklepaje za MySQL).
+
+```php
+$table = 'users';
+$column = 'name';
+$database->query('SELECT ?name FROM ?name WHERE id = 1', $column, $table);
+// SELECT `name` FROM `users` WHERE id = 1 (v MySQL)
+```
+
+**Pozorilo:** Za potrjena imena tabel in stolpcev uporabljajte samo nadomestno ime `?name`. V nasprotnem primeru tvegate [varnostne ranljivosti | security#Dynamic Identifiers].
+
+Drugih namigov običajno ni treba navesti, saj Nette pri sestavljanju poizvedb SQL uporablja pametno samodejno zaznavanje (glejte tretji stolpec tabele). Vendar jih lahko uporabite v primerih, ko želite pogoje združiti z uporabo `OR` namesto `AND`:
+
+```php
+$database->query('SELECT * FROM users WHERE ?or', [
+	'name' => 'John',
+	'email' => 'john@example.com',
+]);
+// SELECT * FROM users WHERE `name` = 'John' OR `email` = 'john@example.com'
+```
+
+
+Posebne vrednosti .[#toc-special-values]
+----------------------------------------
+
+Poleg standardnih skalarnih tipov (npr. `string`, `int`, `bool`) lahko kot parametre posredujete tudi posebne vrednosti:
+
+- Datoteke: Za vstavljanje binarne vsebine datoteke uporabite `fopen('file.png', 'r')`.
+- Datum in čas: Predmeti `DateTime` se samodejno pretvorijo v datumsko obliko podatkovne zbirke.
+- Vrednosti enum: instance `enum` se pretvorijo v ustrezne vrednosti.
+- Literali SQL: Ustvarjeni z uporabo `Connection::literal('NOW()')`, se vstavijo neposredno v poizvedbo.
+
+```php
+$database->query('INSERT INTO articles ?', [
+	'title' => 'My Article',
+	'published_at' => new DateTime,
+	'content' => fopen('image.png', 'r'),
+	'state' => Status::Draft,
+]);
+```
+
+Za podatkovne zbirke, ki nimajo lastne podpore za tip `datetime` (npr. SQLite in Oracle), se vrednosti `DateTime` pretvorijo v skladu z nastavitveno možnostjo `formatDateTime` (privzeto: `U` za časovni žig Unix).
+
+
+Literali SQL .[#toc-sql-literals]
+---------------------------------
+
+V nekaterih primerih boste morda morali vstaviti neobdelano kodo SQL kot vrednost, ne da bi jo obravnavali kot niz ali jo izločili. Za to uporabite predmete razreda `Nette\Database\SqlLiteral`, ki jih lahko ustvarite z metodo `Connection::literal()`.
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	'year >' => $database::literal('YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (`year` > YEAR())
+```
+
+Druga možnost:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > YEAR()'),
+]);
+// SELECT * FROM users WHERE (`name` = 'Jim') AND (year > YEAR())
+```
+
+SQL literali lahko vsebujejo tudi parametre:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('year > ? AND year &lt; ?', $min, $max),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (year > 1978 AND year < 2017)
+```
+
+To omogoča prilagodljive kombinacije:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE', [
+	'name' => $name,
+	$database::literal('?or', [
+		'active' => true,
+		'role' => $role,
+	]),
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND (`active` = 1 OR `role` = 'admin')
+```
+
+
+Pridobivanje podatkov .[#toc-fetching-data]
+===========================================
+
+
+Bližnjice za poizvedbe SELECT .[#toc-shortcuts-for-select-queries]
+------------------------------------------------------------------
+
+Za poenostavitev pridobivanja podatkov razred `Connection` ponuja več bližnjic, ki združujejo klic `query()` s poznejšim klicem `fetch*()`. Te metode sprejemajo enake parametre kot `query()`, tj. poizvedbo SQL in neobvezne parametre.
+Podroben opis metod `fetch*()` je na voljo [v nadaljevanju. |#fetch()]
+
+| `fetch($sql, ...$params): ?Row` | Izvede poizvedbo in pridobi prvo vrstico kot objekt `Row`.
+| `fetchAll($sql, ...$params): array` | Izvede poizvedbo in vse vrstice pobere kot polje objektov `Row`.
+| `fetchPairs($sql, ...$params): array` | Izvede poizvedbo in pridobi asociativno polje, kjer je prvi stolpec ključ, drugi pa vrednost.
+| `fetchField($sql, ...$params): mixed` | Izvede poizvedbo in pridobi vrednost prve celice v prvi vrstici.
+| `fetchList($sql, ...$params): ?array` | Izvede poizvedbo in poišče prvo vrstico kot indeksirano polje.
+
+Primer:
+
+```php
+// fetchField() - vrne vrednost prve celice
+$count = $database->query('SELECT COUNT(*) FROM articles')
+	->fetchField();
+```
+
+
+`foreach` - Iteriranje po vrsticah
+----------------------------------
+
+Po izvedbi poizvedbe se vrne objekt [ResultSet |api:Nette\Database\ResultSet], ki omogoča iteracijo nad rezultati na različne načine. Najpreprostejši in pomnilniško najučinkovitejši način pridobivanja vrstic je iteracija v zanki `foreach`. Ta metoda obdeluje vrstice eno za drugo in se izogne shranjevanju vseh podatkov v pomnilnik naenkrat.
+
+```php
+$result = $database->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+	//...
+}
+```
+
+.[note]
+Po zanki `ResultSet` je mogoče iterirati samo enkrat. Če jo morate iterirati večkrat, morate podatke najprej naložiti v polje, na primer z metodo `fetchAll()`.
+
+
+fetch(): ?Row .[method]
+-----------------------
+
+Izvede poizvedbo in pridobi eno vrstico kot objekt `Row`. Če ni na voljo več vrstic, vrne `null`. Ta metoda premakne notranji kazalec na naslednjo vrstico.
+
+```php
+$result = $database->query('SELECT * FROM users');
+$row = $result->fetch(); // pridobi prvo vrstico
+if ($row) {
+	echo $row->name;
+}
+```
+
+
+fetchAll(): array .[method]
+---------------------------
+
+Pobere vse preostale vrstice iz `ResultSet` kot polje objektov `Row`.
+
+```php
+$result = $database->query('SELECT * FROM users');
+$rows = $result->fetchAll(); // pridobi vse vrstice
+foreach ($rows as $row) {
+	echo $row->name;
+}
+```
+
+
+fetchPairs(string|int|null $key = null, string|int|null $value = null): array .[method]
+---------------------------------------------------------------------------------------
+
+Rezultate pobere kot asociativno polje. Prvi argument določa stolpec, ki se uporabi kot ključ, drugi pa stolpec, ki se uporabi kot vrednost:
+
+```php
+$result = $database->query('SELECT id, name FROM users');
+$names = $result->fetchPairs('id', 'name');
+// [1 => 'John Doe', 2 => 'Jane Doe', ...]
+```
+
+Če je naveden samo prvi parameter, bo vrednost celotna vrstica (kot objekt `Row` ):
+
+```php
+$rows = $result->fetchPairs('id');
+// [1 => Vrstica(id: 1, ime: "John"), 2 => Vrstica(id: 2, ime: "Jane"), ...]
+```
+
+V primeru podvojenih ključev se uporabi vrednost iz zadnje vrstice. Pri uporabi `null` kot ključa se polje številčno indeksira od nič (v tem primeru ne pride do kolizij):
+
+```php
+$names = $result->fetchPairs(null, 'name');
+// [0 => 'John Doe', 1 => 'Jane Doe', ...]
+```
+
+
+fetchPairs(Closure $callback): array .[method]
+----------------------------------------------
+
+Namesto tega lahko zagotovite povratni klic, ki določi pare ključ-vrednost ali vrednosti za vsako vrstico.
+
+```php
+$result = $database->query('SELECT * FROM users');
+$items = $result->fetchPairs(fn($row) => "$row->id - $row->name");
+// ['1 - John', '2 - Jane', ...]
+
+// Povratni klic lahko vrne tudi polje s parom ključ in vrednost:
+$names = $result->fetchPairs(fn($row) => [$row->name, $row->age]);
+// ["John" => 46, "Jane" => 21, ...]
+```
+
+
+fetchField(): mixed .[method]
+-----------------------------
+
+Pridobi vrednost prve celice v trenutni vrstici. Če ni na voljo več vrstic, vrne `null`. Ta metoda premakne notranji kazalec na naslednjo vrstico.
+
+```php
+$result = $database->query('SELECT name FROM users');
+$name = $result->fetchField(); // pridobi ime iz prve vrstice
+```
+
+
+fetchList(): ?array .[method]
+-----------------------------
+
+Prevzame vrstico kot indeksirano polje. Če ni na voljo več vrstic, vrne `null`. Ta metoda premakne notranji kazalec na naslednjo vrstico.
+
+```php
+$result = $database->query('SELECT name, email FROM users');
+$row = $result->fetchList(); // ['John', 'john@example.com']
+```
+
+
+getRowCount(): ?int .[method]
+-----------------------------
+
+Vrne število vrstic, na katere je vplivala zadnja poizvedba `UPDATE` ali `DELETE`. Za poizvedbe `SELECT` vrne število pridobljenih vrstic, vendar to ni vedno znano - v takih primerih vrne `null`.
+
+
+getColumnCount(): ?int .[method]
+--------------------------------
+
+Vrne število stolpcev v `ResultSet`.
+
+
+Informacije o poizvedbi .[#toc-query-information]
+=================================================
+
+Če želite pridobiti podrobnosti o zadnji izvedeni poizvedbi, uporabite:
+
+```php
+echo $database->getLastQueryString(); // izpiše poizvedbo SQL
+
+$result = $database->query('SELECT * FROM articles');
+echo $result->getQueryString();    // izpiše poizvedbo SQL
+echo $result->getTime();           // izpiše čas izvajanja v sekundah
+```
+
+Če želite prikazati rezultat kot tabelo HTML, uporabite:
+
+```php
+$result = $database->query('SELECT * FROM articles');
+$result->dump();
+```
+
+Informacije o vrstah stolpcev lahko pridobite tudi s strani `ResultSet`:
+
+```php
+$result = $database->query('SELECT * FROM articles');
+$types = $result->getColumnTypes();
+
+foreach ($types as $column => $type) {
+	echo "$column is of type $type->type"; // npr. 'id je tipa int'
+}
+```
+
+
+Beleženje poizvedb .[#toc-query-logging]
+----------------------------------------
+
+Poizvedete lahko poizvedbo po meri. Dogodek `onQuery` je niz povratnih klicev, ki se sprožijo po vsakem izvajanju poizvedbe:
+
+```php
+$database->onQuery[] = function ($database, $result) use ($logger) {
+	$logger->info('Query: ' . $result->getQueryString());
+	$logger->info('Time: ' . $result->getTime());
+
+	if ($result->getRowCount() > 1000) {
+		$logger->warning('Large result set: ' . $result->getRowCount() . ' rows');
+	}
+};
+```

@@ -1,0 +1,160 @@
+Riscuri de securitate
+*********************
+
+<div class=perex>
+
+Bazele de date conțin adesea date sensibile și permit efectuarea de operațiuni periculoase. Pentru a lucra în siguranță cu Nette Database, aspectele cheie sunt:
+
+- Înțelegerea diferenței dintre API securizat și nesigur
+- Utilizarea interogărilor parametrizate
+- Validarea corespunzătoare a datelor de intrare
+
+</div>
+
+
+Ce este injecția SQL? .[#toc-what-is-sql-injection]
+===================================================
+
+Injecția SQL este cel mai grav risc de securitate atunci când se lucrează cu baze de date. Aceasta apare atunci când datele nefiltrate introduse de utilizator devin parte a unei interogări SQL. Un atacator își poate introduce propriile comenzi SQL și astfel:
+- extrage date neautorizate
+- Modificarea sau ștergerea datelor din baza de date
+- Ocolirea autentificării
+
+```php
+// ❌ COD PERICULOS - vulnerabil la injectarea SQL
+$database->query("SELECT * FROM users WHERE name = '$_GET[name]'");
+
+// Un atacator ar putea introduce o valoare de genul: ' OR '1'='1
+// Interogarea rezultată ar fi: SELECT * FROM users WHERE name = '' OR '1'='1'
+// Care returnează toți utilizatorii
+```
+
+Același lucru este valabil și pentru Database Explorer:
+
+```php
+// ❌ COD PERICULOS - vulnerabil la injectarea SQL
+$table->where('name = ' . $_GET['name']);
+$table->where("name = '$_GET[name]'");
+```
+
+
+Interogări parametrizate securizate .[#toc-secure-parameterized-queries]
+========================================================================
+
+Modul sigur de a introduce valori în interogările SQL este prin interogări parametrizate. Nette Database oferă mai multe modalități de utilizare a acestora.
+
+Cea mai simplă modalitate este de a utiliza **semne de întrebare**:
+
+```php
+// ✅ Interogare parametrizată securizată
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+// ✅ Condiție sigură în Explorer
+$table->where('name = ?', $name);
+```
+
+Acest lucru se aplică tuturor celorlalte metode din [Database Explorer |explorer] care permit inserarea de expresii cu marcaje de întrebare și parametri.
+
+Pentru comenzile INSERT, UPDATE sau clauzele WHERE, putem trece în siguranță valori într-un array:
+
+```php
+// ✅ Secure INSERT
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'email' => $email,
+]);
+
+// ✅ Secure INSERT în Explorer
+$table->insert([
+	'name' => $name,
+	'email' => $email,
+]);
+```
+
+.[warning]
+Cu toate acestea, trebuie să ne asigurăm de [tipul corect de date al parametrilor |#Validating input data].
+
+
+Cheile Array nu sunt API sigure .[#toc-array-keys-are-not-secure-api]
+---------------------------------------------------------------------
+
+În timp ce valorile array-urilor sunt sigure, acest lucru nu este valabil pentru chei!
+
+```php
+// ❌ COD PERICULOS - cheile array nu sunt salubrizate
+$database->query('INSERT INTO users', $_POST);
+```
+
+Pentru comenzile INSERT și UPDATE, acesta este un defect de securitate major - un atacator poate introduce sau modifica orice coloană din baza de date. Acesta ar putea, de exemplu, să seteze `is_admin = 1` sau să introducă date arbitrare în coloane sensibile (cunoscută sub numele de Vulnerabilitatea atribuirii în masă).
+
+În condițiile WHERE, este și mai periculos, deoarece acestea pot conține operatori:
+
+```php
+// ❌ COD PERICULOS - cheile array nu sunt salubrizate
+$_POST['salary >'] = 100000;
+$database->query('SELECT * FROM users WHERE', $_POST);
+// execută interogarea WHERE (`salary` > 100000)
+```
+
+Un atacator poate utiliza această abordare pentru a descoperi sistematic salariile angajaților. Ar putea începe cu o interogare pentru salarii mai mari de 100 000, apoi mai mici de 50 000, iar prin restrângerea treptată a intervalului, poate dezvălui salariile aproximative ale tuturor angajaților. Acest tip de atac se numește enumerare SQL.
+
+Metoda `where()` acceptă expresii SQL, inclusiv operatori și funcții în chei. Acest lucru oferă unui atacator posibilitatea de a efectua injecții SQL complexe:
+
+```php
+// ❌ COD PERICULOS - atacatorul își poate introduce propriul SQL
+$_POST['0) UNION SELECT name, salary FROM users WHERE (?'] = 1;
+$table->where($_POST);
+// execută interogarea WHERE (0) UNION SELECT nume, salariu FROM utilizatori WHERE (1)
+```
+
+Acest atac încheie condiția inițială cu `0)`, adaugă propriul `SELECT` folosind `UNION` pentru a obține date sensibile din tabelul `users` și se încheie cu o interogare corectă din punct de vedere sintactic folosind `WHERE (1)`.
+
+
+Lista albă a coloanelor .[#toc-column-whitelist]
+------------------------------------------------
+
+Dacă doriți să permiteți utilizatorilor să aleagă coloanele, utilizați întotdeauna o listă albă:
+
+```php
+// ✅ Procesare securizată - numai coloane permise
+$allowedColumns = ['name', 'email', 'active'];
+$values = array_intersect_key($_POST, array_flip($allowedColumns));
+
+$database->query('INSERT INTO users', $values);
+```
+
+
+Validarea datelor de intrare .[#toc-validating-input-data]
+==========================================================
+
+**Cel mai important lucru este să se asigure tipul corect de date al parametrilor** - aceasta este o condiție necesară pentru utilizarea sigură a bazei de date Nette. Baza de date presupune că toate datele de intrare au tipul de date corect corespunzător coloanei date.
+
+De exemplu, dacă `$name` din exemplele anterioare ar fi fost neașteptat un array în loc de un șir de caractere, Nette Database ar încerca să introducă toate elementele acestuia în interogarea SQL, rezultând o eroare. Prin urmare, **nu utilizați** niciodată date nevalidate din `$_GET`, `$_POST` sau `$_COOKIE` direct în interogările bazei de date.
+
+La al doilea nivel, verificăm validitatea tehnică a datelor - de exemplu, dacă șirurile de caractere sunt în codificare UTF-8 și dacă lungimea lor corespunde definiției coloanei sau dacă valorile numerice se află în intervalul permis pentru tipul de date al coloanei date. Pentru acest nivel de validare, ne putem baza parțial pe baza de date în sine - multe baze de date vor respinge datele invalide. Cu toate acestea, comportamentul diferitelor baze de date poate varia, unele pot trunchia în mod silențios șirurile lungi sau pot tăia numerele din afara intervalului.
+
+Al treilea nivel reprezintă verificările logice specifice aplicației dumneavoastră. De exemplu, verificarea faptului că valorile din casetele de selectare corespund opțiunilor oferite, că numerele sunt în intervalul așteptat (de exemplu, vârsta 0-150 de ani) sau că interdependențele dintre valori au sens.
+
+Modalități recomandate de implementare a validării:
+- Utilizați [Nette Forms |forms:], care asigură automat validarea completă a tuturor intrărilor
+- Utilizați [Presenters |application:] și specificați tipurile de date pentru parametri în metodele `action*()` și `render*()`
+- Sau implementați propriul strat de validare utilizând instrumente PHP standard precum `filter_var()`
+
+
+Identificatori dinamici .[#toc-dynamic-identifiers]
+===================================================
+
+Pentru numele dinamice ale tabelelor și coloanelor, utilizați marcajul `?name`. Acest lucru asigură scăparea corespunzătoare a identificatorilor în conformitate cu sintaxa bazei de date respective (de exemplu, utilizarea ghilimelelor în MySQL):
+
+```php
+// ✅ Utilizarea în siguranță a identificatorilor de încredere
+$table = 'users';
+$column = 'name';
+$database->query('SELECT ?name FROM ?name', $column, $table);
+// Rezultat în MySQL: SELECT `name` FROM `users`
+
+// ❌ PERICULOS - nu folosiți niciodată datele introduse de utilizator
+$database->query('SELECT ?name FROM users', $_GET['column']);
+```
+
+Important: utilizați simbolul `?name` numai pentru valorile de încredere definite în codul aplicației. Pentru valorile furnizate de utilizator, utilizați din nou o listă albă. În caz contrar, riscați vulnerabilități de securitate, cum ar fi enumerarea SQL menționată anterior sau Vulnerabilitatea atribuirii în masă.

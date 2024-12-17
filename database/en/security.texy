@@ -1,0 +1,185 @@
+Security Risks
+**************
+
+<div class=perex>
+
+Databases often contain sensitive data and allow performing dangerous operations. For secure work with Nette Database, the key aspects are:
+
+- Understanding the difference between secure and insecure API
+- Using parameterized queries
+- Properly validating input data
+
+</div>
+
+
+What is SQL Injection?
+======================
+
+SQL injection is the most serious security risk when working with databases. It occurs when unfiltered user input becomes part of an SQL query. An attacker can insert their own SQL commands and thereby:
+- Extract unauthorized data
+- Modify or delete data in the database
+- Bypass authentication
+
+```php
+// ❌ DANGEROUS CODE - vulnerable to SQL injection
+$database->query("SELECT * FROM users WHERE name = '$_GET[name]'");
+
+// An attacker might enter a value like: ' OR '1'='1
+// The resulting query would be: SELECT * FROM users WHERE name = '' OR '1'='1'
+// Which returns all users
+```
+
+The same applies to Database Explorer:
+
+```php
+// ❌ DANGEROUS CODE - vulnerable to SQL injection
+$table->where('name = ' . $_GET['name']);
+$table->where("name = '$_GET[name]'");
+```
+
+
+Secure Parameterized Queries
+============================
+
+The fundamental defense against SQL injection is parameterized queries. Nette Database provides several ways to use them.
+
+The simplest way is to use **question mark placeholders**:
+
+```php
+// ✅ Secure parameterized query
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+// ✅ Secure condition in Explorer
+$table->where('name = ?', $name);
+```
+
+This applies to all other methods in [Database Explorer|explorer] that allow inserting expressions with question mark placeholders and parameters.
+
+For `INSERT`, `UPDATE`, or `WHERE` clauses, you can pass values in an array:
+
+```php
+// ✅ Secure INSERT
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'email' => $email,
+]);
+
+// ✅ Secure INSERT in Explorer
+$table->insert([
+	'name' => $name,
+	'email' => $email,
+]);
+```
+
+
+Parameter Value Validation
+==========================
+
+Parameterized queries are the cornerstone of secure database work. However, the values passed into them must undergo several levels of validation:
+
+
+Type Checking
+-------------
+
+**Ensuring the correct data type of parameters is critical**—this is a necessary condition for safely using Nette Database. The database assumes that all input data has the correct data type corresponding to the column.
+
+For instance, if `$name` in the previous examples unexpectedly became an array instead of a string, Nette Database would attempt to insert all of its elements into the SQL query, resulting in an error. Therefore, **never use** unvalidated data from `$_GET`, `$_POST`, or `$_COOKIE` directly in database queries.
+
+
+Format Validation
+-----------------
+
+The second level checks the format of the data—for example, ensuring strings are UTF-8 encoded and their length matches the column definition, or verifying that numerical values fall within the allowable range for the column's data type.
+
+At this level, you can partially rely on the database itself—many databases reject invalid data. However, behavior may vary: some may truncate long strings silently, or clip numbers that are out of range.
+
+
+Domain-Specific Validation
+--------------------------
+
+The third level involves logical checks specific to your application. For example, verifying that values from select boxes match available options, that numbers fall within an expected range (e.g., age 0-150 years), or that relationships between values make sense.
+
+
+Recommended Validation Methods
+------------------------------
+
+- Use [Nette Forms|forms:], which automatically handle proper validation of all inputs.
+- Use [Presenters|application:] and declare parameter data types in `action*()` and `render*()` methods.
+- Or implement a custom validation layer using standard PHP tools like `filter_var()`.
+
+
+Safe Work with Columns
+======================
+
+In the previous section, we covered how to properly validate parameter values. However, when using arrays in SQL queries, equal attention must be paid to their keys.
+
+```php
+// ❌ DANGEROUS CODE - array keys are not sanitized
+$database->query('INSERT INTO users', $_POST);
+```
+
+For INSERT and UPDATE commands, this is a major security flaw - an attacker can insert or modify any column in the database. They could, for example, set `is_admin = 1` or insert arbitrary data into sensitive columns (known as Mass Assignment Vulnerability).
+
+In WHERE conditions, it's even more dangerous because they can contain operators:
+
+```php
+// ❌ DANGEROUS CODE - array keys are not sanitized
+$_POST['salary >'] = 100000;
+$database->query('SELECT * FROM users WHERE', $_POST);
+// executes query WHERE (`salary` > 100000)
+```
+
+An attacker can use this approach to systematically uncover employee salaries. They might start with a query for salaries above 100,000, then below 50,000, and by gradually narrowing the range, they can reveal approximate salaries of all employees. This type of attack is called SQL enumeration.
+
+The `where()` and `whereOr()` methods are even [more flexible|explorer#where] and support SQL expressions, including operators and functions, in both keys and values. This gives an attacker the ability to perform SQL injection:
+
+```php
+// ❌ DANGEROUS CODE - attacker can insert their own SQL
+$_POST = ['0) UNION SELECT name, salary FROM users WHERE (1'];
+$table->where($_POST);
+// executes query WHERE (0) UNION SELECT name, salary FROM users WHERE (1)
+```
+
+This attack terminates the original condition with `0)`, appends its own `SELECT` using `UNION` to obtain sensitive data from the `users` table, and closes with a syntactically correct query using `WHERE (1)`.
+
+
+Column Whitelist
+----------------
+
+For safe work with column names, you need a mechanism that ensures users can only interact with permitted columns and cannot add their own. Attempting to detect and block dangerous column names (blacklisting) is unreliable—an attacker can always come up with a new way to write a dangerous column name that you haven't anticipated.
+
+Therefore, it is much safer to reverse the logic and define an explicit list of allowed columns (whitelisting):
+
+```php
+// Columns the user is allowed to modify
+$allowedColumns = ['name', 'email', 'active'];
+
+// Remove all unauthorized columns from input
+$filteredData = array_intersect_key($userData, array_flip($allowedColumns));
+
+// ✅ Now safe to use in queries, such as:
+$database->query('INSERT INTO users', $filteredData);
+$table->update($filteredData);
+$table->where($filteredData);
+```
+
+
+Dynamic Identifiers
+===================
+
+For dynamic table and column names, use the `?name` placeholder. This ensures proper escaping of identifiers according to the given database syntax (e.g., using backticks in MySQL):
+
+```php
+// ✅ Safe use of trusted identifiers
+$table = 'users';
+$column = 'name';
+$database->query('SELECT ?name FROM ?name', $column, $table);
+// Result in MySQL: SELECT `name` FROM `users`
+```
+
+Important: Use the `?name` symbol only for trusted values defined in the application code. For values provided by the user, use a [whitelist|#Column Whitelist] again. Otherwise, you risk security vulnerabilities:
+
+```php
+// ❌ DANGEROUS - never use user input
+$database->query('SELECT ?name FROM users', $_GET['column']);
+```

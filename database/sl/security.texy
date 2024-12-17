@@ -1,0 +1,160 @@
+Varnostna tveganja
+******************
+
+<div class=perex>
+
+Podatkovne zbirke pogosto vsebujejo občutljive podatke in omogočajo izvajanje nevarnih operacij. Za varno delo s podatkovno zbirko Nette so ključni naslednji vidiki:
+
+- Razumevanje razlike med varnim in negotovim API
+- uporaba parametriziranih poizvedb
+- pravilno preverjanje vhodnih podatkov
+
+</div>
+
+
+Kaj je vdor SQL? .[#toc-what-is-sql-injection]
+==============================================
+
+Vbrizgavanje SQL je najresnejše varnostno tveganje pri delu s podatkovnimi zbirkami. Pojavi se, ko nefiltriran uporabniški vnos postane del poizvedbe SQL. Napadalec lahko vstavi svoje ukaze SQL in s tem:
+- pridobi nepooblaščene podatke
+- spremeni ali izbriše podatke v zbirki podatkov
+- obide avtentikacijo
+
+```php
+// ❌ NEVARNA KODA - občutljiva na vbrizgavanje SQL
+$database->query("SELECT * FROM users WHERE name = '$_GET[name]'");
+
+// Napadalec lahko vnese vrednost, kot je: ' ALI '1'='1
+// Rezultat poizvedbe bi bil: SELECT * FROM users WHERE name = '' OR '1'='1'
+// ki vrne vse uporabnike
+```
+
+Enako velja za Raziskovalca podatkovne zbirke:
+
+```php
+// ❌ NEVARNA KODA - občutljiva na vbrizgavanje SQL
+$table->where('name = ' . $_GET['name']);
+$table->where("name = '$_GET[name]'");
+```
+
+
+Varne parametrirane poizvedbe .[#toc-secure-parameterized-queries]
+==================================================================
+
+Varen način za vstavljanje vrednosti v poizvedbe SQL je uporaba parametriziranih poizvedb. Podatkovna baza Nette ponuja več načinov za njihovo uporabo.
+
+Najpreprostejši način je uporaba **zahtevnih oznak**:
+
+```php
+// ✅ Varna parametrizirana poizvedba
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+// ✅ Varen pogoj v Raziskovalcu
+$table->where('name = ?', $name);
+```
+
+To velja za vse druge metode v [Raziskovalcu podatkovne baze |explorer], ki omogočajo vstavljanje izrazov z nadomestnimi znaki z vprašajem in parametri.
+
+Za ukaze INSERT, UPDATE ali klavzule WHERE lahko varno posredujemo vrednosti v polju:
+
+```php
+// ✅ Varno vstavljanje
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'email' => $email,
+]);
+
+// ✅ Varno vnašanje v Raziskovalcu
+$table->insert([
+	'name' => $name,
+	'email' => $email,
+]);
+```
+
+.[warning]
+Vendar moramo zagotoviti [pravilno podatkovno vrsto parametrov |#Validating input data].
+
+
+Ključi v polju niso varni API .[#toc-array-keys-are-not-secure-api]
+-------------------------------------------------------------------
+
+Medtem ko so vrednosti polj varne, to ne velja za ključe!
+
+```php
+// ❌ NEVARNA KODA - ključi polj niso sanitizirani
+$database->query('INSERT INTO users', $_POST);
+```
+
+Pri ukazih INSERT in UPDATE je to velika varnostna pomanjkljivost - napadalec lahko vstavi ali spremeni kateri koli stolpec v zbirki podatkov. Tako lahko na primer nastavi `is_admin = 1` ali vstavi poljubne podatke v občutljive stolpce (tako imenovana ranljivost množičnega dodeljevanja).
+
+Pri pogojih WHERE je to še bolj nevarno, saj lahko vsebujejo operatorje:
+
+```php
+// ❌ NEVARNA KODA - ključi polj niso sanitizirani
+$_POST['salary >'] = 100000;
+$database->query('SELECT * FROM users WHERE', $_POST);
+// izvede poizvedbo WHERE (`salary` > 100000)
+```
+
+Napadalec lahko ta pristop uporabi za sistematično odkrivanje plač zaposlenih. Začne lahko s poizvedbo po plačah nad 100.000, nato pod 50.000 in s postopnim zmanjševanjem razpona razkrije približne plače vseh zaposlenih. Ta vrsta napada se imenuje naštevanje SQL.
+
+Metoda `where()` podpira izraze SQL, vključno z operatorji in funkcijami v ključih. Tako lahko napadalec izvede zapleteno vbrizgavanje SQL:
+
+```php
+// ❌ Nevarna koda - napadalec lahko vstavi svoj SQL
+$_POST['0) UNION SELECT name, salary FROM users WHERE (?'] = 1;
+$table->where($_POST);
+// izvede poizvedbo WHERE (0) UNION SELECT ime, plača FROM uporabniki WHERE (1)
+```
+
+Ta napad zaključi prvotni pogoj s `0)`, doda svoj `SELECT` z uporabo `UNION` za pridobitev občutljivih podatkov iz tabele `users` in zaključi s sintaktično pravilno poizvedbo z uporabo `WHERE (1)`.
+
+
+Bela lista stolpcev .[#toc-column-whitelist]
+--------------------------------------------
+
+Če želite uporabnikom dovoliti izbiro stolpcev, vedno uporabite belo listo:
+
+```php
+// ✅ Varna obdelava - samo dovoljeni stolpci
+$allowedColumns = ['name', 'email', 'active'];
+$values = array_intersect_key($_POST, array_flip($allowedColumns));
+
+$database->query('INSERT INTO users', $values);
+```
+
+
+Potrjevanje vhodnih podatkov .[#toc-validating-input-data]
+==========================================================
+
+**Najpomembneje je zagotoviti pravilno vrsto podatkov parametrov** - to je nujen pogoj za varno uporabo podatkovne zbirke Nette. Podatkovna baza predpostavlja, da imajo vsi vhodni podatki pravilen podatkovni tip, ki ustreza danemu stolpcu.
+
+Če bi bil na primer `$name` v prejšnjih primerih nepričakovano polje namesto niza, bi podatkovna baza Nette poskušala v poizvedbo SQL vstaviti vse njegove elemente, kar bi povzročilo napako. Zato **nepotrjenih** podatkov iz `$_GET`, `$_POST` ali `$_COOKIE` nikoli ne uporabljajte neposredno v poizvedbah podatkovne zbirke.
+
+Na drugi ravni preverimo tehnično veljavnost podatkov - na primer, ali so nizi v kodiranju UTF-8 in ali se njihova dolžina ujema z definicijo stolpca, ali so številčne vrednosti v dovoljenem območju za dani podatkovni tip stolpca. Pri tej ravni preverjanja se lahko delno zanesemo na samo zbirko podatkov - številne zbirke podatkov zavrnejo neveljavne podatke. Vendar se lahko obnašanje različnih podatkovnih zbirk razlikuje, nekatere lahko tiho skrajšajo dolge nize ali izrežejo številke zunaj območja.
+
+Tretja raven predstavlja logična preverjanja, ki so specifična za vašo aplikacijo. Na primer preverjanje, ali se vrednosti iz izbirnih polj ujemajo s ponujenimi možnostmi, ali so številke v pričakovanem območju (npr. starost 0-150 let) ali ali ali so medsebojne odvisnosti med vrednostmi smiselne.
+
+Priporočeni načini izvajanja potrjevanja:
+- Uporabite [obrazce Nette, |forms:] ki samodejno zagotovijo celovito preverjanje vseh vnosov.
+- Uporabite [predstavnike |application:] in določite podatkovne vrste za parametre v metodah `action*()` in `render*()`.
+- Ali pa implementirajte lastno plast za preverjanje veljavnosti s standardnimi orodji PHP, kot so `filter_var()`
+
+
+Dinamični identifikatorji .[#toc-dynamic-identifiers]
+=====================================================
+
+Za dinamična imena tabel in stolpcev uporabite nosilec `?name`. S tem zagotovite pravilno eskapiranje identifikatorjev v skladu z določeno sintakso podatkovne zbirke (npr. uporaba zaklepajev v MySQL):
+
+```php
+// ✅ Varna uporaba zaupanja vrednih identifikatorjev
+$table = 'users';
+$column = 'name';
+$database->query('SELECT ?name FROM ?name', $column, $table);
+// Rezultat v MySQL: SELECT `name` FROM `users`
+
+// ❌ Nevarno - nikoli ne uporabljajte uporabniškega vnosa
+$database->query('SELECT ?name FROM users', $_GET['column']);
+```
+
+Pomembno: simbol `?name` uporabljajte samo za zaupanja vredne vrednosti, opredeljene v aplikacijski kodi. Za uporabniške vrednosti raje uporabite metodo bele liste.

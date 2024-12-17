@@ -1,0 +1,160 @@
+Risques pour la sécurité
+************************
+
+<div class=perex>
+
+Les bases de données contiennent souvent des données sensibles et permettent d'effectuer des opérations dangereuses. Pour travailler en toute sécurité avec Nette Database, les aspects clés sont les suivants :
+
+- Comprendre la différence entre une API sécurisée et une API non sécurisée
+- Utiliser des requêtes paramétrées
+- Valider correctement les données d'entrée
+
+</div>
+
+
+Qu'est-ce que l'injection SQL ? .[#toc-what-is-sql-injection]
+=============================================================
+
+L'injection SQL est le risque de sécurité le plus sérieux lorsque l'on travaille avec des bases de données. Elle se produit lorsque l'entrée non filtrée de l'utilisateur devient une partie d'une requête SQL. Un attaquant peut insérer ses propres commandes SQL et ainsi :
+- extraire des données non autorisées
+- modifier ou supprimer des données dans la base de données
+- Contourner l'authentification
+
+```php
+// ❌ CODE DANGEREUX - vulnérable à l'injection SQL
+$database->query("SELECT * FROM users WHERE name = '$_GET[name]'");
+
+// Un attaquant pourrait entrer une valeur comme: ' OR '1'='1
+// La requête résultante serait: SELECT * FROM users WHERE name = '' OR '1'='1'
+// Ce qui renvoie tous les utilisateurs
+```
+
+Il en va de même pour l'explorateur de bases de données :
+
+```php
+// ❌ CODE DANGEREUX - vulnérable à l'injection SQL
+$table->where('name = ' . $_GET['name']);
+$table->where("name = '$_GET[name]'");
+```
+
+
+Requêtes paramétrées sécurisées .[#toc-secure-parameterized-queries]
+====================================================================
+
+La manière la plus sûre d'insérer des valeurs dans les requêtes SQL est d'utiliser des requêtes paramétrées. Nette Database propose plusieurs façons de les utiliser.
+
+La manière la plus simple est d'utiliser des **marques d'espacement pour les questions** :
+
+```php
+// ✅ Requête paramétrée sécurisée
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+// ✅ Condition de sécurité dans l'explorateur
+$table->where('name = ?', $name);
+```
+
+Ceci s'applique à toutes les autres méthodes de l'[explorateur de bases de données |explorer] qui permettent d'insérer des expressions avec des points d'interrogation et des paramètres.
+
+Pour les commandes INSERT, UPDATE ou les clauses WHERE, nous pouvons passer en toute sécurité des valeurs dans un tableau :
+
+```php
+// ✅ Secure INSERT
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'email' => $email,
+]);
+
+// ✅ Secure INSERT dans Explorer
+$table->insert([
+	'name' => $name,
+	'email' => $email,
+]);
+```
+
+.[warning]
+Cependant, nous devons nous assurer que [le type de données des paramètres est correct |#Validating input data].
+
+
+Les clés de tableau ne sont pas des API sûres .[#toc-array-keys-are-not-secure-api]
+-----------------------------------------------------------------------------------
+
+Si les valeurs des tableaux sont sécurisées, ce n'est pas le cas des clés !
+
+```php
+// ❌ CODE DANGEREUX - les clés des tableaux ne sont pas assainies
+$database->query('INSERT INTO users', $_POST);
+```
+
+Pour les commandes INSERT et UPDATE, il s'agit d'une faille de sécurité majeure : un pirate peut insérer ou modifier n'importe quelle colonne de la base de données. Il peut, par exemple, définir `is_admin = 1` ou insérer des données arbitraires dans des colonnes sensibles (vulnérabilité d'affectation de masse).
+
+Dans les conditions WHERE, c'est encore plus dangereux car elles peuvent contenir des opérateurs :
+
+```php
+// CODE DANGEREUX - les clés des tableaux ne sont pas nettoyées
+$_POST['salary >'] = 100000;
+$database->query('SELECT * FROM users WHERE', $_POST);
+// exécute la requête WHERE (`salary` > 100000)
+```
+
+Un pirate peut utiliser cette approche pour découvrir systématiquement les salaires des employés. Il peut commencer par demander les salaires supérieurs à 100 000, puis inférieurs à 50 000, et en réduisant progressivement la fourchette, il peut révéler les salaires approximatifs de tous les employés. Ce type d'attaque est appelé énumération SQL.
+
+La méthode `where()` prend en charge les expressions SQL, y compris les opérateurs et les fonctions dans les clés. Cela permet à un pirate d'effectuer des injections SQL complexes :
+
+```php
+// ❌ CODE DANGEREUX - l'attaquant peut insérer son propre code SQL
+$_POST['0) UNION SELECT name, salary FROM users WHERE (?'] = 1;
+$table->where($_POST);
+// exécute la requête WHERE (0) UNION SELECT nom, salaire FROM utilisateurs WHERE (1)
+```
+
+Cette attaque termine la condition originale avec `0)`, ajoute son propre `SELECT` en utilisant `UNION` pour obtenir des données sensibles de la table `users`, et termine avec une requête syntaxiquement correcte en utilisant `WHERE (1)`.
+
+
+Liste blanche des colonnes .[#toc-column-whitelist]
+---------------------------------------------------
+
+Si vous souhaitez permettre aux utilisateurs de choisir des colonnes, utilisez toujours une liste blanche :
+
+```php
+// ✅ Traitement sécurisé - colonnes autorisées uniquement
+$allowedColumns = ['name', 'email', 'active'];
+$values = array_intersect_key($_POST, array_flip($allowedColumns));
+
+$database->query('INSERT INTO users', $values);
+```
+
+
+Validation des données d'entrée .[#toc-validating-input-data]
+=============================================================
+
+**La chose la plus importante est de s'assurer que le type de données des paramètres est correct** - c'est une condition nécessaire pour une utilisation sûre de la base de données Nette. La base de données suppose que toutes les données d'entrée ont le type de données correct correspondant à la colonne donnée.
+
+Par exemple, si `$name` dans les exemples précédents était inopinément un tableau au lieu d'une chaîne, Nette Database essaierait d'insérer tous ses éléments dans la requête SQL, ce qui provoquerait une erreur. Par conséquent, **ne jamais utiliser** des données non validées provenant de `$_GET`, `$_POST`, ou `$_COOKIE` directement dans les requêtes de la base de données.
+
+Au deuxième niveau, nous vérifions la validité technique des données - par exemple, si les chaînes de caractères sont codées en UTF-8 et si leur longueur correspond à la définition de la colonne, ou si les valeurs numériques se situent dans la plage autorisée pour le type de données de la colonne donnée. Pour ce niveau de validation, nous pouvons nous fier en partie à la base de données elle-même - de nombreuses bases de données rejettent les données non valides. Toutefois, le comportement des différentes bases de données peut varier, certaines pouvant tronquer silencieusement les longues chaînes de caractères ou découper les nombres en dehors de la plage autorisée.
+
+Le troisième niveau représente les contrôles logiques spécifiques à votre application. Par exemple, il s'agit de vérifier que les valeurs des cases à cocher correspondent aux options proposées, que les nombres se situent dans l'intervalle prévu (par exemple, âge de 0 à 150 ans) ou que les interdépendances entre les valeurs ont un sens.
+
+Méthodes recommandées pour mettre en œuvre la validation :
+- Utiliser les [Nette Forms |forms:], qui garantissent automatiquement une validation complète de toutes les entrées.
+- Utilisez des [présentateurs |application:] et spécifiez les types de données pour les paramètres dans les méthodes `action*()` et `render*()`.
+- Ou implémentez votre propre couche de validation en utilisant des outils PHP standard tels que `filter_var()`
+
+
+Identificateurs dynamiques .[#toc-dynamic-identifiers]
+======================================================
+
+Pour les noms de tables et de colonnes dynamiques, utilisez l'espace réservé `?name`. Cela permet de s'assurer que les identificateurs sont correctement échappés conformément à la syntaxe de la base de données concernée (par exemple, en utilisant des barres obliques dans MySQL) :
+
+```php
+// ✅ Utilisation sûre des identificateurs de confiance
+$table = 'users';
+$column = 'name';
+$database->query('SELECT ?name FROM ?name', $column, $table);
+// Résultat dans MySQL: SELECT `nom` FROM `users`
+
+// DANGEREUX - ne jamais utiliser les données de l'utilisateur
+$database->query('SELECT ?name FROM users', $_GET['column']);
+```
+
+Important : n'utilisez le symbole `?name` que pour les valeurs de confiance définies dans le code de l'application. Pour les valeurs utilisateur, utilisez plutôt une approche de liste blanche.

@@ -1,0 +1,160 @@
+Güvenlik Riskleri
+*****************
+
+<div class=perex>
+
+Veritabanları genellikle hassas veriler içerir ve tehlikeli işlemlerin gerçekleştirilmesine izin verir. Nette Veritabanı ile güvenli çalışma için temel hususlar şunlardır:
+
+- Güvenli ve güvensiz API arasındaki farkı anlama
+- Parametrelendirilmiş sorguları kullanma
+- Giriş verilerinin uygun şekilde doğrulanması
+
+</div>
+
+
+SQL Enjeksiyonu Nedir? .[#toc-what-is-sql-injection]
+====================================================
+
+SQL enjeksiyonu, veritabanlarıyla çalışırken karşılaşılan en ciddi güvenlik riskidir. Filtrelenmemiş kullanıcı girdisi bir SQL sorgusunun parçası haline geldiğinde ortaya çıkar. Bir saldırgan kendi SQL komutlarını ekleyebilir ve böylece
+- Yetkisiz verileri ayıklayın
+- Veritabanındaki verileri değiştirme veya silme
+- Kimlik doğrulamayı atla
+
+```php
+// ❌ TEHLİKELİ KOD - SQL enjeksiyonuna karşı savunmasız
+$database->query("SELECT * FROM users WHERE name = '$_GET[name]'");
+
+// Bir saldırgan aşağıdaki gibi bir değer girebilir: ' VEYA '1'='1
+// Ortaya çıkan sorgu şöyle olacaktır: SELECT * FROM users WHERE name = '' OR '1'='1'
+// Bu da tüm kullanıcıları döndürür
+```
+
+Aynı durum Veritabanı Gezgini için de geçerlidir:
+
+```php
+// ❌ TEHLİKELİ KOD - SQL enjeksiyonuna karşı savunmasız
+$table->where('name = ' . $_GET['name']);
+$table->where("name = '$_GET[name]'");
+```
+
+
+Güvenli Parametreli Sorgular .[#toc-secure-parameterized-queries]
+=================================================================
+
+SQL sorgularına değer eklemenin güvenli yolu parametrelendirilmiş sorgulardır. Nette Veritabanı bunları kullanmak için çeşitli yollar sunar.
+
+En basit yol **soru işareti yer tutucuları** kullanmaktır:
+
+```php
+// ✅ Güvenli parametrelendirilmiş sorgu
+$database->query('SELECT * FROM users WHERE name = ?', $name);
+
+// ✅ Explorer'da güvenli durum
+$table->where('name = ?', $name);
+```
+
+Bu, [Veritabanı Gezgini |explorer] 'nde soru işareti yer tutucuları ve parametreler içeren ifadelerin eklenmesine izin veren diğer tüm yöntemler için geçerlidir.
+
+INSERT, UPDATE komutları veya WHERE cümleleri için değerleri bir dizi içinde güvenle aktarabiliriz:
+
+```php
+// ✅ Güvenli INSERT
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'email' => $email,
+]);
+
+// ✅ Explorer'da Güvenli INSERT
+$table->insert([
+	'name' => $name,
+	'email' => $email,
+]);
+```
+
+.[warning]
+Ancak, [parametrelerin doğru veri türüne |#Validating input data] sahip olduğundan emin olmalıyız.
+
+
+Dizi Anahtarları Güvenli API Değildir .[#toc-array-keys-are-not-secure-api]
+---------------------------------------------------------------------------
+
+Dizi değerleri güvenli olsa da, bu durum anahtarlar için geçerli değildir!
+
+```php
+// ❌ TEHLİKELİ KOD - dizi anahtarları sterilize edilmemiş
+$database->query('INSERT INTO users', $_POST);
+```
+
+INSERT ve UPDATE komutları için bu büyük bir güvenlik açığıdır - bir saldırgan veritabanındaki herhangi bir sütunu ekleyebilir veya değiştirebilir. Örneğin, `is_admin = 1` adresini ayarlayabilir veya hassas sütunlara rastgele veri ekleyebilirler (Toplu Atama Güvenlik Açığı olarak bilinir).
+
+NEREDE koşullarında, operatör içerebildikleri için daha da tehlikelidir:
+
+```php
+// ❌ TEHLİKELİ KOD - dizi anahtarları sterilize edilmemiş
+$_POST['salary >'] = 100000;
+$database->query('SELECT * FROM users WHERE', $_POST);
+// sorguyu çalıştırır WHERE (`salary` > 100000)
+```
+
+Bir saldırgan, çalışan maaşlarını sistematik olarak ortaya çıkarmak için bu yaklaşımı kullanabilir. Önce 100.000'in üzerindeki, sonra 50.000'in altındaki maaşlar için bir sorguyla başlayabilir ve aralığı kademeli olarak daraltarak tüm çalışanların yaklaşık maaşlarını ortaya çıkarabilirler. Bu saldırı türüne SQL numaralandırma adı verilir.
+
+ `where()` yöntemi, anahtarlardaki operatörler ve fonksiyonlar dahil olmak üzere SQL ifadelerini destekler. Bu, bir saldırgana karmaşık SQL enjeksiyonu gerçekleştirme olanağı verir:
+
+```php
+// ❌ TEHLİKELİ KOD - saldırgan kendi SQL'ini ekleyebilir
+$_POST['0) UNION SELECT name, salary FROM users WHERE (?'] = 1;
+$table->where($_POST);
+// sorguyu çalıştırır WHERE (0) UNION SELECT name, salary FROM users WHERE (1)
+```
+
+Bu saldırı orijinal koşulu `0)` ile sonlandırır, `UNION` kullanarak `users` tablosundan hassas verileri elde etmek için kendi `SELECT` adresini ekler ve `WHERE (1)` kullanarak sözdizimsel olarak doğru bir sorgu ile kapatır.
+
+
+Sütun Beyaz Listesi .[#toc-column-whitelist]
+--------------------------------------------
+
+Kullanıcıların sütun seçmesine izin vermek istiyorsanız, her zaman bir beyaz liste kullanın:
+
+```php
+// ✅ Güvenli işleme - sadece izin verilen sütunlar
+$allowedColumns = ['name', 'email', 'active'];
+$values = array_intersect_key($_POST, array_flip($allowedColumns));
+
+$database->query('INSERT INTO users', $values);
+```
+
+
+Girdi Verilerini Doğrulama .[#toc-validating-input-data]
+========================================================
+
+**En önemli şey parametrelerin doğru veri türüne sahip olmasını sağlamaktır** - bu Nette Veritabanının güvenli kullanımı için gerekli bir koşuldur. Veritabanı, tüm girdi verilerinin verilen sütuna karşılık gelen doğru veri türüne sahip olduğunu varsayar.
+
+Örneğin, önceki örneklerde `$name` bir dize yerine beklenmedik bir şekilde bir dizi olsaydı, Nette Veritabanı tüm öğelerini SQL sorgusuna eklemeye çalışacak ve bir hataya neden olacaktı. Bu nedenle, `$_GET`, `$_POST` veya `$_COOKIE` adreslerindeki doğrulanmamış verileri doğrudan veritabanı sorgularında **asla kullanmayın**.
+
+İkinci seviyede, verilerin teknik geçerliliğini kontrol ederiz - örneğin, dizelerin UTF-8 kodlamasında olup olmadığı ve uzunluklarının sütun tanımıyla eşleşip eşleşmediği veya sayısal değerlerin verilen sütun veri türü için izin verilen aralıkta olup olmadığı. Bu doğrulama seviyesi için kısmen veritabanının kendisine güvenebiliriz - birçok veritabanı geçersiz verileri reddedecektir. Ancak, farklı veritabanlarındaki davranışlar farklılık gösterebilir; bazıları uzun dizeleri sessizce kesebilir veya aralık dışındaki sayıları kırpabilir.
+
+Üçüncü seviye uygulamanıza özel mantıksal kontrolleri temsil eder. Örneğin, seçim kutularındaki değerlerin sunulan seçeneklerle eşleştiğini, sayıların beklenen aralıkta olduğunu (örneğin, 0-150 yaş) veya değerler arasındaki karşılıklı bağımlılıkların mantıklı olduğunu doğrulamak.
+
+Doğrulamayı uygulamak için önerilen yollar:
+- Tüm girdilerin otomatik olarak kapsamlı bir şekilde doğrulanmasını sağlayan [Nette Forms |forms:]'u kullanın
+- [Sunucuları |application:] kullanma ve `action*()` ve `render*()` yöntemlerinde parametreler için veri türleri belirtme
+- Veya aşağıdaki gibi standart PHP araçlarını kullanarak kendi doğrulama katmanınızı uygulayın `filter_var()`
+
+
+Dinamik Tanımlayıcılar .[#toc-dynamic-identifiers]
+==================================================
+
+Dinamik tablo ve sütun adları için `?name` yer tutucusunu kullanın. Bu, tanımlayıcıların verilen veritabanı sözdizimine göre uygun şekilde kaçmasını sağlar (örneğin, MySQL'de backtick kullanımı):
+
+```php
+// ✅ Güvenilir tanımlayıcıların güvenli kullanımı
+$table = 'users';
+$column = 'name';
+$database->query('SELECT ?name FROM ?name', $column, $table);
+// MySQL'de sonuç: SELECT `name` FROM `users`
+
+// TEHLİKELİ - asla kullanıcı girişi kullanmayın
+$database->query('SELECT ?name FROM users', $_GET['column']);
+```
+
+Önemli: `?name` sembolünü yalnızca uygulama kodunda tanımlanan güvenilir değerler için kullanın. Kullanıcı değerleri için bunun yerine bir beyaz liste yaklaşımı kullanın.

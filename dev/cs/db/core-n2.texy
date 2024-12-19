@@ -1,0 +1,651 @@
+Database Core
+*************
+
+.[perex]
+Nette Database Core je základní, nízkoúrovňová vrstva pro přístup k databázi (tzv. database abstraction layer). Poskytuje pohodlný a bezpečný způsob, jak komunikovat s databází, provádět dotazy a manipulovat s daty.
+
+Vedle této základní vrstvy nabízí Nette také pokročilejší [Nette Database Explorer |explorer], který vám umožní pracovat s databází bez nutnosti psát SQL dotazy.
+
+
+Instalace
+=========
+
+Knihovnu stáhnete a nainstalujete pomocí nástroje [Composer|best-practices:composer]:
+
+```shell
+composer require nette/database
+```
+
+
+Připojení a konfigurace
+=======================
+
+Pro připojení k databázi vytvořte instanci třídy [api:Nette\Database\Connection]:
+
+```php
+$database = new Nette\Database\Connection($dsn, $user, $password);
+```
+
+Parametr `$dsn` (data source name) používá stejný formát [jako PDO|https://www.php.net/manual/en/pdo.construct.php#refsect1-pdo.construct-parameters], např. `host=127.0.0.1;dbname=test`.
+
+Elegantněji můžete nastavit připojení pomocí [konfiguračního souboru|configuration]. Stačí přidat sekci `database` a framework se postará o vytvoření potřebných objektů včetně databázového panelu v [Tracy |tracy:].
+
+```neon
+database:
+	dsn: 'mysql:host=127.0.0.1;dbname=test'
+	user: root
+	password: password
+```
+
+Objekt pro připojení pak [získáte jako službu z DI kontejneru|dependency-injection:passing-dependencies]:
+
+```php
+class Model
+{
+	// pro práci s vrstvou Database Explorer si předáme Nette\Database\Explorer
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+}
+```
+
+Více informací o [konfiguraci databáze|configuration].
+
+
+Výběry dat (SELECT)
+===================
+
+Pro dotazování do databáze slouží metoda `query()`. Ta vrací objekt [ResultSet |api:Nette\Database\ResultSet], který reprezentuje výsledek dotazu a můžete jej procházet v cyklu:
+
+```php
+$result = $db->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+}
+```
+
+V případě selhání metoda [vyhodí výjimku#Výjimky].
+
+
+Parametrizované dotazy
+----------------------
+
+Pro bezpečné vkládání hodnot do SQL dotazů používejte parametrizované dotazy. Nette Database je dělá maximálně jednoduché - stačí za SQL dotaz přidat čárku a hodnotu:
+
+```php
+$db->query('SELECT * FROM users WHERE name = ?', $name);
+```
+
+Při více parametrech máte dvě možnosti zápisu. Buď můžete SQL dotaz "prokládat" parametry:
+
+```php
+$db->query('SELECT * FROM users WHERE name = ?', $name, 'AND age > ?', $age);
+```
+
+Nebo napsat nejdříve celý SQL dotaz a pak připojit všechny parametry:
+
+```php
+$db->query('SELECT * FROM users WHERE name = ? AND age > ?', $name, $age);
+```
+
+Podívejte se, jaké technicky nabízí Nette Database pro [snadný zápis pokročilejších SQL dotazů |#Techniky parametrizovaných dotazů].
+
+
+Ochrana přes SQL injection
+--------------------------
+
+Proč je důležité používat parametrizované dotazy? Protože vás chrání před útokem zvaným SQL injection, při kterém by útočník mohl podstrčit vlastní SQL příkazy a tím získat nebo poškodit data v databázi.
+
+.[warning]
+**Nikdy nevkládejte proměnné přímo do SQL dotazu!** Vždy používejte parametrizované dotazy, které vás ochrání před SQL injection.
+
+```php
+// ❌ NEBEZPEČNÝ KÓD - zranitelný vůči SQL injection
+$db->query("SELECT * FROM users WHERE name = '$name'");
+
+// ✅ Bezpečný parametrizovaný dotaz
+$db->query('SELECT * FROM users WHERE name = ?', $name);
+```
+
+
+CRUD operace (INSERT, UPDATE, DELETE)
+=====================================
+
+Pro vkládání, aktualizaci a mazání dat se používá metoda `query()` s příslušným SQL příkazem (INSERT, UPDATE, DELETE).
+
+
+Vkládání dat (INSERT)
+---------------------
+
+Pro vkládání záznamů se používá SQL příkaz `INSERT`.
+
+```php
+// Vložení jednoho záznamu
+$db->query('INSERT INTO users ?', [
+	'name' => 'John Doe',
+	'email' => 'john.doe@example.com',
+]);
+
+// Získání ID posledního vloženého řádku
+$userId = $db->getInsertId();
+
+// Vložení více záznamů najednou
+$db->query('INSERT INTO users ?', [
+    ['name' => 'User 1', 'email' => 'user1@mail.com'],
+    ['name' => 'User 2', 'email' => 'user2@mail.com'],
+]);
+```
+
+getInsertId(string $sequence = null): string .[method]
+
+Vrací ID naposledy vloženého řádku. U některých databází (např. PostgreSQL) je nutné specifikovat název sekvence, ze které se má ID generovat.
+
+
+Aktualizace dat (UPDATE)
+------------------------
+
+Pro aktualizacizáznamů se používá SQL příkaz `UPDATE`.
+
+```php
+// Aktualizace jednoho záznamu
+$db->query('UPDATE users SET ? WHERE id = ?', [
+	'name' => 'John Smith',
+], 1);
+
+// Použití operátorů += a -=
+$db->query('UPDATE users SET ? WHERE id = ?', [
+	'login_count+=' => 1, // Inkrementace sloupce login_count
+], 1);
+
+// Aktualizace více záznamů
+$db->query('UPDATE users SET ? WHERE last_login < ?', [
+	'active' => false,
+], new DateTime('-1 month'));
+
+// Získání počtu ovlivněných řádků
+$rowCount = $db->query('UPDATE users SET active = ?', 0)->getRowCount();
+```
+
+**Bezpečnostní upozornění:** Nikdy nepoužívejte v poli `$data` klíče, které pochází z externích zdrojů (např. `$_POST`), bez předchozí validace. Hrozí riziko zneužití - útočník by mohl podstrčit data do sloupců, které by neměl mít možnost měnit. Více informací naleznete v [dokumentaci o bezpečnosti |security].
+
+
+Mazání dat (DELETE)
+-------------------
+
+Pro mazání záznamů se používá SQL příkaz `DELETE`.
+
+```php
+// Smazání jednoho záznamu
+$db->query('DELETE FROM users WHERE id = ?', 1);
+
+// Smazání více záznamů
+$db->query('DELETE FROM articles WHERE published = ?', false);
+
+// Získání počtu smazaných řádků
+$rowCount = $db->query('DELETE FROM users WHERE active = ?', 0)->getRowCount();
+```
+
+
+Získání dat
+===========
+
+
+Zkratky pro načítání dat
+------------------------
+
+Pro zjednodušení načítání dat nabízí `Connection` několik zkrácených metod, které kombinují volání `query()` s načtením jednoho řádku nebo hodnoty. **Tyto metody přijímají stejné parametry jako `query()`**, tedy SQL dotaz a volitelné parametry.
+
+.[language-php]
+| `fetch($sql): ?Row` | Provede dotaz a vrátí jeden řádek jako objekt `Row`. Pokud dotaz nevrátí žádný řádek, vrací `null`
+| `fetchAll($sql): array` | Provede dotaz a vrátí všechny řádky jako pole objektů `Row`
+| `fetchPairs($sql): array`| Provede dotaz a vrátí asocitivní pole, kde klíčem je hodnota prvního sloupce a hodnotou je hodnota druhého sloupce
+| `fetchField($sql): mixed` | Provede dotaz a vrátí hodnotu prvního sloupce z prvního řádku
+| `fetchList($sql): array` | Provede dotaz a vrátí první sloupec všech řádků jako indexované pole
+
+
+Iterace přes `ResultSet`
+------------------------
+
+`ResultSet` je objekt, který reprezentuje výsledek dotazu. Umožňuje procházet vrácené řádky a přistupovat k hodnotám sloupců.
+`ResultSet` implementuje rozhraní `Iterator`, takže přes něj můžete iterovat v cyklu `foreach`. **Důležité je, že `ResultSet` lze iterovat pouze jednou.** Pokud potřebujete iterovat opakovaně, musíte nejprve načíst data do pole, například pomocí metody `fetchAll()`.
+
+```php
+$result = $db->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+	// ...
+}
+
+// Opakovaná iterace není možná!
+// foreach ($result as $row) { ... } // Chyba!
+```
+
+
+fetch(): ?Row .[method]
+-----------------------
+
+Vrací jeden řádek z `ResultSetu` jako objekt `Row`. Pokud už neexistují další řádky, vrací `null`. Posunuje interní ukazatel na další řádek.
+
+```php
+$result = $db->query('SELECT * FROM users');
+$row = $result->fetch(); // načte první řádek
+if ($row) {
+	echo $row->name;
+}
+```
+
+
+fetchAll(): array .[method]
+---------------------------
+
+Vrací všechny zbývající řádky z `ResultSetu` jako pole objektů `Row`.
+
+```php
+$result = $db->query('SELECT * FROM users');
+$rows = $result->fetchAll(); // načte všechny řádky
+foreach ($rows as $row) {
+	echo $row->name;
+}
+```
+
+
+fetchPairs(string|int|\Closure|null $keyOrCallback = null, string|int|null $value = null): array .[method]
+----------------------------------------------------------------------------------------------------------
+
+Vrací asocitivní pole, kde klíčem je hodnota sloupce zadaného v prvním parametru a hodnotou je hodnota sloupce zadaného v druhém parametru. Pokud je druhý parametr `null`, hodnotou je celý řádek jako objekt `Row`. Pokud je jako první parametr zadán callback, bude pro každý řádek vracet buď samotnou hodnotu, nebo dvojici klíč-hodnota. Pokud callback vrací pouze hodnotu, klíčem bude primární klíč řádku.
+
+```php
+$result = $db->query('SELECT id, name FROM users');
+$pairs = $result->fetchPairs('id', 'name'); // ['1' => 'John', '2' => 'Jane', ...]
+
+$result = $db->query('SELECT id, name FROM users');
+$rows = $result->fetchPairs('id'); // ['1' => Row(id: 1, name: 'John'), '2' => Row(id: 2, name: 'Jane'), ...]
+
+$result = $db->query('SELECT * FROM users');
+$authors = $result->fetchPairs(fn($row) => "$row->name ($row->id)");
+// ['John (1)', 'Jane (2)', ...]
+
+$result = $db->query('SELECT * FROM users');
+$authors = $result->fetchPairs(fn($row) => [$row->id, $row->name]);
+// ['1' => 'John', '2' => 'Jane', ...]
+```
+
+
+fetchField(): mixed .[method]
+-----------------------------
+
+Vrací hodnotu prvního sloupce z aktuálního řádku.
+
+```php
+$result = $db->query('SELECT name FROM users');
+$name = $result->fetchField(); // načte jméno z prvního řádku
+```
+
+
+fetchList(): ?array .[method]
+-----------------------------
+
+Vrací aktuální řádek jako indexované pole.
+
+```php
+$result = $db->query('SELECT name, email FROM users');
+$row = $result->fetchList(); // ['John', 'john@example.com']
+```
+
+
+getRowCount(): ?int .[method]
+-----------------------------
+
+Vrací počet ovlivněných řádků (pro `SELECT` je to počet vrácených řádků, pokud je znám). Všimněte si, že u některých ovladačů (např. MySQL) nemusí být počet vrácených řádků při `SELECT` dotazu znám ihned po provedení dotazu, ale až po načtení všech řádků z `ResultSetu`. V takovém případě metoda vrátí -1.
+
+Vrací počet ovlivněných řádků posledním dotazem `UPDATE` nebo `DELETE`.
+
+
+getColumnCount(): ?int .[method]
+--------------------------------
+
+Vrací počet sloupců v `ResultSetu`.
+
+
+Techniky parametrizovaných dotazů
+=================================
+
+Nette Database nabízí elegantní a expresivní způsoby, jak sestavovat SQL dotazy. Podívejďe si je ukázat.
+
+
+Podmínky WHERE pomocí pole
+--------------------------
+
+Podmínky WHERE můžete zapsat jako asociativní pole, kde klíče jsou názvy sloupců a hodnoty jsou data pro porovnání:
+
+```php
+$db->query('SELECT * FROM users WHERE', [
+	'name' => 'John',
+	'active' => true,
+]);
+// WHERE `name` = 'John' AND `active` = 1
+```
+
+V klíči můžete také specifikovat operátor pro porovnání:
+
+```php
+$db->query('SELECT * FROM users WHERE', [
+	'age >' => 25,          // použije operátor >
+]);
+// WHERE `age` > 25
+```
+
+Nette automaticky volí nejvhodnější SQL operátory podle typu hodnoty. Ošetřuje za vás speciální případy jako null hodnoty nebo pole:
+
+```php
+$db->query('SELECT * FROM users WHERE', [
+	'id' => [1, 2, 3],      // použije IN
+	'group_id' => null,     // použije IS NULL
+	'name NOT' => 'John',   // použije operátor <>
+	'id NOT' => [1, 2, 3],  // použije NOT IN
+	'group_id NOT' => null, // použije IS NOT NULL
+]);
+WHERE (`id` IN (1, 2, 3)) AND (`group_id` IS NULL) AND (`name` NOT 'John') AND (`id` NOT IN (1, 2, 3))
+```
+
+Metoda správně zpracovává i záporné podmínky a prázdné pole:
+
+```php
+$table->where('id', []);         // WHERE `id` IS NULL AND FALSE -- nic nenalezne
+$table->where('id NOT', []);     // WHERE `id` IS NULL OR TRUE -- nalezene vše
+$table->where('NOT (id ?)', []); // WHERE NOT (`id` IS NULL AND FALSE) -- nalezene vše
+// $table->where('NOT id ?', $ids);  Pozor - tato syntaxe není podporovaná
+```
+
+Pro spojování podmínek se používá operátor `AND`. To lze změnit pomocí zástupného symbolu `?or` (viz níže).
+
+```php
+$db->query('SELECT * FROM users WHERE ?or', [
+	'name' => 'John',
+	'active' => true,
+]);
+// WHERE `name` = 'John' OR `active` = 1
+```
+
+
+Pravidla ORDER BY
+-----------------
+
+// TODO
+
+
+Hinty pro sestavování SQL
+-------------------------
+
+Všimněte si, že Nette Database poskládá pole do SQL dotazu růžným způsobem v závislosti na tom, ve které klauzili je použito. Používá k tomu autodetekci.
+
+Druhou možností je určit formu skládání manuálně pomocí hintu. Hint je speciální zástupný symbol v SQL dotazu, který říká, jak se má daná část dotazu vygenerovat.
+
+*   `?values`: Vygeneruje klauzuli `VALUES` pro `INSERT`.
+*   `?set`: Vygeneruje klauzuli `SET` pro `UPDATE`.
+*   `?and`: Spojí podmínky v poli operátorem `AND`.
+*   `?or`: Spojí podmínky v poli operátorem `OR`.
+*   `?order`: Vygeneruje klauzuli `ORDER BY`.
+
+Příklady:
+
+```php
+// INSERT INTO users (name, email) VALUES ('John Doe', 'john.doe@example.com')
+$db->query('INSERT INTO users ?values', [
+	'name' => 'John Doe',
+	'email' => 'john.doe@example.com',
+]);
+
+// UPDATE users SET name = 'John Smith', email = 'john.smith@example.com' WHERE id = 1
+$db->query('UPDATE users ?set WHERE id = ?', [
+	'name' => 'John Smith',
+	'email' => 'john.smith@example.com',
+], 1);
+
+// SELECT * FROM users WHERE name = 'John' OR email = 'john.doe@example.com'
+$db->query('SELECT * FROM users WHERE ?or', [
+	'name' => 'John',
+	'email' => 'john.doe@example.com',
+]);
+
+// SELECT * FROM articles ORDER BY published_at DESC, title ASC
+$db->query('SELECT * FROM articles ORDER BY ?order', [
+	'published_at' => false, // DESC
+	'title' => true, // ASC
+]);
+```
+```
+
+
+Zástupný symbol `?name`
+-----------------------
+
+Pro dynamické vkládání názvů tabulek a sloupců do dotazu slouží zástupný symbol `?name`. Nette Database se postará o správné ošetření identifikátorů podle konvencí dané databáze (např. uzavření do zpětných uvozovek v MySQL).
+
+```php
+$table = 'users';
+$column = 'name';
+$db->query('SELECT ?name FROM ?name WHERE id = 1', $column, $table);
+// Vygeneruje: SELECT `name` FROM `users` WHERE id = 1 (v MySQL)
+```
+
+**Bezpečnostní upozornění!** Zástupný symbol `?name` používejte pouze pro názvy tabulek a sloupců, které **nejsou** přímo ovlivněny uživatelským vstupem. Vždy se ujistěte, že hodnota pochází z důvěryhodného zdroje, například z konfigurace nebo z pevně definovaného seznamu v kódu. Nikdy nepoužívejte `?name` s nevalidovanými daty z `$_GET`, `$_POST` apod. - hrozí riziko SQL injection! Více informací naleznete v [dokumentaci o bezpečnosti |security].
+
+
+Speciální hodnoty parametrů
+===========================
+
+Kromě běžných skalárních typů (string, int, bool) můžete jako parametry předávat i speciální hodnoty:
+
+- soubory: `fopen('image.gif', 'r')` vloží binární obsah souboru
+- datum a čas: objekty `DateTime` se převedou na databázový formát
+- výčtové typy: instance `enum` se převedou na jejich hodnotu
+- SQL literály: vytvořené pomocí `Connection::literal('NOW()')` se vloží přímo do dotazu
+
+```php
+$db->query('INSERT INTO articles ?', [
+	'title' => 'My Article',
+	'published_at' => new DateTime,
+	'content' => fopen('image.png', 'r'),
+]);
+```
+
+Do dotazu můžeme také vložit celý výsledek jiného SQL dotazu:
+
+```php
+// Poddotaz jako parametr
+$users = $db->query('SELECT id FROM users WHERE active = ?', 1);
+$db->query('SELECT * FROM articles WHERE author_id IN (?)', $users);
+
+
+SQL literály
+------------
+
+V některých případech potřebujete do dotazu vložit kus vlastního SQL kódu, který se nemá parametrizovat. K tomu slouží třída `Nette\Database\SqlLiteral` nebo metoda `Connection::literal()`.
+
+```php
+// Použití SqlLiteral
+$db->query('SELECT * FROM users WHERE id = ?', new Nette\Database\SqlLiteral('LAST_INSERT_ID()'));
+
+// Použití Connection::literal()
+$db->query('SELECT * FROM users WHERE registered > ?', $db::literal('NOW() - INTERVAL 1 DAY'));
+
+// SQL literál s parametry
+$db->query('SELECT * FROM users WHERE name LIKE ?', $db::literal('CONCAT(?, "%")', $prefix));
+```
+
+
+Transakce
+=========
+
+Transakce zaručují, že se buď provedou všechny operace v rámci transakce, nebo se neprovede žádná. Jsou užitečné pro zajištění konzistence dat při složitějších operacích.
+
+Nejjednodušší způsob použití transakcí vypadá takto:
+
+```php
+$db->beginTransaction();
+try {
+    $db->query('DELETE FROM articles WHERE id = ?', $id);
+    $db->query('INSERT INTO audit_log', [
+        'article_id' => $id,
+        'action' => 'delete'
+    ]);
+    $db->commit();
+} catch (\Exception $e) {
+    $db->rollBack();
+    throw $e;
+}
+```
+
+Mnohem elegantněji můžete to samé zapsat pomocí metody `transaction()`. Jako parametr přijímá callback, který vykoná v transakci. Pokud callback proběhne bez výjimky, transakce se automaticky potvrdí. Pokud dojde k výjimce, transakce se zruší (rollback) a výjimka se šíří dál.
+
+```php
+$db->transaction(function ($db) use ($id) {
+    $db->query('DELETE FROM articles WHERE id = ?', $id);
+    $db->query('INSERT INTO audit_log', [
+        'article_id' => $id,
+        'action' => 'delete'
+    ]);
+});
+```
+
+Metoda `transaction()` může také vracet hodnoty:
+
+```php
+$count = $db->transaction(function ($db) {
+    $result = $db->query('UPDATE users SET active = ?', true);
+    return $result->getRowCount(); // vrátí počet aktualizovaných řádků
+});
+```
+
+
+Další vlastnosti a nastavení
+============================
+
+
+Nastavení `rowNormalizer`
+-------------------------
+
+Pomocí metody `setRowNormalizer(?callable $normalizer)` můžete nastavit vlastní funkci pro transformaci řádků z databáze. To se hodí například pro automatický převod datových typů.
+
+```php
+// Automatický převod na DateTime objekty
+$db->setRowNormalizer(fn(array $row, Nette\Database\ResultSet $resultSet) => Nette\Database\Helpers::normalizeRow($row, $resultSet, DateTime::class));
+```
+
+
+Události `onConnect` a `onQuery`
+--------------------------------
+
+`onConnect` je pole callbacků, které se zavolají po navázání spojení s databází. `onQuery` je pole callbacků, které se zavolají po každém provedeném dotazu. Můžete je využít například pro logování, profilování nebo úpravu dotazů.
+
+```php
+// Příklad logování dotazů do Tracy Debuggeru
+$db->onQuery[] = function (Nette\Database\Connection $connection, $result) {
+	if ($result instanceof Nette\Database\ResultSet) {
+		Tracy\Debugger::barDump($result->getQueryString(), 'DB Query');
+	} else {
+        Tracy\Debugger::barDump($connection->getLastQueryString(), 'DB Error');
+        Tracy\Debugger::barDump($result, 'Driver Exception');
+    }
+};
+```
+
+
+getPdo(): PDO .[method]
+-----------------------
+
+Vrací instanci PDO, která reprezentuje nízkoúrovňové spojení s databází.
+
+
+getDriver(): Driver .[method]
+-----------------------------
+
+Vrací instanci ovladače, který se stará o specifika komunikace s daným typem databáze.
+
+
+getReflection(): Reflection .[method]
+-------------------------------------
+
+Vrací instanci Reflection, která poskytuje informace o struktuře databáze - odkaz na [dokumentaci Reflection |reflection].
+
+
+API dokumentace `ResultSet`
+===========================
+
+
+dump(): void .[method]
+----------------------
+
+Vygeneruje HTML výpis `ResultSetu` s obsahem dotazu. Vhodné pro ladění.
+
+
+getTime(): float .[method]
+--------------------------
+
+Vrací délku trvání dotazu v sekundách.
+
+
+getQueryString(): string .[method]
+----------------------------------
+
+Vrací poslední provedený SQL dotaz i s dosazenými parametry
+
+
+getParameters(): array .[method]
+--------------------------------
+
+Vrací parametry posledního dotazu.
+
+
+getColumnTypes(): array .[method]
+---------------------------------
+
+Vrací typy sloupců v `ResultSetu` ve formě asociativního pole, kde klíče jsou názvy sloupců a hodnoty jsou konstanty PDO (např. `PDO::PARAM_STR`).
+
+
+API dokumentace `Connection`
+============================
+
+
+getLastQueryString(): ?string .[method]
+---------------------------------------
+
+Vrací poslední provedený SQL dotaz.
+
+
+connect(): void .[method]
+-------------------------
+
+Naváže spojení s databází, pokud ještě není navázáno.
+
+
+disconnect(): void .[method]
+----------------------------
+
+Odpojí se od databáze.
+
+
+reconnect(): void .[method]
+---------------------------
+
+Odpojí se a znovu připojí k databázi.
+
+
+Výjimky
+=======
+
+Nette Database Core používá pro signalizaci chyb hierarchii výjimek, která vychází z `Nette\Database\Exception`.
+
+*   `Nette\Database\Exception` (rozhraní)
+    *   `Nette\Database\ConnectionException` - Vyhozena při chybě připojení k databázi.
+    *   `Nette\Database\DriverException` - Vyhozena při chybě na úrovni databázového ovladače.
+        *   `Nette\Database\ConstraintViolationException` - Vyhozena při porušení integritního omezení (cizí klíč, unikátnost, NOT NULL).
+            *   `Nette\Database\ForeignKeyConstraintViolationException` - Vyhozena při porušení cizího klíče.
+            *   `Nette\Database\NotNullConstraintViolationException` - Vyhozena při porušení omezení NOT NULL.
+            *   `Nette\Database\UniqueConstraintViolationException` - Vyhozena při porušení unikátního indexu.

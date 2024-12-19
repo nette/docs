@@ -1,0 +1,177 @@
+Explorer: Vazby mezi tabulkami
+******************************
+
+V relačních databázích jsou data rozdělena do více tabulek a navzájem propojená pomocí cizích klíčů. Nette Database Explorer přináší revoluční způsob, jak s těmito vazbami pracovat - bez psaní JOIN dotazů a nutnosti cokoliv konfigurovat nebo generovat.
+
+Pro ilustraci práce s vazbami použijeme příklad databáze knih ([najdete jej na GitHubu |https://github.com/nette-examples/books]). V databázi máme tabulky:
+
+- `author` - spisovatelé a překladatelé (sloupce `id`, `name`, `web`, `born`)
+- `book` - knihy (sloupce `id`, `author_id`, `translator_id`, `title`, `sequel_id`)
+- `tag` - štítky (sloupce `id`, `name`)
+- `book_tag` - vazební tabulka mezi knihami a štítky (sloupce `book_id`, `tag_id`)
+
+[* db-schema-1-.webp *] *** Struktura databáze .<>
+
+V našem příkladu databáze knih najdeme několik typů vztahů (byť model je zjednodušený oproti realitě):
+
+- One-to-many 1:N – každá kniha **má jednoho** autora, autor může napsat **několik** knih
+- Zero-to-many 0:N – kniha **může mít** překladatele, překladatel může přeložit **několik** knih
+- Zero-to-one 0:1 – kniha **může mít** další díl
+- Many-to-many M:N – kniha **může mít několik** tagů a tag může být přiřazen **několika** knihám
+
+V těchto vztazích vždy existuje tabulka nadřazená a podřízená. Například ve vztahu mezi autorem a knihou je tabulka `author` nadřazená a `book` podřízená - můžeme si to představit tak, že kniha vždy "patří" nějakému autorovi. To se projevuje i ve struktuře databáze: podřízená tabulka `book` obsahuje cizí klíč `author_id`, který odkazuje na nadřazenou tabulku `author`.
+
+Potřebujeme-li vypsat knihy včetně jmen jejich autorů, máme dvě možnosti. Buď data získáme jediným SQL dotazem pomocí JOIN:
+
+```sql
+SELECT book.*, author.name FROM book LEFT JOIN author ON book.author_id = author.id
+```
+
+Nebo načteme data ve dvou krocích - nejprve knihy a pak jejich autory - a potom je v PHP poskládáme:
+
+```sql
+SELECT * FROM book;
+SELECT * FROM author WHERE id IN (1, 2, 3);  -- ids autorů získaných knih
+```
+
+Druhý přístup je ve skutečnosti efektivnější, i když to může být překvapivé. Data jsou načtena pouze jednou a mohou být lépe využita v cache. Právě tímto způsobem pracuje Nette Database Explorer - vše řeší pod povrchem a vám nabízí elegantní API:
+
+```php
+$books = $explorer->table('book');
+foreach ($books as $book) {
+	echo 'title: ' . $book->title;
+	echo 'written by: ' . $book->author->name; // $book->author je záznam z tabulky 'author'
+	echo 'translated by: ' . $book->translator?->name;
+}
+```
+
+
+Přístup k nadřazené tabulce
+---------------------------
+
+Přístup k nadřazené tabulce je přímočarý. Jde o vztahy jako *kniha má autora* nebo *kniha může mít překladatele*. Související záznam získáme přes property objektu ActiveRow - její název odpovídá názvu sloupce s cizím klíčem bez `id`:
+
+```php
+$book = $explorer->table('book')->get(1);
+echo $book->author->name;      // najde autora podle sloupce author_id
+echo $book->translator?->name; // najde překladatele podle translator_id
+```
+
+Když přistoupíme k property `$book->author`, Explorer v tabulce `book` hledá sloupec, jehož název obsahuje řetězec `author` (tedy `author_id`). Podle hodnoty v tomto sloupci načte odpovídající záznam z tabulky `author` a vrátí jej jako `ActiveRow`. Podobně funguje i `$book->translator`, který využije sloupec `translator_id`. Protože sloupec `translator_id` může obsahovat `null`, použijeme v kódu operátor `?->`.
+
+Alternativní cestu nabízí metoda `ref()`, která přijímá dva argumenty, název cílové tabulky a název spojovacího sloupce, a vrací instanci `ActiveRow` nebo `null`:
+
+```php
+echo $book->ref('author', 'author_id')->name;      // vazba na autora
+echo $book->ref('author', 'translator_id')->name;  // vazba na překladatele
+```
+
+Metoda `ref()` se hodí, pokud nelze použít přístup přes property, protože tabulka obsahuje sloupec se stejným názvem (tj. `author`). V ostatních případech je doporučeno používat přístup přes property, který je čitelnější.
+
+Explorer automaticky optimalizuje databázové dotazy. Když procházíme knihy v cyklu a přistupujeme k jejich souvisejícím záznamům (autorům, překladatelům), Explorer negeneruje dotaz pro každou knihu zvlášť. Místo toho provede pouze jeden SELECT pro každý typ vazby, čímž výrazně snižuje zátěž databáze. Například:
+
+```php
+$books = $explorer->table('book');
+foreach ($books as $book) {
+	echo $book->title . ': ';
+	echo $book->author->name;
+	echo $book->translator?->name;
+}
+```
+
+Tento kód zavolá pouze tyto tři bleskové dotazy do databáze:
+
+```sql
+SELECT * FROM `book`;
+SELECT * FROM `author` WHERE (`id` IN (1, 2, 3)); -- id ze sloupce author_id vybraných knih
+SELECT * FROM `author` WHERE (`id` IN (2, 3));    -- id ze sloupce translator_id vybraných knih
+```
+
+Viz tečková notace.
+
+.[note]
+Logika dohledávání spojovacího sloupce je dána implementací [Conventions |api:Nette\Database\Conventions]. Doporučujeme použití [DiscoveredConventions |api:Nette\Database\Conventions\DiscoveredConventions], které analyzuje cizí klíče a umožňuje jednoduše pracovat s existujícími vztahy mezi tabulkami.
+
+
+Přístup k podřízené tabulce
+---------------------------
+
+Přístup k podřízené tabulce funguje v opačném směru. Nyní se ptáme *jaké knihy napsal tento autor* nebo *přeložil tento překladatel*. Pro tento typ dotazu používáme metodu `related()`, která vrátí `Selection` se souvisejícími záznamy. Podívejme se na příklad:
+
+```php
+$author = $explorer->table('author')->get(1);
+
+// Vypíše všechny knihy od autora
+foreach ($author->related('book.author_id') as $book) {
+	echo "Napsal: $book->title";
+}
+
+// Vypíše všechny knihy, které autor přeložil
+foreach ($author->related('book.translator_id') as $book) {
+	echo "Přeložil: $book->title";
+}
+```
+
+Metoda `related()` přijímá popis spojení jako jeden argument s tečkovou notací nebo jako dva samostatné argumenty:
+
+```php
+$author->related('book.translator_id');  // jeden argument
+$author->related('book', 'translator_id');  // dva argumenty
+```
+
+Explorer dokáže automaticky detekovat správný spojovací sloupec na základě názvu nadřazené tabulky. V tomto případě se spojuje přes sloupec `book.author_id`, protože název zdrojové tabulky je `author`:
+
+```php
+$author->related('book');  // použije book.author_id
+```
+
+Pokud by existovalo více možných spojení, Explorer vyhodí výjimku [AmbiguousReferenceKeyException |api:Nette\Database\Conventions\AmbiguousReferenceKeyException].
+
+Metodu `related()` můžeme samozřejmě použít i při procházení více záznamů v cyklu a Explorer i v tomto případě automaticky optimalizuje dotazy:
+
+```php
+$authors = $explorer->table('author');
+foreach ($authors as $author) {
+	echo $author->name . ' napsal:';
+	foreach ($author->related('book') as $book) {
+		echo $book->title;
+	}
+}
+```
+
+Tento kód vygeneruje pouze dva bleskové SQL dotazy:
+
+```sql
+SELECT * FROM `author`;
+SELECT * FROM `book` WHERE (`author_id` IN (1, 2, 3)); -- id vybraných autorů
+```
+
+Viz dvojtečková notace.
+
+
+Vazba Many-to-many
+------------------
+
+Pro vazbu many-to-many (M:N) je potřeba existence vazební tabulky (v našem případě `book_tag`), která obsahuje dva sloupce s cizími klíči (`book_id`, `tag_id`). Každý z těchto sloupců odkazuje na primární klíč jedné z propojovaných tabulek. Pro získání souvisejících dat nejprve získáme záznamy z vazební tabulky pomocí `related('book_tag')` a dále pokračujeme k cílovým datům:
+
+```php
+$book = $explorer->table('book')->get(1);
+// vypíše názvy tagů přiřazených ke knize
+foreach ($book->related('book_tag') as $bookTag) {
+	echo $bookTag->tag->name;  // vypíše název tagu přes vazební tabulku
+}
+
+$tag = $explorer->table('tag')->get(1);
+// nebo opačně: vypíše názvy knih označených tímto tagem
+foreach ($tag->related('book_tag') as $bookTag) {
+	echo $bookTag->book->title; // vypíše název knihy
+}
+```
+
+Explorer opět optimalizuje SQL dotazy do efektivní podoby:
+
+```sql
+SELECT * FROM `book`;
+SELECT * FROM `book_tag` WHERE (`book_tag`.`book_id` IN (1, 2, ...));  -- id vybraných knih
+SELECT * FROM `tag` WHERE (`tag`.`id` IN (1, 2, ...));                 -- id tagů nalezených v book_tag
+```

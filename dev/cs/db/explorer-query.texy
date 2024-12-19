@@ -1,0 +1,329 @@
+Explorer: Filtrování a řazení
+*****************************
+
+Třída `Selection` poskytuje metody pro filtrování a řazení výběru dat.
+
+.[language-php]
+| `where($condition, ...$params)` | Přidá podmínku WHERE. Více podmínek je spojeno operátorem AND
+| `whereOr(array $conditions)` | Přidá skupinu podmínek WHERE spojených operátorem OR
+| `wherePrimary($value)` | Přidá podmínku WHERE podle primárního klíče
+| `order($columns, ...$params)` | Nastaví řazení ORDER BY
+| `select($columns, ...$params)` | Specifikuje sloupce, které se mají načíst
+| `limit($limit, $offset = null)` | Omezí počet řádků (LIMIT) a volitelně nastaví OFFSET
+| `page($page, $itemsPerPage, &$total = null)` | Nastaví stránkování
+| `group($columns, ...$params)` | Seskupí řádky (GROUP BY)
+| `having($condition, ...$params)` | Přidá podmínku HAVING pro filtrování seskupených řádků
+
+Metody lze řetězit (tzv. [fluent interface|nette:introduction-to-object-oriented-programming#fluent-interfaces]): `$table->where(...)->order(...)->limit(...)`.
+
+V těchto metodách můžete také používat speciální notaci pro přístup k [datům ze souvisejících tabulek|#Dotazování přes související tabulky].
+
+
+Escapování a identifikátory
+---------------------------
+
+Metody automaticky escapují parametry a uvozují identifikátory (názvy tabulek a sloupců), čímž zabraňuje SQL injection. Pro správné fungování je nutné dodržovat několik pravidel:
+
+- Klíčová slova, názvy funkcí, procedur apod. pište **velkými písmeny**.
+- Názvy sloupců a tabulek pište **malými písmeny**.
+- Řetězce vždy dosazujte přes **parametry**.
+
+```php
+where('name = ' . $name);         // KRITICKÁ ZRANITELNOST: SQL injection
+where('name LIKE "%search%"');    // ŠPATNĚ: komplikuje automatické uvozování
+where('name LIKE ?', '%search%'); // SPRÁVNĚ: hodnota dosazená přes parametr
+
+where('name like ?', $name);     // ŠPATNĚ: vygeneruje: `name` `like` ?
+where('name LIKE ?', $name);     // SPRÁVNĚ: vygeneruje: `name` LIKE ?
+where('LOWER(name) = ?', $value);// SPRÁVNĚ: LOWER(`name`) = ?
+```
+
+
+where(string|array $condition, ...$parameters): static .[method]
+----------------------------------------------------------------
+
+Filtruje výsledky pomocí podmínek WHERE. Její silnou stránkou je inteligentní práce s různými typy hodnot a automatická volba SQL operátorů.
+
+Základní použití:
+
+```php
+$table->where('id', $value);     // WHERE `id` = 123
+$table->where('id > ?', $value); // WHERE `id` > 123
+$table->where('id = ? OR name = ?', $id, $name); // WHERE `id` = 1 OR `name` = 'Jon Snow'
+```
+
+Díky automatické detekci vhodných operátorů nemusíme řešit různé speciální případy. Nette je vyřeší za nás:
+
+```php
+$table->where('id', 1);          // WHERE `id` = 1
+$table->where('id', null);       // WHERE `id` IS NULL
+$table->where('id', [1, 2, 3]);  // WHERE `id` IN (1, 2, 3)
+// lze použít i zástupný otazník bez operátoru:
+$table->where('id ?', 1);        // WHERE `id` = 1
+```
+
+Metoda správně zpracovává i záporné podmínky a prázdné pole:
+
+```php
+$table->where('id', []);         // WHERE `id` IS NULL AND FALSE -- nic nenalezne
+$table->where('id NOT', []);     // WHERE `id` IS NULL OR TRUE -- nalezene vše
+$table->where('NOT (id ?)', []); // WHERE NOT (`id` IS NULL AND FALSE) -- nalezene vše
+// $table->where('NOT id ?', $ids);  Pozor - tato syntaxe není podporovaná
+```
+
+Jako parametr můžeme předat také výsledek z jiné tabulky - vytvoří se poddotaz:
+
+```php
+// WHERE `id` IN (SELECT `id` FROM `tableName`)
+$table->where('id', $explorer->table($tableName));
+
+// WHERE `id` IN (SELECT `col` FROM `tableName`)
+$table->where('id', $explorer->table($tableName)->select('col'));
+```
+
+Podmínky můžeme předat také jako pole, jehož položky se spojí pomocí AND:
+
+```php
+// WHERE (`price_final` < `price_original`) AND (`stock_count` > `min_stock`)
+$table->where([
+	'price_final < price_original',
+	'stock_count > min_stock',
+]);
+```
+
+V poli můžeme použít dvojice klíč => hodnota a Nette opět automaticky zvolí správné operátory:
+
+```php
+// WHERE (`status` = 'active') AND (`id` IN (1, 2, 3))
+$table->where([
+	'status' => 'active',
+	'id' => [1, 2, 3],
+]);
+```
+
+V poli můžeme kombinovat SQL výrazy se zástupnými otazníky a více parametry. To je vhodné pro komplexní podmínky s přesně definovanými operátory:
+
+```php
+// WHERE (`age` > 18) AND (ROUND(`score`, 2) > 75.5)
+$table->where([
+	'age > ?' => 18,
+	'ROUND(score, ?) > ?' => [2, 75.5], // dva parametry předáme jako pole
+]);
+```
+
+Vícenásobné volání `where()` podmínky automaticky spojuje pomocí AND.
+
+
+whereOr(array $parameters): static .[method]
+--------------------------------------------
+
+Podobně jako `where()` přidává podmínky, ale s tím rozdílem, že je spojuje pomocí OR:
+
+```php
+// WHERE (`status` = 'active') OR (`deleted` = 1)
+$table->whereOr([
+	'status' => 'active',
+	'deleted' => true,
+]);
+```
+
+I zde můžeme použít komplexnější výrazy:
+
+```php
+// WHERE (`price` > 1000) OR (`price_with_tax` > 1500)
+$table->whereOr([
+	'price > ?' => 1000,
+	'price_with_tax > ?' => 1500,
+]);
+```
+
+
+wherePrimary(mixed $key): static .[method]
+------------------------------------------
+
+Přidá podmínku pro primární klíč tabulky:
+
+```php
+// WHERE `id` = 123
+$table->wherePrimary(123);
+
+// WHERE `id` IN (1, 2, 3)
+$table->wherePrimary([1, 2, 3]);
+```
+
+Pokud má tabulka kompozitní primární klíč (např. `foo_id`, `bar_id`), předáme jej jako pole:
+
+```php
+// WHERE `foo_id` = 1 AND `bar_id` = 5
+$table->wherePrimary(['foo_id' => 1, 'bar_id' => 5])->fetch();
+
+// WHERE (`foo_id`, `bar_id`) IN ((1, 5), (2, 3))
+$table->wherePrimary([
+	['foo_id' => 1, 'bar_id' => 5],
+	['foo_id' => 2, 'bar_id' => 3],
+])->fetchAll();
+```
+
+
+order(string $columns, ...$parameters): static .[method]
+--------------------------------------------------------
+
+Určuje pořadí, v jakém budou řádky vráceny. Můžeme řadit podle jednoho či více sloupců, v sestupném či vzestupném pořadí, nebo podle vlastního výrazu:
+
+```php
+$table->order('created');                   // ORDER BY `created`
+$table->order('created DESC');              // ORDER BY `created` DESC
+$table->order('priority DESC, created');    // ORDER BY `priority` DESC, `created`
+$table->order('status = ? DESC', 'active'); // ORDER BY `status` = 'active' DESC
+```
+
+
+select(string $columns, ...$parameters): static .[method]
+---------------------------------------------------------
+
+Specifikuje sloupce, které se mají vrátit z databáze. Ve výchozím stavu Nette Database Explorer vrací pouze ty sloupce, které se reálně použijí v kódu. Metodu `select()` tak používáme v případech, kdy potřebujeme vrátit specifické výrazy:
+
+```php
+// SELECT *, DATE_FORMAT(`created_at`, "%d.%m.%Y") AS `formatted_date`
+$table->select('*, DATE_FORMAT(created_at, ?) AS formatted_date', '%d.%m.%Y');
+```
+
+Aliasy definované pomocí `AS` jsou pak dostupné jako vlastnosti objektu ActiveRow:
+
+```php
+foreach ($table as $row) {
+	echo $row->formatted_date;   // přístup k aliasu
+}
+```
+
+
+limit(?int $limit, ?int $offset = null): static .[method]
+---------------------------------------------------------
+
+Omezuje počet vrácených řádků (LIMIT) a volitelně umožňuje nastavit offset:
+
+```php
+$table->limit(10);        // LIMIT 10 (vrátí prvních 10 řádků)
+$table->limit(10, 20);    // LIMIT 10 OFFSET 20
+```
+
+Pro stránkování je vhodnější použít metodu `page()`.
+
+
+page(int $page, int $itemsPerPage, &$numOfPages = null): static .[method]
+-------------------------------------------------------------------------
+
+Usnadňuje stránkování výsledků. Přijímá číslo stránky (počítané od 1) a počet položek na stránku. Volitelně lze předat referenci na proměnnou, do které se uloží celkový počet stránek:
+
+```php
+$numOfPages = null;
+$table->page(page: 3, itemsPerPage: 10, $numOfPages);
+echo "Celkem stránek: $numOfPages";
+```
+
+
+group(string $columns, ...$parameters): static .[method]
+--------------------------------------------------------
+
+Seskupuje řádky podle zadaných sloupců (GROUP BY). Používá se obvykle ve spojení s agregačními funkcemi:
+
+```php
+// Spočítá počet produktů v každé kategorii
+$table->select('category_id, COUNT(*) AS count')
+	->group('category_id');
+```
+
+
+having(string $having, ...$parameters): static .[method]
+--------------------------------------------------------
+
+Nastavuje podmínku pro filtrování seskupených řádků (HAVING). Lze ji použít ve spojení s metodou `group()` a agregačními funkcemi:
+
+```php
+// Nalezne kategorie, které mají více než 100 produktů
+$table->select('category_id, COUNT(*) AS count')
+	->group('category_id')
+	->having('count > ?', 100);
+```
+
+
+Dotazování přes související tabulky
+-----------------------------------
+
+V metodách `where()`, `select()`, `order()` a `group()` můžeme používat speciální notace pro přístup k sloupcům z jiných tabulek. Explorer automaticky vytvoří potřebné JOINy.
+
+**Tečková notace** (`nadřazená_tabulka.sloupec`) se používá pro vztah 1:N z pohledu podřízené tabulky:
+
+```php
+$books = $explorer->table('book');
+
+// Najde knihy, jejichž autor má jméno začínající na 'Jon'
+$books->where('author.name LIKE ?', 'Jon%');
+
+// Seřadí knihy podle jména autora sestupně
+$books->order('author.name DESC');
+
+// Vypíše název knihy a jméno autora
+$books->select('book.title, author.name');
+```
+
+**Dvojtečková notace** (`:podřízená_tabulka.sloupec`) se používá pro vztah 1:N z pohledu nadřazené tabulky:
+
+```php
+$authors = $explorer->table('author');
+
+// Najde autory, kteří napsali knihu s 'PHP' v názvu
+$authors->where(':book.title LIKE ?', '%PHP%');
+
+// Spočítá počet knih pro každého autora
+$authors->select('*, COUNT(:book.id) AS book_count')
+	->group('author.id');
+```
+
+Ve výše uvedeném příkladu s dvojtečkovou notací (`:book.title`) není specifikován sloupec s cizím klíčem. Explorer automaticky detekuje správný sloupec na základě názvu nadřazené tabulky. V tomto případě se spojuje přes sloupec `book.author_id`, protože název zdrojové tabulky je `author`. Pokud by existovalo více možných spojení, Explorer vyhodí výjimku [AmbiguousReferenceKeyException |api:Nette\Database\Conventions\AmbiguousReferenceKeyException].
+
+Spojovací sloupec lze explicitně uvést v závorce:
+
+```php
+// Najde autory, kteří přeložili knihu s 'PHP' v názvu
+$authors->where(':book(translator).title LIKE ?', '%PHP%');
+```
+
+Notace lze řetězit pro přístup přes více tabulek:
+
+```php
+// Najde autory knih označených tagem 'PHP'
+$authors->where(':book:book_tag.tag.name', 'PHP')
+	->group('author.id');
+```
+
+
+Rozšíření podmínek pro JOIN
+---------------------------
+
+Metoda `joinWhere()` rozšiřuje podmínky, které se uvádějí při propojování tabulek v SQL za klíčovým slovem `ON`.
+
+Dejme tomu, že chceme najít knihy přeložené konkrétním překladatelem:
+
+```php
+// Najde knihy přeložené překladatelem jménem 'David'
+$books = $explorer->table('book')
+	->joinWhere('translator', 'translator.name', 'David');
+// LEFT JOIN author translator ON book.translator_id = translator.id AND (translator.name = 'David')
+```
+
+V podmínce `joinWhere()` můžeme používat stejné konstrukce jako v metodě `where()` - operátory, zástupné otazníky, pole hodnot či SQL výrazy.
+
+Pro složitější dotazy s více JOINy můžeme definovat aliasy tabulek:
+
+```php
+$tags = $explorer->table('tag')
+	->joinWhere(':book_tag.book.author', 'book_author.born < ?', 1950)
+	->alias(':book_tag.book.author', 'book_author');
+// LEFT JOIN `book_tag` ON `tag`.`id` = `book_tag`.`tag_id`
+// LEFT JOIN `book` ON `book_tag`.`book_id` = `book`.`id`
+// LEFT JOIN `author` `book_author` ON `book`.`author_id` = `book_author`.`id`
+//    AND (`book_author`.`born` < 1950)
+```
+
+Všimněte si, že zatímco metoda `where()` přidává podmínky do klauzule `WHERE`, metoda `joinWhere()` rozšiřuje podmínky v klauzuli `ON` při spojování tabulek.

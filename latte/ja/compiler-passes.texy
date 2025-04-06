@@ -1,0 +1,554 @@
+コンパイルパス
+*******
+
+.[perex]
+コンパイルパスは、Latteテンプレートを抽象構文木（AST）に解析した後、最終的なPHPコードを生成する前に、テンプレートを分析および変更するための強力なメカニズムを提供します。これにより、テンプレートの高度な操作、最適化、セキュリティチェック（Sandboxなど）、およびテンプレートに関する情報の収集が可能になります。このガイドでは、独自のコンパイルパスの作成について説明します。
+
+
+コンパイルパスとは？ .[#toc-what-is-a-compiler-pass]
+==========================================
+
+コンパイルパスの役割を理解するために、[Latteのコンパイルプロセス |custom-tags#Understanding the Compilation Process]をご覧ください。ご覧のとおり、コンパイルパスは重要な段階で動作し、最初の解析と最終的なコード出力の間に深い介入を可能にします。
+
+基本的に、コンパイルパスは単なるPHP callableオブジェクト（関数、静的メソッド、またはインスタンスメソッドなど）であり、単一の引数を受け取ります：テンプレートのルートASTノード。これは常に`Latte\Compiler\Nodes\TemplateNode`のインスタンスです。
+
+コンパイルパスの主な目的は、通常、次の1つまたは両方です：
+
+- 分析：ASTを走査し、テンプレートに関する情報を収集します（例：定義されたすべてのブロックを見つける、特定のタグの使用を確認する、特定のセキュリティ制約が満たされていることを確認する）。
+- 変更：ASTの構造またはノードの属性を変更します（例：HTML属性を自動的に追加する、特定のタグの組み合わせを最適化する、古いタグを新しいタグに置き換える、サンドボックスルールを実装する）。
+
+
+登録 .[#toc-registration]
+=======================
+
+コンパイルパスは、[拡張機能 |extending-latte#getPasses()]の`getPasses()`メソッドを使用して登録されます。このメソッドは連想配列を返します。キーはパスの一意の名前（内部で使用され、ソートに使用されます）であり、値はパスのロジックを実装するPHP callableオブジェクトです。
+
+```php
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Extension;
+
+class MyExtension extends Extension
+{
+	public function getPasses(): array
+	{
+		return [
+			'modificationPass' => $this->modifyTemplateAst(...),
+			// ... その他のパス ...
+		];
+	}
+
+	public function modifyTemplateAst(TemplateNode $templateNode): void
+	{
+		// 実装...
+	}
+}
+```
+
+Latteの基本拡張機能と独自の拡張機能によって登録されたパスは順次実行されます。1つのパスが別のパスの結果または変更に依存する場合、順序が重要になることがあります。Latteは、必要に応じてこの順序を制御するための補助メカニズムを提供します。詳細については、[`Extension::getPasses()` |extending-latte#getPasses()]のドキュメントを参照してください。
+
+
+ASTの例 .[#toc-example-of-ast]
+============================
+
+ASTのより良いイメージを得るために、例を追加します。これはソーステンプレートです：
+
+```latte
+{foreach $category->getItems() as $item}
+	<li>{$item->name|upper}</li>
+	{else}
+	no items found
+{/foreach}
+```
+
+そして、これはAST形式でのその表現です：
+
+/--pre
+Latte\Compiler\Nodes\<b>TemplateNode</b>(
+   Latte\Compiler\Nodes\<b>FragmentNode</b>(
+      - Latte\Essential\Nodes\<b>ForeachNode</b>(
+           expression: Latte\Compiler\Nodes\Php\Expression\<b>MethodCallNode</b>(
+              object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$category')
+              name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('getItems')
+           )
+           value: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+           content: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+              - Latte\Compiler\Nodes\<b>TextNode</b>('  ')
+              - Latte\Compiler\Nodes\<b>Html\ElementNode</b>('li')(
+                   content: Latte\Essential\Nodes\<b>PrintNode</b>(
+                      expression: Latte\Compiler\Nodes\Php\Expression\<b>PropertyFetchNode</b>(
+                         object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+                         name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('name')
+                      )
+                      modifier: Latte\Compiler\Nodes\Php\<b>ModifierNode</b>(
+                         filters:
+                            - Latte\Compiler\Nodes\Php\<b>FilterNode</b>('upper')
+                      )
+                   )
+                )
+            )
+            else: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+               - Latte\Compiler\Nodes\<b>TextNode</b>('no items found')
+            )
+        )
+   )
+)
+\--
+
+
+`NodeTraverser` を使用したASTの走査 .[#toc-traversing-the-ast-with-nodetraverser]
+=========================================================================
+
+複雑なAST構造を走査するために再帰関数を手動で記述するのは、退屈でエラーが発生しやすいです。Latteはこの目的のために特別なツールを提供しています：[api:Latte\Compiler\NodeTraverser]。このクラスは[Visitorデザインパターン |https://en.wikipedia.org/wiki/Visitor_pattern]を実装しており、ASTの走査を体系的かつ管理しやすくします。
+
+基本的な使用法は、`NodeTraverser` のインスタンスを作成し、その `traverse()` メソッドを呼び出し、ASTのルートノードと1つまたは2つの「ビジター」callableオブジェクトを渡すことです：
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+
+(new NodeTraverser)->traverse(
+	$templateNode,
+
+	// 'enter' ビジター：ノードに入るとき（その子の前）に呼び出されます
+	enter: function (Node $node) {
+		echo "ノードタイプへの入力： " . $node::class . "\n";
+		// ここでノードを調べることができます
+		if ($node instanceof Nodes\TextNode) {
+			// echo "見つかったテキスト： " . $node->content . "\n";
+		}
+	},
+
+	// 'leave' ビジター：ノードを離れるとき（その子の後）に呼び出されます
+	leave: function (Node $node) {
+		echo "ノードタイプからの退出： " . $node::class . "\n";
+		// ここで子の処理後にアクションを実行できます
+	},
+);
+```
+
+ニーズに応じて、`enter` ビジターのみ、`leave` ビジターのみ、または両方を提供できます。
+
+**`enter(Node $node)`:** この関数は、トラバーサーがこのノードの子のいずれかを訪問する**前**に各ノードに対して実行されます。以下に役立ちます：
+
+- ツリーを下に移動しながら情報を収集する。
+- 子を処理する**前**に決定を行う（[走査の最適化 |#Optimizing Traversal]で説明されているように、それらをスキップすることを決定するなど）。
+- 子を訪問する前にノードを潜在的に変更する（あまり一般的ではありません）。
+
+**`leave(Node $node)`:** この関数は、すべての子（およびそれらの完全なサブツリー）が完全に訪問された（入力と退出の両方）**後**に各ノードに対して実行されます。以下に最も一般的な場所です：
+
+`enter` と `leave` の両方のビジターは、オプションで値を返して走査プロセスに影響を与えることができます。`null`（または何も）を返すと、通常どおり走査が続行されます。`Node` のインスタンスを返すと、現在のノードが置き換えられます。`NodeTraverser::RemoveNode` や `NodeTraverser::StopTraversal` などの特別な定数を返すと、次のセクションで説明するようにフローが変更されます。
+
+
+走査の仕組み .[#toc-how-traversal-works]
+----------------------------------
+
+`NodeTraverser` は内部的に `getIterator()` メソッドを使用します。これは、各 `Node` クラスが実装する必要があるものです（[カスタムタグの作成 |custom-tags#Implementing getIterator() for Subnodes]で説明されています）。`getIterator()` を使用して取得した子を反復処理し、それらに対して再帰的に `traverse()` を呼び出し、`enter` と `leave` のビジターがイテレータを介してアクセス可能なツリー内の各ノードに対して正しい深さ優先順序で呼び出されることを保証します。これは、カスタムタグノードで正しく実装された `getIterator()` がコンパイルパスが正しく機能するために絶対に不可欠である理由を再度強調しています。
+
+テンプレート内で `{do}` タグ（`Latte\Essential\Nodes\DoNode` で表される）が何回使用されているかをカウントする簡単なパスを作成しましょう。
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\DoNode;
+
+function countDoTags(TemplateNode $templateNode): void
+{
+	$count = 0;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use (&$count): void {
+			if ($node instanceof DoNode) {
+				$count++;
+			}
+		},
+		// このタスクには 'leave' ビジターは必要ありません
+	);
+
+	echo "{do} タグが $count 回見つかりました。\n";
+}
+
+$latte = new Latte\Engine;
+$ast = $latte->parse($templateSource);
+countDoTags($ast);
+```
+
+この例では、訪問した各ノードのタイプを確認するために `enter` ビジターのみが必要でした。
+
+次に、これらのビジターが実際にASTをどのように変更するかを探ります。
+
+
+ASTの変更 .[#toc-modifying-the-ast]
+================================
+
+コンパイルパスの主な目的の1つは、抽象構文木を変更することです。これにより、PHPコードを生成する前に、テンプレート構造に対して強力な変換、最適化、またはルールの強制が可能になります。`NodeTraverser` は、`enter` および `leave` ビジター内でこれを達成するためのいくつかの方法を提供します。
+
+**重要な注意：** ASTの変更には注意が必要です。基本的なノードの削除やノードを互換性のないタイプに置き換えるなど、不適切な変更は、コード生成中にエラーを引き起こしたり、実行時に予期しない動作を引き起こしたりする可能性があります。変更パスは常に徹底的にテストしてください。
+
+
+ノードプロパティの変更 .[#toc-changing-node-properties]
+--------------------------------------------
+
+ツリーを変更する最も簡単な方法は、走査中に訪問したノードの**パブリックプロパティ**を直接変更することです。すべてのノードは、解析された引数、コンテンツ、または属性をパブリックプロパティに格納します。
+
+**例：** すべての静的テキストノード（`TextNode`、通常のHTMLまたはLatteタグ外のテキストを表す）を見つけ、その内容を*AST内で直接*大文字に変換するパスを作成しましょう。
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\TextNode;
+
+function uppercaseStaticText(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// TextNodeには処理する子がないため、'enter'を使用できます
+		enter: function (Node $node) {
+			// このノードは静的テキストブロックですか？
+			if ($node instanceof TextNode) {
+				// はい！パブリックプロパティ 'content' を直接変更します。
+				$node->content = mb_strtoupper(html_entity_decode($node->content));
+			}
+			// 何も返す必要はありません。変更は直接適用されます。
+		},
+	);
+}
+```
+
+この例では、`enter` ビジターは現在の `$node` が `TextNode` タイプであるかどうかを確認します。そうであれば、`mb_strtoupper()` を使用してパブリックプロパティ `$content` を直接更新します。これにより、PHPコードを生成する*前*にASTに格納されている静的テキストの内容が直接変更されます。オブジェクトを直接変更しているため、ビジターから何も返す必要はありません。
+
+効果：テンプレートに `<p>Hello</p>{= $var }<span>World</span>` が含まれていた場合、このパスの後、ASTは `<p>HELLO</p>{= $var }<span>WORLD</span>` のようなものを表します。これは$varの内容には影響しません。
+
+
+ノードの置換 .[#toc-replacing-nodes]
+------------------------------
+
+より強力な変更手法は、ノードを別のノードに完全に置き換えることです。これは、`enter` または `leave` ビジターから**新しい `Node` インスタンスを返す**ことによって行われます。`NodeTraverser` は、元のノードを親ノードの構造内で返されたノードに置き換えます。
+
+**例：** 定数 `PHP_VERSION` のすべての使用（`ConstantFetchNode` で表される）を見つけ、それらを*コンパイル時*に検出された*実際の* PHPバージョンを含む文字列リテラル（`StringNode`）に直接置き換えるパスを作成しましょう。これはコンパイル時の最適化の一形態です。
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\Php\Expression\ConstantFetchNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+
+function inlinePhpVersion(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// 置換には 'leave' がよく使用され、子（存在する場合）が
+		// 最初に処理されることを保証しますが、ここでは 'enter' も機能します。
+		leave: function (Node $node) {
+			// このノードは定数アクセスであり、定数名は 'PHP_VERSION' ですか？
+			if ($node instanceof ConstantFetchNode && (string) $node->name === 'PHP_VERSION') {
+				// 現在のPHPバージョンを含む新しいStringNodeを作成します
+				$newNode = new StringNode(PHP_VERSION);
+
+				// オプションですが、良い習慣です：位置情報をコピーします
+				$newNode->position = $node->position;
+
+				// 新しいStringNodeを返します。Traverserは
+				// 元のConstantFetchNodeをこの$newNodeに置き換えます。
+				return $newNode;
+			}
+			// Nodeを返さない場合、元の$nodeは保持されます。
+		},
+	);
+}
+```
+
+ここでは、`leave` ビジターが `PHP_VERSION` の特定の `ConstantFetchNode` を識別します。次に、*コンパイル時*の `PHP_VERSION` 定数の値を含むまったく新しい `StringNode` を作成します。この `$newNode` を返すことで、トラバーサーに元の `ConstantFetchNode` をAST内で置き換えるように指示します。
+
+効果：テンプレートに `{= PHP_VERSION }` が含まれており、コンパイルがPHP 8.2.1で実行されている場合、このパスの後のASTは効果的に `{= '8.2.1' }` を表します。
+
+**置換のための `enter` vs. `leave` の選択：**
+
+- 新しいノードの作成が古いノードの子の処理結果に依存する場合、または単に子が置換前に訪問されることを保証したい場合（一般的な慣行）は、`leave` を使用します。
+- 子が訪問される*前*にノードを置き換えたい場合は、`enter` を使用します。
+
+
+ノードの削除 .[#toc-removing-nodes]
+-----------------------------
+
+ビジターから特別な定数 `NodeTraverser::RemoveNode` を返すことで、ASTからノードを完全に削除できます。
+
+**例：** Latteコアによって生成されたAST内の `CommentNode` で表されるすべてのテンプレートコメント（`{* ... *}`）を削除しましょう（通常は以前に処理されますが、これは例として役立ちます）。
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\CommentNode;
+
+function removeCommentNodes(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// コメントを削除するために子の情報は必要ないので、ここでは 'enter' で問題ありません
+		enter: function (Node $node) {
+			if ($node instanceof CommentNode) {
+				// このノードをASTから削除するようにトラバーサーに通知します
+				return NodeTraverser::RemoveNode;
+			}
+		},
+	);
+}
+```
+
+**注意：** `RemoveNode` は慎重に使用してください。基本的なコンテンツを含むノードや構造に影響を与えるノード（サイクルのコンテンツノードの削除など）を削除すると、破損したテンプレートや無効な生成コードにつながる可能性があります。本当にオプションまたは自己完結型のノード（コメントやデバッグタグなど）や空の構造ノード（たとえば、空の `FragmentNode` は、クリーンアップパスによって一部のコンテキストで安全に削除できます）に対して最も安全です。
+
+これら3つのメソッド - プロパティの変更、ノードの置換、ノードの削除 - は、コンパイルパス内でASTを操作するための基本的なツールを提供します。
+
+
+走査の最適化 .[#toc-optimizing-traversal]
+===================================
+
+テンプレートのASTはかなり大きくなる可能性があり、潜在的に数千のノードを含むことがあります。パスがツリーの特定の部分にのみ関心がある場合、すべての個々のノードを走査することは不要であり、コンパイルパフォーマンスに影響を与える可能性があります。`NodeTraverser` は、走査を最適化する方法を提供します：
+
+
+子のスキップ .[#toc-skipping-children]
+--------------------------------
+
+特定のタイプのノードに遭遇したら、その子孫のいずれにも探しているノードが含まれていないことがわかっている場合は、トラバーサーにその子の訪問をスキップするように指示できます。これは、**`enter`** ビジターから定数 `NodeTraverser::DontTraverseChildren` を返すことによって行われます。これにより、走査中にブランチ全体が省略され、特にタグ内に複雑なPHP式を含むテンプレートで、かなりの時間を節約できる可能性があります。
+
+
+走査の停止 .[#toc-stopping-traversal]
+--------------------------------
+
+パスが何か（特定のタイプのノード、条件の満たし）の*最初*の出現を見つけるだけでよい場合は、それを見つけたらすぐに走査プロセス全体を完全に停止できます。これは、`enter` または `leave` ビジターから定数 `NodeTraverser::StopTraversal` を返すことによって達成されます。`traverse()` メソッドは、それ以上のノードの訪問を停止します。潜在的に非常に大きなツリーで最初の一致のみが必要な場合に非常に効果的です。
+
+
+便利なヘルパー `NodeTraverser` .[#toc-useful-helper-nodetraverser]
+===========================================================
+
+`NodeTraverser` はきめ細かい制御を提供しますが、Latteは便利なヘルパークラス[api:Latte\Compiler\NodeHelpers]も提供しています。これは、いくつかの一般的な検索および分析タスクのために `NodeTraverser` をカプセル化し、多くの場合、より少ない定型コードで済みます。
+
+
+find(Node $startNode, callable $filter): array .[method]
+--------------------------------------------------------
+
+この静的メソッドは、`$startNode` で始まる（含む）サブツリー内の、コールバック `$filter` を満たすすべてのノードを見つけます。一致するノードの配列を返します。
+
+**例：** テンプレート全体ですべての変数ノード（`VariableNode`）を見つけます。
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\Expression\VariableNode;
+use Latte\Compiler\Nodes\TemplateNode;
+
+function findAllVariables(TemplateNode $templateNode): array
+{
+	return NodeHelpers::find(
+		$templateNode,
+		fn($node) => $node instanceof VariableNode,
+	);
+}
+```
+
+
+findFirst(Node $startNode, callable $filter): ?Node  .[method]
+--------------------------------------------------------------
+
+`find` に似ていますが、コールバック `$filter` を満たす**最初**のノードが見つかった直後に走査を停止します。見つかった `Node` オブジェクトまたは一致するノードが見つからない場合は `null` を返します。これは基本的に `NodeTraverser::StopTraversal` の便利なラッパーです。
+
+**例：** `{parameters}` ノードを見つけます（以前の手動の例と同じですが、より短いです）。
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\ParametersNode;
+
+function findParametersNodeHelper(TemplateNode $templateNode): ?ParametersNode
+{
+	return NodeHelpers::findFirst(
+		$templateNode->head, // 効率のためにヘッドセクションのみを検索
+		fn($node) => $node instanceof ParametersNode,
+	);
+}
+```
+
+
+toValue(ExpressionNode $node, bool $constants = false): mixed .[method]
+-----------------------------------------------------------------------
+
+この静的メソッドは、`ExpressionNode` を**コンパイル時**に評価し、対応するPHP値を返そうとします。単純なリテラルノード（`StringNode`、`IntegerNode`、`FloatNode`、`BooleanNode`、`NullNode`）およびそのような評価可能なアイテムのみを含む `ArrayNode` インスタンスに対してのみ確実に機能します。
+
+`$constants` が `true` に設定されている場合、`defined()` をチェックし `constant()` を使用して `ConstantFetchNode` および `ClassConstantFetchNode` を解決しようとします。
+
+ノードに変数が含まれている場合、関数呼び出し、またはその他の動的要素が含まれている場合、コンパイル時に評価できず、メソッドは `InvalidArgumentException` をスローします。
+
+**使用例：** コンパイル時の決定のために、コンパイル中にタグ引数の静的な値を取得します。
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+
+function getStaticStringArgument(ExpressionNode $argumentNode): ?string
+{
+	try {
+		$value = NodeHelpers::toValue($argumentNode);
+		return is_string($value) ? $value : null;
+	} catch (\InvalidArgumentException $e) {
+		// 引数は静的な文字列リテラルではありませんでした
+		return null;
+	}
+}
+```
+
+
+toText(?Node $node): ?string .[method]
+--------------------------------------
+
+この静的メソッドは、単純なノードからプレーンテキストコンテンツを抽出するのに役立ちます。主に以下で機能します：
+- `TextNode`: その `$content` を返します。
+- `FragmentNode`: すべての子に対して `toText()` の結果を連結します。いずれかの子がテキストに変換できない場合（例：`PrintNode` を含む）、`null` を返します。
+- `NopNode`: 空の文字列を返します。
+- その他のノードタイプ：`null` を返します。
+
+**使用例：** コンパイルパス中の分析のために、HTML属性値または単純なHTML要素の静的なテキストコンテンツを取得します。
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Html\AttributeNode;
+
+function getStaticAttributeValue(AttributeNode $attr): ?string
+{
+	// $attr->value は通常 AreaNode (FragmentNode や TextNode など) です
+	return NodeHelpers::toText($attr->value);
+}
+
+// パスでの使用例：
+// if ($node instanceof Html\ElementNode && $node->name === 'meta') {
+//     $nameAttrValue = getStaticAttributeValue($node->getAttributeNode('name'));
+//     if ($nameAttrValue === 'description') { ... }
+// }
+```
+
+`NodeHelpers` は、一般的なAST走査および分析タスクのための既製のソリューションを提供することで、コンパイルパスを簡素化できます。
+
+
+実践的な例 .[#toc-practical-examples]
+================================
+
+いくつかの実践的な問題を解決するために、ASTの走査と変更の概念を適用しましょう。これらの例は、コンパイルパスで使用される一般的なパターンを示しています。
+
+
+`<img>` に `loading="lazy"` を自動的に追加する .[#toc-auto-adding-loading-lazy-to-img]
+----------------------------------------------------------------------------
+
+最新のブラウザは、`loading="lazy"` 属性を使用して画像のネイティブ遅延読み込みをサポートしています。まだ `loading` 属性を持たないすべての `<img>` タグにこの属性を自動的に追加するパスを作成しましょう。
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Html;
+
+function addLazyLoading(Nodes\TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// ノードを直接変更しており、この決定のために子に依存しないため、'enter' を使用できます。
+		enter: function (Node $node) {
+			// これは名前が 'img' のHTML要素ですか？
+			if ($node instanceof Html\ElementNode && $node->name === 'img') {
+				// 属性ノードが存在することを確認します
+				$node->attributes ??= new Nodes\FragmentNode;
+
+				// 'loading' 属性がすでに存在するかどうかを確認します（大文字と小文字を区別しない）
+				foreach ($node->attributes->children as $attrNode) {
+					if ($attrNode instanceof Html\AttributeNode
+						&& $attrNode->name instanceof Nodes\TextNode // 静的属性名
+						&& strtolower($attrNode->name->content) === 'loading'
+					) {
+						return;
+					}
+				}
+
+				// 属性が空でない場合はスペースを追加します
+				if ($node->attributes->children) {
+					$node->attributes->children[] = new Nodes\TextNode(' ');
+				}
+
+				// 新しい属性ノードを作成します：loading="lazy"
+				$node->attributes->children[] = new Html\AttributeNode(
+					name: new Nodes\TextNode('loading'),
+					value: new Nodes\TextNode('lazy'),
+					quote: '"',
+				);
+				// 変更はオブジェクトに直接適用されるため、何も返す必要はありません。
+			}
+		},
+	);
+}
+```
+
+説明：
+- `enter` ビジターは、名前が `img` の `Html\ElementNode` ノードを探します。
+- 既存の属性（`$node->attributes->children`）を反復処理し、`loading` 属性がすでに存在するかどうかを確認します。
+- 見つからない場合は、`loading="lazy"` を表す新しい `Html\AttributeNode` を作成します。
+
+
+関数呼び出しのチェック .[#toc-checking-function-calls]
+-------------------------------------------
+
+コンパイルパスはLatte Sandboxの基盤です。実際のSandboxは洗練されていますが、禁止された関数呼び出しをチェックする基本原則を示すことができます。
+
+**目標：** テンプレート式内で潜在的に危険な関数 `shell_exec` の使用を防ぎます。
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Php;
+use Latte\SecurityViolationException;
+
+function checkForbiddenFunctions(Nodes\TemplateNode $templateNode): void
+{
+	$forbiddenFunctions = ['shell_exec' => true, 'exec' => true]; // 単純なリスト
+
+	$traverser = new NodeTraverser;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use ($forbiddenFunctions) {
+			// これは直接関数呼び出しノードですか？
+			if ($node instanceof Php\Expression\FunctionCallNode
+				&& $node->name instanceof Php\NameNode
+				&& isset($forbiddenFunctions[strtolower((string) $node->name)])
+			) {
+				throw new SecurityViolationException(
+					"関数 {$node->name}() は許可されていません。",
+					$node->position,
+				);
+			}
+		},
+	);
+}
+```
+
+説明：
+- 禁止された関数名のリストを定義します。
+- `enter` ビジターは `FunctionCallNode` をチェックします。
+- 関数名（`$node->name`）が静的な `NameNode` である場合、その小文字の文字列表現を禁止リストと照合します。
+- 禁止された関数が見つかった場合、セキュリティルールの違反を明確に示し、コンパイルを停止する `Latte\SecurityViolationException` をスローします。
+
+これらの例は、`NodeTraverser` を使用したコンパイルパスが、テンプレートのAST構造と直接対話することにより、分析、自動変更、およびセキュリティ制約の強制にどのように活用できるかを示しています。
+
+
+ベストプラクティス .[#toc-best-practices]
+================================
+
+コンパイルパスを作成する際には、堅牢で保守可能で効率的な拡張機能を作成するために、これらのガイドラインを念頭に置いてください：
+
+- **順序は重要です：** パスが実行される順序に注意してください。パスが別のパス（例：Latteの基本パスまたは別のカスタムパス）によって作成されたAST構造に依存する場合、または他のパスが変更に依存する可能性がある場合は、`Extension::getPasses()` によって提供される順序付けメカニズムを使用して依存関係（`before`/`after`）を定義します。詳細については、[`Extension::getPasses()` |extending-latte#getPasses()]のドキュメントを参照してください。
+- **単一責任：** 1つの明確に定義されたタスクを実行するパスを目指してください。複雑な変換の場合は、ロジックを複数のパスに分割することを検討してください - 分析用に1つ、分析結果に基づいて変更用に別のパスなど。これにより、明確さとテスト容易性が向上します。
+- **パフォーマンス：** コンパイルパスはテンプレートのコンパイル時間を追加することに注意してください（通常はテンプレートが変更されるまで一度だけ発生します）。可能であれば、パス内で計算負荷の高い操作を避けてください。特定のASTの部分を訪問する必要がないことがわかっている場合は常に、`NodeTraverser::DontTraverseChildren` や `NodeTraverser::StopTraversal` などの走査最適化を活用してください。
+- **`NodeHelpers` を使用する：** 特定のノードの検索や単純な式の静的評価などの一般的なタスクについては、独自の `NodeTraverser` ロジックを作成する前に、`Latte\Compiler\NodeHelpers` が適切なメソッドを提供しているかどうかを確認してください。これにより、時間を節約し、定型コードの量を減らすことができます。
+- **エラー処理：** パスがテンプレートASTでエラーまたは無効な状態を検出した場合、明確なメッセージと関連する `Position` オブジェクト（通常は `$node->position`）を含む `Latte\CompileException`（またはセキュリティ問題の場合は `Latte\SecurityViolationException`）をスローします。これにより、テンプレート開発者に役立つフィードバックが提供されます。
+- **べき等性（可能であれば）：** 理想的には、同じASTに対してパスを複数回実行しても、一度実行した場合と同じ結果が得られるはずです。これは常に実現可能ではありませんが、達成されればデバッグとパスの相互作用に関する推論が簡素化されます。たとえば、変更パスが変更を再度適用する前に、変更がすでに適用されているかどうかを確認するようにしてください。
+
+これらのプラクティスに従うことで、コンパイルパスを効果的に活用して、Latteの機能を強力かつ信頼性の高い方法で拡張し、より安全で最適化された、または機能豊富なテンプレート処理に貢献できます。

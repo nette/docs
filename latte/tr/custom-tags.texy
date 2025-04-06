@@ -1,0 +1,1140 @@
+Kendi etiketlerinizi oluşturma
+******************************
+
+.[perex]
+Bu sayfa, Latte'de özel etiketler oluşturmak için kapsamlı bir kılavuz sağlar. Latte'nin şablonları nasıl derlediğini anlamanız üzerine inşa ederek, basit etiketlerden iç içe geçmiş içerik ve özel ayrıştırma ihtiyaçları olan daha karmaşık senaryolara kadar her şeyi ele alacağız.
+
+Özel etiketler, şablon sözdizimi ve oluşturma mantığı üzerinde en yüksek düzeyde kontrol sağlar, ancak aynı zamanda en karmaşık genişletme noktasıdır. Özel bir etiket oluşturmaya karar vermeden önce, her zaman [daha basit bir çözüm olup olmadığını |extending-latte#toc-ways-to-extend-latte] veya [standart sette |tags] uygun bir etiketin zaten mevcut olup olmadığını düşünün. Özel etiketleri yalnızca daha basit alternatifler ihtiyaçlarınız için yeterli olmadığında kullanın.
+
+
+Derleme sürecini anlama .[#toc-understanding-the-compilation-process]
+=====================================================================
+
+Özel etiketleri etkili bir şekilde oluşturmak için Latte'nin şablonları nasıl işlediğini açıklamak faydalıdır. Bu süreci anlamak, etiketlerin neden bu şekilde yapılandırıldığını ve daha geniş bağlama nasıl uyduklarını açıklığa kavuşturur.
+
+Latte'de şablon derlemesi, basitleştirilmiş olarak şu temel adımları içerir:
+
+1.  **Sözcüksel analiz:** Lexer, şablon kaynak kodunu (`.latte` dosyası) okur ve onu **token** adı verilen küçük, farklı parçalara ayırır (ör. `{`, `foreach`, `$variable`, `}`, HTML metni, vb.).
+2.  **Ayrıştırma:** Parser, bu token akışını alır ve şablonun mantığını ve içeriğini temsil eden anlamlı bir ağaç yapısı oluşturur. Bu ağaca **soyut sözdizimi ağacı (AST)** denir.
+3.  **Derleme geçişleri:** PHP kodu oluşturmadan önce Latte, [derleme geçişlerini |compiler passes] çalıştırır. Bunlar, tüm AST'yi dolaşan ve onu değiştirebilen veya bilgi toplayabilen fonksiyonlardır. Bu adım, güvenlik ([Sandbox |sandbox]) veya optimizasyon gibi özellikler için çok önemlidir.
+4.  **Kod oluşturma:** Son olarak, derleyici (potansiyel olarak değiştirilmiş) AST'yi dolaşır ve karşılık gelen PHP sınıf kodunu oluşturur. Bu PHP kodu, çalıştırıldığında şablonu gerçekten oluşturan şeydir.
+5.  **Önbellekleme:** Oluşturulan PHP kodu diske kaydedilir, bu da sonraki oluşturmaları çok hızlı hale getirir, çünkü 1-4 adımları atlanır.
+
+Aslında, derleme biraz daha karmaşıktır. Latte'nin **iki** lexer'ı ve parser'ı vardır: biri HTML şablonu için, diğeri etiketler içindeki PHP benzeri kod için. Ayrıca ayrıştırma, tokenizasyondan sonra gerçekleşmez, ancak lexer ve parser paralel olarak iki "iş parçacığında" çalışır ve koordine olur. İnanın bana, bunu programlamak roket bilimiydi :-)
+
+Şablon içeriğinin yüklenmesinden, ayrıştırılmasına ve sonuç dosyasının oluşturulmasına kadar tüm süreci, deneyebileceğiniz ve ara sonuçları yazdırabileceğiniz bu kodla sıralayabilirsiniz:
+
+```php
+$latte = new Latte\Engine;
+$source = $latte->getLoader()->getContent($file);
+$ast = $latte->parse($source);
+$latte->applyPasses($ast);
+$code = $latte->generate($ast, $file);
+```
+
+
+Bir etiketin anatomisi .[#toc-the-anatomy-of-a-tag]
+===================================================
+
+Latte'de tam işlevsel bir özel etiket oluşturmak, birkaç birbirine bağlı parçayı içerir. Uygulamaya geçmeden önce, HTML ve Belge Nesne Modeli (DOM) ile bir analoji kullanarak temel kavramları ve terminolojiyi anlayalım.
+
+
+Etiketler ve Düğümler (HTML ile Analoji) .[#toc-tags-vs-nodes-analogy-with-html]
+--------------------------------------------------------------------------------
+
+HTML'de `<p>` veya `<div>...</div>` gibi **etiketler** yazarız. Bu etiketler kaynak kodundaki sözdizimidir. Tarayıcı bu HTML'yi ayrıştırdığında, **Belge Nesne Modeli (DOM)** adı verilen bir bellek temsili oluşturur. DOM'da, HTML etiketleri **düğümlerle** temsil edilir (özellikle JavaScript DOM terminolojisinde `Element` düğümleri). Programatik olarak bu *düğümlerle* çalışırız (örneğin, JavaScript `document.getElementById(...)` bir Element düğümü döndürür). Etiket, kaynak dosyadaki yalnızca metinsel bir temsildir; düğüm, mantıksal ağaçtaki nesne temsilidir.
+
+Latte benzer şekilde çalışır:
+
+- `.latte` şablon dosyasında `{foreach ...}` ve `{/foreach}` gibi **Latte etiketleri** yazarsınız. Bu, sizin şablon yazarı olarak çalıştığınız sözdizimidir.
+- Latte şablonu **ayrıştırdığında**, bir **Soyut Sözdizimi Ağacı (AST)** oluşturur. Bu ağaç **düğümlerden** oluşur. Şablondaki her Latte etiketi, HTML öğesi, metin parçası veya ifade, bu ağaçta bir veya daha fazla düğüm haline gelir.
+- AST'deki tüm düğümler için temel sınıf `Latte\Compiler\Node`'dur. Tıpkı DOM'un farklı düğüm türlerine (Element, Text, Comment) sahip olması gibi, Latte AST'sinin de farklı düğüm türleri vardır. Statik metin için `Latte\Compiler\Nodes\TextNode`, HTML öğeleri için `Latte\Compiler\Nodes\Html\ElementNode`, etiketler içindeki ifadeler için `Latte\Compiler\Nodes\Php\ExpressionNode` ve özel etiketler için kritik olarak `Latte\Compiler\Nodes\StatementNode`'dan miras alan düğümlerle karşılaşacaksınız.
+
+
+Neden `StatementNode`? .[#toc-why-statementnode]
+------------------------------------------------
+
+HTML öğeleri (`Html\ElementNode`) öncelikle yapıyı ve içeriği temsil eder. PHP ifadeleri (`Php\ExpressionNode`) değerleri veya hesaplamaları temsil eder. Peki ya `{if}`, `{foreach}` veya özel `{datetime}` etiketimiz gibi Latte etiketleri? Bu etiketler *eylemler gerçekleştirir*, program akışını kontrol eder veya mantığa dayalı çıktı üretir. Bunlar, Latte'yi sadece bir işaretleme dili değil, güçlü bir şablonlama *motoru* yapan işlevsel birimlerdir.
+
+Programlamada, eylemleri gerçekleştiren bu tür birimlere genellikle "statements" (deyimler) denir. Bu nedenle, bu işlevsel Latte etiketlerini temsil eden düğümler tipik olarak `Latte\Compiler\Nodes\StatementNode`'dan miras alır. Bu, onları tamamen yapısal düğümlerden (HTML öğeleri gibi) veya değerleri temsil eden düğümlerden (ifadeler gibi) ayırır.
+
+
+Anahtar bileşenler .[#toc-the-key-components]
+=============================================
+
+Özel bir etiket oluşturmak için gereken ana bileşenleri gözden geçirelim:
+
+
+Etiket ayrıştırma fonksiyonu .[#toc-tag-parsing-function]
+---------------------------------------------------------
+
+- Bu PHP çağrılabilir fonksiyonu, kaynak şablondaki Latte etiketi sözdizimini (`{...}`) ayrıştırır.
+- Etiket hakkındaki bilgileri (adı, konumu ve n:nitelik olup olmadığı gibi) [api:Latte\Compiler\Tag] nesnesi aracılığıyla alır.
+- Etiket ayırıcıları içindeki argümanları ve ifadeleri ayrıştırmak için birincil aracı, `$tag->parser` aracılığıyla erişilebilen [api:Latte\Compiler\TagParser] nesnesidir (bu, tüm şablonu ayrıştıran parser'dan farklıdır).
+- Eşli etiketler için, başlangıç ve bitiş etiketleri arasındaki iç içeriği ayrıştırması için Latte'ye sinyal vermek üzere `yield` kullanır.
+- Ayrıştırma fonksiyonunun nihai hedefi, AST'ye eklenen bir **düğüm sınıfı** örneği oluşturmak ve döndürmektir.
+- Ayrıştırma fonksiyonunu doğrudan ilgili düğüm sınıfında statik bir metot (genellikle `create` olarak adlandırılır) olarak uygulamak gelenekseldir (zorunlu olmasa da). Bu, ayrıştırma mantığını ve düğüm temsilini tek bir pakette düzgün bir şekilde tutar, gerekirse sınıfın özel/korumalı üyelerine erişime izin verir ve organizasyonu iyileştirir.
+
+
+Düğüm sınıfı .[#toc-node-class]
+-------------------------------
+
+- Etiketinizin **Soyut Sözdizimi Ağacı (AST)** içindeki *mantıksal işlevini* temsil eder.
+- Ayrıştırılmış bilgileri (argümanlar veya içerik gibi) genel özellikler olarak içerir. Bu özellikler genellikle diğer `Node` örneklerini içerir (ör. ayrıştırılmış argümanlar için `ExpressionNode`, ayrıştırılmış içerik için `AreaNode`).
+- `print(PrintContext $context): string` metodu, şablon oluşturma sırasında etiketin eylemini gerçekleştiren *PHP kodunu* (bir deyim veya bir dizi deyim) oluşturur.
+- `getIterator(): \Generator` metodu, **derleme geçişleri** tarafından gezinme için alt düğümleri (argümanlar, içerik) erişilebilir kılar. Geçişlerin potansiyel olarak alt düğümleri değiştirmesine veya değiştirmesine izin vermek için referanslar (`&`) sağlamalıdır.
+- Tüm şablon AST'ye ayrıştırıldıktan sonra, Latte bir dizi [derleme geçişi |compiler-passes] çalıştırır. Bu geçişler, her düğüm tarafından sağlanan `getIterator()` metodunu kullanarak *tüm* AST'yi dolaşır. Düğümleri inceleyebilir, bilgi toplayabilir ve hatta ağacı *değiştirebilirler* (ör. düğümlerin genel özelliklerini değiştirerek veya düğümleri tamamen değiştirerek). Kapsamlı bir `getIterator()` gerektiren bu tasarım çok önemlidir. [Sandbox |sandbox] gibi güçlü özelliklerin, özel etiketleriniz de dahil olmak üzere şablonun *herhangi bir* bölümünün davranışını analiz etmesine ve potansiyel olarak değiştirmesine olanak tanıyarak güvenlik ve tutarlılık sağlar.
+
+
+Bir uzantı aracılığıyla kayıt .[#toc-registration-via-an-extension]
+-------------------------------------------------------------------
+
+- Latte'ye yeni etiketiniz hakkında ve bunun için hangi ayrıştırma fonksiyonunun kullanılacağını bildirmeniz gerekir. Bu, bir [Latte uzantısı |extending-latte#latte-extension] içinde yapılır.
+- Uzantı sınıfınızın içinde `getTags(): array` metodunu uygularsınız. Bu metot, anahtarların etiket adları (ör. `'mytag'`, `'n:myattribute'`) ve değerlerin ilgili ayrıştırma fonksiyonlarını temsil eden PHP çağrılabilir fonksiyonları (ör. `MyNamespace\DatetimeNode::create(...)`) olduğu ilişkisel bir dizi döndürür.
+
+Özet: **Etiket ayrıştırma fonksiyonu**, etiketinizin *şablon kaynak kodunu* bir **AST düğümüne** dönüştürür. **Düğüm sınıfı** daha sonra *kendisini* derlenmiş şablon için yürütülebilir *PHP koduna* dönüştürebilir ve alt düğümlerini `getIterator()` aracılığıyla **derleme geçişleri** için erişilebilir kılar. **Uzantı aracılığıyla kayıt**, etiket adını ayrıştırma fonksiyonuyla ilişkilendirir ve Latte'ye bildirir.
+
+Şimdi bu bileşenleri adım adım nasıl uygulayacağımızı inceleyelim.
+
+
+Basit bir etiket oluşturma .[#toc-creating-a-simple-tag]
+========================================================
+
+İlk özel Latte etiketinizi oluşturmaya başlayalım. Çok basit bir örnekle başlayacağız: mevcut tarih ve saati yazdıran `{datetime}` adlı bir etiket. **Başlangıçta bu etiket hiçbir argüman kabul etmeyecek**, ancak daha sonra ["Etiket Argümanlarını Ayrıştırma" |#Parsing Tag Arguments] bölümünde geliştireceğiz. Ayrıca iç içeriği de yoktur.
+
+Bu örnek size temel adımları gösterecektir: düğüm sınıfını tanımlama, `print()` ve `getIterator()` metotlarını uygulama, ayrıştırma fonksiyonunu oluşturma ve son olarak etiketi kaydetme.
+
+**Hedef:** PHP `date()` fonksiyonunu kullanarak mevcut tarih ve saati çıktılamak için `{datetime}`'i uygulamak.
+
+
+Düğüm sınıfının oluşturulması .[#toc-creation-of-the-node-class]
+----------------------------------------------------------------
+
+Öncelikle, Soyut Sözdizimi Ağacı'nda (AST) etiketimizi temsil edecek bir sınıfa ihtiyacımız var. Yukarıda tartışıldığı gibi, `Latte\Compiler\Nodes\StatementNode`'dan miras alıyoruz.
+
+Bir dosya oluşturun (ör. `DatetimeNode.php`) ve sınıfı tanımlayın:
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DatetimeNode extends StatementNode
+{
+	/**
+	 * {datetime} bulunduğunda çağrılan etiket ayrıştırma fonksiyonu.
+	 */
+	public static function create(Tag $tag): self
+	{
+		// Basit etiketimiz şu anda hiçbir argüman kabul etmiyor, bu yüzden hiçbir şeyi ayrıştırmamız gerekmiyor
+		$node = $tag->node = new self;
+		return $node;
+	}
+
+	/**
+	 * Şablon oluşturulurken çalıştırılacak PHP kodunu oluşturur.
+	 */
+	public function print(PrintContext $context): string
+	{
+		return $context->format(
+			'echo date(\'Y-m-d H:i:s\') %line;',
+			$this->position,
+		);
+	}
+
+	/**
+	 * Latte derleme geçişleri için alt düğümlere erişim sağlar.
+	 */
+	public function &getIterator(): \Generator
+	{
+		false && yield;
+	}
+}
+```
+
+Latte bir şablonda `{datetime}` ile karşılaştığında, `create()` ayrıştırma fonksiyonunu çağırır. Görevi, bir `DatetimeNode` örneği döndürmektir.
+
+`print()` metodu, şablon oluşturulurken çalıştırılacak PHP kodunu oluşturur. Derlenmiş şablon için sonuç PHP kod dizesini oluşturan `$context->format()` metodunu çağırıyoruz. İlk argüman, `'echo date('Y-m-d H:i:s') %line;'`, sonraki parametrelerin eklendiği bir maskedir.
+`%line` yer tutucusu, `format()` metoduna ikinci argümanı, yani `$this->position`'ı kullanmasını ve oluşturulan PHP kodunu orijinal şablon satırına geri bağlayan `/* line 15 */` gibi bir yorum eklemesini söyler, bu da hata ayıklama için çok önemlidir.
+
+`$this->position` özelliği, temel `Node` sınıfından miras alınır ve Latte parser tarafından otomatik olarak ayarlanır. Etiketin kaynak `.latte` dosyasında nerede bulunduğunu gösteren bir [api:Latte\Compiler\Position] nesnesi içerir.
+
+`getIterator()` metodu, derleme geçişleri için çok önemlidir. Tüm alt düğümleri sağlamalıdır, ancak basit `DatetimeNode`'umuzun şu anda hiçbir argümanı veya içeriği yoktur, dolayısıyla alt düğümü yoktur. Ancak, metot yine de mevcut olmalı ve bir üreteç olmalıdır, yani `yield` anahtar kelimesi metot gövdesinde bir şekilde bulunmalıdır.
+
+
+Bir uzantı aracılığıyla kayıt .[#toc-registration-via-an-extension]
+-------------------------------------------------------------------
+
+Son olarak, Latte'ye yeni etiket hakkında bilgi verelim. Bir [uzantı sınıfı |extending-latte#latte-extension] oluşturun (ör. `MyLatteExtension.php`) ve etiketi `getTags()` metodunda kaydedin.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Extension;
+
+class MyLatteExtension extends Extension
+{
+	/**
+	 * Bu uzantı tarafından sağlanan etiketlerin listesini döndürür.
+	 * @return array<string, callable> Harita: 'etiket-adı' => ayrıştırma-fonksiyonu
+	 */
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			// Daha sonra buraya daha fazla etiket kaydedin
+		];
+	}
+}
+```
+
+Ardından bu uzantıyı Latte Motoru'nda kaydedin:
+
+```php
+$latte = new Latte\Engine;
+$latte->addExtension(new App\Latte\MyLatteExtension);
+```
+
+Bir şablon oluşturun:
+
+```latte
+<p>Sayfa oluşturuldu: {datetime}</p>
+```
+
+Beklenen çıktı: `<p>Sayfa oluşturuldu: 2023-10-27 11:00:00</p>`
+
+
+Bu aşamanın özeti .[#toc-summary-of-this-phase]
+-----------------------------------------------
+
+Temel bir özel `{datetime}` etiketi başarıyla oluşturduk. AST'deki temsilini (`DatetimeNode`) tanımladık, ayrıştırmasını (`create()`) ele aldık, nasıl PHP kodu oluşturması gerektiğini (`print()`) belirttik, alt öğelerinin geçiş için erişilebilir olmasını (`getIterator()`) sağladık ve Latte'de kaydettik.
+
+Bir sonraki bölümde, bu etiketi argümanları kabul edecek şekilde geliştireceğiz ve ifadeleri nasıl ayrıştıracağımızı ve alt düğümleri nasıl yöneteceğimizi göstereceğiz.
+
+
+Etiket argümanlarını ayrıştırma .[#toc-parsing-tag-arguments]
+=============================================================
+
+Basit `{datetime}` etiketimiz çalışıyor, ancak çok esnek değil. `date()` fonksiyonu için isteğe bağlı bir argüman kabul edecek şekilde geliştirelim: bir biçimlendirme dizesi. Gerekli sözdizimi `{datetime $format}` olacaktır.
+
+**Hedef:** `{datetime}`'i, `date()` için biçimlendirme dizesi olarak kullanılacak isteğe bağlı bir PHP ifadesini argüman olarak kabul edecek şekilde değiştirmek.
+
+
+`TagParser` ile tanışma .[#toc-introducing-tagparser]
+-----------------------------------------------------
+
+Kodu değiştirmeden önce, kullanacağımız aracı anlamak önemlidir: [api:Latte\Compiler\TagParser]. Ana Latte parser'ı (`TemplateParser`), `{datetime ...}` veya bir n:nitelik gibi bir Latte etiketiyle karşılaştığında, etiketin *içindeki* içeriğin ayrıştırılmasını ( `{` ve `}` arasındaki kısım veya nitelik değeri) özel bir `TagParser`'a devreder.
+
+Bu `TagParser` yalnızca **etiket argümanları** ile çalışır. Görevi, bu argümanları temsil eden tokenları işlemektir. Anahtar nokta, kendisine sağlanan **tüm içeriği işlemesi gerektiğidir**. Ayrıştırma fonksiyonunuz biterse ancak `TagParser` argümanların sonuna ulaşmadıysa (`$tag->parser->isEnd()` aracılığıyla kontrol edilir), Latte bir istisna fırlatır, çünkü bu, etiket içinde beklenmeyen tokenların kaldığını gösterir. Tersine, etiket argümanları *gerektiriyorsa*, ayrıştırma fonksiyonunuzun başında `$tag->expectArguments()`'i çağırmalısınız. Bu metot, argümanların mevcut olup olmadığını kontrol eder ve etiket herhangi bir argüman olmadan kullanıldıysa yardımcı bir istisna fırlatır.
+
+`TagParser`, çeşitli türde argümanları ayrıştırmak için kullanışlı metotlar sunar:
+
+- `parseExpression(): ExpressionNode`: PHP benzeri bir ifadeyi (değişkenler, değişmezler, operatörler, fonksiyon/metot çağrıları vb.) ayrıştırır. Latte'nin sözdizimsel şekerlemesini, örneğin basit alfanümerik dizeleri tırnak içine alınmış dizeler gibi ele almasını (ör. `foo`, `'foo'` gibi ayrıştırılır) yönetir.
+- `parseUnquotedStringOrExpression(): ExpressionNode`: Standart bir ifadeyi veya *tırnaksız bir dizeyi* ayrıştırır. Tırnaksız dizeler, Latte tarafından tırnak işaretleri olmadan izin verilen dizilerdir, genellikle dosya yolları gibi şeyler için kullanılır (ör. `{include ../file.latte}`). Tırnaksız bir dize ayrıştırırsa, bir `StringNode` döndürür.
+- `parseArguments(): ArrayNode`: `10, name: 'John', true` gibi potansiyel olarak anahtarlarla virgülle ayrılmış argümanları ayrıştırır.
+- `parseModifier(): ModifierNode`: `|upper|truncate:10` gibi filtreleri ayrıştırır.
+- `parseType(): ?SuperiorTypeNode`: `int`, `?string`, `array|Foo` gibi PHP tür ipuçlarını ayrıştırır.
+
+Daha karmaşık veya daha düşük seviyeli ayrıştırma ihtiyaçları için, [token akışı |api:Latte\Compiler\TokenStream] ile `$tag->parser->stream` aracılığıyla doğrudan etkileşim kurabilirsiniz. Bu nesne, tek tek tokenları kontrol etmek ve işlemek için metotlar sağlar:
+
+- `$tag->parser->stream->is(...): bool`: *Mevcut* tokenın belirtilen türlerden (ör. `Token::Php_Variable`) veya değişmez değerlerden (ör. `'as'`) herhangi biriyle eşleşip eşleşmediğini tüketmeden kontrol eder. İleriye bakmak için kullanışlıdır.
+- `$tag->parser->stream->consume(...): Token`: *Mevcut* tokenı tüketir ve akış konumunu ileri taşır. Argüman olarak beklenen token türleri/değerleri sağlanırsa ve mevcut token eşleşmezse, bir `CompileException` fırlatır. Belirli bir tokenı *beklediğinizde* bunu kullanın.
+- `$tag->parser->stream->tryConsume(...): ?Token`: *Mevcut* tokenı *yalnızca* belirtilen türlerden/değerlerden biriyle eşleşiyorsa tüketmeye çalışır. Eşleşirse, tokenı tüketir ve döndürür. Eşleşmezse, akış konumunu değiştirmeden bırakır ve `null` döndürür. İsteğe bağlı tokenlar için veya farklı sözdizimsel yollar arasında seçim yaparken bunu kullanın.
+
+
+`create()` ayrıştırma fonksiyonunu güncelleme .[#toc-updating-the-parsing-function-create]
+------------------------------------------------------------------------------------------
+
+Bu anlayışla, `DatetimeNode`'daki `create()` metodunu, `$tag->parser` kullanarak isteğe bağlı biçimlendirme argümanını ayrıştıracak şekilde değiştirelim.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DatetimeNode extends StatementNode
+{
+	// Ayrıştırılmış biçim ifadesi düğümünü tutmak için genel bir özellik ekleyin
+	public ?ExpressionNode $format = null;
+
+	public static function create(Tag $tag): self
+	{
+		$node = $tag->node = new self;
+
+		// Herhangi bir token olup olmadığını kontrol edin
+		if (!$tag->parser->isEnd()) {
+			// Argümanı TagParser kullanarak PHP benzeri bir ifade olarak ayrıştırın.
+			$node->format = $tag->parser->parseExpression();
+		}
+
+		return $node;
+	}
+
+	// ... print() ve getIterator() metotları daha sonra güncellenecektir ...
+}
+```
+
+Genel bir `$format` özelliği ekledik. `create()` içinde şimdi argümanların *var olup olmadığını* kontrol etmek için `$tag->parser->isEnd()` kullanıyoruz. Varsa, `$tag->parser->parseExpression()` ifade için tokenları işler. `TagParser` tüm giriş tokenlarını işlemesi gerektiğinden, kullanıcı biçim ifadesinden sonra beklenmeyen bir şey yazarsa (ör. `{datetime 'Y-m-d', unexpected}`) Latte otomatik olarak bir hata fırlatır.
+
+
+`print()` metodunu güncelleme .[#toc-updating-the-print-method]
+---------------------------------------------------------------
+
+Şimdi `print()` metodunu, `$this->format` içinde saklanan ayrıştırılmış biçim ifadesini kullanacak şekilde değiştirelim. Hiçbir biçim sağlanmadıysa (`$this->format` `null` ise), varsayılan bir biçimlendirme dizesi kullanmalıyız, örneğin `'Y-m-d H:i:s'`.
+
+```php
+	public function print(PrintContext $context): string
+	{
+		$formatNode = $this->format ?? new StringNode('Y-m-d H:i:s');
+
+		// %node, $formatNode'un PHP kod temsilini yazdırır.
+		return $context->format(
+			'echo date(%node) %line;',
+			$formatNode,
+			$this->position
+		);
+	}
+```
+
+`$formatNode` değişkeninde, PHP `date()` fonksiyonu için biçimlendirme dizesini temsil eden AST düğümünü saklıyoruz. Burada null birleştirme operatörünü (`??`) kullanıyoruz. Kullanıcı şablonda bir argüman sağladıysa (ör. `{datetime 'd.m.Y'}`), o zaman `$this->format` özelliği karşılık gelen düğümü içerir (bu durumda değeri `'d.m.Y'` olan bir `StringNode`) ve bu düğüm kullanılır. Kullanıcı bir argüman sağlamadıysa (sadece `{datetime}` yazdıysa), `$this->format` özelliği `null` olur ve bunun yerine varsayılan `'Y-m-d H:i:s'` biçimiyle yeni bir `StringNode` oluştururuz. Bu, `$formatNode`'un her zaman biçim için geçerli bir AST düğümü içermesini sağlar.
+
+`'echo date(%node) %line;'` maskesinde, `format()` metoduna bir sonraki argümanı (bizim `$formatNode`'umuz) almasını, `print()` metodunu çağırmasını (PHP kod temsilini döndürecektir) ve sonucu yer tutucunun konumuna eklemesini söyleyen yeni bir `%node` yer tutucusu kullanılır.
+
+
+Alt düğümler için `getIterator()` uygulama .[#toc-implementing-getiterator-for-subnodes]
+----------------------------------------------------------------------------------------
+
+`DatetimeNode`'umuzun şimdi bir alt düğümü var: `$format` ifadesi. Bu alt düğümü, `getIterator()` metodunda sağlayarak derleme geçişlerine erişilebilir kılmalıyız. Geçişlerin potansiyel olarak düğümü değiştirmesine izin vermek için bir *referans* (`&`) sağlamayı unutmayın.
+
+```php
+	public function &getIterator(): \Generator
+	{
+		if ($this->format) {
+			yield $this->format;
+		}
+	}
+```
+
+Bu neden çok önemli? `$format` argümanının yasaklanmış bir fonksiyon çağrısı içerip içermediğini kontrol etmesi gereken bir Sandbox geçişi düşünün (ör. `{datetime dangerousFunction()}`). `getIterator()` `$this->format`'ı sağlamazsa, Sandbox geçişi etiketimizin argümanı içindeki `dangerousFunction()` çağrısını asla görmezdi, bu da potansiyel bir güvenlik açığı yaratırdı. Sağlayarak, Sandbox'ın (ve diğer geçişlerin) `$format` ifade düğümünü kontrol etmesine ve potansiyel olarak değiştirmesine izin veririz.
+
+
+Geliştirilmiş etiketi kullanma .[#toc-using-the-enhanced-tag]
+-------------------------------------------------------------
+
+Etiket şimdi isteğe bağlı argümanı doğru şekilde işliyor:
+
+```latte
+Varsayılan biçim: {datetime}
+Özel biçim: {datetime 'd.m.Y'}
+Değişken kullanımı: {datetime $userDateFormatPreference}
+
+{* Bu, 'd.m.Y' ayrıştırıldıktan sonra bir hataya neden olur, çünkü ", foo" beklenmiyor *}
+{* {datetime 'd.m.Y', foo} *}
+```
+
+Ardından, aralarındaki içeriği işleyen eşli etiketler oluşturmaya bakacağız.
+
+
+Eşli etiketleri işleme .[#toc-handling-paired-tags]
+===================================================
+
+Şimdiye kadar, `{datetime}` etiketimiz *kendiliğinden kapanan* (kavramsal olarak) idi. Başlangıç ve bitiş etiketleri arasında hiçbir içeriği yoktu. Ancak, birçok kullanışlı etiket bir şablon içeriği bloğuyla çalışır. Bunlara **eşli etiketler** denir. Örnekler arasında `{if}...{/if}`, `{block}...{/block}` veya şimdi oluşturacağımız özel bir etiket bulunur: `{debug}...{/debug}`.
+
+Bu etiket, şablonlarımıza yalnızca geliştirme sırasında görünür olması gereken hata ayıklama bilgilerini eklememize olanak tanır.
+
+**Hedef:** İçeriği yalnızca belirli bir "geliştirme modu" bayrağı etkin olduğunda oluşturulan eşli bir `{debug}` etiketi oluşturmak.
+
+
+Sağlayıcılarla tanışma .[#toc-introducing-providers]
+----------------------------------------------------
+
+Bazen etiketlerinizin, doğrudan şablon parametreleri olarak iletilmeyen verilere veya hizmetlere erişmesi gerekir. Örneğin, uygulamanın geliştirme modunda olup olmadığını belirlemek, kullanıcı nesnesine erişmek veya yapılandırma değerlerini almak. Latte bu amaçla **sağlayıcılar** (Providers) adı verilen bir mekanizma sağlar.
+
+Sağlayıcılar, [uzantınızda |extending-latte#latte-extension] `getProviders()` metodu kullanılarak kaydedilir. Bu metot, anahtarların sağlayıcıların şablon çalışma zamanı kodunda erişilebilir olacağı adlar olduğu ve değerlerin gerçek veriler veya nesneler olduğu ilişkisel bir dizi döndürür.
+
+Etiketinizin `print()` metodu tarafından oluşturulan PHP kodu içinde, bu sağlayıcılara özel `$this->global` nesne özelliği aracılığıyla erişebilirsiniz.
+Bu özellik tüm uzantılar arasında paylaşıldığından, Latte'nin temel sağlayıcıları veya diğer üçüncü taraf uzantılarından gelen sağlayıcılarla olası ad çakışmalarını önlemek için **sağlayıcı adlarınıza önek eklemek** iyi bir uygulamadır. Yaygın bir kural, üreticinizle veya uzantı adınızla ilgili kısa, benzersiz bir önek kullanmaktır. Örneğimiz için `app` önekini kullanacağız ve geliştirme modu bayrağı `$this->global->appDevMode` olarak erişilebilir olacaktır.
+
+
+İçerik ayrıştırma için `yield` anahtar kelimesi .[#toc-the-yield-keyword-for-parsing-content]
+---------------------------------------------------------------------------------------------
+
+Latte parser'ına `{debug}` ve `{/debug}` *arasındaki* içeriği işlemesini nasıl söyleriz? İşte burada `yield` anahtar kelimesi devreye girer.
+
+`yield` bir `create()` fonksiyonunda kullanıldığında, fonksiyon bir [PHP üreteci |https://www.php.net/manual/en/language.generators.overview.php] haline gelir. Yürütmesi duraklatılır ve kontrol ana `TemplateParser`'a geri döner. `TemplateParser` daha sonra şablon içeriğini *karşılık gelen kapatma etiketine* (`{/debug}` bizim durumumuzda) rastlayana kadar ayrıştırmaya devam eder.
+
+Kapatma etiketi bulunduğunda, `TemplateParser` `create()` fonksiyonumuzun yürütmesini `yield` deyiminden hemen sonra devam ettirir. `yield` deyimi tarafından *döndürülen* değer, iki öğe içeren bir dizidir:
+
+1.  Başlangıç ve bitiş etiketleri arasındaki ayrıştırılmış içeriği temsil eden bir `AreaNode`.
+2.  Kapatma etiketini temsil eden bir `Tag` nesnesi (ör. `{/debug}`).
+
+`yield` kullanan bir `DebugNode` sınıfı ve `create` metodunu oluşturalım.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DebugNode extends StatementNode
+{
+	// Ayrıştırılmış iç içeriği tutmak için genel özellik
+	public AreaNode $content;
+
+	/**
+	 * Eşli etiket {debug} ... {/debug} için ayrıştırma fonksiyonu.
+	 */
+	public static function create(Tag $tag): \Generator // dönüş türüne dikkat edin
+	{
+		$node = $tag->node = new self;
+
+		// Ayrıştırmayı duraklatın, iç içeriği ve {/debug} bulunduğunda bitiş etiketini alın
+		[$node->content, $endTag] = yield;
+
+		return $node;
+	}
+
+	// ... print() ve getIterator() daha sonra uygulanacaktır ...
+}
+```
+
+Not: Etiket bir n:nitelik olarak kullanılıyorsa, yani `<div n:debug>...</div>` ise `$endTag` `null` olur.
+
+
+Koşullu oluşturma için `print()` uygulama .[#toc-implementing-print-for-conditional-rendering]
+----------------------------------------------------------------------------------------------
+
+`print()` metodu şimdi çalışma zamanında `appDevMode` sağlayıcısını kontrol eden ve bayrak true ise yalnızca iç içerik için kodu yürüten PHP kodu oluşturmalıdır.
+
+```php
+	public function print(PrintContext $context): string
+	{
+		// Çalışma zamanında sağlayıcıyı kontrol eden bir PHP 'if' deyimi oluşturur
+		return $context->format(
+			<<<'XX'
+				if ($this->global->appDevMode) %line {
+					// Geliştirme modundaysa, iç içeriği yazdırın
+					%node
+				}
+
+				XX,
+			$this->position, // %line yorumu için
+			$this->content,  // İç içeriğin AST'sini içeren düğüm
+		);
+	}
+```
+
+Bu basittir. Standart bir PHP `if` deyimi oluşturmak için `PrintContext::format()` kullanıyoruz. `if` içine `$this->content` için `%node` yer tutucusunu yerleştiriyoruz. Latte, etiketin iç kısmı için PHP kodunu oluşturmak üzere `$this->content->print($context)`'i özyinelemeli olarak çağırır, ancak yalnızca `$this->global->appDevMode` çalışma zamanında true olarak değerlendirilirse.
+
+
+İçerik için `getIterator()` uygulama .[#toc-implementing-getiterator-for-content]
+---------------------------------------------------------------------------------
+
+Önceki örnekteki argüman düğümünde olduğu gibi, `DebugNode`'umuzun şimdi bir alt düğümü var: `AreaNode $content`. `getIterator()` içinde sağlayarak erişilebilir kılmalıyız:
+
+```php
+	public function &getIterator(): \Generator
+	{
+		// İçerik düğümüne bir referans sağlar
+		yield $this->content;
+	}
+```
+
+Bu, derleme geçişlerinin `{debug}` etiketimizin içeriğine inmesini sağlar, bu da içerik koşullu olarak oluşturulsa bile önemlidir. Örneğin, Sandbox'ın içeriği `appDevMode`'un true veya false olmasına bakılmaksızın analiz etmesi gerekir.
+
+
+Kayıt ve kullanım .[#toc-registration-and-usage]
+------------------------------------------------
+
+Etiketi ve sağlayıcıyı uzantınızda kaydedin:
+
+```php
+class MyLatteExtension extends Extension
+{
+	// $isDevelopmentMode'un bir yerde belirlendiğini varsayıyoruz (ör. yapılandırmadan)
+	public function __construct(
+		private bool $isDevelopmentMode,
+	) {
+	}
+
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...), // Yeni etiketi kaydet
+		];
+	}
+
+	public function getProviders(): array
+	{
+		return [
+			'appDevMode' => $this->isDevelopmentMode, // Sağlayıcıyı kaydet
+		];
+	}
+}
+
+// Uzantıyı kaydederken:
+$isDev = true; // Bunu uygulamanızın ortamına göre belirleyin
+$latte->addExtension(new App\Latte\MyLatteExtension($isDev));
+```
+
+Ve şablonda kullanımı:
+
+```latte
+<p>Her zaman görünen normal içerik.</p>
+
+{debug}
+	<div class="debug-panel">
+		Mevcut kullanıcının ID'si: {$user->id}
+		İstek zamanı: {=time()}
+	</div>
+{/debug}
+
+<p>Diğer normal içerik.</p>
+```
+
+
+n:nitelik entegrasyonu .[#toc-n-attributes-integration]
+-------------------------------------------------------
+
+Latte, birçok eşli etiket için kullanışlı bir kısaltılmış gösterim sunar: [n:nitelikler |syntax#n:atributy]. `{tag}...{/tag}` gibi eşli bir etiketiniz varsa ve etkisinin doğrudan tek bir HTML öğesine uygulanmasını istiyorsanız, genellikle bu öğe üzerinde bir `n:tag` niteliği olarak daha kısa bir şekilde yazabilirsiniz.
+
+Tanımladığınız çoğu standart eşli etiket için (bizim `{debug}` gibi), Latte karşılık gelen `n:` nitelik sürümünü otomatik olarak etkinleştirir. Kayıt sırasında ek bir şey yapmanız gerekmez:
+
+```latte
+{* Standart eşli etiket kullanımı *}
+{debug}<div>Hata ayıklama bilgisi</div>{/debug}
+
+{* n:nitelik ile eşdeğer kullanım *}
+<div n:debug>Hata ayıklama bilgisi</div>
+```
+
+Her iki sürüm de `<div>`'i yalnızca `$this->global->appDevMode` true ise oluşturur. `inner-` ve `tag-` önekleri de beklendiği gibi çalışır.
+
+Bazen etiketinizin mantığının, standart bir eşli etiket olarak mı yoksa bir n:nitelik olarak mı kullanıldığına veya `n:inner-tag` veya `n:tag-tag` gibi bir önek kullanılıp kullanılmadığına bağlı olarak biraz farklı davranması gerekebilir. `create()` ayrıştırma fonksiyonunuza iletilen `Latte\Compiler\Tag` nesnesi şu bilgileri sağlar:
+
+- `$tag->isNAttribute(): bool`: Etiket bir n:nitelik olarak ayrıştırılıyorsa `true` döndürür
+- `$tag->prefix: ?string`: n:nitelik ile kullanılan öneki döndürür, bu `null` (n:nitelik değil), `Tag::PrefixNone`, `Tag::PrefixInner` veya `Tag::PrefixTag` olabilir
+
+Şimdi basit etiketleri, argüman ayrıştırmayı, eşli etiketleri, sağlayıcıları ve n:nitelikleri anladığımıza göre, `{debug}` etiketimizi başlangıç noktası olarak kullanarak diğer etiketlerin içine yerleştirilmiş etiketleri içeren daha karmaşık bir senaryoyu ele alalım.
+
+
+Ara etiketler .[#toc-intermediate-tags]
+=======================================
+
+Bazı eşli etiketler, son kapatma etiketinden önce *içlerinde* başka etiketlerin görünmesine izin verir veya hatta gerektirir. Bunlara **ara etiketler** denir. Klasik örnekler arasında `{if}...{elseif}...{else}...{/if}` veya `{switch}...{case}...{default}...{/switch}` bulunur.
+
+`{debug}` etiketimizi, uygulama geliştirme modunda *olmadığında* oluşturulacak isteğe bağlı bir `{else}` yan tümcesini destekleyecek şekilde genişletelim.
+
+**Hedef:** `{debug}`'i isteğe bağlı bir ara `{else}` etiketini destekleyecek şekilde değiştirmek. Nihai sözdizimi `{debug} ... {else} ... {/debug}` olmalıdır.
+
+
+`yield` ile ara etiketleri ayrıştırma .[#toc-parsing-intermediate-tags-with-yield]
+----------------------------------------------------------------------------------
+
+`yield`'in `create()` ayrıştırma fonksiyonunu duraklattığını ve ayrıştırılmış içeriği bitiş etiketiyle birlikte döndürdüğünü zaten biliyoruz. Ancak `yield` daha fazla kontrol sunar: ona *ara etiket adları* dizisi sağlayabilirsiniz. Parser, bu belirtilen etiketlerden herhangi birine **aynı iç içe geçme seviyesinde** (yani, üst etiketin doğrudan alt öğeleri olarak, içindeki diğer blokların veya etiketlerin içinde değil) rastladığında, ayrıştırmayı da durdurur.
+
+Ayrıştırma bir ara etiket nedeniyle durduğunda, içerik ayrıştırmayı durdurur, `create()` üretecini devam ettirir ve kısmen ayrıştırılmış içeriği ve **ara etiketin** kendisini (son bitiş etiketi yerine) geri iletir. `create()` fonksiyonumuz daha sonra bu ara etiketi işleyebilir (ör. varsa argümanlarını ayrıştırabilir) ve içeriğin *bir sonraki* bölümünü *son* bitiş etiketine veya başka bir beklenen ara etikete kadar ayrıştırmak için `yield`'i tekrar kullanabilir.
+
+`{else}`'i beklemek için `DebugNode::create()`'i değiştirelim:
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\NopNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DebugNode extends StatementNode
+{
+	// {debug} bölümü için içerik
+	public AreaNode $thenContent;
+	// {else} bölümü için isteğe bağlı içerik
+	public ?AreaNode $elseContent = null;
+
+	public static function create(Tag $tag): \Generator
+	{
+		$node = $tag->node = new self;
+
+		// yield ve {/debug} veya {else}'i bekleyin
+		[$node->thenContent, $nextTag] = yield ['else'];
+
+		// Durduğumuz etiketin {else} olup olmadığını kontrol edin
+		if ($nextTag?->name === 'else') {
+			// {else} ve {/debug} arasındaki içeriği ayrıştırmak için tekrar yield
+			[$node->elseContent, $endTag] = yield;
+		}
+
+		return $node;
+	}
+
+	// ... print() ve getIterator() daha sonra güncellenecektir ...
+}
+```
+
+Şimdi `yield ['else']` Latte'ye sadece `{/debug}` için değil, aynı zamanda `{else}` için de ayrıştırmayı durdurmasını söyler. `{else}` bulunursa, `$nextTag` `{else}` için `Tag` nesnesini içerir. Sonra argümansız `yield`'i tekrar kullanırız, bu da şimdi yalnızca son `{/debug}` etiketini beklediğimiz anlamına gelir ve sonucu `$node->elseContent`'e kaydederiz. `{else}` bulunmazsa, `$nextTag` `{/debug}` için `Tag` olurdu (veya n:nitelik olarak kullanılıyorsa `null`) ve `$node->elseContent` `null` kalırdı.
+
+
+`{else}` ile `print()` uygulama .[#toc-implementing-print-with-else]
+--------------------------------------------------------------------
+
+`print()` metodu yeni yapıyı yansıtmalıdır. `devMode` sağlayıcısına dayalı bir PHP `if/else` deyimi oluşturmalıdır.
+
+```php
+	public function print(PrintContext $context): string
+	{
+		return $context->format(
+			<<<'XX'
+				if ($this->global->appDevMode) %line {
+					%node // 'then' dalı için kod ({debug} içeriği)
+				} else {
+					%node // 'else' dalı için kod ({else} içeriği)
+				}
+
+				XX,
+			$this->position,    // 'if' koşulu için satır numarası
+			$this->thenContent, // İlk %node yer tutucusu
+			$this->elseContent ?? new NopNode, // İkinci %node yer tutucusu
+		);
+	}
+```
+
+Bu standart bir PHP `if/else` yapısıdır. `%node`'u iki kez kullanıyoruz; `format()` sağlanan düğümleri sırayla değiştirir. `$this->elseContent` `null` ise hatalardan kaçınmak için `?? new NopNode` kullanıyoruz – `NopNode` basitçe hiçbir şey yazdırmaz.
+
+
+Her iki içerik için `getIterator()` uygulama .[#toc-implementing-getiterator-for-both-contents]
+-----------------------------------------------------------------------------------------------
+
+Şimdi potansiyel olarak iki alt içerik düğümümüz var (`$thenContent` ve `$elseContent`). Varsa her ikisini de sağlamalıyız:
+
+```php
+	public function &getIterator(): \Generator
+	{
+		yield $this->thenContent;
+		if ($this->elseContent) {
+			yield $this->elseContent;
+		}
+	}
+```
+
+
+Geliştirilmiş etiketi kullanma .[#toc-using-the-enhanced-tag]
+-------------------------------------------------------------
+
+Etiket şimdi isteğe bağlı `{else}` yan tümcesiyle kullanılabilir:
+
+```latte
+{debug}
+	<p>Hata ayıklama bilgileri gösteriliyor, çünkü devMode AÇIK.</p>
+{else}
+	<p>Hata ayıklama bilgileri gizli, çünkü devMode KAPALI.</p>
+{/debug}
+```
+
+
+Durum ve iç içe geçmeyi işleme .[#toc-handling-state-and-nesting]
+=================================================================
+
+Önceki örneklerimiz (`{datetime}`, `{debug}`) `print()` metotları içinde nispeten durumsuzdu. Ya doğrudan içerik yazdırıyorlardı ya da genel bir sağlayıcıya dayalı basit bir koşullu kontrol gerçekleştiriyorlardı. Ancak birçok etiket, oluşturma sırasında bir tür **durum** yönetmeyi gerektirir veya performans veya doğruluk nedeniyle yalnızca bir kez çalıştırılması gereken kullanıcı ifadelerinin değerlendirilmesini içerir. Ayrıca, özel etiketlerimiz **iç içe** geçtiğinde ne olacağını düşünmeliyiz.
+
+Bu kavramları, `{repeat $count}...{/repeat}` etiketini oluşturarak gösterelim. Bu etiket, iç içeriğini `$count` kez tekrarlayacaktır.
+
+**Hedef:** İçeriğini belirtilen sayıda tekrarlayan `{repeat $count}`'i uygulamak.
+
+
+Geçici ve benzersiz değişkenlere duyulan ihtiyaç .[#toc-the-need-for-temporary-unique-variables]
+------------------------------------------------------------------------------------------------
+
+Kullanıcının şunu yazdığını hayal edin:
+
+```latte
+{repeat rand(1, 5)} İçerik {/repeat}
+```
+
+`print()` metodumuzda safça bir PHP `for` döngüsünü şu şekilde oluşturursak:
+
+```php
+// Basitleştirilmiş, YANLIŞ oluşturulan kod
+for ($i = 0; $i < rand(1, 5); $i++) {
+	// içerik çıktısı
+}
+```
+Bu yanlış olurdu! `rand(1, 5)` ifadesi **döngünün her iterasyonunda yeniden değerlendirilir**, bu da öngörülemeyen sayıda tekrara yol açar. `$count` ifadesini döngü başlamadan *bir kez* değerlendirmemiz ve sonucunu saklamamız gerekir.
+
+Önce sayı ifadesini değerlendiren ve onu **geçici bir çalışma zamanı değişkeninde** saklayan PHP kodu oluşturacağız. Şablon kullanıcısı tarafından tanımlanan değişkenlerle *ve* Latte'nin dahili değişkenleriyle ( `$ʟ_...` gibi) çakışmaları önlemek için, geçici değişkenlerimiz için **`$__` (çift alt çizgi)** önek kuralını kullanacağız.
+
+Oluşturulan kod daha sonra şöyle görünür:
+
+```php
+$__count = rand(1, 5);
+for ($__i = 0; $__i < $__count; $__i++) {
+	// içerik çıktısı
+}
+```
+
+Şimdi iç içe geçmeyi düşünelim:
+
+```latte
+{repeat $countA}       {* Dış döngü *}
+	{repeat $countB}   {* İç döngü *}
+		...
+	{/repeat}
+{/repeat}
+```
+
+Hem dış hem de iç `{repeat}` etiketi *aynı* geçici değişken adlarını (ör. `$__count` ve `$__i`) kullanarak kod oluşturursa, iç döngü dış döngünün değişkenlerinin üzerine yazar ve mantığı bozar.
+
+Her `{repeat}` etiketi örneği için oluşturulan geçici değişkenlerin **benzersiz** olmasını sağlamalıyız. Bunu `PrintContext::generateId()` kullanarak başarırız. Bu metot, derleme aşamasında benzersiz bir tamsayı döndürür. Bu ID'yi geçici değişkenlerimizin adlarına ekleyebiliriz.
+
+Yani `$__count` yerine, ilk repeat etiketi için `$__count_1`, ikincisi için `$__count_2` vb. oluşturacağız. Benzer şekilde, döngü sayacı için `$__i_1`, `$__i_2` vb. kullanacağız.
+
+
+`RepeatNode` uygulama .[#toc-implementing-repeatnode]
+-----------------------------------------------------
+
+Düğüm sınıfını oluşturalım.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\CompileException;
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class RepeatNode extends StatementNode
+{
+	public ExpressionNode $count;
+	public AreaNode $content;
+
+	/**
+	 * {repeat $count} ... {/repeat} için ayrıştırma fonksiyonu
+	 */
+	public static function create(Tag $tag): \Generator
+	{
+		$tag->expectArguments(); // $count'un sağlandığından emin olun
+		$node = $tag->node = new self;
+		// Sayı ifadesini ayrıştırın
+		$node->count = $tag->parser->parseExpression();
+		// İç içeriği alın
+		[$node->content] = yield;
+		return $node;
+	}
+
+	/**
+	 * Benzersiz değişken adlarıyla PHP 'for' döngüsü oluşturur.
+	 */
+	public function print(PrintContext $context): string
+	{
+		// Benzersiz değişken adları oluşturun
+		$id = $context->generateId();
+		$countVar = '$__count_' . $id; // ör. $__count_1, $__count_2, vb.
+		$iteratorVar = '$__i_' . $id;  // ör. $__i_1, $__i_2, vb.
+
+		return $context->format(
+			<<<'XX'
+				// Sayı ifadesini *bir kez* değerlendirin ve saklayın
+				%raw = (int) (%node);
+				// Saklanan sayıyı ve benzersiz iterasyon değişkenini kullanarak döngü yapın
+				for (%raw = 0; %2.raw < %0.raw; %2.raw++) %line {
+					%node // İç içeriği oluşturun
+				}
+
+				XX,
+			$countVar,          // %0 - Sayıyı saklamak için değişken
+			$this->count,       // %1 - Sayı için ifade düğümü
+			$iteratorVar,       // %2 - Döngü iterasyon değişkeninin adı
+			$this->position,    // %3 - Döngünün kendisi için satır numarası yorumu
+			$this->content      // %4 - İç içerik düğümü
+		);
+	}
+
+	/**
+	 * Alt düğümleri (sayı ifadesi ve içerik) sağlar.
+	 */
+	public function &getIterator(): \Generator
+	{
+		yield $this->count;
+		yield $this->content;
+	}
+}
+```
+
+`create()` metodu, `parseExpression()` kullanarak gerekli `$count` ifadesini ayrıştırır. Önce `$tag->expectArguments()` çağrılır. Bu, kullanıcının `{repeat}`'ten sonra *bir şey* sağladığından emin olur. `$tag->parser->parseExpression()` hiçbir şey sağlanmazsa başarısız olsa da, hata mesajı beklenmeyen sözdizimi hakkında olabilir. `expectArguments()` kullanmak, özellikle `{repeat}` etiketi için argümanların eksik olduğunu belirten çok daha net bir hata sağlar.
+
+`print()` metodu, çalışma zamanında tekrarlama mantığını yürütmekten sorumlu PHP kodunu oluşturur. İhtiyaç duyacağı geçici PHP değişkenleri için benzersiz adlar oluşturarak başlar.
+
+`$context->format()` metodu, karşılık gelen argüman olarak sağlanan *ham dizeyi* ekleyen yeni bir `%raw` yer tutucusu ile çağrılır. Burada, `$countVar` içinde saklanan benzersiz değişken adını (ör. `$__count_1`) ekler.
+Peki ya `%0.raw` ve `%2.raw`? Bu, **konumsal yer tutucuları** gösterir. Yalnızca *bir sonraki* mevcut ham argümanı alan `%raw` yerine, `%2.raw` açıkça dizin 2'deki argümanı ( `$iteratorVar` olan) alır ve ham dize değerini ekler. Bu, `$iteratorVar` dizesini `format()` için argüman listesinde birden çok kez iletmeden yeniden kullanmamızı sağlar.
+
+Bu dikkatlice oluşturulmuş `format()` çağrısı, sayı ifadesini doğru şekilde işleyen ve `{repeat}` etiketleri iç içe geçtiğinde bile değişken adı çakışmalarını önleyen verimli ve güvenli bir PHP döngüsü oluşturur.
+
+
+Kayıt ve kullanım .[#toc-registration-and-usage]
+------------------------------------------------
+
+Etiketi uzantınızda kaydedin:
+
+```php
+use App\Latte\RepeatNode;
+
+class MyLatteExtension extends Extension
+{
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...),
+			'repeat' => RepeatNode::create(...), // repeat etiketini kaydet
+		];
+	}
+}
+```
+
+İç içe geçme dahil şablonda kullanın:
+
+```latte
+{var $rows = rand(5, 7)}
+{var $cols = rand(3, 5)}
+
+{repeat $rows}
+	<tr>
+		{repeat $cols}
+			<td>İç döngü</td>
+		{/repeat}
+	</tr>
+{/repeat}
+```
+
+Bu örnek, `$__` önekli geçici değişkenler ve `PrintContext::generateId()`'den alınan benzersiz ID'ler kullanarak durumun (döngü sayaçları) ve potansiyel iç içe geçme sorunlarının nasıl ele alınacağını gösterir.
+
+
+Saf n:nitelikler .[#toc-pure-n-attributes]
+------------------------------------------
+
+`n:if` veya `n:foreach` gibi birçok `n:nitelik`, eşli etiket karşılıkları (`{if}...{/if}`, `{foreach}...{/foreach}`) için kullanışlı kısaltmalar olarak hizmet ederken, Latte ayrıca *yalnızca* n:nitelik biçiminde var olan etiketleri tanımlamanıza da olanak tanır. Bunlar genellikle eklendikleri HTML öğesinin niteliklerini veya davranışını değiştirmek için kullanılır.
+
+Latte'de yerleşik standart örnekler arasında, `class` niteliğini dinamik olarak oluşturmaya yardımcı olan [`n:class` |tags#n:class] ve birden çok rastgele nitelik ayarlayabilen [`n:attr` |tags#n:attr] bulunur.
+
+Kendi saf n:niteliğimizi oluşturalım: `n:confirm`, bir eylem gerçekleştirmeden önce (bir bağlantıyı takip etmek veya bir form göndermek gibi) bir JavaScript onay iletişim kutusu ekler.
+
+**Hedef:** Kullanıcı onay iletişim kutusunu iptal ederse varsayılan eylemi önlemek için bir `onclick` işleyicisi ekleyen `n:confirm="'Emin misiniz?'"` uygulamak.
+
+
+`ConfirmNode` uygulama .[#toc-implementing-confirmnode]
+-------------------------------------------------------
+
+Bir Node sınıfına ve bir ayrıştırma fonksiyonuna ihtiyacımız var.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+
+class ConfirmNode extends StatementNode
+{
+	public ExpressionNode $message;
+
+	public static function create(Tag $tag): self
+	{
+		$tag->expectArguments();
+		$node = $tag->node = new self;
+		$node->message = $tag->parser->parseExpression();
+		return $node;
+	}
+
+	/**
+	 * Doğru kaçış ile 'onclick' nitelik kodunu oluşturur.
+	 */
+	public function print(PrintContext $context): string
+	{
+		// Hem JavaScript hem de HTML nitelik bağlamları için doğru kaçışı sağlar.
+		return $context->format(
+			<<<'XX'
+				echo ' onclick="', LR\Filters::escapeHtmlAttr('return confirm(' . LR\Filters::escapeJs(%node) . ')'), '"' %line;
+				XX,
+			$this->message,
+			$this->position,
+		);
+	}
+
+	public function &getIterator(): \Generator
+	{
+		yield $this->message;
+	}
+}
+```
+
+`print()` metodu, şablon oluşturma sırasında sonunda `onclick="..."` HTML niteliğini yazdıracak PHP kodunu oluşturur. İç içe geçmiş bağlamların (HTML niteliği içindeki JavaScript) işlenmesi dikkatli kaçış gerektirir.
+`LR\Filters::escapeJs(%node)` filtresi çalışma zamanında çağrılır ve mesajı JavaScript içinde kullanım için doğru şekilde kaçar (çıktı `"Sure?"` gibi olurdu). Ardından `LR\Filters::escapeHtmlAttr(...)` filtresi, HTML niteliklerinde özel olan karakterleri kaçar, böylece çıktıyı `return confirm(&quot;Sure?&quot;)` olarak değiştirir.
+Bu iki aşamalı çalışma zamanı kaçışı, mesajın JavaScript için güvenli olmasını ve sonuçtaki JavaScript kodunun bir HTML `onclick` niteliğine eklenmek için güvenli olmasını sağlar.
+
+
+Kayıt ve kullanım .[#toc-registration-and-usage]
+------------------------------------------------
+
+n:niteliğini uzantınızda kaydedin. Anahtardaki `n:` önekini unutmayın:
+
+```php
+class MyLatteExtension extends Extension
+{
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...),
+			'repeat' => RepeatNode::create(...),
+			'n:confirm' => ConfirmNode::create(...), // n:confirm'i kaydet
+		];
+	}
+}
+```
+
+Şimdi `n:confirm`'i bağlantılarda, düğmelerde veya form öğelerinde kullanabilirsiniz:
+
+```latte
+<a href="delete.php?id=123" n:confirm='"{$id} öğesini gerçekten silmek istiyor musunuz?"'>Sil</a>
+```
+
+Oluşturulan HTML:
+
+```html
+<a href="delete.php?id=123" onclick="return confirm(&quot;Öğe 123'ü gerçekten silmek istiyor musunuz?&quot;)">Sil</a>
+```
+
+Kullanıcı bağlantıya tıkladığında, tarayıcı `onclick` kodunu yürütür, onay iletişim kutusunu görüntüler ve yalnızca kullanıcı "Tamam"ı tıklarsa `delete.php`'ye gider.
+
+Bu örnek, `print()` metodunda uygun PHP kodunu oluşturarak ana HTML öğesinin davranışını veya niteliklerini değiştirmek için saf bir n:niteliğin nasıl oluşturulabileceğini gösterir. Genellikle gerekli olan çift kaçışı unutmayın: biri hedef bağlam için (bu durumda JavaScript) ve diğeri HTML nitelik bağlamı için.
+
+
+Gelişmiş konular .[#toc-advanced-topics]
+========================================
+
+Önceki bölümler temel kavramları kapsarken, özel Latte etiketleri oluştururken karşılaşabileceğiniz birkaç gelişmiş konu aşağıdadır.
+
+
+Etiket çıktı modları .[#toc-tag-output-modes]
+---------------------------------------------
+
+`create()` fonksiyonunuza iletilen `Tag` nesnesinin bir `outputMode` özelliği vardır. Bu özellik, Latte'nin çevreleyen boşlukları ve girintiyi nasıl ele aldığını etkiler, özellikle etiket kendi satırında kullanıldığında. Bu özelliği `create()` fonksiyonunuzda değiştirebilirsiniz.
+
+- `Tag::OutputKeepIndentation` ( `{=...}` gibi çoğu etiket için varsayılan): Latte, etiketten önceki girintiyi korumaya çalışır. Etiketten *sonraki* yeni satırlar genellikle korunur. Bu, satır içi içerik yazdıran etiketler için uygundur.
+- `Tag::OutputRemoveIndentation` ( `{if}`, `{foreach}` gibi blok etiketleri için varsayılan): Latte, baştaki girintiyi ve potansiyel olarak bir sonraki yeni satırı kaldırır. Bu, oluşturulan PHP kodunu daha temiz tutmaya yardımcı olur ve etiketin kendisinden kaynaklanan HTML çıktısındaki ek boş satırları önler. Kontrol yapılarını veya kendileri boşluk eklememesi gereken blokları temsil eden etiketler için bunu kullanın.
+- `Tag::OutputNone` ( `{var}`, `{default}` gibi etiketler tarafından kullanılır): `RemoveIndentation`'a benzer, ancak etiketin kendisinin doğrudan çıktı üretmediğini daha güçlü bir şekilde işaret eder, potansiyel olarak etrafındaki boşlukların işlenmesini daha agresif bir şekilde etkiler. Bildirimsel veya ayarlama etiketleri için uygundur.
+
+Etiketinizin amacına en uygun modu seçin. Çoğu yapısal veya kontrol etiketi için `OutputRemoveIndentation` genellikle uygundur.
+
+
+Üst/en yakın etiketlere erişim .[#toc-accessing-parent-closest-tags]
+--------------------------------------------------------------------
+
+Bazen bir etiketin davranışı, kullanıldığı bağlama, özellikle içinde bulunduğu üst etikete/etiketlere bağlı olması gerekir. `create()` fonksiyonunuza iletilen `Tag` nesnesi, tam olarak bu amaç için bir `closestTag(array $classes, ?callable $condition = null): ?Tag` metodu sağlar.
+
+Bu metot, mevcut açık etiketlerin hiyerarşisinde (ayrıştırma sırasında dahili olarak temsil edilen HTML öğeleri dahil) yukarı doğru arama yapar ve belirli ölçütlere uyan en yakın atanın `Tag` nesnesini döndürür. Eşleşen bir ata bulunmazsa `null` döndürür.
+
+`$classes` dizisi, ne tür ata etiketleri aradığınızı belirtir. Ata etiketin ilişkili düğümünün (`$ancestorTag->node`) bu sınıfın bir örneği olup olmadığını kontrol eder.
+
+```php
+function create(Tag $tag)
+{
+	// Düğümü ForeachNode örneği olan en yakın ata etiketini arayın
+	$foreachTag = $tag->closestTag([ForeachNode::class]);
+	if ($foreachTag) {
+		// ForeachNode örneğine kendisi erişebiliriz:
+		$foreachNode = $foreachTag->node;
+	}
+}
+```
+
+`$foreachTag->node`'a dikkat edin: Bu yalnızca, Latte etiket geliştirmede, oluşturulan düğümü `create()` metodu içinde hemen `$tag->node`'a atamanın bir kuralı olduğu için çalışır, her zaman yaptığımız gibi.
+
+Bazen yalnızca düğüm türünü karşılaştırmak yeterli olmaz. Potansiyel bir ata etiketin veya düğümünün belirli bir özelliğini kontrol etmeniz gerekebilir. `closestTag()` için isteğe bağlı ikinci argüman, potansiyel ata `Tag` nesnesini kabul eden ve geçerli bir eşleşme olup olmadığını döndürmesi gereken bir çağrılabilirdir.
+
+```php
+function create(Tag $tag)
+{
+	$dynamicBlockTag = $tag->closestTag(
+		[BlockNode::class],
+		// Koşul: blok dinamik olmalıdır
+		fn(Tag $blockTag) => $blockTag->node->block->isDynamic(),
+	);
+}
+```
+
+`closestTag()` kullanmak, bağlama duyarlı olan ve şablon yapınız içinde doğru kullanımı zorlayan etiketler oluşturmanıza olanak tanır, bu da daha sağlam ve anlaşılır şablonlara yol açar.
+
+
+`PrintContext::format()` yer tutucuları
+---------------------------------------
+
+Düğümlerimizin `print()` metotlarında PHP kodu oluşturmak için sık sık `PrintContext::format()` kullandık. Bir maske dizesi ve maske içindeki yer tutucuları değiştiren sonraki argümanları kabul eder. Mevcut yer tutucuların bir özeti aşağıdadır:
+
+- **`%node`**: Argüman bir `Node` örneği olmalıdır. Düğümün `print()` metodunu çağırır ve sonuçtaki PHP kod dizesini ekler.
+- **`%dump`**: Argüman herhangi bir PHP değeridir. Değeri geçerli PHP koduna dışa aktarır. Skalerler, diziler, null için uygundur.
+	- `$context->format('echo %dump;', 'Hello')` -> `echo 'Hello';`
+	- `$context->format('$arr = %dump;', [1, 2])` -> `$arr = [1, 2];`
+- **`%raw`**: Argümanı herhangi bir kaçış veya değişiklik olmadan doğrudan çıktı PHP koduna ekler. **Dikkatli kullanın**, öncelikle önceden oluşturulmuş PHP kod parçacıklarını veya değişken adlarını eklemek için.
+	- `$context->format('%raw = 1;', '$variableName')` -> `$variableName = 1;`
+- **`%args`**: Argüman bir `Expression\ArrayNode` olmalıdır. Dizi öğelerini bir fonksiyon veya metot çağrısı için argümanlar olarak biçimlendirilmiş şekilde yazdırır (virgülle ayrılmış, varsa adlandırılmış argümanları işler).
+	- `$argsNode = new ArrayNode([...]);`
+	- `$context->format('myFunc(%args);', $argsNode)` -> `myFunc(1, name: 'Joe');`
+- **`%line`**: Argüman bir `Position` nesnesi olmalıdır (genellikle `$this->position`). Kaynak satır numarasını gösteren bir PHP yorumu `/* line X */` ekler.
+	- `$context->format('echo "Hi" %line;', $this->position)` -> `echo "Hi" /* line 42 */;`
+- **`%escape(...)`**: *Çalışma zamanında* iç ifadeyi mevcut bağlama duyarlı kaçış kurallarını kullanarak kaçan PHP kodu oluşturur.
+	- `$context->format('echo %escape(%node);', $variableNode)`
+- **`%modify(...)`**: Argüman bir `ModifierNode` olmalıdır. `ModifierNode`'da belirtilen filtreleri iç içeriğe uygulayan PHP kodu oluşturur, `|noescape` ile devre dışı bırakılmadıkça bağlama duyarlı kaçış dahil.
+	- `$context->format('%modify(%node);', $modifierNode, $variableNode)`
+- **`%modifyContent(...)`**: `%modify`'a benzer, ancak yakalanan içerik bloklarını (genellikle HTML) değiştirmek için tasarlanmıştır.
+
+Argümanlara dizinlerine göre (sıfırdan başlayarak) açıkça başvurabilirsiniz: `%0.node`, `%1.dump`, `%2.raw`, vb. Bu, bir argümanı `format()`'a tekrar tekrar iletmeden maske içinde birkaç kez yeniden kullanmanızı sağlar. `%0.raw` ve `%2.raw`'ın kullanıldığı `{repeat}` etiketi örneğine bakın.
+
+
+Karmaşık argüman ayrıştırma örneği .[#toc-complex-argument-parsing-example]
+---------------------------------------------------------------------------
+
+`parseExpression()`, `parseArguments()` vb. birçok durumu kapsarken, bazen `$tag->parser->stream` aracılığıyla erişilebilen daha düşük seviyeli `TokenStream` kullanan daha karmaşık ayrıştırma mantığına ihtiyacınız olur.
+
+**Hedef:** `{embedYoutube $videoID, width: 640, height: 480}` etiketini oluşturmak. Gerekli video ID'sini (dize veya değişken) ve ardından boyutlar için isteğe bağlı anahtar-değer çiftlerini ayrıştırmak istiyoruz.
+
+```php
+<?php
+namespace App\Latte;
+
+class YoutubeNode extends StatementNode
+{
+	public ExpressionNode $videoId;
+	public ?ExpressionNode $width = null;
+	public ?ExpressionNode $height = null;
+
+	public static function create(Tag $tag): self
+	{
+		$tag->expectArguments();
+		$node = $tag->node = new self;
+		// Gerekli video ID'sini ayrıştırın
+		$node->videoId = $tag->parser->parseExpression();
+
+		// İsteğe bağlı anahtar-değer çiftlerini ayrıştırın
+		$stream = $tag->parser->stream; // Token akışını alın
+		while ($stream->tryConsume(',')) { // Virgülle ayırma gerektirir
+			// 'width' veya 'height' tanımlayıcısını bekleyin
+			$keyToken = $stream->consume(Token::Php_Identifier);
+			$key = strtolower($keyToken->text);
+
+			$stream->consume(':'); // İki nokta üst üste ayırıcısını bekleyin
+
+			$value = $tag->parser->parseExpression(); // Değer ifadesini ayrıştırın
+
+			if ($key === 'width') {
+				$node->width = $value;
+			} elseif ($key === 'height') {
+				$node->height = $value;
+			} else {
+				throw new CompileException("Bilinmeyen argüman '$key'. 'width' veya 'height' bekleniyordu.", $keyToken->position);
+			}
+		}
+
+		return $node;
+	}
+}
+```
+
+Bu kontrol seviyesi, token akışıyla doğrudan etkileşim kurarak özel etiketleriniz için çok özel ve karmaşık sözdizimleri tanımlamanıza olanak tanır.
+
+
+`AuxiliaryNode` kullanma .[#toc-using-auxiliarynode]
+----------------------------------------------------
+
+Latte, kod oluşturma sırasında veya derleme geçişleri içinde özel durumlar için genel "yardımcı" düğümler sağlar. Bunlar `AuxiliaryNode` ve `Php\Expression\AuxiliaryNode`'dur.
+
+`AuxiliaryNode`'u, temel işlevlerini - kod oluşturma ve alt düğümleri açığa çıkarma - yapıcısında sağlanan argümanlara devreden esnek bir kapsayıcı düğüm olarak düşünün:
+
+- `print()` delegasyonu: Yapıcının ilk argümanı bir PHP **closure**'dır. Latte, `AuxiliaryNode` üzerinde `print()` metodunu çağırdığında, bu sağlanan closure'ı yürütür. Closure, bir `PrintContext` ve yapıcının ikinci argümanında iletilen herhangi bir düğümü kabul eder, bu da çalışma zamanında tamamen özel PHP kod oluşturma mantığı tanımlamanıza olanak tanır.
+- `getIterator()` delegasyonu: Yapıcının ikinci argümanı **`Node` nesneleri dizisidir**. Latte'nin `AuxiliaryNode`'un alt öğelerini (ör. derleme geçişleri sırasında) dolaşması gerektiğinde, `getIterator()` metodu basitçe bu dizide listelenen düğümleri sağlar.
+
+Örnek:
+
+```php
+$node = new AuxiliaryNode(
+    // 1. Bu closure, print() gövdesi olur
+    fn(PrintContext $context, $arg1, $arg2) => $context->format('...%node...%node...', $arg1, $arg2),
+
+    // 2. Bu düğümler getIterator() metodu tarafından sağlanır ve yukarıdaki closure'a iletilir
+    [$argumentNode1, $argumentNode2]
+);
+```
+
+Latte, oluşturulan kodu nereye eklemeniz gerektiğine bağlı olarak iki farklı tür sağlar:
+
+- `Latte\Compiler\Nodes\Php\Expression\AuxiliaryNode`: Bir **ifadeyi** temsil eden bir PHP kod parçası oluşturmanız gerektiğinde bunu kullanın
+- `Latte\Compiler\Nodes\AuxiliaryNode`: Bir veya daha fazla **deyimi** temsil eden bir PHP kod bloğu eklemeniz gerektiğinde daha genel amaçlar için bunu kullanın
+
+`print()` metodunuz veya derleme geçişiniz içinde standart düğümler ( `StaticMethodCallNode` gibi) yerine `AuxiliaryNode` kullanmanın önemli bir nedeni, **sonraki derleme geçişleri için görünürlük kontrolüdür**, özellikle Sandbox gibi güvenlikle ilgili olanlar.
+
+Bir senaryo düşünün: Derleme geçişinizin, kullanıcı tarafından sağlanan bir ifadeyi (`$userExpr`) belirli, güvenilir bir yardımcı fonksiyon `myInternalSanitize($userExpr)` çağrısıyla sarmalaması gerekir. Standart bir `new FunctionCallNode('myInternalSanitize', [$userExpr])` düğümü oluşturursanız, AST geçişine tamamen görünür olacaktır. Sandbox geçişi daha sonra çalışırsa ve `myInternalSanitize` izin verilenler listesinde *değilse*, Sandbox bu çağrıyı *engelleyebilir* veya değiştirebilir, potansiyel olarak etiketinizin dahili mantığını bozabilir, siz, etiket yazarı, bu özel çağrının güvenli ve gerekli olduğunu bilseniz bile. Bu nedenle, çağrıyı doğrudan `AuxiliaryNode` closure'ı içinde oluşturabilirsiniz.
+
+```php
+use Latte\Compiler\Nodes\Php\Expression\AuxiliaryNode;
+
+// ... print() veya derleme geçişi içinde ...
+$wrappedNode = new AuxiliaryNode(
+	fn(PrintContext $context, $userExpr) => $context->format(
+		'myInternalSanitize(%node)', // Doğrudan PHP kodu oluşturun
+		$userExpr,
+	),
+	// ÖNEMLİ: Orijinal kullanıcı ifadesi düğümünü hala buraya iletin!
+	[$userExpr],
+);
+```
+
+Bu durumda, Sandbox geçişi `AuxiliaryNode`'u görür, ancak **closure'ı tarafından oluşturulan PHP kodunu analiz etmez**. Closure *içinde* oluşturulan `myInternalSanitize` çağrısını doğrudan engelleyemez.
+
+Oluşturulan PHP kodunun kendisi geçişlerden gizlenirken, bu koda *girdiler* (kullanıcı verilerini veya ifadelerini temsil eden düğümler) **hala geçilebilir olmalıdır**. Bu nedenle, `AuxiliaryNode` yapıcısının ikinci argümanı çok önemlidir. Closure'ınızın kullandığı tüm orijinal düğümleri (yukarıdaki örnekteki `$userExpr` gibi) içeren diziyi **iletmelisiniz**. `AuxiliaryNode`'un `getIterator()`'ı **bu düğümleri sağlayacaktır**, Sandbox gibi derleme geçişlerinin potansiyel sorunlar için bunları analiz etmesine olanak tanır.
+
+
+En iyi uygulamalar .[#toc-best-practices]
+=========================================
+
+- **Net amaç:** Etiketinizin net ve gerekli bir amacı olduğundan emin olun. [Filtreler |custom-filters] veya [fonksiyonlar |custom-functions] ile kolayca çözülebilecek görevler için etiketler oluşturmayın.
+- **`getIterator()`'ı doğru şekilde uygulayın:** Her zaman `getIterator()`'ı uygulayın ve şablondan ayrıştırılan *tüm* alt düğümlere (argümanlar, içerik) *referanslar* (`&`) sağlayın. Bu, derleme geçişleri, güvenlik (Sandbox) ve potansiyel gelecek optimizasyonları için gereklidir.
+- **Düğümler için genel özellikler:** Alt düğümleri içeren özellikleri genel yapın, böylece derleme geçişleri gerekirse bunları değiştirebilir.
+- **`PrintContext::format()` kullanın:** PHP kodu oluşturmak için `format()` metodunu kullanın. Tırnak işaretlerini işler, yer tutucuları doğru şekilde kaçar ve satır numarası yorumlarını otomatik olarak ekler.
+- **Geçici değişkenler (`$__`):** Geçici değişkenlere ihtiyaç duyan çalışma zamanı PHP kodu oluştururken (ör. ara toplamları, döngü sayaçlarını saklamak için), kullanıcı değişkenleri ve Latte'nin dahili `$ʟ_` değişkenleriyle çakışmaları önlemek için `$__` önek kuralını kullanın.
+- **İç içe geçme ve benzersiz ID'ler:** Etiketiniz iç içe geçebiliyorsa veya çalışma zamanında örneğe özgü duruma ihtiyaç duyuyorsa, geçici `$__` değişkenleriniz için benzersiz sonekler oluşturmak üzere `print()` metodunuz içinde `$context->generateId()` kullanın.
+- **Harici veriler için sağlayıcılar:** Çalışma zamanı verilerine veya hizmetlerine ($this->global->...) erişmek için değerleri sabit kodlamak veya genel duruma güvenmek yerine sağlayıcıları ( `Extension::getProviders()` aracılığıyla kaydedilir) kullanın. Sağlayıcı adları için üretici önekleri kullanın.
+- **n:nitelikleri düşünün:** Eşli etiketiniz mantıksal olarak tek bir HTML öğesi üzerinde çalışıyorsa, Latte muhtemelen otomatik `n:nitelik` desteği sağlar. Kullanıcı rahatlığı için bunu aklınızda bulundurun. Bir nitelik değiştirme etiketi oluşturuyorsanız, saf bir `n:nitelik`'in en uygun biçim olup olmadığını düşünün.
+- **Test etme:** Etiketleriniz için testler yazın, hem farklı sözdizimsel girdilerin ayrıştırılmasını hem de oluşturulan **PHP kodunun** çıktısının doğruluğunu kapsayın.
+
+Bu yönergeleri izleyerek, Latte şablonlama motoruyla sorunsuz bir şekilde bütünleşen güçlü, sağlam ve sürdürülebilir özel etiketler oluşturabilirsiniz.
+
+.[note]
+Latte'nin bir parçası olan düğüm sınıflarını incelemek, ayrıştırma sürecinin tüm ayrıntılarını öğrenmenin en iyi yoludur.

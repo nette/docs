@@ -1,0 +1,555 @@
+Kompilacijski prehodi
+*********************
+
+.[perex]
+Kompilacijski prehodi zagotavljajo zmogljiv mehanizem za analizo in spreminjanje predlog Latte *po* njihovem razčlenjevanju v abstraktno sintaktično drevo (AST) in *pred* generiranjem končne PHP kode. To omogoča napredno manipulacijo s predlogami, optimizacije, varnostne preglede (kot je Sandbox) in zbiranje informacij o predlogah. Ta vodnik vas bo vodil skozi ustvarjanje lastnih kompilacijskih prehodov.
+
+
+Kaj je kompilacijski prehod? .[#toc-what-is-a-compiler-pass]
+============================================================
+
+Za razumevanje vloge kompilacijskih prehodov si oglejte [kompilacijski proces Latte |custom-tags#Understanding the Compilation Process]. Kot lahko vidite, kompilacijski prehodi delujejo v ključni fazi, kar omogoča globok poseg med začetnim razčlenjevanjem in končnim izpisom kode.
+
+V jedru je kompilacijski prehod preprosto PHP klicni objekt (kot funkcija, statična metoda ali metoda instance), ki sprejme en argument: korenski vozel AST predloge, ki je vedno instanca `Latte\Compiler\Nodes\TemplateNode`.
+
+Primarni cilj kompilacijskega prehoda je običajno eden ali oba od naslednjih:
+
+- Analiza: Prehajati skozi AST in zbirati informacije o predlogi (npr. najti vse definirane bloke, preveriti uporabo specifičnih značk, zagotoviti izpolnjevanje določenih varnostnih omejitev).
+- Sprememba: Spremeniti strukturo AST ali atribute vozlov (npr. samodejno dodati HTML atribute, optimizirati določene kombinacije značk, zamenjati zastarele značke z novimi, implementirati pravila peskovnika).
+
+
+Registracija .[#toc-registration]
+=================================
+
+Kompilacijski prehodi so registrirani s pomočjo metode [razširitve |extending-latte#getPasses()] `getPasses()`. Ta metoda vrača asociativno polje, kjer so ključi edinstvena imena prehodov (uporabljena interno in za razvrščanje) in vrednosti so PHP klicni objekti, ki implementirajo logiko prehoda.
+
+```php
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Extension;
+
+class MyExtension extends Extension
+{
+	public function getPasses(): array
+	{
+		return [
+			'modificationPass' => $this->modifyTemplateAst(...),
+			// ... nadaljnji prehodi ...
+		];
+	}
+
+	public function modifyTemplateAst(TemplateNode $templateNode): void
+	{
+		// Implementacija...
+	}
+}
+```
+
+Prehodi, registrirani z osnovnimi razširitvami Latte in vašimi lastnimi razširitvami, tečejo zaporedno. Vrstni red je lahko pomemben, še posebej, če en prehod temelji na rezultatih ali spremembah drugega. Latte ponuja pomožni mehanizem za nadzor tega vrstnega reda, če je potrebno; glejte dokumentacijo za [`Extension::getPasses()` |extending-latte#getPasses()] za podrobnosti.
+
+
+Primer AST .[#toc-example-of-ast]
+=================================
+
+Za boljšo predstavo o AST dodajamo primer. To je izvorna predloga:
+
+```latte
+{foreach $category->getItems() as $item}
+	<li>{$item->name|upper}</li>
+	{else}
+	no items found
+{/foreach}
+```
+
+In to je njena predstavitev v obliki AST:
+
+/--pre
+Latte\Compiler\Nodes\<b>TemplateNode</b>(
+   Latte\Compiler\Nodes\<b>FragmentNode</b>(
+      - Latte\Essential\Nodes\<b>ForeachNode</b>(
+           expression: Latte\Compiler\Nodes\Php\Expression\<b>MethodCallNode</b>(
+              object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$category')
+              name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('getItems')
+           )
+           value: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+           content: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+              - Latte\Compiler\Nodes\<b>TextNode</b>('  ')
+              - Latte\Compiler\Nodes\<b>Html\ElementNode</b>('li')(
+                   content: Latte\Essential\Nodes\<b>PrintNode</b>(
+                      expression: Latte\Compiler\Nodes\Php\Expression\<b>PropertyFetchNode</b>(
+                         object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+                         name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('name')
+                      )
+                      modifier: Latte\Compiler\Nodes\Php\<b>ModifierNode</b>(
+                         filters:
+                            - Latte\Compiler\Nodes\Php\<b>FilterNode</b>('upper')
+                      )
+                   )
+                )
+            )
+            else: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+               - Latte\Compiler\Nodes\<b>TextNode</b>('no items found')
+            )
+        )
+   )
+)
+\--
+
+
+Prehajanje AST s pomočjo `NodeTraverser` .[#toc-traversing-the-ast-with-nodetraverser]
+======================================================================================
+
+Ročno pisanje rekurzivnih funkcij za prehajanje kompleksne strukture AST je utrujajoče in nagnjeno k napakam. Latte ponuja posebno orodje za ta namen: [api:Latte\Compiler\NodeTraverser]. Ta razred implementira [načrtovalski vzorec Visitor |https://en.wikipedia.org/wiki/Visitor_pattern], zahvaljujoč kateremu je prehajanje AST sistematično in enostavno obvladljivo.
+
+Osnovna uporaba vključuje ustvarjanje instance `NodeTraverser` in klic njene metode `traverse()`, posredovanje korenskega vozla AST in enega ali dveh "visitor" klicnih objektov:
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+
+(new NodeTraverser)->traverse(
+	$templateNode,
+
+	// 'enter' visitor: Klican ob vstopu v vozel (pred njegovimi otroki)
+	enter: function (Node $node) {
+		echo "Vstop v vozel tipa: " . $node::class . "\n";
+		// Tu lahko preučujete vozel
+		if ($node instanceof Nodes\TextNode) {
+			// echo "Najden tekst: " . $node->content . "\n";
+		}
+	},
+
+	// 'leave' visitor: Klican ob izstopu iz vozla (po njegovih otrocih)
+	leave: function (Node $node) {
+		echo "Izstop iz vozla tipa: " . $node::class . "\n";
+		// Tu lahko izvajate akcije po obdelavi otrok
+	},
+);
+```
+
+Lahko posredujete samo `enter` visitor, samo `leave` visitor, ali oba, odvisno od vaših potreb.
+
+**`enter(Node $node)`:** Ta funkcija se izvede za vsak vozel **pred** tem, ko obiskovalec obišče kateregakoli od otrok tega vozla. Uporabna je za:
+
+- Zbiranje informacij med prehajanjem drevesa navzdol.
+- Odločanje *pred* obdelavo otrok (kot odločitev, da jih preskočimo, glejte [Optimizacija prehajanja |#Optimizing Traversal]).
+- Potencialne spremembe vozla pred obiskom otrok (manj pogosto).
+
+**`leave(Node $node)`:** Ta funkcija se izvede za vsak vozel **po** tem, ko so bili vsi njegovi otroci (in njihova celotna poddrevesa) v celoti obiskani (tako vstop kot izstop). Je najpogostejše mesto za:
+
+Oba visitorja `enter` in `leave` lahko neobvezno vračata vrednost za vplivanje na proces prehajanja. Vračanje `null` (ali nič) nadaljuje prehajanje normalno, vračanje instance `Node` zamenja trenutni vozel, in vračanje posebnih konstant kot `NodeTraverser::RemoveNode` ali `NodeTraverser::StopTraversal` spremeni tok, kot je razloženo v naslednjih odsekih.
+
+
+Kako prehajanje deluje .[#toc-how-traversal-works]
+--------------------------------------------------
+
+`NodeTraverser` interno uporablja metodo `getIterator()`, ki jo mora implementirati vsak razred `Node` (kot je bilo obravnavano v [Ustvarjanje lastnih značk |custom-tags#Implementing getIterator() for Subnodes]). Iterira skozi otroke, pridobljene s pomočjo `getIterator()`, rekurzivno kliče `traverse()` na njih in zagotavlja, da sta `enter` in `leave` visitorja klicana v pravilnem globinsko-prvem vrstnem redu za vsak vozel v drevesu, dostopen preko iteratorjev. To ponovno poudarja, zakaj je pravilno implementiran `getIterator()` v vaših lastnih vozlih značk absolutno nujen za pravilno delovanje kompilacijskih prehodov.
+
+Napišimo preprost prehod, ki šteje, kolikokrat je v predlogi uporabljena značka `{do}` (predstavljena z `Latte\Essential\Nodes\DoNode`).
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\DoNode;
+
+function countDoTags(TemplateNode $templateNode): void
+{
+	$count = 0;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use (&$count): void {
+			if ($node instanceof DoNode) {
+				$count++;
+			}
+		},
+		// 'leave' visitor ni potreben za to nalogo
+	);
+
+	echo "Najdena značka {do} $count krat.\n";
+}
+
+$latte = new Latte\Engine;
+$ast = $latte->parse($templateSource);
+countDoTags($ast);
+```
+
+V tem primeru smo potrebovali samo visitor `enter` za preverjanje tipa vsakega obiskanega vozla.
+
+Nato bomo preučili, kako ti visitorji dejansko spreminjajo AST.
+
+
+Spreminjanje AST .[#toc-modifying-the-ast]
+==========================================
+
+Eden od glavnih namenov kompilacijskih prehodov je spreminjanje abstraktnega sintaktičnega drevesa. To omogoča zmogljive transformacije, optimizacije ali uveljavljanje pravil neposredno na strukturi predloge pred generiranjem PHP kode. `NodeTraverser` ponuja več načinov, kako to doseči znotraj visitorjev `enter` in `leave`.
+
+**Pomembna opomba:** Spreminjanje AST zahteva previdnost. Napačne spremembe – kot odstranitev osnovnih vozlov ali zamenjava vozla z nezdružljivim tipom – lahko vodijo do napak med generiranjem kode ali povzročijo nepričakovano vedenje med izvajanjem programa. Vedno temeljito testirajte svoje modifikacijske prehode.
+
+
+Spreminjanje atributov vozlov .[#toc-changing-node-properties]
+--------------------------------------------------------------
+
+Najenostavnejši način za spreminjanje drevesa je neposredna sprememba **javnih lastnosti** vozlov, obiskanih med prehajanjem. Vsi vozli shranjujejo svoje razčlenjene argumente, vsebino ali atribute v javnih lastnostih.
+
+**Primer:** Ustvarimo prehod, ki najde vse statične tekstovne vozle (`TextNode`, ki predstavljajo običajen HTML ali tekst zunaj Latte značk) in pretvori njihovo vsebino v velike črke *neposredno v AST*.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\TextNode;
+
+function uppercaseStaticText(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Lahko uporabimo 'enter', ker TextNode nima otrok za obdelavo
+		enter: function (Node $node) {
+			// Je ta vozel statični tekstovni blok?
+			if ($node instanceof TextNode) {
+				// Da! Neposredno spremenimo njegovo javno lastnost 'content'.
+				$node->content = mb_strtoupper(html_entity_decode($node->content));
+			}
+			// Ni treba ničesar vračati; sprememba je uporabljena neposredno.
+		},
+	);
+}
+```
+
+V tem primeru visitor `enter` preverja, ali je trenutni `$node` tipa `TextNode`. Če je, neposredno posodobimo njegovo javno lastnost `$content` s pomočjo `mb_strtoupper()`. To neposredno spremeni vsebino statičnega teksta, shranjenega v AST *pred* generiranjem PHP kode. Ker spreminjamo objekt neposredno, nam ni treba ničesar vračati iz visitorja.
+
+Učinek: Če je predloga vsebovala `<p>Hello</p>{= $var }<span>World</span>`, bo po tem prehodu AST predstavljal nekaj takega: `<p>HELLO</p>{= $var }<span>WORLD</span>`. To NE VPLIVA na vsebino $var.
+
+
+Zamenjava vozlov .[#toc-replacing-nodes]
+----------------------------------------
+
+Močnejša tehnika spreminjanja je popolna zamenjava vozla z drugim. To se naredi z **vračanjem nove instance `Node`** iz visitorja `enter` ali `leave`. `NodeTraverser` nato zamenja prvotni vozel z vrnjenim v strukturi starševskega vozla.
+
+**Primer:** Ustvarimo prehod, ki najde vse uporabe konstante `PHP_VERSION` (predstavljene z `ConstantFetchNode`) in jih zamenja neposredno z nizovnim literalom (`StringNode`), ki vsebuje *dejansko* različico PHP, zaznano *med kompilacijo*. To je oblika optimizacije v času kompilacije.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\Php\Expression\ConstantFetchNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+
+function inlinePhpVersion(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// 'leave' se pogosto uporablja za zamenjavo, zagotavlja, da so otroci (če obstajajo)
+		// obdelani najprej, čeprav bi tu deloval tudi 'enter'.
+		leave: function (Node $node) {
+			// Je ta vozel dostop do konstante in ime konstante 'PHP_VERSION'?
+			if ($node instanceof ConstantFetchNode && (string) $node->name === 'PHP_VERSION') {
+				// Ustvarimo nov StringNode, ki vsebuje trenutno različico PHP
+				$newNode = new StringNode(PHP_VERSION);
+
+				// Neobvezno, a dobra praksa: kopiramo informacije o poziciji
+				$newNode->position = $node->position;
+
+				// Vrnemo nov StringNode. Traverser bo zamenjal
+				// prvotni ConstantFetchNode s tem $newNode.
+				return $newNode;
+			}
+			// Če ne vrnemo Node, se prvotni $node ohrani.
+		},
+	);
+}
+```
+
+Tu visitor `leave` identificira specifičen `ConstantFetchNode` za `PHP_VERSION`. Nato ustvari popolnoma nov `StringNode`, ki vsebuje vrednost konstante `PHP_VERSION` *v času kompilacije*. Z vračanjem tega `$newNode` pove traverserju, naj zamenja prvotni `ConstantFetchNode` v AST.
+
+Učinek: Če je predloga vsebovala `{= PHP_VERSION }` in kompilacija teče na PHP 8.2.1, bo AST po tem prehodu učinkovito predstavljal `{= '8.2.1' }`.
+
+**Izbira `enter` vs. `leave` za zamenjavo:**
+
+- Uporabite `leave`, če ustvarjanje novega vozla temelji na rezultatih obdelave otrok starega vozla, ali če želite preprosto zagotoviti, da so otroci obiskani pred zamenjavo (pogosta praksa).
+- Uporabite `enter`, če želite zamenjati vozel *pred* tem, ko so njegovi otroci sploh obiskani.
+
+
+Odstranjevanje vozlov .[#toc-removing-nodes]
+--------------------------------------------
+
+Lahko popolnoma odstranite vozel iz AST z vračanjem posebne konstante `NodeTraverser::RemoveNode` iz visitorja.
+
+**Primer:** Odstranimo vse komentarje predloge (`{* ... *}`), ki so predstavljeni z `CommentNode` v AST, generiranem s strani jedra Latte (čeprav so običajno obdelani prej, to služi kot primer).
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\CommentNode;
+
+function removeCommentNodes(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// 'enter' je tu v redu, ker ne potrebujemo informacij o otrocih za odstranitev komentarja
+		enter: function (Node $node) {
+			if ($node instanceof CommentNode) {
+				// Signaliziramo traverserju, naj odstrani ta vozel iz AST
+				return NodeTraverser::RemoveNode;
+			}
+		},
+	);
+}
+```
+
+**Opozorilo:** Uporabljajte `RemoveNode` previdno. Odstranitev vozla, ki vsebuje osnovno vsebino ali vpliva na strukturo (kot odstranitev vsebinskega vozla cikla), lahko vodi do poškodovanih predlog ali neveljavne generirane kode. Najvarnejše je za vozle, ki so resnično neobvezni ali samostojni (kot komentarji ali razhroščevalne značke) ali za prazne strukturne vozle (npr. prazen `FragmentNode` je lahko v nekaterih kontekstih varno odstranjen s prehodom za čiščenje).
+
+Te tri metode - spreminjanje lastnosti, zamenjava vozlov in odstranjevanje vozlov - zagotavljajo osnovna orodja za manipulacijo z AST znotraj vaših kompilacijskih prehodov.
+
+
+Optimizacija prehajanja .[#toc-optimizing-traversal]
+====================================================
+
+AST predlog je lahko precej velik, potencialno vsebujoč tisoče vozlov. Prehajanje vsakega posameznega vozla je lahko nepotrebno in vpliva na zmogljivost kompilacije, če vaš prehod zanima samo specifične dele drevesa. `NodeTraverser` ponuja načine za optimizacijo prehajanja:
+
+
+Preskakovanje otrok .[#toc-skipping-children]
+---------------------------------------------
+
+Če veste, da ko naletite na določen tip vozla, nobeden od njegovih potomcev ne more vsebovati vozlov, ki jih iščete, lahko traverserju poveste, naj preskoči obisk njegovih otrok. To se naredi z vračanjem konstante `NodeTraverser::DontTraverseChildren` iz visitorja **`enter`**. S tem izpustite cele veje pri prehodu, kar potencialno prihrani znaten čas, še posebej v predlogah s kompleksnimi PHP izrazi znotraj značk.
+
+
+Ustavitev prehajanja .[#toc-stopping-traversal]
+-----------------------------------------------
+
+Če vaš prehod potrebuje najti samo *prvi* pojav nečesa (specifičen tip vozla, izpolnitev pogoja), lahko popolnoma ustavite celoten proces prehajanja, takoj ko to najdete. To dosežete z vračanjem konstante `NodeTraverser::StopTraversal` iz visitorja `enter` ali `leave`. Metoda `traverse()` preneha obiskovati katerekoli nadaljnje vozle. To je zelo učinkovito, če potrebujete samo prvo ujemanje v potencialno zelo velikem drevesu.
+
+
+Uporaben pomočnik `NodeTraverser` .[#toc-useful-helper-nodetraverser]
+=====================================================================
+
+Medtem ko `NodeTraverser` ponuja fino stopenjsko kontrolo, Latte ponuja tudi praktičen pomožni razred, [api:Latte\Compiler\NodeHelpers], ki zapušča `NodeTraverser` za več pogostih nalog iskanja in analize, pogosto zahtevajoč manj pripravljalne kode.
+
+
+find(Node $startNode, callable $filter): array .[method]
+--------------------------------------------------------
+
+Ta statična metoda najde **vse** vozle v poddrevesu, ki se začne na `$startNode` (vključno), ki izpolnjujejo povratni klic `$filter`. Vrača polje ujemajočih se vozlov.
+
+**Primer:** Najti vse vozle spremenljivk (`VariableNode`) v celotni predlogi.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\Expression\VariableNode;
+use Latte\Compiler\Nodes\TemplateNode;
+
+function findAllVariables(TemplateNode $templateNode): array
+{
+	return NodeHelpers::find(
+		$templateNode,
+		fn($node) => $node instanceof VariableNode,
+	);
+}
+```
+
+
+findFirst(Node $startNode, callable $filter): ?Node  .[method]
+--------------------------------------------------------------
+
+Podobno kot `find`, vendar ustavi prehajanje takoj po najdbi **prvega** vozla, ki izpolnjuje povratni klic `$filter`. Vrača najden objekt `Node` ali `null`, če ni najden noben ujemajoč se vozel. To je v bistvu praktičen ovoj okoli `NodeTraverser::StopTraversal`.
+
+**Primer:** Najti vozel `{parameters}` (enako kot ročni primer prej, vendar krajše).
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\ParametersNode;
+
+function findParametersNodeHelper(TemplateNode $templateNode): ?ParametersNode
+{
+	return NodeHelpers::findFirst(
+		$templateNode->head, // Iskati samo v glavni sekciji za učinkovitost
+		fn($node) => $node instanceof ParametersNode,
+	);
+}
+```
+
+
+toValue(ExpressionNode $node, bool $constants = false): mixed .[method]
+-----------------------------------------------------------------------
+
+Ta statična metoda poskuša ovrednotiti `ExpressionNode` **v času kompilacije** in vrniti njegovo ustrezno PHP vrednost. Deluje zanesljivo samo za preproste literalne vozle (`StringNode`, `IntegerNode`, `FloatNode`, `BooleanNode`, `NullNode`) in instance `ArrayNode`, ki vsebujejo samo take ovrednotljive elemente.
+
+Če je `$constants` nastavljen na `true`, bo poskušal rešiti tudi `ConstantFetchNode` in `ClassConstantFetchNode` s preverjanjem `defined()` in uporabo `constant()`.
+
+Če vozel vsebuje spremenljivke, klice funkcij ali druge dinamične elemente, ga ni mogoče ovrednotiti v času kompilacije in metoda vrže `InvalidArgumentException`.
+
+**Primer uporabe:** Pridobivanje statične vrednosti argumenta značke med kompilacijo za odločanje v času kompilacije.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+
+function getStaticStringArgument(ExpressionNode $argumentNode): ?string
+{
+	try {
+		$value = NodeHelpers::toValue($argumentNode);
+		return is_string($value) ? $value : null;
+	} catch (\InvalidArgumentException $e) {
+		// Argument ni bil statični literalni niz
+		return null;
+	}
+}
+```
+
+
+toText(?Node $node): ?string .[method]
+--------------------------------------
+
+Ta statična metoda je uporabna za ekstrakcijo preprostega tekstovnega vsebine iz preprostih vozlov. Deluje primarno z:
+- `TextNode`: Vrača njegov `$content`.
+- `FragmentNode`: Združi rezultat `toText()` za vse njegove otroke. Če kateri otrok ni pretvorljiv v tekst (npr. vsebuje `PrintNode`), vrne `null`.
+- `NopNode`: Vrača prazen niz.
+- Drugi tipi vozlov: Vrača `null`.
+
+**Primer uporabe:** Pridobivanje statične tekstovne vsebine vrednosti HTML atributa ali preprostega HTML elementa za analizo med kompilacijskim prehodom.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Html\AttributeNode;
+
+function getStaticAttributeValue(AttributeNode $attr): ?string
+{
+	// $attr->value je tipično AreaNode (kot FragmentNode ali TextNode)
+	return NodeHelpers::toText($attr->value);
+}
+
+// Primer uporabe v prehodu:
+// if ($node instanceof Html\ElementNode && $node->name === 'meta') {
+//     $nameAttrValue = getStaticAttributeValue($node->getAttributeNode('name'));
+//     if ($nameAttrValue === 'description') { ... }
+// }
+```
+
+`NodeHelpers` lahko poenostavi vaše kompilacijske prehode z zagotavljanjem pripravljenih rešitev za pogoste naloge prehajanja in analize AST.
+
+
+Praktični primeri .[#toc-practical-examples]
+============================================
+
+Uporabimo koncepte prehajanja in spreminjanja AST za reševanje nekaterih praktičnih problemov. Ti primeri prikazujejo pogoste vzorce, uporabljene v kompilacijskih prehodih.
+
+
+Samodejno dodajanje `loading="lazy"` k `<img>` .[#toc-auto-adding-loading-lazy-to-img]
+--------------------------------------------------------------------------------------
+
+Sodobni brskalniki podpirajo nativno leno nalaganje za slike s pomočjo atributa `loading="lazy"`. Ustvarimo prehod, ki samodejno doda ta atribut vsem značkam `<img>`, ki še nimajo atributa `loading`.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Html;
+
+function addLazyLoading(Nodes\TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Lahko uporabimo 'enter', ker spreminjamo vozel neposredno
+		// in nismo odvisni od otrok za to odločitev.
+		enter: function (Node $node) {
+			// Je to HTML element z imenom 'img'?
+			if ($node instanceof Html\ElementNode && $node->name === 'img') {
+				// Zagotovimo, da vozel atributov obstaja
+				$node->attributes ??= new Nodes\FragmentNode;
+
+				// Preverimo, ali že obstaja atribut 'loading' (ne glede na velikost črk)
+				foreach ($node->attributes->children as $attrNode) {
+					if ($attrNode instanceof Html\AttributeNode
+						&& $attrNode->name instanceof Nodes\TextNode // Statično ime atributa
+						&& strtolower($attrNode->name->content) === 'loading'
+					) {
+						return;
+					}
+				}
+
+				// Dodamo presledek, če atributi niso prazni
+				if ($node->attributes->children) {
+					$node->attributes->children[] = new Nodes\TextNode(' ');
+				}
+
+				// Ustvarimo nov vozel atributa: loading="lazy"
+				$node->attributes->children[] = new Html\AttributeNode(
+					name: new Nodes\TextNode('loading'),
+					value: new Nodes\TextNode('lazy'),
+					quote: '"',
+				);
+				// Sprememba je uporabljena neposredno v objektu, ni treba ničesar vračati.
+			}
+		},
+	);
+}
+```
+
+Pojasnilo:
+- Visitor `enter` išče vozle `Html\ElementNode` z imenom `img`.
+- Iterira skozi obstoječe atribute (`$node->attributes->children`) in preverja, ali je atribut `loading` že prisoten.
+- Če ni najden, ustvari nov `Html\AttributeNode`, ki predstavlja `loading="lazy"`.
+
+
+Preverjanje klicev funkcij .[#toc-checking-function-calls]
+----------------------------------------------------------
+
+Kompilacijski prehodi so osnova Latte Sandboxa. Čeprav je dejanski Sandbox sofisticiran, lahko demonstriramo osnovni princip preverjanja prepovedanih klicev funkcij.
+
+**Cilj:** Preprečiti uporabo potencialno nevarne funkcije `shell_exec` znotraj izrazov predloge.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Php;
+use Latte\SecurityViolationException;
+
+function checkForbiddenFunctions(Nodes\TemplateNode $templateNode): void
+{
+	$forbiddenFunctions = ['shell_exec' => true, 'exec' => true]; // Preprost seznam
+
+	$traverser = new NodeTraverser;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use ($forbiddenFunctions) {
+			// Je to vozel neposrednega klica funkcije?
+			if ($node instanceof Php\Expression\FunctionCallNode
+				&& $node->name instanceof Php\NameNode
+				&& isset($forbiddenFunctions[strtolower((string) $node->name)])
+			) {
+				throw new SecurityViolationException(
+					"Funkcija {$node->name}() ni dovoljena.",
+					$node->position,
+				);
+			}
+		},
+	);
+}
+```
+
+Pojasnilo:
+- Definiramo seznam prepovedanih imen funkcij.
+- Visitor `enter` preverja `FunctionCallNode`.
+- Če je ime funkcije (`$node->name`) statičen `NameNode`, preverjamo njegovo nizovno predstavitev v malih črkah proti našemu prepovedanemu seznamu.
+- Če je najdena prepovedana funkcija, vržemo `Latte\SecurityViolationException`, ki jasno označuje kršitev varnostnega pravila in ustavi kompilacijo.
+
+Ti primeri prikazujejo, kako lahko kompilacijske prehode z uporabo `NodeTraverser` izkoristimo za analizo, samodejne spremembe in uveljavljanje varnostnih omejitev interakcij neposredno s strukturo AST predloge.
+
+
+Najboljše prakse .[#toc-best-practices]
+=======================================
+
+Pri pisanju kompilacijskih prehodov imejte v mislih te smernice za ustvarjanje robustnih, vzdržljivih in učinkovitih razširitev:
+
+- **Vrstni red je pomemben:** Zavedajte se vrstnega reda, v katerem tečejo prehodi. Če vaš prehod temelji na strukturi AST, ustvarjeni z drugim prehodom (npr. osnovni prehodi Latte ali drug lasten prehod), ali če drugi prehodi lahko temeljijo na vaših spremembah, uporabite mehanizem razvrščanja, ki ga ponuja `Extension::getPasses()`, za definiranje odvisnosti (`before`/`after`). Glejte dokumentacijo za [`Extension::getPasses()` |extending-latte#getPasses()] za podrobnosti.
+- **Ena odgovornost:** Prizadevajte si za prehode, ki opravljajo eno dobro definirano nalogo. Za kompleksne transformacije razmislite o razdelitvi logike na več prehodov – morda enega za analizo in drugega za spremembo na podlagi rezultatov analize. To izboljšuje preglednost in testabilnost.
+- **Zmogljivost:** Ne pozabite, da kompilacijski prehodi dodajajo čas kompilacije predloge (čeprav se to običajno zgodi samo enkrat, dokler se predloga ne spremeni). Izogibajte se računsko zahtevnim operacijam v vaših prehodih, če je le mogoče. Izkoristite optimizacije prehajanja kot `NodeTraverser::DontTraverseChildren` in `NodeTraverser::StopTraversal`, kadarkoli veste, da vam ni treba obiskati določenih delov AST.
+- **Uporabljajte `NodeHelpers`:** Za pogoste naloge, kot je iskanje specifičnih vozlov ali statično vrednotenje preprostih izrazov, preverite, ali `Latte\Compiler\NodeHelpers` ponuja primerno metodo, preden pišete lastno logiko `NodeTraverser`. To lahko prihrani čas in zmanjša količino pripravljalne kode.
+- **Obravnavanje napak:** Če vaš prehod zazna napako ali neveljavno stanje v AST predloge, vržite `Latte\CompileException` (ali `Latte\SecurityViolationException` za varnostne težave) z jasnim sporočilom in ustreznim objektom `Position` (običajno `$node->position`). To zagotavlja uporabno povratno informacijo razvijalcu predloge.
+- **Idempotenca (če je mogoče):** Idealno bi bilo, če bi zagon vašega prehoda večkrat na istem AST proizvedel enak rezultat kot njegov enkratni zagon. To ni vedno izvedljivo, vendar poenostavlja razhroščevanje in razmišljanje o interakcijah prehodov, če je to doseženo. Na primer, zagotovite, da vaš modifikacijski prehod preveri, ali je bila sprememba že uporabljena, preden jo ponovno uporabi.
+
+Z upoštevanjem teh praks lahko učinkovito izkoristite kompilacijske prehode za razširitev zmogljivosti Latte na zmogljiv in zanesljiv način, kar prispeva k varnejšemu, optimiziranemu ali funkcionalno bogatejšemu obdelovanju predlog.

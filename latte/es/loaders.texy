@@ -1,0 +1,198 @@
+Loaders
+*******
+
+.[perex]
+Los loaders son el mecanismo que Latte utiliza para obtener el código fuente de sus plantillas. Muy a menudo, las plantillas se almacenan como archivos en el disco, pero gracias al sistema flexible de loaders, puede cargarlas desde prácticamente cualquier lugar o incluso generarlas dinámicamente.
+
+
+¿Qué es un Loader? .[#toc-what-is-a-loader]
+===========================================
+
+Cuando trabaja con plantillas, generalmente imagina archivos `.latte` ubicados en la estructura de directorios de su proyecto. De esto se encarga el [FileLoader |#FileLoader] predeterminado en Latte. Sin embargo, la conexión entre el nombre de la plantilla (como `'main.latte'` o `'components/card.latte'`) y su código fuente real *no tiene* que ser un mapeo directo a una ruta de archivo.
+
+Aquí es donde entran en juego los loaders. Un loader es un objeto que tiene la tarea de tomar el nombre de una plantilla (una cadena de identificación) y proporcionar a Latte su código fuente. Latte depende completamente del loader configurado para esta tarea. Esto se aplica no solo a la plantilla inicial solicitada con `$latte->render('main.latte')`, sino también a **cada plantilla referenciada dentro** usando etiquetas como `{include ...}`, `{layout ...}`, `{embed ...}` o `{import ...}`.
+
+¿Por qué usar un loader personalizado?
+
+- **Carga desde fuentes alternativas:** Obtener plantillas almacenadas en una base de datos, en caché (como Redis o Memcached), en un sistema de control de versiones (como Git, basado en un commit específico) o generadas dinámicamente.
+- **Implementación de convenciones de nomenclatura personalizadas:** Es posible que desee usar alias más cortos para las plantillas o implementar una lógica específica de rutas de búsqueda (por ejemplo, buscar primero en el directorio del tema, luego volver al directorio predeterminado).
+- **Agregar seguridad o control de acceso:** Un loader personalizado puede verificar los permisos del usuario antes de cargar ciertas plantillas.
+- **Preprocesamiento:** Aunque generalmente no se recomienda ([los pasos de compilación |compiler-passes] son mejores), un loader *podría* teóricamente preprocesar el contenido de la plantilla antes de pasarlo a Latte.
+
+Un loader para una instancia de `Latte\Engine` se establece usando el método `setLoader()`:
+
+```php
+$latte = new Latte\Engine;
+
+// Uso del FileLoader predeterminado para archivos en '/path/to/templates'
+$loader = new Latte\Loaders\FileLoader('/path/to/templates');
+$latte->setLoader($loader);
+```
+
+El loader debe implementar la interfaz `Latte\Loader`.
+
+
+Loaders incorporados .[#toc-built-in-loaders]
+=============================================
+
+Latte ofrece varios loaders estándar:
+
+
+FileLoader .[#toc-fileloader]
+-----------------------------
+
+Este es el **loader predeterminado** utilizado por la clase `Latte\Engine` si no se especifica ningún otro. Carga plantillas directamente desde el sistema de archivos.
+
+Opcionalmente, puede establecer un directorio raíz para restringir el acceso:
+
+```php
+use Latte\Loaders\FileLoader;
+
+// Lo siguiente permitirá cargar plantillas solo desde el directorio /var/www/html/templates
+$loader = new FileLoader('/var/www/html/templates');
+$latte->setLoader($loader);
+
+// $latte->render('../../../etc/passwd'); // Esto lanzaría una excepción
+
+// Renderizar una plantilla ubicada en /var/www/html/templates/pages/contact.latte
+$latte->render('pages/contact.latte');
+```
+
+Cuando se usan etiquetas como `{include}` o `{layout}`, resuelve los nombres de las plantillas en relación con la plantilla actual, a menos que se especifique una ruta absoluta.
+
+
+StringLoader .[#toc-stringloader]
+---------------------------------
+
+Este loader obtiene el contenido de la plantilla de un array asociativo, donde las claves son los nombres de las plantillas (identificadores) y los valores son las cadenas de código fuente de la plantilla. Es particularmente útil para pruebas o aplicaciones pequeñas donde las plantillas pueden almacenarse directamente en el código PHP.
+
+```php
+use Latte\Loaders\StringLoader;
+
+$loader = new StringLoader([
+	'main.latte' => 'Hello {$name}, include is below:{include helper.latte}',
+	'helper.latte' => '{var $x = 10}Included content: {$x}',
+	// Agregue más plantillas según sea necesario
+]);
+
+$latte->setLoader($loader);
+
+$latte->render('main.latte', ['name' => 'World']);
+// Salida: Hello World, include is below:Included content: 10
+```
+
+Si necesita renderizar solo una plantilla directamente desde una cadena sin necesidad de inclusión o herencia que haga referencia a otras plantillas de cadena con nombre, puede pasar la cadena directamente al método `render()` o `renderToString()` cuando use `StringLoader` sin un array:
+
+```php
+$loader = new StringLoader;
+$latte->setLoader($loader);
+
+$templateString = 'Hello {$name}!';
+$output = $latte->renderToString($templateString, ['name' => 'Alice']);
+// $output contiene 'Hello Alice!'
+```
+
+
+Creación de un Loader personalizado .[#toc-creating-a-custom-loader]
+====================================================================
+
+Para crear un loader personalizado (por ejemplo, para cargar plantillas desde una base de datos, caché, sistema de control de versiones u otra fuente), debe crear una clase que implemente la interfaz [api:Latte\Loader].
+
+Veamos qué debe hacer cada método.
+
+
+getContent(string $name): string .[method]
+------------------------------------------
+Este es el método principal del loader. Su tarea es obtener y devolver el código fuente completo de la plantilla identificada por `$name` (como se pasa al método `$latte->render()` o se devuelve por el método [getReferredName() |#getReferredName()]).
+
+Si la plantilla no se puede encontrar o acceder, este método **debe lanzar una excepción `Latte\RuntimeException`**.
+
+```php
+public function getContent(string $name): string
+{
+	// Ejemplo: Carga desde un almacenamiento interno hipotético
+	$content = $this->storage->read($name);
+	if ($content === null) {
+		throw new Latte\RuntimeException("Template '$name' cannot be loaded.");
+	}
+	return $content;
+}
+```
+
+
+getReferredName(string $name, string $referringName): string .[method]
+----------------------------------------------------------------------
+Este método maneja la resolución de nombres de plantillas utilizadas dentro de etiquetas como `{include}`, `{layout}`, etc. Cuando Latte encuentra, por ejemplo, `{include 'partial.latte'}` dentro de `main.latte`, llama a este método con `$name = 'partial.latte'` y `$referringName = 'main.latte'`.
+
+La tarea del método es traducir `$name` a un identificador canónico (por ejemplo, ruta absoluta, clave de base de datos única) que se utilizará al llamar a otros métodos del loader, según el contexto proporcionado en `$referringName`.
+
+```php
+public function getReferredName(string $name, string $referringName): string
+{
+	return ...;
+}
+```
+
+
+getUniqueId(string $name): string .[method]
+-------------------------------------------
+Latte utiliza una caché de plantillas compiladas para mejorar el rendimiento. Cada archivo de plantilla compilado necesita un nombre único derivado del identificador de la plantilla fuente. Este método proporciona una cadena que **identifica unívocamente** la plantilla `$name`.
+
+Para plantillas basadas en archivos, la ruta absoluta puede servir. Para plantillas en una base de datos, una combinación de un prefijo y el ID de la base de datos es común.
+
+```php
+public function getUniqueId(string $name): string
+{
+	return ...;
+}
+```
+
+
+Ejemplo: Loader simple de base de datos .[#toc-example-simple-database-loader]
+------------------------------------------------------------------------------
+
+Este ejemplo muestra la estructura básica de un loader que carga plantillas almacenadas en una tabla de base de datos llamada `templates` con columnas `name` (identificador único), `content` y `updated_at`.
+
+```php
+use Latte;
+
+class DatabaseLoader implements Latte\Loader
+{
+	public function __construct(
+		private \PDO $db,
+	) {
+	}
+
+	public function getContent(string $name): string
+	{
+		$stmt = $this->db->prepare('SELECT content FROM templates WHERE name = ?');
+		$stmt->execute([$name]);
+		$content = $stmt->fetchColumn();
+		if ($content === false) {
+			throw new Latte\RuntimeException("Template '$name' not found in database.");
+		}
+		return $content;
+	}
+
+	// Este ejemplo simple asume que los nombres de las plantillas ('homepage', 'article', etc.)
+	// son IDs únicos y las plantillas no se refieren entre sí relativamente.
+	public function getReferredName(string $name, string $referringName): string
+	{
+		return $name;
+	}
+
+	public function getUniqueId(string $name): string
+	{
+		// Usar un prefijo y el propio nombre es único y suficiente aquí
+		return 'db_' . $name;
+	}
+}
+
+// Uso:
+$pdo = new \PDO(/* detalles de conexión */);
+$loader = new DatabaseLoader($pdo);
+$latte->setLoader($loader);
+$latte->render('homepage'); // Carga la plantilla con el nombre 'homepage' de la BD
+```
+
+Los loaders personalizados le brindan un control total sobre de dónde provienen sus plantillas Latte, lo que permite la integración con diversos sistemas de almacenamiento y flujos de trabajo.

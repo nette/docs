@@ -1,0 +1,144 @@
+Creazione di funzioni personalizzate
+************************************
+
+.[perex]
+Aggiungi facilmente funzioni di aiuto personalizzate ai template Latte. Chiama la logica PHP direttamente nelle espressioni per calcoli, accesso ai servizi o generazione di contenuto dinamico, mantenendo i tuoi template puliti e potenti.
+
+
+Cosa sono le funzioni? .[#toc-what-are-functions]
+=================================================
+
+Le funzioni in Latte ti consentono di estendere il set di funzioni che possono essere chiamate all'interno delle espressioni nei template (`{...}`). Puoi pensarle come **funzioni PHP personalizzate disponibili solo all'interno dei tuoi template Latte**. Ciò porta diversi vantaggi:
+
+**Comodità:** Puoi definire logica di aiuto (come calcoli, formattazione o accesso ai dati dell'applicazione) e chiamarla usando una sintassi di funzione semplice e familiare direttamente nel template, proprio come chiameresti `strlen()` o `date()` in PHP.
+
+```latte
+{var $userInitials = initials($userName)} {* ad es. 'J. D.' *}
+
+{if hasPermission('article', 'edit')}
+    <a href="...">Modifica</a>
+{/if}
+```
+
+**Nessun inquinamento dello spazio globale:** A differenza della definizione di una vera funzione globale in PHP, le funzioni Latte esistono solo nel contesto del rendering del template. Non devi appesantire lo spazio dei nomi globale di PHP con helper specifici solo per i template.
+
+**Integrazione con la logica dell'applicazione:** Il callable PHP dietro una funzione Latte può essere qualsiasi cosa – una funzione anonima, un metodo statico o un metodo di istanza. Ciò significa che le tue funzioni nei template possono accedere facilmente ai servizi dell'applicazione, database, configurazione o qualsiasi altra logica necessaria catturando variabili (nel caso di funzioni anonime) o usando la dependency injection (nel caso di oggetti). L'esempio `hasPermission` sopra lo dimostra chiaramente, quando probabilmente chiama in background un servizio di autorizzazione.
+
+**Sovrascrittura di funzioni native (opzionale):** Puoi persino definire una funzione Latte con lo stesso nome di una funzione PHP nativa. Nel template, verrà chiamata la tua versione personalizzata invece della funzione originale. Questo può essere utile per fornire un comportamento specifico per il template o garantire un'elaborazione coerente (ad esempio, assicurando che `strlen` sia sempre sicuro per multibyte). Usa questa funzione con cautela per evitare malintesi.
+
+Di default, Latte consente la chiamata di *tutte* le funzioni PHP native (a meno che non siano limitate dalla [Sandbox |sandbox]). Le funzioni personalizzate estendono questa libreria integrata con le esigenze specifiche del tuo progetto.
+
+Se stai solo trasformando un singolo valore, potrebbe essere più appropriato usare un [filtro personalizzato |custom-filters].
+
+
+Creazione e registrazione delle funzioni .[#toc-creating-and-registering-functions]
+===================================================================================
+
+Similmente ai filtri, esistono diversi modi per definire e registrare funzioni personalizzate.
+
+
+Registrazione diretta tramite `addFunction()` .[#toc-direct-registration-via-addfunction]
+-----------------------------------------------------------------------------------------
+
+Il metodo più semplice è usare `addFunction()` sull'oggetto `Latte\Engine`. Specifichi il nome della funzione (come apparirà nel template) e il callable PHP corrispondente.
+
+```php
+$latte = new Latte\Engine;
+
+// Semplice funzione di aiuto
+$latte->addFunction('initials', function (string $name): string {
+	preg_match_all('#\b\w#u', $name, $m);
+	return implode('. ', $m[0]) . '.';
+});
+```
+
+**Uso nel template:**
+
+```latte
+{var $userInitials = initials($userName)}
+```
+
+Gli argomenti della funzione nel template vengono passati direttamente al callable PHP nello stesso ordine. Le funzionalità PHP come type hint, valori predefiniti e parametri variabili (`...`) funzionano come previsto.
+
+
+Registrazione tramite estensione .[#toc-registration-via-extension]
+-------------------------------------------------------------------
+
+Per una migliore organizzazione e riutilizzabilità, registra le funzioni all'interno di un'[estensione Latte |extending-latte#latte-extension]. Questo approccio è raccomandato per applicazioni più complesse o librerie condivise.
+
+```php
+namespace App\Latte;
+
+use Latte\Extension;
+use Nette\Security\Authorizator;
+
+class MyLatteExtension extends Extension
+{
+	public function __construct(
+		// Supponiamo che il servizio Authorizator esista
+		private Authorizator $authorizator,
+	) {
+	}
+
+	public function getFunctions(): array
+	{
+		// Registrazione di metodi come funzioni Latte
+		return [
+			'hasPermission' => $this->hasPermission(...),
+		];
+	}
+
+	public function hasPermission(string $resource, string $action): bool
+	{
+		return $this->authorizator->isAllowed($resource, $action);
+	}
+}
+
+// Registrazione (supponiamo che $container contenga DIC)
+$extension = $container->getByType(App\Latte\MyLatteExtension::class);
+$latte = new Latte\Engine;
+$latte->addExtension($extension);
+```
+
+Questo approccio illustra come le funzioni definite in Latte possano essere supportate da metodi di oggetti, che possono avere le proprie dipendenze gestite dal container di dependency injection della tua applicazione o da una factory. Ciò mantiene la logica dei tuoi template collegata al nucleo dell'applicazione, preservando al contempo un'organizzazione chiara.
+
+
+Funzioni che utilizzano una classe con attributi .[#toc-functions-using-the-class]
+----------------------------------------------------------------------------------
+
+Come i filtri, le funzioni possono essere definite come metodi nella tua [classe dei parametri del template |develop#Parameters as a class] usando l'attributo `#[Latte\Attributes\TemplateFunction]`.
+
+```php
+use Latte\Attributes\TemplateFunction;
+
+class TemplateParameters
+{
+	public function __construct(
+		public string $userName,
+		// altri parametri...
+	) {}
+
+	// Questo metodo sarà disponibile come {initials(...)} nel template
+	#[TemplateFunction]
+	public function initials(string $name): string
+	{
+		preg_match_all('#\b\w#u', $name, $m);
+		return implode('. ', $m[0]) . '.';
+	}
+}
+
+// Passaggio dell'oggetto al template
+$params = new TemplateParameters(userName: 'John Doe', /* ... */);
+$latte->render('template.latte', $params);
+```
+
+Latte scoprirà e registrerà automaticamente i metodi contrassegnati con questo attributo quando l'oggetto dei parametri viene passato al template. Il nome della funzione nel template corrisponde al nome del metodo.
+
+```latte
+{* Uso della funzione definita nella classe dei parametri *}
+{var $inits = initials($userName)}
+```
+
+**Funzioni contestuali?**
+
+A differenza dei filtri, non esiste un concetto diretto di "funzioni contestuali" che riceverebbero un oggetto simile a `FilterInfo`. Le funzioni operano all'interno delle espressioni e tipicamente non necessitano di accesso diretto al contesto di rendering o alle informazioni sul tipo di contenuto nello stesso modo dei filtri applicati ai blocchi.

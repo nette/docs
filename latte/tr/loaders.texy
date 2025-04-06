@@ -1,0 +1,198 @@
+Yükleyiciler
+************
+
+.[perex]
+Yükleyiciler, Latte'nin şablonlarınızın kaynak kodunu almak için kullandığı mekanizmadır. Çoğu zaman şablonlar diskteki dosyalar olarak saklanır, ancak esnek yükleyici sistemi sayesinde bunları pratikte her yerden yükleyebilir veya hatta dinamik olarak oluşturabilirsiniz.
+
+
+Yükleyici Nedir? .[#toc-what-is-a-loader]
+=========================================
+
+Şablonlarla çalışırken, genellikle projenizin dizin yapısında bulunan `.latte` dosyalarını hayal edersiniz. Latte'deki varsayılan [FileLoader |#FileLoader] bununla ilgilenir. Ancak, bir şablon adı ( `'main.latte'` veya `'components/card.latte'` gibi) ile gerçek kaynak kodu arasındaki bağlantı, bir dosya yoluna doğrudan bir eşleme *olmayabilir*.
+
+İşte burada yükleyiciler devreye girer. Yükleyici, bir şablon adını (tanımlayıcı bir dize) alıp Latte'ye kaynak kodunu sağlamakla görevli bir nesnedir. Latte bu görev için tamamen yapılandırılmış yükleyiciye güvenir. Bu yalnızca `$latte->render('main.latte')` ile istenen başlangıç şablonu için değil, aynı zamanda `{include ...}`, `{layout ...}`, `{embed ...}` veya `{import ...}` gibi etiketler kullanılarak **içeride başvurulan her şablon** için de geçerlidir.
+
+Neden özel bir yükleyici kullanmalı?
+
+- **Alternatif kaynaklardan yükleme:** Veritabanında, önbellekte (Redis veya Memcached gibi), sürüm kontrol sisteminde (Git gibi, belirli bir commite dayalı olarak) saklanan veya dinamik olarak oluşturulan şablonları alma.
+- **Özel adlandırma kurallarını uygulama:** Şablonlar için daha kısa takma adlar kullanmak veya belirli bir arama yolu mantığı uygulamak isteyebilirsiniz (ör. önce tema dizininde arama, sonra varsayılan dizine geri dönme).
+- **Güvenlik veya erişim kontrolü ekleme:** Özel bir yükleyici, belirli şablonları yüklemeden önce kullanıcı izinlerini doğrulayabilir.
+- **Ön işleme:** Genellikle önerilmese de ([derleme geçişleri |compiler-passes] daha iyidir), bir yükleyici *teorik olarak* şablon içeriğini Latte'ye iletmeden önce ön işleyebilir.
+
+Bir `Latte\Engine` örneği için yükleyiciyi `setLoader()` metoduyla ayarlarsınız:
+
+```php
+$latte = new Latte\Engine;
+
+// '/path/to/templates' içindeki dosyalar için varsayılan FileLoader'ı kullanma
+$loader = new Latte\Loaders\FileLoader('/path/to/templates');
+$latte->setLoader($loader);
+```
+
+Yükleyici, `Latte\Loader` arayüzünü uygulamalıdır.
+
+
+Yerleşik Yükleyiciler .[#toc-built-in-loaders]
+==============================================
+
+Latte birkaç standart yükleyici sunar:
+
+
+FileLoader .[#toc-fileloader]
+-----------------------------
+
+Bu, başka bir tane belirtilmediği sürece `Latte\Engine` sınıfı tarafından kullanılan **varsayılan yükleyicidir**. Şablonları doğrudan dosya sisteminden yükler.
+
+İsteğe bağlı olarak, erişimi kısıtlamak için bir kök dizin ayarlayabilirsiniz:
+
+```php
+use Latte\Loaders\FileLoader;
+
+// Aşağıdakiler yalnızca /var/www/html/templates dizininden şablon yüklemeye izin verir
+$loader = new FileLoader('/var/www/html/templates');
+$latte->setLoader($loader);
+
+// $latte->render('../../../etc/passwd'); // Bu bir istisna fırlatırdı
+
+// /var/www/html/templates/pages/contact.latte konumundaki şablonu oluşturma
+$latte->render('pages/contact.latte');
+```
+
+`{include}` veya `{layout}` gibi etiketleri kullanırken, mutlak bir yol belirtilmedikçe şablon adlarını mevcut şablona göre çözer.
+
+
+StringLoader .[#toc-stringloader]
+---------------------------------
+
+Bu yükleyici, şablon içeriğini, anahtarların şablon adları (tanımlayıcılar) ve değerlerin şablon kaynak kodu dizeleri olduğu ilişkisel bir diziden alır. Özellikle test etme veya şablonların doğrudan PHP kodunda saklanabileceği küçük uygulamalar için kullanışlıdır.
+
+```php
+use Latte\Loaders\StringLoader;
+
+$loader = new StringLoader([
+	'main.latte' => 'Merhaba {$name}, include aşağıdadır:{include helper.latte}',
+	'helper.latte' => '{var $x = 10}Dahil edilen içerik: {$x}',
+	// Gerektiğinde daha fazla şablon ekleyin
+]);
+
+$latte->setLoader($loader);
+
+$latte->render('main.latte', ['name' => 'Dünya']);
+// Çıktı: Merhaba Dünya, include aşağıdadır:Dahil edilen içerik: 10
+```
+
+Diğer adlandırılmış dize şablonlarına başvuran ekleme veya kalıtıma ihtiyaç duymadan yalnızca bir şablonu doğrudan bir dizeden oluşturmanız gerekiyorsa, bir dizi olmadan `StringLoader` kullanırken dizeyi doğrudan `render()` veya `renderToString()` metoduna iletebilirsiniz:
+
+```php
+$loader = new StringLoader;
+$latte->setLoader($loader);
+
+$templateString = 'Merhaba {$name}!';
+$output = $latte->renderToString($templateString, ['name' => 'Alice']);
+// $output 'Merhaba Alice!' içerir
+```
+
+
+Özel Bir Yükleyici Oluşturma .[#toc-creating-a-custom-loader]
+=============================================================
+
+Özel bir yükleyici oluşturmak için (ör. şablonları veritabanından, önbellekten, sürüm kontrol sisteminden veya başka bir kaynaktan yüklemek için), [api:Latte\Loader] arayüzünü uygulayan bir sınıf oluşturmanız gerekir.
+
+Her metodun ne yapması gerektiğine bakalım.
+
+
+getContent(string $name): string .[method]
+------------------------------------------
+Bu, yükleyicinin temel metodudur. Görevi, `$name` ile tanımlanan şablonun tam kaynak kodunu almak ve döndürmektir (`$latte->render()` metoduna iletildiği veya [getReferredName() |#getReferredName()] metodu tarafından döndürüldüğü gibi).
+
+Şablon bulunamazsa veya erişilemezse, bu metot **bir `Latte\RuntimeException` istisnası fırlatmalıdır**.
+
+```php
+public function getContent(string $name): string
+{
+	// Örnek: Varsayımsal bir dahili depodan yükleme
+	$content = $this->storage->read($name);
+	if ($content === null) {
+		throw new Latte\RuntimeException("'$name' şablonu yüklenemiyor.");
+	}
+	return $content;
+}
+```
+
+
+getReferredName(string $name, string $referringName): string .[method]
+----------------------------------------------------------------------
+Bu metot, `{include}`, `{layout}` vb. etiketler içinde kullanılan şablon adlarının çözümlenmesini yönetir. Latte örneğin `main.latte` içinde `{include 'partial.latte'}` ile karşılaştığında, bu metodu `$name = 'partial.latte'` ve `$referringName = 'main.latte'` ile çağırır.
+
+Metodun görevi, `$referringName` içinde sağlanan bağlama dayanarak, diğer yükleyici metotları çağrılırken kullanılacak olan `$name`'i kanonik bir tanımlayıcıya (ör. mutlak yol, benzersiz veritabanı anahtarı) çevirmektir.
+
+```php
+public function getReferredName(string $name, string $referringName): string
+{
+	return ...;
+}
+```
+
+
+getUniqueId(string $name): string .[method]
+-------------------------------------------
+Latte, performansı artırmak için derlenmiş şablonların bir önbelleğini kullanır. Her derlenmiş şablon dosyası, kaynak şablon tanımlayıcısından türetilen benzersiz bir ada ihtiyaç duyar. Bu metot, `$name` şablonunu **benzersiz olarak tanımlayan** bir dize sağlar.
+
+Dosya tabanlı şablonlar için mutlak yol işe yarayabilir. Veritabanındaki şablonlar için, bir önek ve veritabanı ID'sinin birleşimi yaygındır.
+
+```php
+public function getUniqueId(string $name): string
+{
+	return ...;
+}
+```
+
+
+Örnek: Basit Veritabanı Yükleyicisi .[#toc-example-simple-database-loader]
+--------------------------------------------------------------------------
+
+Bu örnek, `name` (benzersiz tanımlayıcı), `content` ve `updated_at` sütunlarına sahip `templates` adlı bir veritabanı tablosunda saklanan şablonları yükleyen bir yükleyicinin temel yapısını gösterir.
+
+```php
+use Latte;
+
+class DatabaseLoader implements Latte\Loader
+{
+	public function __construct(
+		private \PDO $db,
+	) {
+	}
+
+	public function getContent(string $name): string
+	{
+		$stmt = $this->db->prepare('SELECT content FROM templates WHERE name = ?');
+		$stmt->execute([$name]);
+		$content = $stmt->fetchColumn();
+		if ($content === false) {
+			throw new Latte\RuntimeException("'$name' şablonu veritabanında bulunamadı.");
+		}
+		return $content;
+	}
+
+	// Bu basit örnek, şablon adlarının ('homepage', 'article', vb.)
+	// benzersiz ID'ler olduğunu ve şablonların birbirine göreceli olarak başvurmadığını varsayar.
+	public function getReferredName(string $name, string $referringName): string
+	{
+		return $name;
+	}
+
+	public function getUniqueId(string $name): string
+	{
+		// Bir önek ve adın kendisini kullanmak burada benzersiz ve yeterlidir
+		return 'db_' . $name;
+	}
+}
+
+// Kullanım:
+$pdo = new \PDO(/* bağlantı detayları */);
+$loader = new DatabaseLoader($pdo);
+$latte->setLoader($loader);
+$latte->render('homepage'); // DB'den 'homepage' adlı şablonu yükler
+```
+
+Özel yükleyiciler, Latte şablonlarınızın nereden geldiği üzerinde tam kontrol sahibi olmanızı sağlar, bu da çeşitli depolama sistemleri ve iş akışlarıyla entegrasyona olanak tanır.

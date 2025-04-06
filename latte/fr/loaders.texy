@@ -1,0 +1,198 @@
+Chargeurs (Loaders)
+*******************
+
+.[perex]
+Les chargeurs (Loaders) sont le mécanisme que Latte utilise pour obtenir le code source de vos templates. Le plus souvent, les templates sont stockés sous forme de fichiers sur le disque, mais grâce au système flexible de chargeurs, vous pouvez les charger depuis pratiquement n'importe où ou même les générer dynamiquement.
+
+
+Qu'est-ce qu'un chargeur ? .[#toc-what-is-a-loader]
+===================================================
+
+Lorsque vous travaillez avec des templates, vous imaginez généralement des fichiers `.latte` situés dans la structure de répertoires de votre projet. C'est ce que gère le [FileLoader |#FileLoader] par défaut de Latte. Cependant, le lien entre le nom d'un template (comme `'main.latte'` ou `'components/card.latte'`) et son code source réel *n'a pas* besoin d'être un mappage direct vers un chemin de fichier.
+
+C'est là que les chargeurs entrent en jeu. Un chargeur est un objet chargé de prendre un nom de template (une chaîne d'identification) et de fournir à Latte son code source. Latte s'appuie entièrement sur le chargeur configuré pour cette tâche. Cela s'applique non seulement au template initial demandé via `$latte->render('main.latte')`, mais aussi à **chaque template référencé à l'intérieur** à l'aide de balises comme `{include ...}`, `{layout ...}`, `{embed ...}` ou `{import ...}`.
+
+Pourquoi utiliser un chargeur personnalisé ?
+
+- **Chargement depuis des sources alternatives :** Récupération de templates stockés dans une base de données, dans un cache (comme Redis ou Memcached), dans un système de gestion de versions (comme Git, basé sur un commit spécifique) ou générés dynamiquement.
+- **Implémentation de conventions de nommage personnalisées :** Vous pourriez vouloir utiliser des alias plus courts pour les templates ou implémenter une logique de chemin de recherche spécifique (par exemple, chercher d'abord dans le répertoire du thème, puis revenir au répertoire par défaut).
+- **Ajout de sécurité ou de contrôle d'accès :** Un chargeur personnalisé peut vérifier les permissions utilisateur avant de charger certains templates.
+- **Prétraitement :** Bien que généralement déconseillé ([les passes de compilation |compiler-passes] sont meilleures), un chargeur *pourrait* théoriquement prétraiter le contenu du template avant de le transmettre à Latte.
+
+Vous définissez le chargeur pour une instance de `Latte\Engine` à l'aide de la méthode `setLoader()` :
+
+```php
+$latte = new Latte\Engine;
+
+// Utilisation du FileLoader par défaut pour les fichiers dans '/path/to/templates'
+$loader = new Latte\Loaders\FileLoader('/path/to/templates');
+$latte->setLoader($loader);
+```
+
+Le chargeur doit implémenter l'interface `Latte\Loader`.
+
+
+Chargeurs intégrés .[#toc-built-in-loaders]
+===========================================
+
+Latte propose plusieurs chargeurs standard :
+
+
+FileLoader .[#toc-fileloader]
+-----------------------------
+
+C'est le **chargeur par défaut** utilisé par la classe `Latte\Engine` si aucun autre n'est spécifié. Il charge les templates directement depuis le système de fichiers.
+
+Vous pouvez éventuellement définir un répertoire racine pour restreindre l'accès :
+
+```php
+use Latte\Loaders\FileLoader;
+
+// Ce qui suit permettra de charger des templates uniquement depuis le répertoire /var/www/html/templates
+$loader = new FileLoader('/var/www/html/templates');
+$latte->setLoader($loader);
+
+// $latte->render('../../../etc/passwd'); // Ceci lèverait une exception
+
+// Rendu d'un template situé dans /var/www/html/templates/pages/contact.latte
+$latte->render('pages/contact.latte');
+```
+
+Lors de l'utilisation de balises comme `{include}` ou `{layout}`, il résout les noms de templates relativement au template actuel, sauf si un chemin absolu est fourni.
+
+
+StringLoader .[#toc-stringloader]
+---------------------------------
+
+Ce chargeur récupère le contenu du template à partir d'un tableau associatif, où les clés sont les noms des templates (identifiants) et les valeurs sont les chaînes de code source du template. Il est particulièrement utile pour les tests ou les petites applications où les templates peuvent être stockés directement dans le code PHP.
+
+```php
+use Latte\Loaders\StringLoader;
+
+$loader = new StringLoader([
+	'main.latte' => 'Bonjour {$name}, l\'inclusion est ci-dessous:{include helper.latte}',
+	'helper.latte' => '{var $x = 10}Contenu inclus : {$x}',
+	// Ajoutez d'autres templates selon les besoins
+]);
+
+$latte->setLoader($loader);
+
+$latte->render('main.latte', ['name' => 'Monde']);
+// Sortie : Bonjour Monde, l'inclusion est ci-dessous:Contenu inclus : 10
+```
+
+Si vous avez besoin de rendre un seul template directement à partir d'une chaîne sans avoir besoin d'inclusions ou d'héritage faisant référence à d'autres templates de chaîne nommés, vous pouvez passer la chaîne directement à la méthode `render()` ou `renderToString()` en utilisant `StringLoader` sans tableau :
+
+```php
+$loader = new StringLoader;
+$latte->setLoader($loader);
+
+$templateString = 'Bonjour {$name}!';
+$output = $latte->renderToString($templateString, ['name' => 'Alice']);
+// $output contient 'Bonjour Alice!'
+```
+
+
+Création d'un chargeur personnalisé .[#toc-creating-a-custom-loader]
+====================================================================
+
+Pour créer un chargeur personnalisé (par exemple, pour charger des templates depuis une base de données, un cache, un système de gestion de versions ou une autre source), vous devez créer une classe qui implémente l'interface [api:Latte\Loader].
+
+Voyons ce que chaque méthode doit faire.
+
+
+getContent(string $name): string .[method]
+------------------------------------------
+C'est la méthode principale du chargeur. Sa tâche est de récupérer et de retourner le code source complet du template identifié par `$name` (tel que passé à la méthode `$latte->render()` ou retourné par la méthode [getReferredName() |#getReferredName()]).
+
+Si le template ne peut pas être trouvé ou accédé, cette méthode **doit lever une exception `Latte\RuntimeException`**.
+
+```php
+public function getContent(string $name): string
+{
+	// Exemple : Chargement depuis un stockage interne hypothétique
+	$content = $this->storage->read($name);
+	if ($content === null) {
+		throw new Latte\RuntimeException("Le template '$name' ne peut pas être chargé.");
+	}
+	return $content;
+}
+```
+
+
+getReferredName(string $name, string $referringName): string .[method]
+----------------------------------------------------------------------
+Cette méthode gère la résolution des noms de templates utilisés dans des balises comme `{include}`, `{layout}`, etc. Lorsque Latte rencontre par exemple `{include 'partial.latte'}` à l'intérieur de `main.latte`, il appelle cette méthode avec `$name = 'partial.latte'` et `$referringName = 'main.latte'`.
+
+La tâche de la méthode est de résoudre `$name` en un identifiant canonique (par exemple, un chemin absolu, une clé de base de données unique) qui sera utilisé lors de l'appel d'autres méthodes du chargeur, en fonction du contexte fourni dans `$referringName`.
+
+```php
+public function getReferredName(string $name, string $referringName): string
+{
+	return ...;
+}
+```
+
+
+getUniqueId(string $name): string .[method]
+-------------------------------------------
+Latte utilise un cache de templates compilés pour améliorer les performances. Chaque fichier de template compilé a besoin d'un nom unique dérivé de l'identifiant du template source. Cette méthode fournit une chaîne qui **identifie de manière unique** le template `$name`.
+
+Pour les templates basés sur des fichiers, le chemin absolu peut suffire. Pour les templates en base de données, une combinaison d'un préfixe et de l'ID de la base de données est courante.
+
+```php
+public function getUniqueId(string $name): string
+{
+	return ...;
+}
+```
+
+
+Exemple : Un chargeur de base de données simple .[#toc-example-simple-database-loader]
+--------------------------------------------------------------------------------------
+
+Cet exemple montre la structure de base d'un chargeur qui charge des templates stockés dans une table de base de données nommée `templates` avec les colonnes `name` (identifiant unique), `content` et `updated_at`.
+
+```php
+use Latte;
+
+class DatabaseLoader implements Latte\Loader
+{
+	public function __construct(
+		private \PDO $db,
+	) {
+	}
+
+	public function getContent(string $name): string
+	{
+		$stmt = $this->db->prepare('SELECT content FROM templates WHERE name = ?');
+		$stmt->execute([$name]);
+		$content = $stmt->fetchColumn();
+		if ($content === false) {
+			throw new Latte\RuntimeException("Template '$name' non trouvé dans la base de données.");
+		}
+		return $content;
+	}
+
+	// Cet exemple simple suppose que les noms de templates ('homepage', 'article', etc.)
+	// sont des ID uniques et que les templates ne se référencent pas relativement.
+	public function getReferredName(string $name, string $referringName): string
+	{
+		return $name;
+	}
+
+	public function getUniqueId(string $name): string
+	{
+		// Utiliser un préfixe et le nom lui-même est unique et suffisant ici
+		return 'db_' . $name;
+	}
+}
+
+// Utilisation :
+$pdo = new \PDO(/* détails de connexion */);
+$loader = new DatabaseLoader($pdo);
+$latte->setLoader($loader);
+$latte->render('homepage'); // Charge le template nommé 'homepage' depuis la BDD
+```
+
+Les chargeurs personnalisés vous donnent un contrôle total sur l'origine de vos templates Latte, permettant l'intégration avec divers systèmes de stockage et flux de travail.

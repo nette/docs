@@ -1,0 +1,198 @@
+Loadere
+*******
+
+.[perex]
+Loaderele sunt mecanismul pe care Latte îl folosește pentru a obține codul sursă al șabloanelor dvs. Cel mai adesea, șabloanele sunt stocate ca fișiere pe disc, dar datorită sistemului flexibil de loadere, le puteți încărca practic de oriunde sau chiar le puteți genera dinamic.
+
+
+Ce este un Loader? .[#toc-what-is-a-loader]
+===========================================
+
+Când lucrați cu șabloane, de obicei vă imaginați fișiere `.latte` situate în structura de directoare a proiectului dvs. De acest lucru se ocupă [FileLoader |#FileLoader] implicit în Latte. Cu toate acestea, legătura dintre numele șablonului (cum ar fi `'main.latte'` sau `'components/card.latte'`) și codul său sursă real *nu trebuie* să fie o mapare directă la calea fișierului.
+
+Aici intervin loaderele. Un loader este un obiect care are sarcina de a lua numele șablonului (un șir de identificare) și de a furniza Latte codul său sursă. Latte se bazează complet pe loaderul configurat pentru această sarcină. Acest lucru este valabil nu numai pentru șablonul inițial solicitat folosind `$latte->render('main.latte')`, ci și pentru **fiecare șablon referit în interior** folosind tag-uri precum `{include ...}`, `{layout ...}`, `{embed ...}` sau `{import ...}`.
+
+De ce să folosiți un loader personalizat?
+
+- **Încărcarea din surse alternative:** Obținerea șabloanelor stocate într-o bază de date, în cache (cum ar fi Redis sau Memcached), într-un sistem de control al versiunilor (cum ar fi Git, pe baza unui commit specific) sau generate dinamic.
+- **Implementarea convențiilor de denumire personalizate:** Este posibil să doriți să utilizați aliasuri mai scurte pentru șabloane sau să implementați o logică specifică a căilor de căutare (de exemplu, căutați mai întâi în directorul temei, apoi reveniți la directorul implicit).
+- **Adăugarea securității sau a controlului accesului:** Un loader personalizat poate verifica permisiunile utilizatorului înainte de a încărca anumite șabloane.
+- **Preprocesare:** Deși în general nu se recomandă ([trecerile de compilare |compiler-passes] sunt mai bune), un loader *ar putea* teoretic să preproceseze conținutul șablonului înainte de a-l transmite către Latte.
+
+Setați loaderul pentru instanța `Latte\Engine` folosind metoda `setLoader()`:
+
+```php
+$latte = new Latte\Engine;
+
+// Utilizarea FileLoader implicit pentru fișierele din '/path/to/templates'
+$loader = new Latte\Loaders\FileLoader('/path/to/templates');
+$latte->setLoader($loader);
+```
+
+Loaderul trebuie să implementeze interfața `Latte\Loader`.
+
+
+Loadere încorporate .[#toc-built-in-loaders]
+============================================
+
+Latte oferă mai multe loadere standard:
+
+
+FileLoader .[#toc-fileloader]
+-----------------------------
+
+Acesta este **loaderul implicit** utilizat de clasa `Latte\Engine`, dacă nu este specificat niciun altul. Încarcă șabloanele direct din sistemul de fișiere.
+
+Opțional, puteți seta un director rădăcină pentru a restricționa accesul:
+
+```php
+use Latte\Loaders\FileLoader;
+
+// Următorul va permite încărcarea șabloanelor numai din directorul /var/www/html/templates
+$loader = new FileLoader('/var/www/html/templates');
+$latte->setLoader($loader);
+
+// $latte->render('../../../etc/passwd'); // Acest lucru ar arunca o excepție
+
+// Randarea unui șablon situat la /var/www/html/templates/pages/contact.latte
+$latte->render('pages/contact.latte');
+```
+
+La utilizarea tag-urilor precum `{include}` sau `{layout}`, rezolvă numele șabloanelor relativ la șablonul curent, dacă nu este specificată o cale absolută.
+
+
+StringLoader .[#toc-stringloader]
+---------------------------------
+
+Acest loader obține conținutul șablonului dintr-un array asociativ, unde cheile sunt numele șabloanelor (identificatori) și valorile sunt șiruri de cod sursă al șablonului. Este deosebit de util pentru testare sau aplicații mici, unde șabloanele pot fi stocate direct în codul PHP.
+
+```php
+use Latte\Loaders\StringLoader;
+
+$loader = new StringLoader([
+	'main.latte' => 'Hello {$name}, include is below:{include helper.latte}',
+	'helper.latte' => '{var $x = 10}Included content: {$x}',
+	// Adăugați alte șabloane după cum este necesar
+]);
+
+$latte->setLoader($loader);
+
+$latte->render('main.latte', ['name' => 'World']);
+// Ieșire: Hello World, include is below:Included content: 10
+```
+
+Dacă trebuie să randați doar un singur șablon direct dintr-un șir, fără a fi nevoie de includere sau moștenire care să facă referire la alte șabloane șir numite, puteți transmite șirul direct metodei `render()` sau `renderToString()` atunci când utilizați `StringLoader` fără un array:
+
+```php
+$loader = new StringLoader;
+$latte->setLoader($loader);
+
+$templateString = 'Hello {$name}!';
+$output = $latte->renderToString($templateString, ['name' => 'Alice']);
+// $output conține 'Hello Alice!'
+```
+
+
+Crearea unui Loader personalizat .[#toc-creating-a-custom-loader]
+=================================================================
+
+Pentru a crea un loader personalizat (de exemplu, pentru a încărca șabloane dintr-o bază de date, cache, sistem de control al versiunilor sau altă sursă), trebuie să creați o clasă care implementează interfața [api:Latte\Loader].
+
+Să vedem ce trebuie să facă fiecare metodă.
+
+
+getContent(string $name): string .[method]
+------------------------------------------
+Aceasta este metoda de bază a loaderului. Sarcina sa este să obțină și să returneze codul sursă complet al șablonului identificat prin `$name` (așa cum este transmis metodei `$latte->render()` sau returnat de metoda [getReferredName() |#getReferredName()]).
+
+Dacă șablonul nu poate fi găsit sau accesat, această metodă **trebuie să arunce o excepție `Latte\RuntimeException`**.
+
+```php
+public function getContent(string $name): string
+{
+	// Exemplu: Încărcare dintr-un depozit intern ipotetic
+	$content = $this->storage->read($name);
+	if ($content === null) {
+		throw new Latte\RuntimeException("Template '$name' cannot be loaded.");
+	}
+	return $content;
+}
+```
+
+
+getReferredName(string $name, string $referringName): string .[method]
+----------------------------------------------------------------------
+Această metodă se ocupă de traducerea numelor de șabloane utilizate în interiorul tag-urilor precum `{include}`, `{layout}`, etc. Când Latte întâlnește, de exemplu, `{include 'partial.latte'}` în interiorul `main.latte`, apelează această metodă cu `$name = 'partial.latte'` și `$referringName = 'main.latte'`.
+
+Sarcina metodei este să traducă `$name` într-un identificator canonic (de exemplu, cale absolută, cheie unică de bază de date), care va fi utilizat la apelarea altor metode ale loaderului, pe baza contextului furnizat în `$referringName`.
+
+```php
+public function getReferredName(string $name, string $referringName): string
+{
+	return ...;
+}
+```
+
+
+getUniqueId(string $name): string .[method]
+-------------------------------------------
+Latte utilizează un cache de șabloane compilate pentru a îmbunătăți performanța. Fiecare fișier de șablon compilat are nevoie de un nume unic derivat din identificatorul șablonului sursă. Această metodă furnizează un șir care **identifică în mod unic** șablonul `$name`.
+
+Pentru șabloanele bazate pe fișiere, calea absolută poate servi. Pentru șabloanele din baza de date, o combinație de prefix și ID de bază de date este comună.
+
+```php
+public function getUniqueId(string $name): string
+{
+	return ...;
+}
+```
+
+
+Exemplu: Loader simplu de bază de date .[#toc-example-simple-database-loader]
+-----------------------------------------------------------------------------
+
+Acest exemplu arată structura de bază a unui loader care încarcă șabloane stocate într-un tabel de bază de date numit `templates` cu coloanele `name` (identificator unic), `content` și `updated_at`.
+
+```php
+use Latte;
+
+class DatabaseLoader implements Latte\Loader
+{
+	public function __construct(
+		private \PDO $db,
+	) {
+	}
+
+	public function getContent(string $name): string
+	{
+		$stmt = $this->db->prepare('SELECT content FROM templates WHERE name = ?');
+		$stmt->execute([$name]);
+		$content = $stmt->fetchColumn();
+		if ($content === false) {
+			throw new Latte\RuntimeException("Template '$name' not found in database.");
+		}
+		return $content;
+	}
+
+	// Acest exemplu simplu presupune că numele șabloanelor ('homepage', 'article', etc.)
+	// sunt ID-uri unice și șabloanele nu se referă relativ unele la altele.
+	public function getReferredName(string $name, string $referringName): string
+	{
+		return $name;
+	}
+
+	public function getUniqueId(string $name): string
+	{
+		// Utilizarea unui prefix și a numelui însuși este unică și suficientă aici
+		return 'db_' . $name;
+	}
+}
+
+// Utilizare:
+$pdo = new \PDO(/* detalii conexiune */);
+$loader = new DatabaseLoader($pdo);
+$latte->setLoader($loader);
+$latte->render('homepage'); // Încarcă șablonul cu numele 'homepage' din DB
+```
+
+Loaderele personalizate vă oferă control complet asupra provenienței șabloanelor dvs. Latte, permițând integrarea cu diverse sisteme de stocare și fluxuri de lucru.

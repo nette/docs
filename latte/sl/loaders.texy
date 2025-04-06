@@ -1,0 +1,198 @@
+Nalagatelji (Loaders)
+*********************
+
+.[perex]
+Nalagatelji so mehanizem, ki ga Latte uporablja za pridobivanje izvorne kode vaših predlog. Najpogosteje so predloge shranjene kot datoteke na disku, vendar jih lahko zaradi prilagodljivega sistema nalagateljev nalagate praktično od koder koli ali jih celo dinamično generirate.
+
+
+Kaj je Nalagatelj? .[#toc-what-is-a-loader]
+===========================================
+
+Ko delate s predlogami, si običajno predstavljate datoteke `.latte`, ki se nahajajo v strukturi imenikov vašega projekta. Za to skrbi privzeti [FileLoader |#FileLoader] v Latte. Vendar pa povezava med imenom predloge (kot je `'main.latte'` ali `'components/card.latte'`) in njeno dejansko izvorno kodo *ni nujno* neposredno preslikava na pot do datoteke.
+
+Prav tukaj pridejo na vrsto nalagatelji. Nalagatelj je objekt, ki ima nalogo vzeti ime predloge (identifikacijski niz) in Latteju zagotoviti njeno izvorno kodo. Latte se pri tej nalogi popolnoma zanaša na konfiguriran nalagatelj. To velja ne samo za začetno predlogo, zahtevano z `$latte->render('main.latte')`, ampak tudi za **vsako predlogo, na katero se sklicuje znotraj** z uporabo značk, kot so `{include ...}`, `{layout ...}`, `{embed ...}` ali `{import ...}`.
+
+Zakaj uporabiti lasten nalagatelj?
+
+- **Nalaganje iz alternativnih virov:** Pridobivanje predlog, shranjenih v podatkovni bazi, v predpomnilniku (kot sta Redis ali Memcached), v sistemu za upravljanje različic (kot je Git, na podlagi določenega commita) ali dinamično generiranih.
+- **Implementacija lastnih konvencij poimenovanja:** Morda želite uporabljati krajše vzdevke za predloge ali implementirati specifično logiko iskalnih poti (npr. najprej iskati v imeniku teme, nato se vrniti v privzeti imenik).
+- **Dodajanje varnosti ali nadzora dostopa:** Lasten nalagatelj lahko pred nalaganjem določenih predlog preveri uporabniška dovoljenja.
+- **Predobdelava:** Čeprav se to na splošno ne priporoča ([prevajalski prehodi |compiler-passes] so boljši), bi nalagatelj *teoretično* lahko predobdelal vsebino predloge, preden jo preda Latteju.
+
+Nalagatelj za instanco `Latte\Engine` nastavite z metodo `setLoader()`:
+
+```php
+$latte = new Latte\Engine;
+
+// Uporaba privzetega FileLoaderja za datoteke v '/path/to/templates'
+$loader = new Latte\Loaders\FileLoader('/path/to/templates');
+$latte->setLoader($loader);
+```
+
+Nalagatelj mora implementirati vmesnik `Latte\Loader`.
+
+
+Vgrajeni Nalagatelji .[#toc-built-in-loaders]
+=============================================
+
+Latte ponuja več standardnih nalagateljev:
+
+
+FileLoader .[#toc-fileloader]
+-----------------------------
+
+To je **privzeti nalagatelj**, ki ga uporablja razred `Latte\Engine`, če ni določen noben drug. Nalaga predloge neposredno iz datotečnega sistema.
+
+Po želji lahko nastavite korenski imenik za omejitev dostopa:
+
+```php
+use Latte\Loaders\FileLoader;
+
+// Naslednje bo omogočilo nalaganje predlog samo iz imenika /var/www/html/templates
+$loader = new FileLoader('/var/www/html/templates');
+$latte->setLoader($loader);
+
+// $latte->render('../../../etc/passwd'); // To bi vrglo izjemo
+
+// Izrisovanje predloge, ki se nahaja na /var/www/html/templates/pages/contact.latte
+$latte->render('pages/contact.latte');
+```
+
+Pri uporabi značk, kot sta `{include}` ali `{layout}`, razrešuje imena predlog relativno glede na trenutno predlogo, če ni podana absolutna pot.
+
+
+StringLoader .[#toc-stringloader]
+---------------------------------
+
+Ta nalagatelj pridobi vsebino predloge iz asociativnega polja, kjer so ključi imena predlog (identifikatorji), vrednosti pa nizi izvorne kode predloge. Je še posebej uporaben za testiranje ali majhne aplikacije, kjer so lahko predloge shranjene neposredno v PHP kodi.
+
+```php
+use Latte\Loaders\StringLoader;
+
+$loader = new StringLoader([
+	'main.latte' => 'Hello {$name}, include is below:{include helper.latte}',
+	'helper.latte' => '{var $x = 10}Included content: {$x}',
+	// Dodajte druge predloge po potrebi
+]);
+
+$latte->setLoader($loader);
+
+$latte->render('main.latte', ['name' => 'World']);
+// Izpis: Hello World, include is below:Included content: 10
+```
+
+Če morate izrisati samo eno predlogo neposredno iz niza brez potrebe po vključevanju ali dedovanju, ki se sklicuje na druge poimenovane nizovne predloge, lahko niz posredujete neposredno metodi `render()` ali `renderToString()` pri uporabi `StringLoader` brez polja:
+
+```php
+$loader = new StringLoader;
+$latte->setLoader($loader);
+
+$templateString = 'Hello {$name}!';
+$output = $latte->renderToString($templateString, ['name' => 'Alice']);
+// $output vsebuje 'Hello Alice!'
+```
+
+
+Ustvarjanje lastnega Nalagatelja .[#toc-creating-a-custom-loader]
+=================================================================
+
+Za ustvarjanje lastnega nalagatelja (npr. za nalaganje predlog iz podatkovne baze, predpomnilnika, sistema za upravljanje različic ali drugega vira) morate ustvariti razred, ki implementira vmesnik [api:Latte\Loader].
+
+Poglejmo, kaj mora vsaka metoda narediti.
+
+
+getContent(string $name): string .[method]
+------------------------------------------
+To je osnovna metoda nalagatelja. Njena naloga je pridobiti in vrniti celotno izvorno kodo predloge, identificirane z `$name` (kot je posredovano metodi `$latte->render()` ali vrnjeno z metodo [getReferredName() |#getReferredName()]).
+
+Če predloge ni mogoče najti ali dostopati do nje, mora ta metoda **vrniti izjemo `Latte\RuntimeException`**.
+
+```php
+public function getContent(string $name): string
+{
+	// Primer: Nalaganje iz hipotetičnega notranjega shrambe
+	$content = $this->storage->read($name);
+	if ($content === null) {
+		throw new Latte\RuntimeException("Template '$name' cannot be loaded.");
+	}
+	return $content;
+}
+```
+
+
+getReferredName(string $name, string $referringName): string .[method]
+----------------------------------------------------------------------
+Ta metoda rešuje prevajanje imen predlog, uporabljenih znotraj značk, kot so `{include}`, `{layout}` itd. Ko Latte naleti na primer na `{include 'partial.latte'}` znotraj `main.latte`, pokliče to metodo z `$name = 'partial.latte'` in `$referringName = 'main.latte'`.
+
+Naloga metode je prevesti `$name` v kanonični identifikator (npr. absolutno pot, edinstven ključ podatkovne baze), ki bo uporabljen pri klicanju drugih metod nalagatelja, na podlagi konteksta, podanega v `$referringName`.
+
+```php
+public function getReferredName(string $name, string $referringName): string
+{
+	return ...;
+}
+```
+
+
+getUniqueId(string $name): string .[method]
+-------------------------------------------
+Latte uporablja za izboljšanje učinkovitosti predpomnilnik prevedenih predlog. Vsaka prevedena datoteka predloge potrebuje edinstveno ime, izpeljano iz identifikatorja izvorne predloge. Ta metoda zagotavlja niz, ki **nedvoumno identificira** predlogo `$name`.
+
+Za predloge, ki temeljijo na datotekah, lahko služi absolutna pot. Za predloge v podatkovni bazi je običajna kombinacija predpone in ID-ja podatkovne baze.
+
+```php
+public function getUniqueId(string $name): string
+{
+	return ...;
+}
+```
+
+
+Primer: Preprost Nalagatelj iz Podatkovne Baze .[#toc-example-simple-database-loader]
+-------------------------------------------------------------------------------------
+
+Ta primer prikazuje osnovno strukturo nalagatelja, ki nalaga predloge, shranjene v tabeli podatkovne baze, imenovani `templates`, s stolpci `name` (edinstven identifikator), `content` in `updated_at`.
+
+```php
+use Latte;
+
+class DatabaseLoader implements Latte\Loader
+{
+	public function __construct(
+		private \PDO $db,
+	) {
+	}
+
+	public function getContent(string $name): string
+	{
+		$stmt = $this->db->prepare('SELECT content FROM templates WHERE name = ?');
+		$stmt->execute([$name]);
+		$content = $stmt->fetchColumn();
+		if ($content === false) {
+			throw new Latte\RuntimeException("Template '$name' not found in database.");
+		}
+		return $content;
+	}
+
+	// Ta preprost primer predpostavlja, da so imena predlog ('homepage', 'article', itd.)
+	// edinstveni ID-ji in se predloge ne sklicujejo relativno druga na drugo.
+	public function getReferredName(string $name, string $referringName): string
+	{
+		return $name;
+	}
+
+	public function getUniqueId(string $name): string
+	{
+		// Uporaba predpone in samega imena je tukaj edinstvena in zadostna
+		return 'db_' . $name;
+	}
+}
+
+// Uporaba:
+$pdo = new \PDO(/* podrobnosti povezave */);
+$loader = new DatabaseLoader($pdo);
+$latte->setLoader($loader);
+$latte->render('homepage'); // Naloži predlogo z imenom 'homepage' iz PB
+```
+
+Lastni nalagatelji vam dajejo popoln nadzor nad tem, od kod prihajajo vaše Latte predloge, kar omogoča integracijo z različnimi sistemi shranjevanja in delovnimi postopki.

@@ -1,0 +1,198 @@
+Loaderek
+********
+
+.[perex]
+A loaderek az a mechanizmus, amelyet a Latte használ a sablonok forráskódjának lekérésére. Leggyakrabban a sablonok fájlokként vannak tárolva a lemezen, de a rugalmas loader rendszernek köszönhetően gyakorlatilag bárhonnan betöltheti őket, vagy akár dinamikusan is generálhatja.
+
+
+Mi az a Loader? .[#toc-what-is-a-loader]
+========================================
+
+Amikor sablonokkal dolgozik, általában a projekt könyvtárstruktúrájában elhelyezett `.latte` fájlokra gondol. Erről gondoskodik az alapértelmezett [FileLoader |#FileLoader] a Latte-ban. Azonban a sablon neve (mint `'main.latte'` vagy `'components/card.latte'`) és a tényleges forráskódja közötti kapcsolat *nem feltétlenül* közvetlen leképezés egy fájlútvonalra.
+
+Itt jönnek képbe a loaderek. A loader egy objektum, amelynek feladata, hogy vegyen egy sablonnevet (egy azonosító sztringet), és biztosítsa a Latte számára annak forráskódját. A Latte ebben a feladatban teljes mértékben a konfigurált loaderre támaszkodik. Ez nemcsak a `$latte->render('main.latte')`-val kért kezdeti sablonra vonatkozik, hanem **minden belülről hivatkozott sablonra** is, olyan tagekkel, mint `{include ...}`, `{layout ...}`, `{embed ...}` vagy `{import ...}`.
+
+Miért használna egyéni loadert?
+
+- **Betöltés alternatív forrásokból:** Sablonok lekérése adatbázisból, gyorsítótárból (mint Redis vagy Memcached), verziókezelő rendszerből (mint Git, egy konkrét commit alapján) vagy dinamikusan generáltak.
+- **Egyéni elnevezési konvenciók implementálása:** Lehet, hogy rövidebb aliasokat szeretne használni a sablonokhoz, vagy egy specifikus keresési útvonal logikát implementálna (pl. először a téma könyvtárában keres, majd visszatér az alapértelmezett könyvtárhoz).
+- **Biztonság vagy hozzáférés-vezérlés hozzáadása:** Egy egyéni loader ellenőrizheti a felhasználói jogosultságokat bizonyos sablonok betöltése előtt.
+- **Előfeldolgozás:** Bár általában nem ajánlott ([fordítási menetek |compiler-passes] jobbak), egy loader *elméletileg* előfeldolgozhatná a sablon tartalmát, mielőtt átadná a Latte-nak.
+
+A `Latte\Engine` példányhoz tartozó loadert a `setLoader()` metódussal állíthatja be:
+
+```php
+$latte = new Latte\Engine;
+
+// Az alapértelmezett FileLoader használata a '/path/to/templates' fájlokhoz
+$loader = new Latte\Loaders\FileLoader('/path/to/templates');
+$latte->setLoader($loader);
+```
+
+A loadernek implementálnia kell a `Latte\Loader` interfészt.
+
+
+Beépített Loaderek .[#toc-built-in-loaders]
+===========================================
+
+A Latte több standard loadert kínál:
+
+
+FileLoader .[#toc-fileloader]
+-----------------------------
+
+Ez az **alapértelmezett loader**, amelyet a `Latte\Engine` osztály használ, ha nincs más megadva. Közvetlenül a fájlrendszerből tölti be a sablonokat.
+
+Opcionálisan beállíthat egy gyökérkönyvtárat a hozzáférés korlátozására:
+
+```php
+use Latte\Loaders\FileLoader;
+
+// A következő csak a /var/www/html/templates könyvtárból engedélyezi a sablonok betöltését
+$loader = new FileLoader('/var/www/html/templates');
+$latte->setLoader($loader);
+
+// $latte->render('../../../etc/passwd'); // Ez kivételt dobna
+
+// A /var/www/html/templates/pages/contact.latte helyen található sablon renderelése
+$latte->render('pages/contact.latte');
+```
+
+Az olyan tagek használatakor, mint `{include}` vagy `{layout}`, a sablonneveket relatívan oldja fel az aktuális sablonhoz képest, hacsak nincs abszolút útvonal megadva.
+
+
+StringLoader .[#toc-stringloader]
+---------------------------------
+
+Ez a loader a sablon tartalmát egy asszociatív tömbből szerzi be, ahol a kulcsok a sablonnevek (azonosítók), az értékek pedig a sablon forráskód sztringjei. Különösen hasznos teszteléshez vagy kis alkalmazásokhoz, ahol a sablonok közvetlenül a PHP kódban tárolhatók.
+
+```php
+use Latte\Loaders\StringLoader;
+
+$loader = new StringLoader([
+	'main.latte' => 'Hello {$name}, include is below:{include helper.latte}',
+	'helper.latte' => '{var $x = 10}Included content: {$x}',
+	// Adjon hozzá további sablonokat szükség szerint
+]);
+
+$latte->setLoader($loader);
+
+$latte->render('main.latte', ['name' => 'World']);
+// Kimenet: Hello World, include is below:Included content: 10
+```
+
+Ha csak egyetlen sablont kell közvetlenül egy sztringből renderelnie, anélkül, hogy beágyazásra vagy öröklődésre lenne szüksége, amely más névvel ellátott sztring sablonokra hivatkozik, átadhatja a sztringet közvetlenül a `render()` vagy `renderToString()` metódusnak, amikor a `StringLoader`-t tömb nélkül használja:
+
+```php
+$loader = new StringLoader;
+$latte->setLoader($loader);
+
+$templateString = 'Hello {$name}!';
+$output = $latte->renderToString($templateString, ['name' => 'Alice']);
+// $output tartalmazza: 'Hello Alice!'
+```
+
+
+Egyéni Loader létrehozása .[#toc-creating-a-custom-loader]
+==========================================================
+
+Egyéni loader létrehozásához (pl. sablonok betöltése adatbázisból, gyorsítótárból, verziókezelő rendszerből vagy más forrásból) létre kell hoznia egy osztályt, amely implementálja a [api:Latte\Loader] interfészt.
+
+Nézzük meg, mit kell tennie minden metódusnak.
+
+
+getContent(string $name): string .[method]
+------------------------------------------
+Ez a loader alapvető metódusa. Feladata a `$name` által azonosított sablon teljes forráskódjának lekérése és visszaadása (ahogy a `$latte->render()` metódusnak átadták, vagy a [getReferredName() |#getReferredName()] metódus visszaadta).
+
+Ha a sablont nem lehet megtalálni vagy hozzáférni, ez a metódus **`Latte\RuntimeException` kivételt kell, hogy dobjon**.
+
+```php
+public function getContent(string $name): string
+{
+	// Példa: Betöltés egy hipotetikus belső tárolóból
+	$content = $this->storage->read($name);
+	if ($content === null) {
+		throw new Latte\RuntimeException("Template '$name' cannot be loaded.");
+	}
+	return $content;
+}
+```
+
+
+getReferredName(string $name, string $referringName): string .[method]
+----------------------------------------------------------------------
+Ez a metódus kezeli a sablonnevek feloldását, amelyeket olyan tagekben használnak, mint `{include}`, `{layout}`, stb. Amikor a Latte például találkozik egy `{include 'partial.latte'}` taggel a `main.latte`-n belül, meghívja ezt a metódust `$name = 'partial.latte'` és `$referringName = 'main.latte'` értékekkel.
+
+A metódus feladata a `$name` lefordítása egy kanonikus azonosítóra (pl. abszolút útvonal, egyedi adatbázis kulcs), amelyet a loader további metódusainak hívásakor használnak, a `$referringName`-ben megadott kontextus alapján.
+
+```php
+public function getReferredName(string $name, string $referringName): string
+{
+	return ...;
+}
+```
+
+
+getUniqueId(string $name): string .[method]
+-------------------------------------------
+A Latte a teljesítmény javítása érdekében a fordított sablonok gyorsítótárát használja. Minden fordított sablonfájlnak egyedi névre van szüksége, amely a forrássablon azonosítójából származik. Ez a metódus egy sztringet biztosít, amely **egyértelműen azonosítja** a `$name` sablont.
+
+Fájl alapú sablonok esetén az abszolút útvonal szolgálhat erre. Adatbázisban lévő sablonok esetén gyakori egy előtag és az adatbázis ID kombinációja.
+
+```php
+public function getUniqueId(string $name): string
+{
+	return ...;
+}
+```
+
+
+Példa: Egyszerű adatbázis Loader .[#toc-example-simple-database-loader]
+-----------------------------------------------------------------------
+
+Ez a példa egy olyan loader alapvető struktúráját mutatja be, amely egy `templates` nevű adatbázis táblában tárolt sablonokat tölt be, `name` (egyedi azonosító), `content` és `updated_at` oszlopokkal.
+
+```php
+use Latte;
+
+class DatabaseLoader implements Latte\Loader
+{
+	public function __construct(
+		private \PDO $db,
+	) {
+	}
+
+	public function getContent(string $name): string
+	{
+		$stmt = $this->db->prepare('SELECT content FROM templates WHERE name = ?');
+		$stmt->execute([$name]);
+		$content = $stmt->fetchColumn();
+		if ($content === false) {
+			throw new Latte\RuntimeException("Template '$name' not found in database.");
+		}
+		return $content;
+	}
+
+	// Ez az egyszerű példa feltételezi, hogy a sablonnevek ('homepage', 'article', stb.)
+	// egyedi ID-k, és a sablonok nem hivatkoznak egymásra relatívan.
+	public function getReferredName(string $name, string $referringName): string
+	{
+		return $name;
+	}
+
+	public function getUniqueId(string $name): string
+	{
+		// Az előtag és maga a név használata itt egyedi és elegendő
+		return 'db_' . $name;
+	}
+}
+
+// Használat:
+$pdo = new \PDO(/* csatlakozási részletek */);
+$loader = new DatabaseLoader($pdo);
+$latte->setLoader($loader);
+$latte->render('homepage'); // Betölti a 'homepage' nevű sablont az DB-ből
+```
+
+Az egyéni loaderek teljes kontrollt adnak Önnek afölött, honnan származnak a Latte sablonjai, lehetővé téve az integrációt különböző tárolórendszerekkel és munkafolyamatokkal.

@@ -1,0 +1,555 @@
+Kompilační průchody
+*******************
+
+.[perex]
+Kompilační průchody poskytují výkonný mechanismus pro analýzu a modifikaci Latte šablon *po* jejich parsování do abstraktního syntaktického stromu (AST) a *před* vygenerováním finálního PHP kódu. To umožňuje pokročilou manipulaci s šablonami, optimalizace, bezpečnostní kontroly (jako je Sandbox) a sběr informací o šablonách. Tento průvodce vás provede vytvořením vlastních kompilačních průchodů.
+
+
+Co je kompilační průchod?
+=========================
+
+Pro pochopení role kompilačních průchodů se podívejte na [kompilační proces Latte |custom-tags#Pochopení procesu kompilace]. Jak můžete vidět, kompilační průchody operují v klíčové fázi, umožňující hluboký zásah mezi počátečním parsováním a finálním výstupem kódu.
+
+V jádru je kompilační průchod jednoduše PHP volatelný objekt (jako funkce, statická metoda nebo metoda instance), který přijímá jeden argument: kořenový uzel AST šablony, což je vždy instance `Latte\Compiler\Nodes\TemplateNode`.
+
+Primárním cílem kompilačního průchodu je obvykle jeden nebo oba z následujících:
+
+- Analýza: Procházet AST a shromažďovat informace o šabloně (např. najít všechny definované bloky, zkontrolovat použití specifických tagů, zajistit splnění určitých bezpečnostních omezení).
+- Modifikace: Změnit strukturu AST nebo atributy uzlů (např. automaticky přidat HTML atributy, optimalizovat určité kombinace tagů, nahradit zastaralé tagy novými, implementovat pravidla sandboxu).
+
+
+Registrace
+==========
+
+Kompilační průchody jsou registrovány pomocí metody [rozšíření |extending-latte#getPasses()] `getPasses()`. Tato metoda vrací asociativní pole, kde klíče jsou jedinečné názvy průchodů (používané interně a pro řazení) a hodnoty jsou PHP volatelné objekty implementující logiku průchodu.
+
+```php
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Extension;
+
+class MyExtension extends Extension
+{
+	public function getPasses(): array
+	{
+		return [
+			'modificationPass' => $this->modifyTemplateAst(...),
+			// ... další průchody ...
+		];
+	}
+
+	public function modifyTemplateAst(TemplateNode $templateNode): void
+	{
+		// Implementace...
+	}
+}
+```
+
+Průchody registrované základními rozšířeními Latte a vašimi vlastními rozšířeními běží sekvenčně. Pořadí může být důležité, zejména pokud jeden průchod závisí na výsledcích nebo modifikacích jiného. Latte poskytuje pomocný mechanismus pro kontrolu tohoto pořadí, pokud je potřeba; viz dokumentaci k [`Extension::getPasses()` |extending-latte#getPasses()] pro podrobnosti.
+
+
+Příklad AST
+===========
+
+Pro lepší představu o AST, přidáváme ukázku. Toto je zdrojová šablona:
+
+```latte
+{foreach $category->getItems() as $item}
+	<li>{$item->name|upper}</li>
+	{else}
+	no items found
+{/foreach}
+```
+
+A toto je její reprezentace ve formě AST:
+
+/--pre
+Latte\Compiler\Nodes\<b>TemplateNode</b>(
+   Latte\Compiler\Nodes\<b>FragmentNode</b>(
+      - Latte\Essential\Nodes\<b>ForeachNode</b>(
+           expression: Latte\Compiler\Nodes\Php\Expression\<b>MethodCallNode</b>(
+              object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$category')
+              name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('getItems')
+           )
+           value: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+           content: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+              - Latte\Compiler\Nodes\<b>TextNode</b>('  ')
+              - Latte\Compiler\Nodes\<b>Html\ElementNode</b>('li')(
+                   content: Latte\Essential\Nodes\<b>PrintNode</b>(
+                      expression: Latte\Compiler\Nodes\Php\Expression\<b>PropertyFetchNode</b>(
+                         object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+                         name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('name')
+                      )
+                      modifier: Latte\Compiler\Nodes\Php\<b>ModifierNode</b>(
+                         filters:
+                            - Latte\Compiler\Nodes\Php\<b>FilterNode</b>('upper')
+                      )
+                   )
+                )
+            )
+            else: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+               - Latte\Compiler\Nodes\<b>TextNode</b>('no items found')
+            )
+        )
+   )
+)
+\--
+
+
+Procházení AST pomocí `NodeTraverser`
+=====================================
+
+Ruční psaní rekurzivních funkcí pro procházení komplexní struktury AST je únavné a náchylné k chybám. Latte poskytuje speciální nástroj pro tento účel: [api:Latte\Compiler\NodeTraverser]. Tato třída implementuje [návrhový vzor Visitor |https://en.wikipedia.org/wiki/Visitor_pattern], díky kterému je procházení AST systematické a snadno zvládnutelné.
+
+Základní použití zahrnuje vytvoření instance `NodeTraverser` a volání její metody `traverse()`, předání kořenového uzlu AST a jednoho nebo dvou "visitor" volatelných objektů:
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+
+(new NodeTraverser)->traverse(
+	$templateNode,
+
+	// 'enter' visitor: Volán při vstupu do uzlu (před jeho dětmi)
+	enter: function (Node $node) {
+		echo "Vstup do uzlu typu: " . $node::class . "\n";
+		// Zde můžete zkoumat uzel
+		if ($node instanceof Nodes\TextNode) {
+			// echo "Nalezen text: " . $node->content . "\n";
+		}
+	},
+
+	// 'leave' visitor: Volán při opuštění uzlu (po jeho dětech)
+	leave: function (Node $node) {
+		echo "Opuštění uzlu typu: " . $node::class . "\n";
+		// Zde můžete provádět akce po zpracování dětí
+	},
+);
+```
+
+Můžete poskytnout pouze `enter` visitor, pouze `leave` visitor, nebo oba, v závislosti na vašich potřebách.
+
+**`enter(Node $node)`:** Tato funkce je provedena pro každý uzel **před** tím, než procházející navštíví kterékoliv z dětí tohoto uzlu. Je užitečná pro:
+
+- Sbírání informací při průchodu stromem směrem dolů.
+- Rozhodování *před* zpracováním dětí (jako rozhodnutí je přeskočit, viz [#Optimalizace procházení]).
+- Potenciální úpravy uzlu před návštěvou dětí (méně časté).
+
+**`leave(Node $node)`:** Tato funkce je provedena pro každý uzel **po** tom, co všechny jeho děti (a jejich celé podstromy) byly plně navštíveny (jak vstup tak opuštění). Je nejčastějším místem pro:
+
+Oba visitoři `enter` a `leave` mohou volitelně vracet hodnotu pro ovlivnění procesu procházení. Vrácení `null` (nebo nic) pokračuje v procházení normálně, vrácení instance `Node` nahradí aktuální uzel, a vrácení speciálních konstant jako `NodeTraverser::RemoveNode` nebo `NodeTraverser::StopTraversal` modifikuje tok, jak je vysvětleno v následujících sekcích.
+
+
+Jak procházení funguje
+----------------------
+
+`NodeTraverser` interně používá metodu `getIterator()`, kterou musí implementovat každá třída `Node` (jak bylo diskutováno v [Vytváření vlastních tagů |custom-tags#Implementace getIterator() pro poduzly]). Iteruje přes děti získané pomocí `getIterator()`, rekurzivně volá `traverse()` na nich a zajišťuje, že `enter` a `leave` visitoři jsou voláni ve správném hloubkově-prvním pořadí pro každý uzel ve stromě dostupný přes iterátory. To znovu zdůrazňuje, proč správně implementovaný `getIterator()` ve vašich vlastních tagových uzlech je naprosto nezbytný pro správné fungování kompilačních průchodů.
+
+Pojďme napsat jednoduchý průchod, který počítá, kolikrát je v šabloně použit tag `{do}` (reprezentovaný `Latte\Essential\Nodes\DoNode`).
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\DoNode;
+
+function countDoTags(TemplateNode $templateNode): void
+{
+	$count = 0;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use (&$count): void {
+			if ($node instanceof DoNode) {
+				$count++;
+			}
+		},
+		// 'leave' visitor není pro tento úkol potřeba
+	);
+
+	echo "Nalezen tag {do} $count krát.\n";
+}
+
+$latte = new Latte\Engine;
+$ast = $latte->parse($templateSource);
+countDoTags($ast);
+```
+
+V tomto příkladu jsme potřebovali pouze visitor `enter` ke kontrole typu každého navštíveného uzlu.
+
+Dále prozkoumáme, jak tyto visitoři skutečně modifikují AST.
+
+
+Modifikace AST
+==============
+
+Jedním z hlavních účelů kompilačních průchodů je modifikace abstraktního syntaktického stromu. To umožňuje výkonné transformace, optimalizace nebo vynucení pravidel přímo na struktuře šablony před generováním PHP kódu. `NodeTraverser` poskytuje několik způsobů, jak toho dosáhnout v rámci visitorů `enter` a `leave`.
+
+**Důležitá poznámka:** Modifikace AST vyžaduje opatrnost. Nesprávné změny – jako odstranění základních uzlů nebo nahrazení uzlu nekompatibilním typem – mohou vést k chybám během generování kódu nebo způsobit neočekávané chování během běhu programu. Vždy důkladně testujte své modifikační průchody.
+
+
+Úprava atributů uzlů
+--------------------
+
+Nejjednodušší způsob, jak modifikovat strom, je přímá změna **veřejných vlastností** uzlů navštívených během procházení. Všechny uzly ukládají své parsované argumenty, obsah nebo atributy ve veřejných vlastnostech.
+
+**Příklad:** Vytvořme průchod, který najde všechny statické textové uzly (`TextNode`, reprezentující běžné HTML nebo text mimo Latte tagy) a převede jejich obsah na velká písmena *přímo v AST*.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\TextNode;
+
+function uppercaseStaticText(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Můžeme použít 'enter', protože TextNode nemá žádné děti ke zpracování
+		enter: function (Node $node) {
+			// Je tento uzel statickým textovým blokem?
+			if ($node instanceof TextNode) {
+				// Ano! Přímo upravíme jeho veřejnou vlastnost 'content'.
+				$node->content = mb_strtoupper(html_entity_decode($node->content));
+			}
+			// Není potřeba nic vracet; změna je aplikována přímo.
+		},
+	);
+}
+```
+
+V tomto příkladu visitor `enter` kontroluje, zda je aktuální `$node` typu `TextNode`. Pokud ano, přímo aktualizujeme jeho veřejnou vlastnost `$content` pomocí `mb_strtoupper()`. To přímo mění obsah statického textu uloženého v AST *před* generováním PHP kódu. Protože modifikujeme objekt přímo, nemusíme nic vracet z visitoru.
+
+Efekt: Pokud šablona obsahovala `<p>Hello</p>{= $var }<span>World</span>`, po tomto průchodu bude AST reprezentovat něco jako: `<p>HELLO</p>{= $var }<span>WORLD</span>`. To NEOVLIVNÍ obsah $var.
+
+
+Nahrazování uzlů
+----------------
+
+Výkonnější technikou modifikace je kompletní nahrazení uzlu jiným. To se provádí **vrácením nové instance `Node`** z visitoru `enter` nebo `leave`. `NodeTraverser` pak nahradí původní uzel vráceným ve struktuře rodičovského uzlu.
+
+**Příklad:** Vytvořme průchod, který najde všechna použití konstanty `PHP_VERSION` (reprezentované `ConstantFetchNode`) a nahradí je přímo řetězcovým literálem (`StringNode`) obsahujícím *skutečnou* verzi PHP detekovanou *během kompilace*. Toto je forma optimalizace v době kompilace.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\Php\Expression\ConstantFetchNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+
+function inlinePhpVersion(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// 'leave' je často používán pro nahrazení, zajišťuje, že děti (pokud existují)
+		// jsou zpracovány nejdříve, i když by zde fungoval i 'enter'.
+		leave: function (Node $node) {
+			// Je tento uzel přístupem ke konstantě a jméno konstanty 'PHP_VERSION'?
+			if ($node instanceof ConstantFetchNode && (string) $node->name === 'PHP_VERSION') {
+				// Vytvoříme nový StringNode obsahující aktuální verzi PHP
+				$newNode = new StringNode(PHP_VERSION);
+
+				// Volitelné, ale dobrá praxe: zkopírujeme informace o pozici
+				$newNode->position = $node->position;
+
+				// Vrátíme nový StringNode. Traverser nahradí
+				// původní ConstantFetchNode tímto $newNode.
+				return $newNode;
+			}
+			// Pokud nevrátíme Node, původní $node je zachován.
+		},
+	);
+}
+```
+
+Zde visitor `leave` identifikuje specifický `ConstantFetchNode` pro `PHP_VERSION`. Poté vytvoří zcela nový `StringNode` obsahující hodnotu konstanty `PHP_VERSION` *v době kompilace*. Vrácením tohoto `$newNode` říká traverseru, aby nahradil původní `ConstantFetchNode` v AST.
+
+Efekt: Pokud šablona obsahovala `{= PHP_VERSION }` a kompilace běží na PHP 8.2.1, AST po tomto průchodu bude efektivně reprezentovat `{= '8.2.1' }`.
+
+**Volba `enter` vs. `leave` pro nahrazení:**
+
+- Použijte `leave`, pokud vytvoření nového uzlu závisí na výsledcích zpracování dětí starého uzlu, nebo pokud chcete jednoduše zajistit, aby děti byly navštíveny před nahrazením (běžná praxe).
+- Použijte `enter`, pokud chcete nahradit uzel *před* tím, než jsou jeho děti vůbec navštíveny.
+
+
+Odstraňování uzlů
+-----------------
+
+Můžete zcela odstranit uzel z AST vrácením speciální konstanty `NodeTraverser::RemoveNode` z visitoru.
+
+**Příklad:** Odstraňme všechny komentáře šablony (`{* ... *}`), které jsou reprezentovány `CommentNode` v AST generovaném jádrem Latte (ačkoli typicky zpracovány dříve, toto slouží jako příklad).
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\CommentNode;
+
+function removeCommentNodes(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// 'enter' je zde v pořádku, protože nepotřebujeme informace o dětech k odstranění komentáře
+		enter: function (Node $node) {
+			if ($node instanceof CommentNode) {
+				// Signalizujeme traverseru, aby odstranil tento uzel z AST
+				return NodeTraverser::RemoveNode;
+			}
+		},
+	);
+}
+```
+
+**Upozornění:** Používejte `RemoveNode` opatrně. Odstranění uzlu, který obsahuje základní obsah nebo ovlivňuje strukturu (jako odstranění obsahového uzlu cyklu), může vést k poškozeným šablonám nebo neplatnému generovanému kódu. Nejbezpečnější je pro uzly, které jsou skutečně volitelné nebo samostatné (jako komentáře nebo ladící tagy) nebo pro prázdné strukturální uzly (např. prázdný `FragmentNode` může být v některých kontextech bezpečně odstraněn průchodem pro vyčištění).
+
+Tyto tři metody - úprava vlastností, nahrazování uzlů a odstraňování uzlů - poskytují základní nástroje pro manipulaci s AST v rámci vašich kompilačních průchodů.
+
+
+Optimalizace procházení
+=======================
+
+AST šablon může být poměrně velký, potenciálně obsahující tisíce uzlů. Procházení každého jednotlivého uzlu může být zbytečné a ovlivnit výkon kompilace, pokud váš průchod má zájem pouze o specifické části stromu. `NodeTraverser` nabízí způsoby optimalizace procházení:
+
+
+Přeskakování dětí
+-----------------
+
+Pokud víte, že jakmile narazíte na určitý typ uzlu, žádný z jeho potomků nemůže obsahovat uzly, které hledáte, můžete traverseru říct, aby přeskočil návštěvu jeho dětí. To se provádí vrácením konstanty `NodeTraverser::DontTraverseChildren` z visitoru **`enter`**. Tím vynecháte celé větve při procházení, což potenciálně ušetří značný čas, zejména v šablonách s komplexními PHP výrazy uvnitř tagů.
+
+
+Zastavení procházení
+--------------------
+
+Pokud váš průchod potřebuje najít pouze *první* výskyt něčeho (specifický typ uzlu, splnění podmínky), můžete úplně zastavit celý proces procházení, jakmile to najdete. Toho je dosaženo vrácením konstanty `NodeTraverser::StopTraversal` z visitoru `enter` nebo `leave`. Metoda `traverse()` přestane navštěvovat jakékoliv další uzly. To je vysoce efektivní, pokud potřebujete pouze první shodu v potenciálně velmi velkém stromě.
+
+
+Užitečný pomocník `NodeHelpers`
+===============================
+
+Zatímco `NodeTraverser` nabízí jemně odstupňovanou kontrolu, Latte také poskytuje praktickou pomocnou třídu, [api:Latte\Compiler\NodeHelpers], která zapouzdřuje `NodeTraverser` pro několik běžných úloh vyhledávání a analýzy, často vyžadující méně přípravného kódu.
+
+
+find(Node $startNode, callable $filter): array .[method]
+--------------------------------------------------------
+
+Tato statická metoda nachází **všechny** uzly v podstromu začínajícím na `$startNode` (včetně), které splňují callback `$filter`. Vrací pole odpovídajících uzlů.
+
+**Příklad:** Najít všechny uzly proměnných (`VariableNode`) v celé šabloně.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\Expression\VariableNode;
+use Latte\Compiler\Nodes\TemplateNode;
+
+function findAllVariables(TemplateNode $templateNode): array
+{
+	return NodeHelpers::find(
+		$templateNode,
+		fn($node) => $node instanceof VariableNode,
+	);
+}
+```
+
+
+findFirst(Node $startNode, callable $filter): ?Node  .[method]
+--------------------------------------------------------------
+
+Podobné jako `find`, ale zastaví procházení okamžitě po nalezení **prvního** uzlu, který splňuje callback `$filter`. Vrací nalezený objekt `Node` nebo `null`, pokud není nalezen žádný odpovídající uzel. Toto je v podstatě praktický obal kolem `NodeTraverser::StopTraversal`.
+
+**Příklad:** Najít uzel `{parameters}` (stejné jako manuální příklad předtím, ale kratší).
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\ParametersNode;
+
+function findParametersNodeHelper(TemplateNode $templateNode): ?ParametersNode
+{
+	return NodeHelpers::findFirst(
+		$templateNode->head, // Hledat pouze v hlavní sekci pro efektivitu
+		fn($node) => $node instanceof ParametersNode,
+	);
+}
+```
+
+
+toValue(ExpressionNode $node, bool $constants = false): mixed .[method]
+-----------------------------------------------------------------------
+
+Tato statická metoda se pokouší vyhodnotit `ExpressionNode` **v době kompilace** a vrátit jeho odpovídající PHP hodnotu. Funguje spolehlivě pouze pro jednoduché literální uzly (`StringNode`, `IntegerNode`, `FloatNode`, `BooleanNode`, `NullNode`) a instance `ArrayNode` obsahující pouze takové vyhodnotitelné položky.
+
+Pokud je `$constants` nastaveno na `true`, bude se také pokoušet vyřešit `ConstantFetchNode` a `ClassConstantFetchNode` kontrolou `defined()` a použitím `constant()`.
+
+Pokud uzel obsahuje proměnné, volání funkcí nebo jiné dynamické prvky, nemůže být vyhodnocen v době kompilace a metoda vyhodí `InvalidArgumentException`.
+
+**Případ použití:** Získání statické hodnoty argumentu tagu během kompilace pro rozhodování v době kompilace.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+
+function getStaticStringArgument(ExpressionNode $argumentNode): ?string
+{
+	try {
+		$value = NodeHelpers::toValue($argumentNode);
+		return is_string($value) ? $value : null;
+	} catch (\InvalidArgumentException $e) {
+		// Argument nebyl statický literální řetězec
+		return null;
+	}
+}
+```
+
+
+toText(?Node $node): ?string .[method]
+--------------------------------------
+
+Tato statická metoda je užitečná pro extrakci prostého textového obsahu z jednoduchých uzlů. Funguje primárně s:
+- `TextNode`: Vrací jeho `$content`.
+- `FragmentNode`: Zřetězí výsledek `toText()` pro všechny jeho děti. Pokud některé dítě není převoditelné na text (např. obsahuje `PrintNode`), vrací `null`.
+- `NopNode`: Vrací prázdný řetězec.
+- Ostatní typy uzlů: Vrací `null`.
+
+**Případ použití:** Získání statického textového obsahu hodnoty HTML atributu nebo jednoduchého HTML elementu pro analýzu během kompilačního průchodu.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Html\AttributeNode;
+
+function getStaticAttributeValue(AttributeNode $attr): ?string
+{
+	// $attr->value je typicky AreaNode (jako FragmentNode nebo TextNode)
+	return NodeHelpers::toText($attr->value);
+}
+
+// Příklad použití v průchodu:
+// if ($node instanceof Html\ElementNode && $node->name === 'meta') {
+//     $nameAttrValue = getStaticAttributeValue($node->getAttributeNode('name'));
+//     if ($nameAttrValue === 'description') { ... }
+// }
+```
+
+`NodeHelpers` může zjednodušit vaše kompilační průchody poskytnutím hotových řešení pro běžné úlohy procházení a analýzy AST.
+
+
+Praktické příklady
+==================
+
+Pojďme aplikovat koncepty procházení a modifikace AST k řešení některých praktických problémů. Tyto příklady demonstrují běžné vzory používané v kompilačních průchodech.
+
+
+Automatické přidání `loading="lazy"` k `<img>`
+----------------------------------------------
+
+Moderní prohlížeče podporují nativní líné načítání pro obrázky pomocí atributu `loading="lazy"`. Vytvořme průchod, který automaticky přidá tento atribut ke všem tagům `<img>`, které ještě nemají atribut `loading`.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Html;
+
+function addLazyLoading(Nodes\TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Můžeme použít 'enter', protože modifikujeme uzel přímo
+		// a nezávisíme na dětech pro toto rozhodnutí.
+		enter: function (Node $node) {
+			// Je to HTML element s názvem 'img'?
+			if ($node instanceof Html\ElementNode && $node->name === 'img') {
+				// Zajistíme, že uzel atributů existuje
+				$node->attributes ??= new Nodes\FragmentNode;
+
+				// Zkontrolujeme, zda již existuje atribut 'loading' (bez ohledu na velikost písmen)
+				foreach ($node->attributes->children as $attrNode) {
+					if ($attrNode instanceof Html\AttributeNode
+						&& $attrNode->name instanceof Nodes\TextNode // Statický název atributu
+						&& strtolower($attrNode->name->content) === 'loading'
+					) {
+						return;
+					}
+				}
+
+				// Připojíme mezeru, pokud atributy nejsou prázdné
+				if ($node->attributes->children) {
+					$node->attributes->children[] = new Nodes\TextNode(' ');
+				}
+
+				// Vytvoříme nový uzel atributu: loading="lazy"
+				$node->attributes->children[] = new Html\AttributeNode(
+					name: new Nodes\TextNode('loading'),
+					value: new Nodes\TextNode('lazy'),
+					quote: '"',
+				);
+				// Změna je aplikována přímo v objektu, není potřeba nic vracet.
+			}
+		},
+	);
+}
+```
+
+Vysvětlení:
+- Visitor `enter` hledá uzly `Html\ElementNode` s názvem `img`.
+- Iteruje přes existující atributy (`$node->attributes->children`) a kontroluje, zda je atribut `loading` již přítomen.
+- Pokud není nalezen, vytvoří nový `Html\AttributeNode` reprezentující `loading="lazy"`.
+
+
+Kontrola volání funkcí
+----------------------
+
+Kompilační průchody jsou základem Latte Sandboxu. I když je skutečný Sandbox sofistikovaný, můžeme demonstrovat základní princip kontroly zakázaných volání funkcí.
+
+**Cíl:** Zabránit použití potenciálně nebezpečné funkce `shell_exec` v rámci výrazů šablony.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Php;
+use Latte\SecurityViolationException;
+
+function checkForbiddenFunctions(Nodes\TemplateNode $templateNode): void
+{
+	$forbiddenFunctions = ['shell_exec' => true, 'exec' => true]; // Jednoduchý seznam
+
+	$traverser = new NodeTraverser;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use ($forbiddenFunctions) {
+			// Je to uzel přímého volání funkce?
+			if ($node instanceof Php\Expression\FunctionCallNode
+				&& $node->name instanceof Php\NameNode
+				&& isset($forbiddenFunctions[strtolower((string) $node->name)])
+			) {
+				throw new SecurityViolationException(
+					"Funkce {$node->name}() není povolena.",
+					$node->position,
+				);
+			}
+		},
+	);
+}
+```
+
+Vysvětlení:
+- Definujeme seznam zakázaných názvů funkcí.
+- Visitor `enter` kontroluje `FunctionCallNode`.
+- Pokud je název funkce (`$node->name`) statický `NameNode`, kontrolujeme jeho řetězcovou reprezentaci v malých písmenech proti našemu zakázanému seznamu.
+- Pokud je nalezena zakázaná funkce, vyhodíme `Latte\SecurityViolationException`, která jasně indikuje porušení bezpečnostního pravidla a zastaví kompilaci.
+
+Tyto příklady ukazují, jak mohou být kompilační průchody s použitím `NodeTraverser` využity pro analýzu, automatické modifikace a vynucení bezpečnostních omezení interakcí přímo se strukturou AST šablony.
+
+
+Osvědčené postupy
+=================
+
+Při psaní kompilačních průchodů mějte na paměti tyto směrnice pro vytváření robustních, udržovatelných a efektivních rozšíření:
+
+- **Pořadí je důležité:** Buďte si vědomi pořadí, v jakém průchody běží. Pokud váš průchod závisí na struktuře AST vytvořené jiným průchodem (např. základní průchody Latte nebo jiný vlastní průchod), nebo pokud jiné průchody mohou záviset na vašich modifikacích, použijte mechanismus řazení poskytovaný `Extension::getPasses()` k definování závislostí (`before`/`after`). Viz dokumentaci k [`Extension::getPasses()` |extending-latte#getPasses()] pro podrobnosti.
+- **Jedna odpovědnost:** Snažte se o průchody, které provádějí jednu dobře definovanou úlohu. Pro komplexní transformace zvažte rozdělení logiky do více průchodů – možná jeden pro analýzu a další pro modifikaci založenou na výsledcích analýzy. To zlepšuje přehlednost a testovatelnost.
+- **Výkon:** Pamatujte, že kompilační průchody přidávají čas kompilace šablony (i když to obvykle nastává pouze jednou, dokud se šablona nezmění). Vyhněte se výpočetně náročným operacím ve vašich průchodech, pokud je to možné. Využívejte optimalizace procházení jako `NodeTraverser::DontTraverseChildren` a `NodeTraverser::StopTraversal` kdykoliv víte, že nepotřebujete navštívit určité části AST.
+- **Používejte `NodeHelpers`:** Pro běžné úlohy jako hledání specifických uzlů nebo statické vyhodnocování jednoduchých výrazů, zkontrolujte, zda `Latte\Compiler\NodeHelpers` nenabízí vhodnou metodu před psaním vlastní logiky `NodeTraverser`. Může to ušetřit čas a snížit množství přípravného kódu.
+- **Zpracování chyb:** Pokud váš průchod detekuje chybu nebo neplatný stav v AST šablony, vyhoďte `Latte\CompileException` (nebo `Latte\SecurityViolationException` pro bezpečnostní problémy) s jasnou zprávou a relevantním objektem `Position` (obvykle `$node->position`). To poskytuje užitečnou zpětnou vazbu vývojáři šablony.
+- **Idempotence (pokud možno):** Ideálně by spuštění vašeho průchodu vícekrát na stejném AST mělo produkovat stejný výsledek jako jeho jednorázové spuštění. To není vždy proveditelné, ale zjednodušuje ladění a uvažování o interakcích průchodů, pokud je toho dosaženo. Například zajistěte, aby váš modifikační průchod kontroloval, zda modifikace již byla aplikována, než ji aplikuje znovu.
+
+Dodržováním těchto postupů můžete efektivně využít kompilační průchody k rozšíření schopností Latte výkonným a spolehlivým způsobem, což přispívá k bezpečnějšímu, optimalizovanějšímu nebo funkčně bohatšímu zpracování šablon.

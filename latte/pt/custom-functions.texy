@@ -1,0 +1,144 @@
+Criando funções personalizadas
+******************************
+
+.[perex]
+Adicione facilmente funções auxiliares personalizadas aos templates Latte. Chame a lógica PHP diretamente nas expressões para cálculos, acesso a serviços ou geração de conteúdo dinâmico, mantendo os seus templates limpos e poderosos.
+
+
+O que são funções?
+==================
+
+Funções no Latte permitem estender o conjunto de funções que podem ser chamadas dentro das expressões nos templates (`{...}`). Você pode pensar nelas como **funções PHP personalizadas disponíveis apenas dentro dos seus templates Latte**. Isto traz várias vantagens:
+
+**Conveniência:** Você pode definir lógica auxiliar (como cálculos, formatação ou acesso a dados da aplicação) e chamá-la usando uma sintaxe de função simples e familiar diretamente no template, assim como chamaria `strlen()` ou `date()` em PHP.
+
+```latte
+{var $userInitials = initials($userName)} {* por exemplo, 'J. D.' *}
+
+{if hasPermission('article', 'edit')}
+    <a href="...">Editar</a>
+{/if}
+```
+
+**Sem poluição do espaço global:** Ao contrário da definição de uma função global real em PHP, as funções Latte existem apenas no contexto de renderização do template. Você não precisa sobrecarregar o namespace global do PHP com auxiliares que são específicos apenas para templates.
+
+**Integração com a lógica da aplicação:** O PHP callable por trás de uma função Latte pode ser qualquer coisa – uma função anónima, um método estático ou um método de instância. Isto significa que as suas funções nos templates podem aceder facilmente aos serviços da aplicação, bases de dados, configuração ou qualquer outra lógica necessária capturando variáveis (no caso de funções anónimas) ou usando injeção de dependência (no caso de objetos). O exemplo `hasPermission` acima demonstra isto claramente, provavelmente chamando um serviço de autorização nos bastidores.
+
+**Sobrescrita de funções nativas (opcional):** Você pode até definir uma função Latte com o mesmo nome de uma função PHP nativa. No template, a sua versão personalizada será chamada em vez da função original. Isto pode ser útil para fornecer comportamento específico do template ou garantir processamento consistente (por exemplo, garantir que `strlen` seja sempre seguro para multibyte). Use esta funcionalidade com cuidado para evitar mal-entendidos.
+
+Por padrão, o Latte permite a chamada de *todas* as funções PHP nativas (a menos que restringidas pelo [Sandbox |sandbox]). Funções personalizadas estendem esta biblioteca integrada com as necessidades específicas do seu projeto.
+
+Se você está apenas a transformar um único valor, pode ser mais apropriado usar um [filtro personalizado |custom-filters].
+
+
+Criando e registando funções
+============================
+
+Assim como nos filtros, existem várias maneiras de definir e registar funções personalizadas.
+
+
+Registo direto via `addFunction()`
+----------------------------------
+
+O método mais simples é usar `addFunction()` no objeto `Latte\Engine`. Você especifica o nome da função (como ela aparecerá no template) e o objeto PHP callable correspondente.
+
+```php
+$latte = new Latte\Engine;
+
+// Função auxiliar simples
+$latte->addFunction('initials', function (string $name): string {
+	preg_match_all('#\b\w#u', $name, $m);
+	return implode('. ', $m[0]) . '.';
+});
+```
+
+**Uso no template:**
+
+```latte
+{var $userInitials = initials($userName)}
+```
+
+Os argumentos da função no template são passados diretamente para o objeto PHP callable na mesma ordem. Funcionalidades PHP como dicas de tipo, valores padrão e parâmetros variáveis (`...`) funcionam como esperado.
+
+
+Registo via extensão
+--------------------
+
+Para melhor organização e reutilização, registe funções dentro de uma [extensão Latte |extending-latte#Latte Extension]. Esta abordagem é recomendada para aplicações mais complexas ou bibliotecas partilhadas.
+
+```php
+namespace App\Latte;
+
+use Latte\Extension;
+use Nette\Security\Authorizator;
+
+class MyLatteExtension extends Extension
+{
+	public function __construct(
+		// Assumindo que o serviço Authorizator existe
+		private Authorizator $authorizator,
+	) {
+	}
+
+	public function getFunctions(): array
+	{
+		// Registro de métodos como funções Latte
+		return [
+			'hasPermission' => $this->hasPermission(...),
+		];
+	}
+
+	public function hasPermission(string $resource, string $action): bool
+	{
+		return $this->authorizator->isAllowed($resource, $action);
+	}
+}
+
+// Registo (assumindo que $container contém o Contêiner DI)
+$extension = $container->getByType(App\Latte\MyLatteExtension::class);
+$latte = new Latte\Engine;
+$latte->addExtension($extension);
+```
+
+Esta abordagem ilustra como as funções definidas no Latte podem ser apoiadas por métodos de objetos, que podem ter as suas próprias dependências geridas pelo contêiner de injeção de dependência da sua aplicação ou por uma fábrica. Isto mantém a lógica dos seus templates conectada ao núcleo da aplicação, mantendo ao mesmo tempo uma organização clara.
+
+
+Funções usando uma classe com atributos
+---------------------------------------
+
+Assim como os filtros, as funções podem ser definidas como métodos na sua [classe de parâmetros do template |develop#Parâmetros como classe] usando o atributo `#[Latte\Attributes\TemplateFunction]`.
+
+```php
+use Latte\Attributes\TemplateFunction;
+
+class TemplateParameters
+{
+	public function __construct(
+		public string $userName,
+		// outros parâmetros...
+	) {}
+
+	// Este método estará disponível como {initials(...)} no template
+	#[TemplateFunction]
+	public function initials(string $name): string
+	{
+		preg_match_all('#\b\w#u', $name, $m);
+		return implode('. ', $m[0]) . '.';
+	}
+}
+
+// Passando o objeto para o template
+$params = new TemplateParameters(userName: 'John Doe', /* ... */);
+$latte->render('template.latte', $params);
+```
+
+O Latte descobrirá e registará automaticamente os métodos marcados com este atributo quando o objeto de parâmetros for passado para o template. O nome da função no template corresponde ao nome do método.
+
+```latte
+{* Usando a função definida na classe de parâmetros *}
+{var $inits = initials($userName)}
+```
+
+**Funções contextuais?**
+
+Ao contrário dos filtros, não existe um conceito direto de "funções contextuais" que receberiam um objeto semelhante a `FilterInfo`. As funções operam dentro de expressões e normalmente não precisam de acesso direto ao contexto de renderização ou informações de tipo de conteúdo da mesma forma que os filtros aplicados a blocos.

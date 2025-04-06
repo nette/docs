@@ -1,0 +1,198 @@
+ローダー
+****
+
+.[perex]
+ローダーは、Latteがテンプレートのソースコードを取得するために使用するメカニズムです。最も一般的には、テンプレートはディスク上のファイルとして保存されますが、柔軟なローダーシステムのおかげで、事実上どこからでもロードしたり、動的に生成したりすることもできます。
+
+
+ローダーとは？
+=======
+
+テンプレートを扱うとき、通常はプロジェクトのディレクトリ構造に配置された `.latte` ファイルを想像します。これはLatteのデフォルトの [#FileLoader] が担当します。しかし、テンプレート名（`'main.latte'` や `'components/card.latte'` など）とその実際のソースコードとの間の接続は、*必ずしも*ファイルパスへの直接的なマッピングである必要はありません。
+
+ここでローダーが登場します。ローダーは、テンプレート名（識別文字列）を受け取り、Latteにそのソースコードを提供する責任を持つオブジェクトです。Latteはこのタスクのために設定されたローダーに完全に依存します。これは、`$latte->render('main.latte')` で要求された最初のテンプレートだけでなく、`{include ...}`、`{layout ...}`、`{embed ...}`、`{import ...}` のようなタグを使用して **内部で参照されるすべてのテンプレート** にも適用されます。
+
+なぜカスタムローダーを使用するのですか？
+
+- **代替ソースからの読み込み:** データベース、キャッシュ（RedisやMemcachedなど）、バージョン管理システム（特定のコミットに基づくGitなど）に保存されているテンプレート、または動的に生成されたテンプレートを取得します。
+- **カスタム命名規則の実装:** テンプレートに短いエイリアスを使用したり、特定の検索パスロジック（例：最初にテーマディレクトリを検索し、次にデフォルトディレクトリにフォールバックする）を実装したりすることができます。
+- **セキュリティまたはアクセス制御の追加:** カスタムローダーは、特定のテンプレートをロードする前にユーザー権限を検証できます。
+- **前処理:** 一般的には推奨されませんが（[コンパイルパス |compiler-passes] の方が優れています）、ローダーは理論的にはテンプレートコンテンツをLatteに渡す前に前処理する *可能性* があります。
+
+`Latte\Engine` インスタンスのローダーは `setLoader()` メソッドを使用して設定します：
+
+```php
+$latte = new Latte\Engine;
+
+// '/path/to/templates' 内のファイルにデフォルトの FileLoader を使用
+$loader = new Latte\Loaders\FileLoader('/path/to/templates');
+$latte->setLoader($loader);
+```
+
+ローダーは `Latte\Loader` インターフェースを実装する必要があります。
+
+
+組み込みローダー
+========
+
+Latteはいくつかの標準ローダーを提供します：
+
+
+FileLoader
+----------
+
+これは、他に指定されていない場合に `Latte\Engine` クラスで使用される **デフォルトのローダー** です。ファイルシステムから直接テンプレートをロードします。
+
+オプションで、アクセスを制限するためにルートディレクトリを設定できます：
+
+```php
+use Latte\Loaders\FileLoader;
+
+// 以下は /var/www/html/templates ディレクトリからのみテンプレートのロードを許可します
+$loader = new FileLoader('/var/www/html/templates');
+$latte->setLoader($loader);
+
+// $latte->render('../../../etc/passwd'); // これは例外をスローします
+
+// /var/www/html/templates/pages/contact.latte にあるテンプレートをレンダリング
+$latte->render('pages/contact.latte');
+```
+
+`{include}` や `{layout}` のようなタグを使用する場合、絶対パスが指定されていない限り、現在のテンプレートからの相対パスでテンプレート名を解決します。
+
+
+StringLoader
+------------
+
+このローダーは、キーがテンプレート名（識別子）、値がテンプレートソースコード文字列である連想配列からテンプレートコンテンツを取得します。テストや、テンプレートがPHPコード内に直接保存される可能性のある小規模なアプリケーションに特に役立ちます。
+
+```php
+use Latte\Loaders\StringLoader;
+
+$loader = new StringLoader([
+	'main.latte' => 'Hello {$name}, include is below:{include helper.latte}',
+	'helper.latte' => '{var $x = 10}Included content: {$x}',
+	// 必要に応じて他のテンプレートを追加
+]);
+
+$latte->setLoader($loader);
+
+$latte->render('main.latte', ['name' => 'World']);
+// 出力: Hello World, include is below:Included content: 10
+```
+
+他の名前付き文字列テンプレートを参照するインクルードや継承を必要とせずに、文字列から直接1つのテンプレートのみをレンダリングする必要がある場合は、配列なしで `StringLoader` を使用するときに `render()` または `renderToString()` メソッドに文字列を直接渡すことができます：
+
+```php
+$loader = new StringLoader;
+$latte->setLoader($loader);
+
+$templateString = 'Hello {$name}!';
+$output = $latte->renderToString($templateString, ['name' => 'Alice']);
+// $output には 'Hello Alice!' が含まれます
+```
+
+
+カスタムローダーの作成
+===========
+
+カスタムローダー（例：データベース、キャッシュ、バージョン管理システム、または他のソースからテンプレートをロードするため）を作成するには、[api:Latte\Loader] インターフェースを実装するクラスを作成する必要があります。
+
+各メソッドが何をする必要があるかを見てみましょう。
+
+
+getContent(string $name): string .[method]
+------------------------------------------
+これはローダーのコアメソッドです。その仕事は、`$name`（`$latte->render()` メソッドに渡されるか、[#getReferredName()] メソッドによって返される）によって識別されるテンプレートの完全なソースコードを取得して返すことです。
+
+テンプレートが見つからないかアクセスできない場合、このメソッドは **`Latte\RuntimeException` 例外をスローする必要があります**。
+
+```php
+public function getContent(string $name): string
+{
+	// 例：仮説的な内部ストレージからの読み込み
+	$content = $this->storage->read($name);
+	if ($content === null) {
+		throw new Latte\RuntimeException("Template '$name' cannot be loaded.");
+	}
+	return $content;
+}
+```
+
+
+getReferredName(string $name, string $referringName): string .[method]
+----------------------------------------------------------------------
+このメソッドは、`{include}`、`{layout}` などのタグ内で使用されるテンプレート名の解決を処理します。Latteが `main.latte` 内で `{include 'partial.latte'}` などに遭遇すると、`$name = 'partial.latte'` および `$referringName = 'main.latte'` でこのメソッドを呼び出します。
+
+メソッドの仕事は、`$referringName` で提供されるコンテキストに基づいて、`$name` を他のローダーメソッドを呼び出すときに使用される正規の識別子（例：絶対パス、一意のデータベースキー）に解決することです。
+
+```php
+public function getReferredName(string $name, string $referringName): string
+{
+	return ...;
+}
+```
+
+
+getUniqueId(string $name): string .[method]
+-------------------------------------------
+Latteはパフォーマンス向上のためにコンパイル済みテンプレートキャッシュを使用します。各コンパイル済みテンプレートファイルには、ソーステンプレート識別子から派生した一意の名前が必要です。このメソッドは、テンプレート `$name` を **一意に識別する** 文字列を提供します。
+
+ファイルベースのテンプレートの場合、絶対パスが役立ちます。データベース内のテンプレートの場合、プレフィックスとデータベースIDの組み合わせが一般的です。
+
+```php
+public function getUniqueId(string $name): string
+{
+	return ...;
+}
+```
+
+
+例：シンプルなデータベースローダー
+-----------------
+
+この例は、`templates` という名前のデータベーステーブル（列 `name`（一意の識別子）、`content`、`updated_at` を持つ）に保存されているテンプレートをロードするローダーの基本的な構造を示しています。
+
+```php
+use Latte;
+
+class DatabaseLoader implements Latte\Loader
+{
+	public function __construct(
+		private \PDO $db,
+	) {
+	}
+
+	public function getContent(string $name): string
+	{
+		$stmt = $this->db->prepare('SELECT content FROM templates WHERE name = ?');
+		$stmt->execute([$name]);
+		$content = $stmt->fetchColumn();
+		if ($content === false) {
+			throw new Latte\RuntimeException("Template '$name' not found in database.");
+		}
+		return $content;
+	}
+
+	// この単純な例では、テンプレート名（'homepage'、'article'など）が
+	// 一意のIDであり、テンプレートが互いに相対的に参照しないと仮定します。
+	public function getReferredName(string $name, string $referringName): string
+	{
+		return $name;
+	}
+
+	public function getUniqueId(string $name): string
+	{
+		// ここではプレフィックスと名前自体を使用するのが一意で十分です
+		return 'db_' . $name;
+	}
+}
+
+// 使用法：
+$pdo = new \PDO(/* 接続詳細 */);
+$loader = new DatabaseLoader($pdo);
+$latte->setLoader($loader);
+$latte->render('homepage'); // DBから 'homepage' という名前のテンプレートをロードします
+```
+
+カスタムローダーを使用すると、Latteテンプレートの取得元を完全に制御でき、さまざまなストレージシステムやワークフローとの統合が可能になります。

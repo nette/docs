@@ -1,0 +1,555 @@
+Przebiegi kompilacji
+********************
+
+.[perex]
+Przebiegi kompilacji stanowią potężny mechanizm do analizy i modyfikacji szablonów Latte *po* ich sparsowaniu do abstrakcyjnego drzewa składni (AST) i *przed* wygenerowaniem ostatecznego kodu PHP. Umożliwia to zaawansowaną manipulację szablonami, optymalizacje, kontrole bezpieczeństwa (takie jak Sandbox) oraz zbieranie informacji o szablonach. Ten przewodnik poprowadzi Cię przez tworzenie własnych przebiegów kompilacji.
+
+
+Co to jest przebieg kompilacji?
+===============================
+
+Aby zrozumieć rolę przebiegów kompilacji, spójrz na [proces kompilacji Latte |custom-tags#Zrozumienie procesu kompilacji]. Jak możesz zobaczyć, przebiegi kompilacji działają w kluczowej fazie, umożliwiając głęboką interwencję między początkowym parsowaniem a ostatecznym wyjściem kodu.
+
+W istocie przebieg kompilacji to po prostu PHP callable (jak funkcja, metoda statyczna lub metoda instancji), który przyjmuje jeden argument: korzeniowy węzeł AST szablonu, który jest zawsze instancją `Latte\Compiler\Nodes\TemplateNode`.
+
+Głównym celem przebiegu kompilacji jest zwykle jeden lub oba z poniższych:
+
+- Analiza: Przechodzenie przez AST i zbieranie informacji o szablonie (np. znalezienie wszystkich zdefiniowanych bloków, sprawdzenie użycia specyficznych tagów, zapewnienie spełnienia określonych ograniczeń bezpieczeństwa).
+- Modyfikacja: Zmiana struktury AST lub atrybutów węzłów (np. automatyczne dodawanie atrybutów HTML, optymalizacja określonych kombinacji tagów, zastępowanie przestarzałych tagów nowymi, implementacja zasad sandboxu).
+
+
+Rejestracja
+===========
+
+Przebiegi kompilacji są rejestrowane za pomocą metody [rozszerzenia |extending-latte#getPasses] `getPasses()`. Ta metoda zwraca tablicę asocjacyjną, gdzie klucze są unikalnymi nazwami przebiegów (używanymi wewnętrznie i do sortowania), a wartości to PHP callable implementujące logikę przebiegu.
+
+```php
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Extension;
+
+class MyExtension extends Extension
+{
+	public function getPasses(): array
+	{
+		return [
+			'modificationPass' => $this->modifyTemplateAst(...),
+			// ... inne przebiegi ...
+		];
+	}
+
+	public function modifyTemplateAst(TemplateNode $templateNode): void
+	{
+		// Implementacja...
+	}
+}
+```
+
+Przebiegi zarejestrowane przez podstawowe rozszerzenia Latte i Twoje własne rozszerzenia są uruchamiane sekwencyjnie. Kolejność może być ważna, szczególnie jeśli jeden przebieg zależy od wyników lub modyfikacji innego. Latte dostarcza pomocniczy mechanizm kontroli tej kolejności, jeśli jest to potrzebne; zobacz dokumentację [`Extension::getPasses()` |extending-latte#getPasses] dla szczegółów.
+
+
+Przykład AST
+============
+
+Dla lepszego wyobrażenia o AST, dodajemy przykład. To jest szablon źródłowy:
+
+```latte
+{foreach $category->getItems() as $item}
+	<li>{$item->name|upper}</li>
+	{else}
+	nie znaleziono elementów
+{/foreach}
+```
+
+A to jest jego reprezentacja w formie AST:
+
+/--pre
+Latte\Compiler\Nodes\<b>TemplateNode</b>(
+   Latte\Compiler\Nodes\<b>FragmentNode</b>(
+      - Latte\Essential\Nodes\<b>ForeachNode</b>(
+           expression: Latte\Compiler\Nodes\Php\Expression\<b>MethodCallNode</b>(
+              object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$category')
+              name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('getItems')
+           )
+           value: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+           content: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+              - Latte\Compiler\Nodes\<b>TextNode</b>('  ')
+              - Latte\Compiler\Nodes\<b>Html\ElementNode</b>('li')(
+                   content: Latte\Essential\Nodes\<b>PrintNode</b>(
+                      expression: Latte\Compiler\Nodes\Php\Expression\<b>PropertyFetchNode</b>(
+                         object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+                         name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('name')
+                      )
+                      modifier: Latte\Compiler\Nodes\Php\<b>ModifierNode</b>(
+                         filters:
+                            - Latte\Compiler\Nodes\Php\<b>FilterNode</b>('upper')
+                      )
+                   )
+                )
+            )
+            else: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+               - Latte\Compiler\Nodes\<b>TextNode</b>('nie znaleziono elementów')
+            )
+        )
+   )
+)
+\--
+
+
+Przechodzenie przez AST za pomocą `NodeTraverser`
+=================================================
+
+Ręczne pisanie rekurencyjnych funkcji do przechodzenia przez złożoną strukturę AST jest męczące i podatne na błędy. Latte dostarcza specjalne narzędzie do tego celu: [api:Latte\Compiler\NodeTraverser]. Ta klasa implementuje [wzorzec projektowy Visitor |https://en.wikipedia.org/wiki/Visitor_pattern], dzięki któremu przechodzenie przez AST jest systematyczne i łatwe do opanowania.
+
+Podstawowe użycie obejmuje utworzenie instancji `NodeTraverser` i wywołanie jej metody `traverse()`, przekazanie korzeniowego węzła AST i jednego lub dwóch "visitor" callable:
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+
+(new NodeTraverser)->traverse(
+	$templateNode,
+
+	// 'enter' visitor: Wywoływany przy wejściu do węzła (przed jego dziećmi)
+	enter: function (Node $node) {
+		echo "Wejście do węzła typu: " . $node::class . "\n";
+		// Tutaj możesz badać węzeł
+		if ($node instanceof Nodes\TextNode) {
+			// echo "Znaleziono tekst: " . $node->content . "\n";
+		}
+	},
+
+	// 'leave' visitor: Wywoływany przy opuszczeniu węzła (po jego dzieciach)
+	leave: function (Node $node) {
+		echo "Opuszczenie węzła typu: " . $node::class . "\n";
+		// Tutaj możesz wykonywać akcje po przetworzeniu dzieci
+	},
+);
+```
+
+Możesz dostarczyć tylko visitor `enter`, tylko visitor `leave` lub oba, w zależności od Twoich potrzeb.
+
+**`enter(Node $node)`:** Ta funkcja jest wykonywana dla każdego węzła **przed** tym, jak przechodzący odwiedzi którekolwiek z dzieci tego węzła. Jest przydatna do:
+
+- Zbierania informacji podczas przechodzenia przez drzewo w dół.
+- Podejmowania decyzji *przed* przetworzeniem dzieci (jak decyzja o ich pominięciu, zobacz [#Optymalizacja przechodzenia]).
+- Potencjalnej modyfikacji węzła przed odwiedzeniem dzieci (rzadziej).
+
+**`leave(Node $node)`:** Ta funkcja jest wykonywana dla każdego węzła **po** tym, jak wszystkie jego dzieci (i ich całe poddrzewa) zostały w pełni odwiedzone (zarówno wejście, jak i opuszczenie). Jest to najczęstsze miejsce dla:
+
+Oba visitory `enter` i `leave` mogą opcjonalnie zwracać wartość w celu wpływu na proces przechodzenia. Zwrócenie `null` (lub niczego) kontynuuje przechodzenie normalnie, zwrócenie instancji `Node` zastępuje bieżący węzeł, a zwrócenie specjalnych stałych takich jak `NodeTraverser::RemoveNode` lub `NodeTraverser::StopTraversal` modyfikuje przepływ, jak wyjaśniono w kolejnych sekcjach.
+
+
+Jak działa przechodzenie
+------------------------
+
+`NodeTraverser` wewnętrznie używa metody `getIterator()`, którą musi implementować każda klasa `Node` (jak omówiono w [Tworzenie własnych tagów |custom-tags#Implementacja getIterator dla podwęzłów]). Iteruje przez dzieci uzyskane za pomocą `getIterator()`, rekurencyjnie wywołuje na nich `traverse()` i zapewnia, że visitory `enter` i `leave` są wywoływane w prawidłowej kolejności wgłąb (depth-first) dla każdego węzła w drzewie dostępnego przez iteratory. To ponownie podkreśla, dlaczego prawidłowo zaimplementowany `getIterator()` w Twoich własnych węzłach tagów jest absolutnie niezbędny do prawidłowego działania przebiegów kompilacji.
+
+Napiszmy prosty przebieg, który liczy, ile razy w szablonie użyty jest tag `{do}` (reprezentowany przez `Latte\Essential\Nodes\DoNode`).
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\DoNode;
+
+function countDoTags(TemplateNode $templateNode): void
+{
+	$count = 0;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use (&$count): void {
+			if ($node instanceof DoNode) {
+				$count++;
+			}
+		},
+		// visitor 'leave' nie jest potrzebny do tego zadania
+	);
+
+	echo "Znaleziono tag {do} $count razy.\n";
+}
+
+$latte = new Latte\Engine;
+$ast = $latte->parse($templateSource);
+countDoTags($ast);
+```
+
+W tym przykładzie potrzebowaliśmy tylko visitora `enter`, aby sprawdzić typ każdego odwiedzanego węzła.
+
+Następnie zbadamy, jak te visitory faktycznie modyfikują AST.
+
+
+Modyfikacja AST
+===============
+
+Jednym z głównych celów przebiegów kompilacji jest modyfikacja abstrakcyjnego drzewa składni. Umożliwia to potężne transformacje, optymalizacje lub wymuszanie reguł bezpośrednio na strukturze szablonu przed generowaniem kodu PHP. `NodeTraverser` dostarcza kilka sposobów, jak to osiągnąć w ramach visitorów `enter` i `leave`.
+
+**Ważna uwaga:** Modyfikacja AST wymaga ostrożności. Nieprawidłowe zmiany – jak usunięcie podstawowych węzłów lub zastąpienie węzła niekompatybilnym typem – mogą prowadzić do błędów podczas generowania kodu lub spowodować nieoczekiwane zachowanie podczas działania programu. Zawsze dokładnie testuj swoje przebiegi modyfikacyjne.
+
+
+Zmiana właściwości węzłów
+-------------------------
+
+Najprostszym sposobem modyfikacji drzewa jest bezpośrednia zmiana **publicznych właściwości** węzłów odwiedzanych podczas przechodzenia. Wszystkie węzły przechowują swoje sparsowane argumenty, zawartość lub atrybuty w publicznych właściwościach.
+
+**Przykład:** Stwórzmy przebieg, który znajduje wszystkie statyczne węzły tekstowe (`TextNode`, reprezentujące zwykły HTML lub tekst poza tagami Latte) i konwertuje ich zawartość na wielkie litery *bezpośrednio w AST*.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\TextNode;
+
+function uppercaseStaticText(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Możemy użyć 'enter', ponieważ TextNode nie ma żadnych dzieci do przetworzenia
+		enter: function (Node $node) {
+			// Czy ten węzeł jest statycznym blokiem tekstowym?
+			if ($node instanceof TextNode) {
+				// Tak! Bezpośrednio modyfikujemy jego publiczną właściwość 'content'.
+				$node->content = mb_strtoupper(html_entity_decode($node->content));
+			}
+			// Nie ma potrzeby niczego zwracać; zmiana jest stosowana bezpośrednio.
+		},
+	);
+}
+```
+
+W tym przykładzie visitor `enter` sprawdza, czy bieżący `$node` jest typu `TextNode`. Jeśli tak, bezpośrednio aktualizujemy jego publiczną właściwość `$content` za pomocą `mb_strtoupper()`. To bezpośrednio zmienia zawartość statycznego tekstu przechowywanego w AST *przed* generowaniem kodu PHP. Ponieważ modyfikujemy obiekt bezpośrednio, nie musimy niczego zwracać z visitora.
+
+Efekt: Jeśli szablon zawierał `<p>Witaj</p>{= $var }<span>Świecie</span>`, po tym przebiegu AST będzie reprezentować coś w rodzaju: `<p>WITAJ</p>{= $var }<span>ŚWIECIE</span>`. To NIE WPŁYNIE na zawartość $var.
+
+
+Zastępowanie węzłów
+-------------------
+
+Potężniejszą techniką modyfikacji jest całkowite zastąpienie węzła innym. Robi się to przez **zwrócenie nowej instancji `Node`** z visitora `enter` lub `leave`. `NodeTraverser` następnie zastępuje oryginalny węzeł zwróconym w strukturze węzła nadrzędnego.
+
+**Przykład:** Stwórzmy przebieg, który znajduje wszystkie użycia stałej `PHP_VERSION` (reprezentowanej przez `ConstantFetchNode`) i zastępuje je bezpośrednio literałem ciągu znaków (`StringNode`) zawierającym *rzeczywistą* wersję PHP wykrytą *podczas kompilacji*. Jest to forma optymalizacji w czasie kompilacji.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\Php\Expression\ConstantFetchNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+
+function inlinePhpVersion(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// 'leave' jest często używany do zastępowania, zapewnia, że dzieci (jeśli istnieją)
+		// są przetwarzane najpierw, chociaż tutaj działałby również 'enter'.
+		leave: function (Node $node) {
+			// Czy ten węzeł jest dostępem do stałej i nazwa stałej to 'PHP_VERSION'?
+			if ($node instanceof ConstantFetchNode && (string) $node->name === 'PHP_VERSION') {
+				// Tworzymy nowy StringNode zawierający aktualną wersję PHP
+				$newNode = new StringNode(PHP_VERSION);
+
+				// Opcjonalne, ale dobra praktyka: kopiujemy informacje o pozycji
+				$newNode->position = $node->position;
+
+				// Zwracamy nowy StringNode. Traverser zastąpi
+				// oryginalny ConstantFetchNode tym $newNode.
+				return $newNode;
+			}
+			// Jeśli nie zwrócimy Node, oryginalny $node jest zachowany.
+		},
+	);
+}
+```
+
+Tutaj visitor `leave` identyfikuje specyficzny `ConstantFetchNode` dla `PHP_VERSION`. Następnie tworzy całkowicie nowy `StringNode` zawierający wartość stałej `PHP_VERSION` *w czasie kompilacji*. Zwracając ten `$newNode`, mówi traverserowi, aby zastąpił oryginalny `ConstantFetchNode` w AST.
+
+Efekt: Jeśli szablon zawierał `{= PHP_VERSION }` i kompilacja przebiega na PHP 8.2.1, AST po tym przebiegu będzie efektywnie reprezentować `{= '8.2.1' }`.
+
+**Wybór `enter` vs. `leave` do zastąpienia:**
+
+- Użyj `leave`, jeśli utworzenie nowego węzła zależy od wyników przetwarzania dzieci starego węzła, lub jeśli chcesz po prostu zapewnić, że dzieci zostały odwiedzone przed zastąpieniem (powszechna praktyka).
+- Użyj `enter`, jeśli chcesz zastąpić węzeł *przed* tym, jak jego dzieci zostaną w ogóle odwiedzone.
+
+
+Usuwanie węzłów
+---------------
+
+Możesz całkowicie usunąć węzeł z AST, zwracając specjalną stałą `NodeTraverser::RemoveNode` z visitora.
+
+**Przykład:** Usuńmy wszystkie komentarze szablonu (`{* ... *}`), które są reprezentowane przez `CommentNode` w AST generowanym przez rdzeń Latte (chociaż typowo przetwarzane wcześniej, to służy jako przykład).
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\CommentNode;
+
+function removeCommentNodes(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// 'enter' jest tutaj w porządku, ponieważ nie potrzebujemy informacji o dzieciach do usunięcia komentarza
+		enter: function (Node $node) {
+			if ($node instanceof CommentNode) {
+				// Sygnalizujemy traverserowi, aby usunął ten węzeł z AST
+				return NodeTraverser::RemoveNode;
+			}
+		},
+	);
+}
+```
+
+**Ostrzeżenie:** Używaj `RemoveNode` ostrożnie. Usunięcie węzła, który zawiera podstawową zawartość lub wpływa na strukturę (jak usunięcie węzła zawartości pętli), może prowadzić do uszkodzonych szablonów lub nieprawidłowego wygenerowanego kodu. Najbezpieczniejsze jest dla węzłów, które są rzeczywiście opcjonalne lub samodzielne (jak komentarze lub tagi debugowania) lub dla pustych węzłów strukturalnych (np. pusty `FragmentNode` może być w niektórych kontekstach bezpiecznie usunięty przez przebieg czyszczący).
+
+Te trzy metody - modyfikacja właściwości, zastępowanie węzłów i usuwanie węzłów - stanowią podstawowe narzędzia do manipulacji AST w ramach Twoich przebiegów kompilacji.
+
+
+Optymalizacja przechodzenia
+===========================
+
+AST szablonów może być dość duży, potencjalnie zawierając tysiące węzłów. Przechodzenie przez każdy pojedynczy węzeł może być niepotrzebne i wpływać na wydajność kompilacji, jeśli Twój przebieg interesuje się tylko specyficznymi częściami drzewa. `NodeTraverser` oferuje sposoby optymalizacji przechodzenia:
+
+
+Pomijanie dzieci
+----------------
+
+Jeśli wiesz, że gdy napotkasz określony typ węzła, żaden z jego potomków nie może zawierać węzłów, których szukasz, możesz powiedzieć traverserowi, aby pominął odwiedzanie jego dzieci. Robi się to przez zwrócenie stałej `NodeTraverser::DontTraverseChildren` z visitora **`enter`**. W ten sposób pomijasz całe gałęzie podczas przechodzenia, co potencjalnie oszczędza znaczący czas, zwłaszcza w szablonach ze złożonymi wyrażeniami PHP wewnątrz tagów.
+
+
+Zatrzymanie przechodzenia
+-------------------------
+
+Jeśli Twój przebieg potrzebuje znaleźć tylko *pierwsze* wystąpienie czegoś (specyficzny typ węzła, spełnienie warunku), możesz całkowicie zatrzymać cały proces przechodzenia, gdy tylko to znajdziesz. Osiąga się to przez zwrócenie stałej `NodeTraverser::StopTraversal` z visitora `enter` lub `leave`. Metoda `traverse()` przestanie odwiedzać jakiekolwiek dalsze węzły. Jest to bardzo efektywne, jeśli potrzebujesz tylko pierwszego dopasowania w potencjalnie bardzo dużym drzewie.
+
+
+Użyteczny pomocnik `NodeHelpers`
+================================
+
+Podczas gdy `NodeTraverser` oferuje precyzyjną kontrolę, Latte dostarcza również praktyczną klasę pomocniczą, [api:Latte\Compiler\NodeHelpers], która enkapsuluje `NodeTraverser` dla kilku typowych zadań wyszukiwania i analizy, często wymagając mniej kodu przygotowawczego.
+
+
+find(Node $startNode, callable $filter): array .[method]
+--------------------------------------------------------
+
+Ta metoda statyczna znajduje **wszystkie** węzły w poddrzewie zaczynającym się od `$startNode` (włącznie), które spełniają callback `$filter`. Zwraca tablicę pasujących węzłów.
+
+**Przykład:** Znajdź wszystkie węzły zmiennych (`VariableNode`) w całym szablonie.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\Expression\VariableNode;
+use Latte\Compiler\Nodes\TemplateNode;
+
+function findAllVariables(TemplateNode $templateNode): array
+{
+	return NodeHelpers::find(
+		$templateNode,
+		fn($node) => $node instanceof VariableNode,
+	);
+}
+```
+
+
+findFirst(Node $startNode, callable $filter): ?Node  .[method]
+--------------------------------------------------------------
+
+Podobne do `find`, ale zatrzymuje przechodzenie natychmiast po znalezieniu **pierwszego** węzła, który spełnia callback `$filter`. Zwraca znaleziony obiekt `Node` lub `null`, jeśli nie znaleziono żadnego pasującego węzła. Jest to w zasadzie praktyczne opakowanie wokół `NodeTraverser::StopTraversal`.
+
+**Przykład:** Znajdź węzeł `{parameters}` (to samo co ręczny przykład wcześniej, ale krócej).
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\ParametersNode;
+
+function findParametersNodeHelper(TemplateNode $templateNode): ?ParametersNode
+{
+	return NodeHelpers::findFirst(
+		$templateNode->head, // Szukaj tylko w głównej sekcji dla efektywności
+		fn($node) => $node instanceof ParametersNode,
+	);
+}
+```
+
+
+toValue(ExpressionNode $node, bool $constants = false): mixed .[method]
+-----------------------------------------------------------------------
+
+Ta metoda statyczna próbuje wyewaluować `ExpressionNode` **w czasie kompilacji** i zwrócić jego odpowiadającą wartość PHP. Działa niezawodnie tylko dla prostych węzłów literalnych (`StringNode`, `IntegerNode`, `FloatNode`, `BooleanNode`, `NullNode`) oraz instancji `ArrayNode` zawierających tylko takie ewaluowalne elementy.
+
+Jeśli `$constants` jest ustawione na `true`, będzie również próbować rozwiązać `ConstantFetchNode` i `ClassConstantFetchNode`, sprawdzając `defined()` i używając `constant()`.
+
+Jeśli węzeł zawiera zmienne, wywołania funkcji lub inne dynamiczne elementy, nie może być wyewaluowany w czasie kompilacji, a metoda rzuci `InvalidArgumentException`.
+
+**Przypadek użycia:** Uzyskanie statycznej wartości argumentu tagu podczas kompilacji do podejmowania decyzji w czasie kompilacji.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+
+function getStaticStringArgument(ExpressionNode $argumentNode): ?string
+{
+	try {
+		$value = NodeHelpers::toValue($argumentNode);
+		return is_string($value) ? $value : null;
+	} catch (\InvalidArgumentException $e) {
+		// Argument nie był statycznym literałem ciągu znaków
+		return null;
+	}
+}
+```
+
+
+toText(?Node $node): ?string .[method]
+--------------------------------------
+
+Ta metoda statyczna jest przydatna do ekstrakcji zwykłego tekstu z prostych węzłów. Działa głównie z:
+- `TextNode`: Zwraca jego `$content`.
+- `FragmentNode`: Konkatenuje wynik `toText()` dla wszystkich jego dzieci. Jeśli któreś dziecko nie jest konwertowalne na tekst (np. zawiera `PrintNode`), zwraca `null`.
+- `NopNode`: Zwraca pusty ciąg znaków.
+- Inne typy węzłów: Zwraca `null`.
+
+**Przypadek użycia:** Uzyskanie statycznej zawartości tekstowej wartości atrybutu HTML lub prostego elementu HTML do analizy podczas przebiegu kompilacji.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Html\AttributeNode;
+
+function getStaticAttributeValue(AttributeNode $attr): ?string
+{
+	// $attr->value jest zazwyczaj AreaNode (jak FragmentNode lub TextNode)
+	return NodeHelpers::toText($attr->value);
+}
+
+// Przykład użycia w przebiegu:
+// if ($node instanceof Html\ElementNode && $node->name === 'meta') {
+//     $nameAttrValue = getStaticAttributeValue($node->getAttributeNode('name'));
+//     if ($nameAttrValue === 'description') { ... }
+// }
+```
+
+`NodeHelpers` może uprościć Twoje przebiegi kompilacji, dostarczając gotowych rozwiązań dla typowych zadań przechodzenia i analizy AST.
+
+
+Praktyczne przykłady
+====================
+
+Zastosujmy koncepcje przechodzenia i modyfikacji AST do rozwiązania niektórych praktycznych problemów. Te przykłady demonstrują typowe wzorce używane w przebiegach kompilacji.
+
+
+Automatyczne dodawanie `loading="lazy"` do `<img>`
+--------------------------------------------------
+
+Nowoczesne przeglądarki obsługują natywne leniwe ładowanie obrazów za pomocą atrybutu `loading="lazy"`. Stwórzmy przebieg, który automatycznie dodaje ten atrybut do wszystkich tagów `<img>`, które jeszcze nie mają atrybutu `loading`.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Html;
+
+function addLazyLoading(Nodes\TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Możemy użyć 'enter', ponieważ modyfikujemy węzeł bezpośrednio
+		// i nie zależy to od dzieci dla tej decyzji.
+		enter: function (Node $node) {
+			// Czy to element HTML o nazwie 'img'?
+			if ($node instanceof Html\ElementNode && $node->name === 'img') {
+				// Upewniamy się, że węzeł atrybutów istnieje
+				$node->attributes ??= new Nodes\FragmentNode;
+
+				// Sprawdzamy, czy już istnieje atrybut 'loading' (bez względu na wielkość liter)
+				foreach ($node->attributes->children as $attrNode) {
+					if ($attrNode instanceof Html\AttributeNode
+						&& $attrNode->name instanceof Nodes\TextNode // Statyczna nazwa atrybutu
+						&& strtolower($attrNode->name->content) === 'loading'
+					) {
+						return;
+					}
+				}
+
+				// Dołączamy spację, jeśli atrybuty nie są puste
+				if ($node->attributes->children) {
+					$node->attributes->children[] = new Nodes\TextNode(' ');
+				}
+
+				// Tworzymy nowy węzeł atrybutu: loading="lazy"
+				$node->attributes->children[] = new Html\AttributeNode(
+					name: new Nodes\TextNode('loading'),
+					value: new Nodes\TextNode('lazy'),
+					quote: '"',
+				);
+				// Zmiana jest stosowana bezpośrednio w obiekcie, nie trzeba niczego zwracać.
+			}
+		},
+	);
+}
+```
+
+Wyjaśnienie:
+- Visitor `enter` szuka węzłów `Html\ElementNode` o nazwie `img`.
+- Iteruje przez istniejące atrybuty (`$node->attributes->children`) i sprawdza, czy atrybut `loading` jest już obecny.
+- Jeśli nie jest znaleziony, tworzy nowy `Html\AttributeNode` reprezentujący `loading="lazy"`.
+
+
+Sprawdzanie wywołań funkcji
+---------------------------
+
+Przebiegi kompilacji są podstawą Latte Sandbox. Chociaż prawdziwy Sandbox jest zaawansowany, możemy zademonstrować podstawową zasadę sprawdzania zabronionych wywołań funkcji.
+
+**Cel:** Zapobieganie użyciu potencjalnie niebezpiecznej funkcji `shell_exec` wewnątrz wyrażeń szablonu.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Php;
+use Latte\SecurityViolationException;
+
+function checkForbiddenFunctions(Nodes\TemplateNode $templateNode): void
+{
+	$forbiddenFunctions = ['shell_exec' => true, 'exec' => true]; // Prosta lista
+
+	$traverser = new NodeTraverser;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use ($forbiddenFunctions) {
+			// Czy to węzeł bezpośredniego wywołania funkcji?
+			if ($node instanceof Php\Expression\FunctionCallNode
+				&& $node->name instanceof Php\NameNode
+				&& isset($forbiddenFunctions[strtolower((string) $node->name)])
+			) {
+				throw new SecurityViolationException(
+					"Funkcja {$node->name}() nie jest dozwolona.",
+					$node->position,
+				);
+			}
+		},
+	);
+}
+```
+
+Wyjaśnienie:
+- Definiujemy listę zabronionych nazw funkcji.
+- Visitor `enter` sprawdza `FunctionCallNode`.
+- Jeśli nazwa funkcji (`$node->name`) jest statycznym `NameNode`, sprawdzamy jej reprezentację tekstową w małych literach w naszej zabronionej liście.
+- Jeśli zostanie znaleziona zabroniona funkcja, rzucamy `Latte\SecurityViolationException`, która jasno wskazuje naruszenie reguły bezpieczeństwa i zatrzymuje kompilację.
+
+Te przykłady pokazują, jak przebiegi kompilacji z użyciem `NodeTraverser` mogą być wykorzystane do analizy, automatycznych modyfikacji i egzekwowania ograniczeń bezpieczeństwa poprzez interakcję bezpośrednio ze strukturą AST szablonu.
+
+
+Dobre praktyki
+==============
+
+Podczas pisania przebiegów kompilacji pamiętaj o tych wytycznych, aby tworzyć solidne, łatwe w utrzymaniu i efektywne rozszerzenia:
+
+- **Kolejność ma znaczenie:** Bądź świadomy kolejności, w jakiej przebiegają przebiegi. Jeśli Twój przebieg zależy od struktury AST utworzonej przez inny przebieg (np. podstawowe przebiegi Latte lub inny własny przebieg), lub jeśli inne przebiegi mogą zależeć od Twoich modyfikacji, użyj mechanizmu sortowania dostarczanego przez `Extension::getPasses()` do definiowania zależności (`before`/`after`). Zobacz dokumentację [`Extension::getPasses()` |extending-latte#getPasses] dla szczegółów.
+- **Pojedyncza odpowiedzialność:** Dąż do przebiegów, które wykonują jedno dobrze zdefiniowane zadanie. Dla złożonych transformacji rozważ podzielenie logiki na wiele przebiegów – być może jeden do analizy i drugi do modyfikacji opartej na wynikach analizy. To poprawia przejrzystość i testowalność.
+- **Wydajność:** Pamiętaj, że przebiegi kompilacji wydłużają czas kompilacji szablonu (chociaż zazwyczaj dzieje się to tylko raz, dopóki szablon się nie zmieni). Unikaj operacji wymagających dużych zasobów obliczeniowych w swoich przebiegach, jeśli to możliwe. Wykorzystuj optymalizacje przechodzenia, takie jak `NodeTraverser::DontTraverseChildren` i `NodeTraverser::StopTraversal`, gdy tylko wiesz, że nie musisz odwiedzać określonych części AST.
+- **Używaj `NodeHelpers`:** Dla typowych zadań, takich jak znajdowanie specyficznych węzłów lub statyczne ewaluowanie prostych wyrażeń, sprawdź, czy `Latte\Compiler\NodeHelpers` nie oferuje odpowiedniej metody przed pisaniem własnej logiki `NodeTraverser`. Może to zaoszczędzić czas i zmniejszyć ilość kodu przygotowawczego.
+- **Obsługa błędów:** Jeśli Twój przebieg wykryje błąd lub nieprawidłowy stan w AST szablonu, rzuć `Latte\CompileException` (lub `Latte\SecurityViolationException` dla problemów bezpieczeństwa) z jasną wiadomością i odpowiednim obiektem `Position` (zazwyczaj `$node->position`). To dostarcza użytecznej informacji zwrotnej programiście szablonu.
+- **Idempotencja (jeśli to możliwe):** Idealnie, uruchomienie Twojego przebiegu wielokrotnie na tym samym AST powinno dać ten sam wynik, co jego jednorazowe uruchomienie. Nie zawsze jest to wykonalne, ale upraszcza debugowanie i rozumienie interakcji przebiegów, jeśli jest to osiągnięte. Na przykład, upewnij się, że Twój przebieg modyfikacyjny sprawdza, czy modyfikacja została już zastosowana, zanim zastosuje ją ponownie.
+
+Przestrzegając tych praktyk, możesz efektywnie wykorzystać przebiegi kompilacji do rozszerzenia możliwości Latte w sposób potężny i niezawodny, przyczyniając się do bezpieczniejszego, bardziej zoptymalizowanego lub bogatszego funkcjonalnie przetwarzania szablonów.

@@ -1,0 +1,198 @@
+Template Loaders
+****************
+
+.[perex]
+Loaders are the mechanism Latte uses to retrieve the source code of your templates. Most commonly, templates are files stored on disk, but Latte's flexible loader system allows you to load them from virtually anywhere, or even generate them dynamically.
+
+
+What is a Loader?
+=================
+
+Typically, when you work with templates, you think of `.latte` files residing in your project's directory structure. This is handled by Latte's default [#FileLoader]. However, the connection between a template name (like `'main.latte'` or `'components/card.latte'`) and its actual source code content doesn't *have* to be a direct file path mapping.
+
+This is where loaders come in. A loader is an object responsible for taking a template name (an identifier string) and providing Latte with its source code. Latte relies entirely on the configured loader for this task. This applies not only to the initial template requested via `$latte->render('main.latte')` but also to **every template referenced within** using tags like `{include ...}`, `{layout ...}`, `{embed ...}`, or `{import ...}`.
+
+Why use a custom loader?
+
+- **Loading from alternative sources:** Fetch templates stored in a database, a cache (like Redis or Memcached), a version control system (like Git, based on a specific commit), or generated dynamically.
+- **Implementing custom naming conventions:** You might want to use shorter aliases for templates or implement a specific search path logic (e.g., looking in a theme directory first, then fallback to a default directory).
+- **Adding security or access control:** A custom loader could verify user permissions before loading certain templates.
+- **Preprocessing:** While generally discouraged ([compiler passes] are better), a loader *could* theoretically preprocess template content before handing it to Latte.
+
+You configure the loader for your `Latte\Engine` instance using the `setLoader()` method:
+
+```php
+$latte = new Latte\Engine;
+
+// Use the default FileLoader for files in '/path/to/templates'
+$loader = new Latte\Loaders\FileLoader('/path/to/templates');
+$latte->setLoader($loader);
+```
+
+A loader must implement the `Latte\Loader` interface.
+
+
+Built-in Loaders
+================
+
+Latte provides several standard loaders:
+
+
+FileLoader
+----------
+
+This is the **default loader** used by `Latte\Engine` if no other loader is specified. It loads templates directly from the filesystem.
+
+You can optionally set a root directory to restrict access:
+
+```php
+use Latte\Loaders\FileLoader;
+
+// The following will only allow loading templates within /var/www/html/templates
+$loader = new FileLoader('/var/www/html/templates');
+$latte->setLoader($loader);
+
+// $latte->render('../../../etc/passwd'); // This would throw an exception
+
+// Render template located at /var/www/html/templates/pages/contact.latte
+$latte->render('pages/contact.latte');
+```
+
+It resolves template names relative to the current template when using tags like `{include}` or `{layout}`, unless an absolute path is given.
+
+
+StringLoader
+------------
+
+This loader retrieves template content from an associative array where keys are template names (identifiers) and values are the template source code strings. It's particularly useful for testing or small applications where templates might be stored within PHP code itself.
+
+```php
+use Latte\Loaders\StringLoader;
+
+$loader = new StringLoader([
+	'main.latte' => 'Hello {$name}, include is below:{include helper.latte}',
+	'helper.latte' => '{var $x = 10}Included content: {$x}',
+	// Add more templates as needed
+]);
+
+$latte->setLoader($loader);
+
+$latte->render('main.latte', ['name' => 'World']);
+// Outputs: Hello World, include is below:Included content: 10
+```
+
+If you only need to render a single template directly from a string without needing includes or inheritance referencing other named string templates, you can pass the string directly to `render()` or `renderToString()` when using `StringLoader` without an array:
+
+```php
+$loader = new StringLoader;
+$latte->setLoader($loader);
+
+$templateString = 'Hello {$name}!';
+$output = $latte->renderToString($templateString, ['name' => 'Alice']);
+// $output contains 'Hello Alice!'
+```
+
+
+Creating a Custom Loader
+========================
+
+To create your own loader (e.g., to load templates from a database, cache, version control, or other source), you need to create a class that implements the [api:Latte\Loader] interface.
+
+Let's look at what each method needs to do.
+
+
+getContent(string $name): string .[method]
+------------------------------------------
+This is the core method of the loader. Its responsibility is to retrieve and return the full source code content for the template identified by `$name` (as passed to `$latte->render()` or returned by [#getReferredName()]).
+
+If the template cannot be found or accessed, this method **must throw a `Latte\RuntimeException`**.
+
+```php
+public function getContent(string $name): string
+{
+	// Example: Fetch from a hypothetical internal storage
+	$content = $this->storage->read($name);
+	if ($content === null) {
+		throw new Latte\RuntimeException("Template '$name' cannot be loaded.");
+	}
+	return $content;
+}
+```
+
+
+getReferredName(string $name, string $referringName): string .[method]
+----------------------------------------------------------------------
+This method handles the resolution of template names used within tags like `{include}`, `{layout}`, etc. When Latte encounters, for example, `{include 'partial.latte'}` inside `main.latte`, it calls this method with `$name = 'partial.latte'` and `$referringName = 'main.latte'`.
+
+The method's job is to resolve `$name` into a canonical identifier (e.g., an absolute path, a unique database key), which will be used when calling other loader methods, based on the context provided by `$referringName`.
+
+```php
+public function getReferredName(string $name, string $referringName): string
+{
+	return ...;
+}
+```
+
+
+getUniqueId(string $name): string .[method]
+-------------------------------------------
+Latte uses the compiled template cache for performance. Each compiled template file needs a unique name derived from the source template's identifier. This method provides a string that **uniquely identifies** the template `$name`.
+
+For file-based templates, the absolute path might work. For database templates, a combination of a prefix and the database ID is common.
+
+```php
+public function getUniqueId(string $name): string
+{
+	return ...;
+}
+```
+
+
+Example: Simple Database Loader
+-------------------------------
+
+This example demonstrates the basic structure of a loader retrieving templates stored in a database table named `templates` with columns `name` (unique identifier), `content`, and `updated_at`.
+
+```php
+use Latte;
+
+class DatabaseLoader implements Latte\Loader
+{
+	public function __construct(
+		private \PDO $db,
+	) {
+	}
+
+	public function getContent(string $name): string
+	{
+		$stmt = $this->db->prepare('SELECT content FROM templates WHERE name = ?');
+		$stmt->execute([$name]);
+		$content = $stmt->fetchColumn();
+		if ($content === false) {
+			throw new Latte\RuntimeException("Template '$name' not found in database.");
+		}
+		return $content;
+	}
+
+	// This simple example assumes template names ('homepage', 'article', etc.)
+	// are unique IDs and templates don't reference each other relatively.
+	public function getReferredName(string $name, string $referringName): string
+	{
+		return $name;
+	}
+
+	public function getUniqueId(string $name): string
+	{
+		// Using a prefix and the name itself is unique and sufficient here
+		return 'db_' . $name;
+	}
+}
+
+// Usage:
+$pdo = new \PDO(/* connection details */);
+$loader = new DatabaseLoader($pdo);
+$latte->setLoader($loader);
+$latte->render('homepage'); // Loads template with name 'homepage' from DB
+```
+
+Custom loaders give you complete control over where your Latte templates come from, enabling integration with various storage systems and workflows.

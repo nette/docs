@@ -1,0 +1,144 @@
+Tworzenie własnych funkcji
+**************************
+
+.[perex]
+Łatwo dodaj do szablonów Latte własne funkcje pomocnicze. Wywołuj logikę PHP bezpośrednio w wyrażeniach do obliczeń, dostępu do usług lub generowania dynamicznej zawartości, co pozwoli utrzymać szablony czyste i wydajne.
+
+
+Co to są funkcje?
+=================
+
+Funkcje w Latte pozwalają rozszerzyć zestaw funkcji, które można wywoływać w ramach wyrażeń w szablonach (`{...}`). Możesz je sobie wyobrazić jako **własne funkcje PHP dostępne tylko wewnątrz Twoich szablonów Latte**. Przynosi to kilka korzyści:
+
+**Wygoda:** Możesz zdefiniować logikę pomocniczą (jak obliczenia, formatowanie lub dostęp do danych aplikacji) i wywoływać ją za pomocą prostej, znanej składni funkcji bezpośrednio w szablonie, tak jakbyś wywoływał `strlen()` lub `date()` w PHP.
+
+```latte
+{var $userInitials = initials($userName)} {* np. 'J. D.' *}
+
+{if hasPermission('article', 'edit')}
+    <a href="...">Edytuj</a>
+{/if}
+```
+
+**Bez zanieczyszczania globalnej przestrzeni:** W przeciwieństwie do definiowania prawdziwej globalnej funkcji w PHP, funkcje Latte istnieją tylko w kontekście renderowania szablonu. Nie musisz obciążać globalnej przestrzeni nazw PHP pomocnikami, które są specyficzne tylko dla szablonów.
+
+**Integracja z logiką aplikacji:** PHP callable stojący za funkcją Latte może być czymkolwiek – funkcją anonimową, metodą statyczną lub metodą instancji. Oznacza to, że Twoje funkcje w szablonach mogą łatwo uzyskiwać dostęp do usług aplikacji, baz danych, konfiguracji lub jakiejkolwiek innej potrzebnej logiki poprzez przechwytywanie zmiennych (w przypadku funkcji anonimowych) lub za pomocą wstrzykiwania zależności (w przypadku obiektów). Powyższy przykład `hasPermission` jasno to demonstruje, gdy prawdopodobnie wywołuje w tle usługę autoryzacji.
+
+**Nadpisywanie funkcji natywnych (opcjonalnie):** Możesz nawet zdefiniować funkcję Latte o tej samej nazwie co natywna funkcja PHP. W szablonie zostanie wywołana Twoja własna wersja zamiast oryginalnej funkcji. Może to być przydatne do zapewnienia zachowania specyficznego dla szablonu lub zapewnienia spójnego przetwarzania (np. zapewnienie, że `strlen` będzie zawsze bezpieczny dla wielu bajtów). Używaj tej funkcji ostrożnie, aby uniknąć nieporozumień.
+
+Domyślnie Latte pozwala na wywoływanie *wszystkich* natywnych funkcji PHP (chyba że są ograniczone przez [Sandbox |sandbox]). Własne funkcje rozszerzają tę wbudowaną bibliotekę o specyficzne potrzeby Twojego projektu.
+
+Jeśli tylko transformujesz pojedynczą wartość, bardziej odpowiednie może być użycie [własnego filtra |custom-filters].
+
+
+Tworzenie i rejestracja funkcji
+===============================
+
+Podobnie jak w przypadku filtrów, istnieje kilka sposobów definiowania i rejestrowania własnych funkcji.
+
+
+Bezpośrednia rejestracja za pomocą `addFunction()`
+--------------------------------------------------
+
+Najprostszą metodą jest użycie `addFunction()` na obiekcie `Latte\Engine`. Podajesz nazwę funkcji (jak będzie wyświetlana w szablonie) i odpowiadający PHP callable.
+
+```php
+$latte = new Latte\Engine;
+
+// Prosta funkcja pomocnicza
+$latte->addFunction('initials', function (string $name): string {
+	preg_match_all('#\b\w#u', $name, $m);
+	return implode('. ', $m[0]) . '.';
+});
+```
+
+**Użycie w szablonie:**
+
+```latte
+{var $userInitials = initials($userName)}
+```
+
+Argumenty funkcji w szablonie są przekazywane bezpośrednio do PHP callable w tej samej kolejności. Funkcjonalności PHP takie jak podpowiedzi typów, wartości domyślne i parametry o zmiennej liczbie argumentów (`...`) działają zgodnie z oczekiwaniami.
+
+
+Rejestracja za pomocą rozszerzenia
+----------------------------------
+
+Dla lepszej organizacji i reużywalności, rejestruj funkcje w ramach [rozszerzenia Latte |extending-latte#Latte Extension]. To podejście jest zalecane dla bardziej złożonych aplikacji lub współdzielonych bibliotek.
+
+```php
+namespace App\Latte;
+
+use Latte\Extension;
+use Nette\Security\Authorizator;
+
+class MyLatteExtension extends Extension
+{
+	public function __construct(
+		// Zakładamy, że usługa Authorizator istnieje
+		private Authorizator $authorizator,
+	) {
+	}
+
+	public function getFunctions(): array
+	{
+		// Rejestracja metod jako funkcji Latte
+		return [
+			'hasPermission' => $this->hasPermission(...),
+		];
+	}
+
+	public function hasPermission(string $resource, string $action): bool
+	{
+		return $this->authorizator->isAllowed($resource, $action);
+	}
+}
+
+// Rejestracja (zakładamy, że $container zawiera kontener DI)
+$extension = $container->getByType(App\Latte\MyLatteExtension::class);
+$latte = new Latte\Engine;
+$latte->addExtension($extension);
+```
+
+To podejście ilustruje, jak funkcje zdefiniowane w Latte mogą być wspierane przez metody obiektów, które mogą mieć swoje własne zależności zarządzane przez kontener wstrzykiwania zależności Twojej aplikacji lub fabrykę. Pozwala to utrzymać logikę szablonów połączoną z rdzeniem aplikacji, zachowując jednocześnie przejrzystą organizację.
+
+
+Funkcje używające klasy z atrybutami
+------------------------------------
+
+Podobnie jak filtry, funkcje mogą być definiowane jako metody w Twojej [klasie parametrów szablonu |develop#Parametry jako klasa] za pomocą atrybutu `#[Latte\Attributes\TemplateFunction]`.
+
+```php
+use Latte\Attributes\TemplateFunction;
+
+class TemplateParameters
+{
+	public function __construct(
+		public string $userName,
+		// inne parametry...
+	) {}
+
+	// Ta metoda będzie dostępna jako {initials(...)} w szablonie
+	#[TemplateFunction]
+	public function initials(string $name): string
+	{
+		preg_match_all('#\b\w#u', $name, $m);
+		return implode('. ', $m[0]) . '.';
+	}
+}
+
+// Przekazanie obiektu do szablonu
+$params = new TemplateParameters(userName: 'John Doe', /* ... */);
+$latte->render('template.latte', $params);
+```
+
+Latte automatycznie odkryje i zarejestruje metody oznaczone tym atrybutem, gdy obiekt parametrów zostanie przekazany do szablonu. Nazwa funkcji w szablonie odpowiada nazwie metody.
+
+```latte
+{* Użycie funkcji zdefiniowanej w klasie parametrów *}
+{var $inits = initials($userName)}
+```
+
+**Funkcje kontekstowe?**
+
+W przeciwieństwie do filtrów, nie ma bezpośredniego pojęcia "funkcji kontekstowych", które otrzymałyby obiekt podobny do `FilterInfo`. Funkcje działają w ramach wyrażeń i zazwyczaj nie potrzebują bezpośredniego dostępu do kontekstu renderowania ani informacji o typie zawartości w taki sam sposób, jak filtry stosowane do bloków.

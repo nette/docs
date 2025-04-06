@@ -1,0 +1,198 @@
+Loadery
+*******
+
+.[perex]
+Loadery to mechanizm, którego Latte używa do uzyskania kodu źródłowego Twoich szablonów. Najczęściej szablony są przechowywane jako pliki na dysku, ale dzięki elastycznemu systemowi loaderów możesz je ładować praktycznie z dowolnego miejsca lub nawet generować dynamicznie.
+
+
+Co to jest Loader?
+==================
+
+Kiedy pracujesz z szablonami, zazwyczaj wyobrażasz sobie pliki `.latte` umieszczone w strukturze katalogów Twojego projektu. Tym zajmuje się domyślny [#FileLoader] w Latte. Jednak połączenie między nazwą szablonu (jak `'main.latte'` lub `'components/card.latte'`) a jego rzeczywistym kodem źródłowym *nie musi* być bezpośrednim mapowaniem na ścieżkę pliku.
+
+Właśnie tutaj wchodzą w grę loadery. Loader to obiekt, który ma za zadanie wziąć nazwę szablonu (ciąg identyfikacyjny) i dostarczyć Latte jego kod źródłowy. Latte podczas tego zadania całkowicie polega na skonfigurowanym loaderze. Dotyczy to nie tylko początkowego szablonu żądanego za pomocą `$latte->render('main.latte')`, ale także **każdego szablonu odwołującego się wewnątrz** za pomocą tagów takich jak `{include ...}`, `{layout ...}`, `{embed ...}` lub `{import ...}`.
+
+Dlaczego używać własnego loadera?
+
+- **Ładowanie z alternatywnych źródeł:** Pobieranie szablonów przechowywanych w bazie danych, w pamięci podręcznej (jak Redis lub Memcached), w systemie kontroli wersji (jak Git, na podstawie konkretnego commita) lub generowanych dynamicznie.
+- **Implementacja własnych konwencji nazewnictwa:** Możesz chcieć używać krótszych aliasów dla szablonów lub zaimplementować specyficzną logikę ścieżek wyszukiwania (np. najpierw szukać w katalogu motywu, potem wrócić do katalogu domyślnego).
+- **Dodanie zabezpieczeń lub kontroli dostępu:** Własny loader może przed załadowaniem określonych szablonów zweryfikować uprawnienia użytkownika.
+- **Przetwarzanie wstępne:** Chociaż generalnie nie jest to zalecane ([przejścia kompilacji |compiler-passes] są lepsze), loader *teoretycznie mógłby* przetworzyć wstępnie zawartość szablonu, zanim przekaże ją do Latte.
+
+Loader dla instancji `Latte\Engine` ustawiasz za pomocą metody `setLoader()`:
+
+```php
+$latte = new Latte\Engine;
+
+// Użycie domyślnego FileLoadera dla plików w '/path/to/templates'
+$loader = new Latte\Loaders\FileLoader('/path/to/templates');
+$latte->setLoader($loader);
+```
+
+Loader musi implementować interfejs `Latte\Loader`.
+
+
+Wbudowane Loadery
+=================
+
+Latte oferuje kilka standardowych loaderów:
+
+
+FileLoader
+----------
+
+To jest **domyślny loader** używany przez klasę `Latte\Engine`, jeśli nie określono żadnego innego. Ładuje szablony bezpośrednio z systemu plików.
+
+Opcjonalnie możesz ustawić katalog główny, aby ograniczyć dostęp:
+
+```php
+use Latte\Loaders\FileLoader;
+
+// Poniższe pozwoli na ładowanie szablonów tylko z katalogu /var/www/html/templates
+$loader = new FileLoader('/var/www/html/templates');
+$latte->setLoader($loader);
+
+// $latte->render('../../../etc/passwd'); // To rzuciłoby wyjątek
+
+// Renderowanie szablonu znajdującego się w /var/www/html/templates/pages/contact.latte
+$latte->render('pages/contact.latte');
+```
+
+Podczas używania tagów takich jak `{include}` lub `{layout}` rozwiązuje nazwy szablonów względnie do bieżącego szablonu, jeśli nie podano ścieżki absolutnej.
+
+
+StringLoader
+------------
+
+Ten loader pobiera zawartość szablonu z tablicy asocjacyjnej, gdzie klucze są nazwami szablonów (identyfikatorami), a wartości są ciągami kodu źródłowego szablonu. Jest szczególnie przydatny do testowania lub małych aplikacji, gdzie szablony mogą być przechowywane bezpośrednio w kodzie PHP.
+
+```php
+use Latte\Loaders\StringLoader;
+
+$loader = new StringLoader([
+	'main.latte' => 'Hello {$name}, include is below:{include helper.latte}',
+	'helper.latte' => '{var $x = 10}Included content: {$x}',
+	// Dodaj więcej szablonów w razie potrzeby
+]);
+
+$latte->setLoader($loader);
+
+$latte->render('main.latte', ['name' => 'World']);
+// Wyjście: Hello World, include is below:Included content: 10
+```
+
+Jeśli potrzebujesz wyrenderować tylko jeden szablon bezpośrednio z ciągu bez potrzeby włączania lub dziedziczenia odwołującego się do innych nazwanych szablonów ciągów, możesz przekazać ciąg bezpośrednio do metody `render()` lub `renderToString()` podczas używania `StringLoader` bez tablicy:
+
+```php
+$loader = new StringLoader;
+$latte->setLoader($loader);
+
+$templateString = 'Hello {$name}!';
+$output = $latte->renderToString($templateString, ['name' => 'Alice']);
+// $output zawiera 'Hello Alice!'
+```
+
+
+Tworzenie własnego Loadera
+==========================
+
+Aby stworzyć własny loader (np. do ładowania szablonów z bazy danych, pamięci podręcznej, systemu kontroli wersji lub innego źródła), musisz utworzyć klasę, która implementuje interfejs [api:Latte\Loader].
+
+Zobaczmy, co musi robić każda metoda.
+
+
+getContent(string $name): string .[method]
+------------------------------------------
+To jest podstawowa metoda loadera. Jej zadaniem jest uzyskanie i zwrócenie pełnego kodu źródłowego szablonu zidentyfikowanego przez `$name` (jak przekazano do metody `$latte->render()` lub zwrócono przez metodę [#getReferredName()]).
+
+Jeśli szablonu nie można znaleźć lub uzyskać do niego dostępu, ta metoda **musi rzucić wyjątek `Latte\RuntimeException`**.
+
+```php
+public function getContent(string $name): string
+{
+	// Przykład: Ładowanie z hipotetycznego wewnętrznego magazynu
+	$content = $this->storage->read($name);
+	if ($content === null) {
+		throw new Latte\RuntimeException("Template '$name' cannot be loaded.");
+	}
+	return $content;
+}
+```
+
+
+getReferredName(string $name, string $referringName): string .[method]
+----------------------------------------------------------------------
+Ta metoda zajmuje się tłumaczeniem nazw szablonów używanych wewnątrz tagów takich jak `{include}`, `{layout}` itp. Kiedy Latte napotka na przykład `{include 'partial.latte'}` wewnątrz `main.latte`, wywołuje tę metodę z `$name = 'partial.latte'` i `$referringName = 'main.latte'`.
+
+Zadaniem metody jest przetłumaczenie `$name` na kanoniczny identyfikator (np. ścieżkę absolutną, unikalny klucz bazy danych), który zostanie użyty podczas wywoływania innych metod loadera, na podstawie kontekstu dostarczonego w `$referringName`.
+
+```php
+public function getReferredName(string $name, string $referringName): string
+{
+	return ...;
+}
+```
+
+
+getUniqueId(string $name): string .[method]
+-------------------------------------------
+Latte używa pamięci podręcznej skompilowanych szablonów do poprawy wydajności. Każdy skompilowany plik szablonu potrzebuje unikalnej nazwy pochodzącej od identyfikatora szablonu źródłowego. Ta metoda dostarcza ciąg, który **jednoznacznie identyfikuje** szablon `$name`.
+
+Dla szablonów opartych na plikach może posłużyć ścieżka absolutna. Dla szablonów w bazie danych powszechna jest kombinacja prefiksu i ID bazy danych.
+
+```php
+public function getUniqueId(string $name): string
+{
+	return ...;
+}
+```
+
+
+Przykład: Prosty Loader bazodanowy
+----------------------------------
+
+Ten przykład pokazuje podstawową strukturę loadera, który ładuje szablony przechowywane w tabeli bazy danych o nazwie `templates` z kolumnami `name` (unikalny identyfikator), `content` i `updated_at`.
+
+```php
+use Latte;
+
+class DatabaseLoader implements Latte\Loader
+{
+	public function __construct(
+		private \PDO $db,
+	) {
+	}
+
+	public function getContent(string $name): string
+	{
+		$stmt = $this->db->prepare('SELECT content FROM templates WHERE name = ?');
+		$stmt->execute([$name]);
+		$content = $stmt->fetchColumn();
+		if ($content === false) {
+			throw new Latte\RuntimeException("Template '$name' not found in database.");
+		}
+		return $content;
+	}
+
+	// Ten prosty przykład zakłada, że nazwy szablonów ('homepage', 'article', itp.)
+	// są unikalnymi ID i szablony nie odwołują się do siebie względnie.
+	public function getReferredName(string $name, string $referringName): string
+	{
+		return $name;
+	}
+
+	public function getUniqueId(string $name): string
+	{
+		// Użycie prefiksu i samej nazwy jest tutaj unikalne i wystarczające
+		return 'db_' . $name;
+	}
+}
+
+// Użycie:
+$pdo = new \PDO(/* szczegóły połączenia */);
+$loader = new DatabaseLoader($pdo);
+$latte->setLoader($loader);
+$latte->render('homepage'); // Ładuje szablon o nazwie 'homepage' z DB
+```
+
+Własne loadery dają Ci pełną kontrolę nad tym, skąd pochodzą Twoje szablony Latte, co umożliwia integrację z różnymi systemami przechowywania i przepływami pracy.

@@ -1,0 +1,555 @@
+Fordítási menetek
+*****************
+
+.[perex]
+A fordítási menetek hatékony mechanizmust biztosítanak a Latte sablonok elemzésére és módosítására *miután* azokat absztrakt szintaxisfává (AST) elemezték, és *mielőtt* a végső PHP kódot generálnák. Ez lehetővé teszi a sablonok fejlett manipulálását, optimalizálását, biztonsági ellenőrzését (mint például a [Sandbox |sandbox]) és a sablonokkal kapcsolatos információk gyűjtését. Ez az útmutató végigvezeti Önt saját fordítási menetek létrehozásán.
+
+
+Mi az a fordítási menet?
+========================
+
+A fordítási menetek szerepének megértéséhez tekintse meg a [Latte fordítási folyamatát |custom-tags#A fordítási folyamat megértése]. Amint láthatja, a fordítási menetek kulcsfontosságú szakaszban működnek, lehetővé téve a mély beavatkozást a kezdeti elemzés és a végső kódkimenet között.
+
+Lényegében a fordítási menet egyszerűen egy PHP [callable |php:language.types.callable] objektum (mint egy függvény, statikus metódus vagy példány metódus), amely egyetlen argumentumot fogad el: a sablon AST gyökércsomópontját, amely mindig a `Latte\Compiler\Nodes\TemplateNode` egy példánya.
+
+A fordítási menet elsődleges célja általában az alábbiak közül egy vagy mindkettő:
+
+- Elemzés: Az AST bejárása és információk gyűjtése a sablonról (pl. az összes definiált blokk megtalálása, specifikus tagek használatának ellenőrzése, bizonyos biztonsági korlátozások teljesülésének biztosítása).
+- Módosítás: Az AST struktúrájának vagy a csomópontok attribútumainak megváltoztatása (pl. HTML attribútumok automatikus hozzáadása, bizonyos tag kombinációk optimalizálása, elavult tagek lecserélése újakra, sandbox szabályok implementálása).
+
+
+Regisztráció
+============
+
+A fordítási meneteket a [bővítmény |extending-latte#getPasses] `getPasses()` metódusával regisztráljuk. Ez a metódus egy asszociatív tömböt ad vissza, ahol a kulcsok a menetek egyedi nevei (belsőleg és a sorrendezéshez használatosak), az értékek pedig a menet logikáját implementáló PHP [callable |php:language.types.callable] objektumok.
+
+```php
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Extension;
+
+class MyExtension extends Extension
+{
+	public function getPasses(): array
+	{
+		return [
+			'modificationPass' => $this->modifyTemplateAst(...),
+			// ... további menetek ...
+		];
+	}
+
+	public function modifyTemplateAst(TemplateNode $templateNode): void
+	{
+		// Implementáció...
+	}
+}
+```
+
+A Latte alap bővítményei és a saját bővítményei által regisztrált menetek szekvenciálisan futnak le. A sorrend fontos lehet, különösen, ha egy menet egy másik eredményeitől vagy módosításaitól függ. A Latte segédmechanizmust biztosít ennek a sorrendnek a szabályozására, ha szükséges; lásd a [`Extension::getPasses()` |extending-latte#getPasses] dokumentációját a részletekért.
+
+
+AST példa
+=========
+
+Az AST jobb megértése érdekében hozzáadunk egy példát. Ez a forrás sablon:
+
+```latte
+{foreach $category->getItems() as $item}
+	<li>{$item->name|upper}</li>
+	{else}
+	nincsenek elemek
+{/foreach}
+```
+
+És ez annak reprezentációja AST formájában:
+
+/--pre
+Latte\Compiler\Nodes\<b>TemplateNode</b>(
+   Latte\Compiler\Nodes\<b>FragmentNode</b>(
+      - Latte\Essential\Nodes\<b>ForeachNode</b>(
+           expression: Latte\Compiler\Nodes\Php\Expression\<b>MethodCallNode</b>(
+              object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$category')
+              name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('getItems')
+           )
+           value: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+           content: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+              - Latte\Compiler\Nodes\<b>TextNode</b>('  ')
+              - Latte\Compiler\Nodes\<b>Html\ElementNode</b>('li')(
+                   content: Latte\Essential\Nodes\<b>PrintNode</b>(
+                      expression: Latte\Compiler\Nodes\Php\Expression\<b>PropertyFetchNode</b>(
+                         object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+                         name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('name')
+                      )
+                      modifier: Latte\Compiler\Nodes\Php\<b>ModifierNode</b>(
+                         filters:
+                            - Latte\Compiler\Nodes\Php\<b>FilterNode</b>('upper')
+                      )
+                   )
+                )
+            )
+            else: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+               - Latte\Compiler\Nodes\<b>TextNode</b>('nincsenek elemek')
+            )
+        )
+   )
+)
+\--
+
+
+AST bejárása a `NodeTraverser` segítségével
+===========================================
+
+Rekurzív függvények kézi írása az AST komplex struktúrájának bejárásához fárasztó és hibára hajlamos. A Latte speciális eszközt biztosít erre a célra: [api:Latte\Compiler\NodeTraverser]. Ez az osztály a [Visitor tervezési mintát |https://en.wikipedia.org/wiki/Visitor_pattern] implementálja, amelynek köszönhetően az AST bejárása szisztematikus és könnyen kezelhető.
+
+Az alapvető használat magában foglalja egy `NodeTraverser` példány létrehozását és annak `traverse()` metódusának meghívását, átadva az AST gyökércsomópontját és egy vagy két "visitor" [callable |php:language.types.callable] objektumot:
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+
+(new NodeTraverser)->traverse(
+	$templateNode,
+
+	// 'enter' visitor: Csomópontba lépéskor hívódik meg (a gyermekei előtt)
+	enter: function (Node $node) {
+		echo "Belépés a csomópontba, típusa: " . $node::class . "\n";
+		// Itt vizsgálhatja a csomópontot
+		if ($node instanceof Nodes\TextNode) {
+			// echo "Talált szöveg: " . $node->content . "\n";
+		}
+	},
+
+	// 'leave' visitor: Csomópont elhagyásakor hívódik meg (a gyermekei után)
+	leave: function (Node $node) {
+		echo "Kilépés a csomópontból, típusa: " . $node::class . "\n";
+		// Itt végezhet műveleteket a gyermekek feldolgozása után
+	},
+);
+```
+
+Megadhat csak `enter` visitort, csak `leave` visitort, vagy mindkettőt, az igényeitől függően.
+
+**`enter(Node $node)`:** Ez a függvény minden csomópontra végrehajtódik **mielőtt** a bejáró meglátogatná a csomópont bármely gyermekét. Hasznos a következőkre:
+
+- Információgyűjtés a fa lefelé történő bejárása során.
+- Döntéshozatal *mielőtt* a gyermekeket feldolgozná (például döntés azok kihagyásáról, lásd [#Bejárás optimalizálása]).
+- A csomópont potenciális módosítása a gyermekek meglátogatása előtt (ritkábban).
+
+**`leave(Node $node)`:** Ez a függvény minden csomópontra végrehajtódik **miután** az összes gyermeke (és azok teljes aláfája) teljesen meglátogatásra került (mind belépés, mind kilépés). Ez a leggyakoribb hely a következőkre:
+
+Mind az `enter`, mind a `leave` visitor opcionálisan visszaadhat egy értéket a bejárási folyamat befolyásolására. A `null` (vagy semmi) visszaadása normálisan folytatja a bejárást, egy `Node` példány visszaadása lecseréli az aktuális csomópontot, és speciális konstansok, mint a `NodeTraverser::RemoveNode` vagy `NodeTraverser::StopTraversal` visszaadása módosítja a folyamatot, ahogy azt a következő szakaszokban kifejtjük.
+
+
+Hogyan működik a bejárás
+------------------------
+
+A `NodeTraverser` belsőleg a `getIterator()` metódust használja, amelyet minden `Node` osztálynak implementálnia kell (ahogy azt az [Egyéni tagek létrehozása |custom-tags#A getIterator implementálása gyermek csomópontokhoz] részben tárgyaltuk). Iterál a `getIterator()` által kapott gyermekeken, rekurzívan meghívja rajtuk a `traverse()`-t, és biztosítja, hogy az `enter` és `leave` visitorok a megfelelő mélységi-első sorrendben legyenek meghívva minden, az iterátorokon keresztül elérhető csomópontra a fában. Ez újra hangsúlyozza, miért elengedhetetlen a saját tag csomópontjaiban a helyesen implementált `getIterator()` a fordítási menetek megfelelő működéséhez.
+
+Írjunk egy egyszerű menetet, amely megszámolja, hányszor használják a `{do}` taget (amelyet a `Latte\Essential\Nodes\DoNode` reprezentál) a sablonban.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\DoNode;
+
+function countDoTags(TemplateNode $templateNode): void
+{
+	$count = 0;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use (&$count): void {
+			if ($node instanceof DoNode) {
+				$count++;
+			}
+		},
+		// 'leave' visitor nem szükséges ehhez a feladathoz
+	);
+
+	echo "A {do} tag $count alkalommal található meg.\n";
+}
+
+$latte = new Latte\Engine;
+$ast = $latte->parse($templateSource);
+countDoTags($ast);
+```
+
+Ebben a példában csak az `enter` visitorra volt szükségünk, hogy ellenőrizzük minden meglátogatott csomópont típusát.
+
+Ezután megvizsgáljuk, hogyan módosítják ezek a visitorok valójában az AST-t.
+
+
+AST módosítása
+==============
+
+A fordítási menetek egyik fő célja az absztrakt szintaxisfa módosítása. Ez lehetővé teszi erőteljes átalakításokat, optimalizálásokat vagy szabályok kikényszerítését közvetlenül a sablon struktúráján, mielőtt PHP kódot generálnánk. A `NodeTraverser` több módot kínál ennek elérésére az `enter` és `leave` visitorokon belül.
+
+**Fontos megjegyzés:** Az AST módosítása óvatosságot igényel. A helytelen változtatások – mint például alapvető csomópontok eltávolítása vagy egy csomópont nem kompatibilis típussal való helyettesítése – hibákhoz vezethetnek a kódgenerálás során, vagy váratlan viselkedést okozhatnak a program futása közben. Mindig alaposan tesztelje a módosító meneteit.
+
+
+Csomópont tulajdonságainak módosítása
+-------------------------------------
+
+A fa módosításának legegyszerűbb módja a bejárás során meglátogatott csomópontok **nyilvános property-jeinek** közvetlen megváltoztatása. Minden csomópont az elemzett argumentumait, tartalmát vagy attribútumait nyilvános property-kben tárolja.
+
+**Példa:** Hozzunk létre egy menetet, amely megtalálja az összes statikus szöveges csomópontot (`TextNode`, amely a Latte tageken kívüli normál HTML-t vagy szöveget reprezentálja), és átalakítja a tartalmukat nagybetűssé *közvetlenül az AST-ben*.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\TextNode;
+
+function uppercaseStaticText(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Használhatjuk az 'enter'-t, mivel a TextNode-nak nincsenek feldolgozandó gyermekei
+		enter: function (Node $node) {
+			// Ez a csomópont egy statikus szövegblokk?
+			if ($node instanceof TextNode) {
+				// Igen! Közvetlenül módosítjuk a 'content' nyilvános property-jét.
+				$node->content = mb_strtoupper(html_entity_decode($node->content));
+			}
+			// Nincs szükség semmit visszaadni; a változás közvetlenül alkalmazódik.
+		},
+	);
+}
+```
+
+Ebben a példában az `enter` visitor ellenőrzi, hogy az aktuális `$node` `TextNode` típusú-e. Ha igen, közvetlenül frissítjük a `$content` nyilvános property-jét a `mb_strtoupper()` segítségével. Ez közvetlenül megváltoztatja az AST-ben tárolt statikus szöveg tartalmát *mielőtt* PHP kódot generálnánk. Mivel közvetlenül az objektumot módosítjuk, nem kell semmit visszaadnunk a visitorból.
+
+Hatás: Ha a sablon `<p>Hello</p>{= $var }<span>World</span>` tartalmazott, ezen menet után az AST valami ilyesmit fog reprezentálni: `<p>HELLO</p>{= $var }<span>WORLD</span>`. Ez NEM befolyásolja a `$var` tartalmát.
+
+
+Csomópontok cseréje
+-------------------
+
+Egy erőteljesebb módosítási technika egy csomópont teljes lecserélése egy másikkal. Ezt úgy végezzük, hogy **egy új `Node` példányt adunk vissza** az `enter` vagy `leave` visitorból. A `NodeTraverser` ezután lecseréli az eredeti csomópontot a visszaadottal a szülő csomópont struktúrájában.
+
+**Példa:** Hozzunk létre egy menetet, amely megtalálja a `PHP_VERSION` konstans összes használatát (amelyet a `ConstantFetchNode` reprezentál), és lecseréli őket közvetlenül egy string literállal (`StringNode`), amely a *fordításkor* észlelt *valódi* PHP verziót tartalmazza. Ez egyfajta fordítási idejű optimalizálás.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\Php\Expression\ConstantFetchNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+
+function inlinePhpVersion(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// A 'leave'-et gyakran használják cserére, biztosítva, hogy a gyermekek (ha vannak)
+		// először legyenek feldolgozva, bár itt az 'enter' is működne.
+		leave: function (Node $node) {
+			// Ez a csomópont egy konstans hozzáférés, és a konstans neve 'PHP_VERSION'?
+			if ($node instanceof ConstantFetchNode && (string) $node->name === 'PHP_VERSION') {
+				// Létrehozunk egy új StringNode-ot, amely az aktuális PHP verziót tartalmazza
+				$newNode = new StringNode(PHP_VERSION);
+
+				// Opcionális, de jó gyakorlat: másoljuk a pozíció információt
+				$newNode->position = $node->position;
+
+				// Visszaadjuk az új StringNode-ot. A Traverser lecseréli
+				// az eredeti ConstantFetchNode-ot ezzel a $newNode-nal.
+				return $newNode;
+			}
+			// Ha nem adunk vissza Node-ot, az eredeti $node megmarad.
+		},
+	);
+}
+```
+
+Itt a `leave` visitor azonosítja a specifikus `ConstantFetchNode`-ot a `PHP_VERSION`-hoz. Ezután létrehoz egy teljesen új `StringNode`-ot, amely a `PHP_VERSION` konstans értékét tartalmazza *a fordítás idején*. Ennek a `$newNode`-nak a visszaadásával jelzi a traversernek, hogy cserélje le az eredeti `ConstantFetchNode`-ot az AST-ben.
+
+Hatás: Ha a sablon `{= PHP_VERSION }`-t tartalmazott, és a fordítás PHP 8.2.1-en fut, az AST ezen menet után hatékonyan `{= '8.2.1' }`-t fog reprezentálni.
+
+**Az `enter` vs. `leave` választása a cseréhez:**
+
+- Használja a `leave`-et, ha az új csomópont létrehozása a régi csomópont gyermekeinek feldolgozásának eredményeitől függ, vagy ha egyszerűen biztosítani szeretné, hogy a gyermekek meglátogatásra kerüljenek a csere előtt (gyakori gyakorlat).
+- Használja az `enter`-t, ha le akarja cserélni a csomópontot *mielőtt* annak gyermekei egyáltalán meglátogatásra kerülnének.
+
+
+Csomópontok eltávolítása
+------------------------
+
+Teljesen eltávolíthat egy csomópontot az AST-ből a `NodeTraverser::RemoveNode` speciális konstans visszaadásával a visitorból.
+
+**Példa:** Távolítsuk el az összes sablon kommentet (`{* ... *}`), amelyeket a Latte magja által generált AST-ben a `CommentNode` reprezentál (bár általában korábban kezelik őket, ez példaként szolgál).
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\CommentNode;
+
+function removeCommentNodes(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Az 'enter' itt rendben van, mivel nincs szükségünk a gyermekek információira a komment eltávolításához
+		enter: function (Node $node) {
+			if ($node instanceof CommentNode) {
+				// Jelezzük a traversernek, hogy távolítsa el ezt a csomópontot az AST-ből
+				return NodeTraverser::RemoveNode;
+			}
+		},
+	);
+}
+```
+
+**Figyelmeztetés:** Használja a `RemoveNode`-ot óvatosan. Egy olyan csomópont eltávolítása, amely alapvető tartalmat tartalmaz vagy befolyásolja a struktúrát (mint egy ciklus tartalom csomópontjának eltávolítása), sérült sablonokhoz vagy érvénytelen generált kódhoz vezethet. Legbiztonságosabb olyan csomópontokhoz, amelyek valóban opcionálisak vagy önállóak (mint a kommentek vagy hibakereső tagek), vagy üres strukturális csomópontokhoz (pl. egy üres `FragmentNode` bizonyos kontextusokban biztonságosan eltávolítható egy tisztító menettel).
+
+Ez a három módszer - property-k módosítása, csomópontok cseréje és csomópontok eltávolítása - biztosítja az alapvető eszközöket az AST manipulálásához a fordítási menetein belül.
+
+
+Bejárás optimalizálása
+======================
+
+A sablonok AST-je meglehetősen nagy lehet, potenciálisan több ezer csomópontot tartalmazva. Minden egyes csomópont bejárása felesleges lehet, és befolyásolhatja a fordítási teljesítményt, ha a menet csak a fa specifikus részei iránt érdeklődik. A `NodeTraverser` módszereket kínál a bejárás optimalizálására:
+
+
+Gyermekek kihagyása
+-------------------
+
+Ha tudja, hogy amint egy bizonyos típusú csomópontra bukkan, annak egyetlen leszármazottja sem tartalmazhatja a keresett csomópontokat, megmondhatja a traversernek, hogy hagyja ki a gyermekei meglátogatását. Ezt a `NodeTraverser::DontTraverseChildren` konstans visszaadásával teheti meg az **`enter`** visitorból. Ezzel egész ágakat hagy ki a bejárás során, potenciálisan jelentős időt takarítva meg, különösen komplex PHP kifejezéseket tartalmazó tagekkel rendelkező sablonokban.
+
+
+Bejárás leállítása
+------------------
+
+Ha a menetnek csak valaminek az *első* előfordulását kell megtalálnia (egy specifikus csomóponttípus, egy feltétel teljesülése), teljesen leállíthatja az egész bejárási folyamatot, amint megtalálta. Ezt a `NodeTraverser::StopTraversal` konstans visszaadásával érheti el az `enter` vagy `leave` visitorból. A `traverse()` metódus abbahagyja bármely további csomópont meglátogatását. Ez rendkívül hatékony, ha csak az első egyezésre van szüksége egy potenciálisan nagyon nagy fában.
+
+
+Hasznos segítő `NodeHelpers`
+============================
+
+Míg a `NodeTraverser` finomhangolt vezérlést kínál, a Latte egy praktikus segédosztályt is biztosít, a [api:Latte\Compiler\NodeHelpers]-t, amely beburkolja a `NodeTraverser`-t számos gyakori keresési és elemzési feladathoz, gyakran kevesebb boilerplate kódot igényelve.
+
+
+find(Node $startNode, callable $filter): array .[method]
+--------------------------------------------------------
+
+Ez a statikus metódus megtalálja **az összes** csomópontot a `$startNode`-tól kezdődő (beleértve) aláfában, amelyek megfelelnek a `$filter` callbacknek. Visszaadja a megfelelő csomópontok tömbjét.
+
+**Példa:** Találja meg az összes változó csomópontot (`VariableNode`) az egész sablonban.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\Expression\VariableNode;
+use Latte\Compiler\Nodes\TemplateNode;
+
+function findAllVariables(TemplateNode $templateNode): array
+{
+	return NodeHelpers::find(
+		$templateNode,
+		fn($node) => $node instanceof VariableNode,
+	);
+}
+```
+
+
+findFirst(Node $startNode, callable $filter): ?Node  .[method]
+--------------------------------------------------------------
+
+Hasonló a `find`-hoz, de azonnal leállítja a bejárást, miután megtalálta az **első** csomópontot, amely megfelel a `$filter` callbacknek. Visszaadja a talált `Node` objektumot vagy `null`-t, ha nem található megfelelő csomópont. Ez lényegében egy praktikus burkoló a `NodeTraverser::StopTraversal` köré.
+
+**Példa:** Találja meg a `{parameters}` csomópontot (ugyanaz, mint a korábbi manuális példa, de rövidebb).
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\ParametersNode;
+
+function findParametersNodeHelper(TemplateNode $templateNode): ?ParametersNode
+{
+	return NodeHelpers::findFirst(
+		$templateNode->head, // Csak a fő szekcióban keresünk a hatékonyság érdekében
+		fn($node) => $node instanceof ParametersNode,
+	);
+}
+```
+
+
+toValue(ExpressionNode $node, bool $constants = false): mixed .[method]
+-----------------------------------------------------------------------
+
+Ez a statikus metódus megpróbálja kiértékelni az `ExpressionNode`-ot **fordítási időben**, és visszaadni a megfelelő PHP értékét. Megbízhatóan csak egyszerű literális csomópontokra (`StringNode`, `IntegerNode`, `FloatNode`, `BooleanNode`, `NullNode`) és olyan `ArrayNode` példányokra működik, amelyek csak ilyen kiértékelhető elemeket tartalmaznak.
+
+Ha a `$constants` `true`-ra van állítva, megpróbálja feloldani a `ConstantFetchNode`-ot és a `ClassConstantFetchNode`-ot is a `defined()` ellenőrzésével és a `constant()` használatával.
+
+Ha a csomópont változókat, függvényhívásokat vagy más dinamikus elemeket tartalmaz, nem értékelhető ki fordítási időben, és a metódus `InvalidArgumentException`-t dob.
+
+**Használati eset:** Egy tag argumentumának statikus értékének lekérése fordításkor fordítási idejű döntéshozatalhoz.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+
+function getStaticStringArgument(ExpressionNode $argumentNode): ?string
+{
+	try {
+		$value = NodeHelpers::toValue($argumentNode);
+		return is_string($value) ? $value : null;
+	} catch (\InvalidArgumentException $e) {
+		// Az argumentum nem volt statikus literális string
+		return null;
+	}
+}
+```
+
+
+toText(?Node $node): ?string .[method]
+--------------------------------------
+
+Ez a statikus metódus hasznos egyszerű csomópontokból származó egyszerű szöveges tartalom kinyerésére. Elsősorban a következőkkel működik:
+- `TextNode`: Visszaadja a `$content`-jét.
+- `FragmentNode`: Összefűzi a `toText()` eredményét az összes gyermekére. Ha valamelyik gyermek nem alakítható szöveggé (pl. `PrintNode`-ot tartalmaz), `null`-t ad vissza.
+- `NopNode`: Üres stringet ad vissza.
+- Más csomóponttípusok: `null`-t ad vissza.
+
+**Használati eset:** Egy HTML attribútum értékének vagy egy egyszerű HTML elem statikus szöveges tartalmának lekérése elemzéshez egy fordítási menet során.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Html\AttributeNode;
+
+function getStaticAttributeValue(AttributeNode $attr): ?string
+{
+	// $attr->value általában AreaNode (mint FragmentNode vagy TextNode)
+	return NodeHelpers::toText($attr->value);
+}
+
+// Példa használat egy menetben:
+// if ($node instanceof Html\ElementNode && $node->name === 'meta') {
+//     $nameAttrValue = getStaticAttributeValue($node->getAttributeNode('name'));
+//     if ($nameAttrValue === 'description') { ... }
+// }
+```
+
+A `NodeHelpers` egyszerűsítheti a fordítási meneteit azáltal, hogy kész megoldásokat kínál a gyakori AST bejárási és elemzési feladatokra.
+
+
+Gyakorlati példák
+=================
+
+Alkalmazzuk a bejárási és módosítási koncepciókat néhány gyakorlati probléma megoldására. Ezek a példák a fordítási menetekben használt gyakori mintákat mutatják be.
+
+
+`loading="lazy"` automatikus hozzáadása az `<img>`-hez
+------------------------------------------------------
+
+A modern böngészők támogatják a képek natív lusta betöltését a `loading="lazy"` attribútummal. Hozzunk létre egy menetet, amely automatikusan hozzáadja ezt az attribútumot minden `<img>` taghez, amely még nem rendelkezik `loading` attribútummal.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Html;
+
+function addLazyLoading(Nodes\TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Használhatjuk az 'enter'-t, mivel közvetlenül módosítjuk a csomópontot
+		// és nem függünk a gyermekektől ehhez a döntéshez.
+		enter: function (Node $node) {
+			// Ez egy HTML elem 'img' névvel?
+			if ($node instanceof Html\ElementNode && $node->name === 'img') {
+				// Biztosítjuk, hogy az attribútum csomópont létezik
+				$node->attributes ??= new Nodes\FragmentNode;
+
+				// Ellenőrizzük, hogy létezik-e már 'loading' attribútum (kis- és nagybetű érzéketlenül)
+				foreach ($node->attributes->children as $attrNode) {
+					if ($attrNode instanceof Html\AttributeNode
+						&& $attrNode->name instanceof Nodes\TextNode // Statikus attribútum név
+						&& strtolower($attrNode->name->content) === 'loading'
+					) {
+						return; // Már létezik, ne tegyünk semmit
+					}
+				}
+
+				// Hozzáadunk egy szóközt, ha az attribútumok nem üresek
+				if ($node->attributes->children) {
+					$node->attributes->children[] = new Nodes\TextNode(' ');
+				}
+
+				// Létrehozunk egy új attribútum csomópontot: loading="lazy"
+				$node->attributes->children[] = new Html\AttributeNode(
+					name: new Nodes\TextNode('loading'),
+					value: new Nodes\TextNode('lazy'),
+					quote: '"',
+				);
+				// A változás közvetlenül az objektumban alkalmazódik, nincs szükség semmit visszaadni.
+			}
+		},
+	);
+}
+```
+
+Magyarázat:
+- Az `enter` visitor `Html\ElementNode` csomópontokat keres `img` névvel.
+- Iterál a meglévő attribútumokon (`$node->attributes->children`), és ellenőrzi, hogy a `loading` attribútum már jelen van-e.
+- Ha nem található, létrehoz egy új `Html\AttributeNode`-ot, amely a `loading="lazy"`-t reprezentálja.
+
+
+Függvényhívások ellenőrzése
+---------------------------
+
+A fordítási menetek a Latte [Sandbox |sandbox] alapját képezik. Bár a valódi Sandbox kifinomult, demonstrálhatjuk a tiltott függvényhívások ellenőrzésének alapelvét.
+
+**Cél:** Megakadályozni a potenciálisan veszélyes `shell_exec` függvény használatát a sablon kifejezéseken belül.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Php;
+use Latte\SecurityViolationException;
+
+function checkForbiddenFunctions(Nodes\TemplateNode $templateNode): void
+{
+	$forbiddenFunctions = ['shell_exec' => true, 'exec' => true]; // Egyszerű lista
+
+	$traverser = new NodeTraverser;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use ($forbiddenFunctions) {
+			// Ez egy közvetlen függvényhívás csomópont?
+			if ($node instanceof Php\Expression\FunctionCallNode
+				&& $node->name instanceof Php\NameNode
+				&& isset($forbiddenFunctions[strtolower((string) $node->name)])
+			) {
+				throw new SecurityViolationException(
+					"A(z) {$node->name}() függvény nem engedélyezett.",
+					$node->position,
+				);
+			}
+		},
+	);
+}
+```
+
+Magyarázat:
+- Definiálunk egy listát a tiltott függvénynevekről.
+- Az `enter` visitor ellenőrzi a `FunctionCallNode`-ot.
+- Ha a függvény neve (`$node->name`) egy statikus `NameNode`, ellenőrizzük annak kisbetűs string reprezentációját a tiltott listánkhoz képest.
+- Ha tiltott függvényt találunk, `Latte\SecurityViolationException`-t dobunk, amely egyértelműen jelzi a biztonsági szabály megsértését és leállítja a fordítást.
+
+Ezek a példák bemutatják, hogyan használhatók a fordítási menetek a `NodeTraverser` segítségével elemzésre, automatikus módosításokra és biztonsági korlátozások kikényszerítésére közvetlenül a sablon AST struktúrájával való interakció révén.
+
+
+Legjobb gyakorlatok
+===================
+
+Fordítási menetek írásakor tartsa szem előtt ezeket az irányelveket robusztus, karbantartható és hatékony bővítmények létrehozásához:
+
+- **A sorrend számít:** Legyen tisztában a menetek futási sorrendjével. Ha a menet egy másik menet által létrehozott AST struktúrától függ (pl. a Latte alap meneteitől vagy egy másik egyéni menettől), vagy ha más menetek függhetnek az Ön módosításaitól, használja az `Extension::getPasses()` által biztosított sorrendezési mechanizmust a függőségek (`before`/`after`) definiálásához. Lásd a [`Extension::getPasses()` |extending-latte#getPasses] dokumentációját a részletekért.
+- **Egy felelősség:** Törekedjen olyan menetekre, amelyek egy jól definiált feladatot végeznek. Komplex átalakításokhoz fontolja meg a logika több menetre bontását – esetleg egyet az elemzéshez és egy másikat a módosításhoz az elemzési eredmények alapján. Ez javítja az áttekinthetőséget és a tesztelhetőséget.
+- **Teljesítmény:** Ne feledje, hogy a fordítási menetek hozzáadnak a sablon fordítási idejéhez (bár ez általában csak egyszer történik, amíg a sablon nem változik). Kerülje a számításigényes műveleteket a meneteiben, ha lehetséges. Használja ki a bejárási optimalizálásokat, mint a `NodeTraverser::DontTraverseChildren` és `NodeTraverser::StopTraversal`, amikor tudja, hogy nem kell meglátogatnia az AST bizonyos részeit.
+- **Használja a `NodeHelpers`-t:** Gyakori feladatokhoz, mint specifikus csomópontok keresése vagy egyszerű kifejezések statikus kiértékelése, ellenőrizze, hogy a `Latte\Compiler\NodeHelpers` kínál-e megfelelő metódust, mielőtt saját `NodeTraverser` logikát írna. Ez időt takaríthat meg és csökkentheti a boilerplate kód mennyiségét.
+- **Hibakezelés:** Ha a menet hibát vagy érvénytelen állapotot észlel a sablon AST-jében, dobjon `Latte\CompileException`-t (vagy `Latte\SecurityViolationException`-t biztonsági problémák esetén) egyértelmű üzenettel és a releváns `Position` objektummal (általában `$node->position`). Ez hasznos visszajelzést nyújt a sablon fejlesztőjének.
+- **Idempotencia (ha lehetséges):** Ideális esetben a menet többszöri futtatása ugyanazon az AST-n ugyanazt az eredményt kell, hogy produkálja, mint az egyszeri futtatása. Ez nem mindig megvalósítható, de egyszerűsíti a hibakeresést és a menetek interakcióiról való gondolkodást, ha elérik. Például győződjön meg róla, hogy a módosító menet ellenőrzi, hogy a módosítás már alkalmazva lett-e, mielőtt újra alkalmazná.
+
+Ezen gyakorlatok követésével hatékonyan használhatja a fordítási meneteket a Latte képességeinek erőteljes és megbízható módon történő kiterjesztésére, hozzájárulva a biztonságosabb, optimalizáltabb vagy funkciókban gazdagabb sablonfeldolgozáshoz.

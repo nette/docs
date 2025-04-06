@@ -1,0 +1,1140 @@
+Vytváření vlastních tagů
+************************
+
+.[perex]
+Tato stránka poskytuje komplexní návod pro vytváření vlastních tagů v Latte. Probereme vše od jednoduchých tagů až po složitější scénáře s vnořeným obsahem a specifickými potřebami parsování, přičemž budeme stavět na vašem pochopení toho, jak Latte kompiluje šablony.
+
+Vlastní tagy poskytují nejvyšší úroveň kontroly nad syntaxí šablony a logikou vykreslování, ale jsou také nejsložitějším bodem rozšíření. Než se rozhodnete vytvořit vlastní tag, vždy zvažte, zda [neexistuje jednodušší řešení |extending-latte#Způsoby rozšíření Latte] nebo zda již vhodný tag neexistuje ve [standardní sadě |tags]. Vlastní tagy používejte pouze tehdy, když pro vaše potřeby nejsou jednodušší alternativy dostatečné.
+
+
+Pochopení procesu kompilace
+===========================
+
+Pro efektivní vytváření vlastních tagů je užitečné vysvětlit, jak Latte zpracovává šablony. Pochopení tohoto procesu objasňuje, proč jsou tagy strukturovány právě takto a jak zapadají do širšího kontextu.
+
+Kompilace šablony v Latte, zjednodušeně, zahrnuje tyto klíčové kroky:
+
+1.  **Lexikální analýza:** Lexer čte zdrojový kód šablony (soubor `.latte`) a rozděluje ho na posloupnost malých, odlišných částí zvaných **tokeny** (např. `{`, `foreach`, `$variable`, `}`, HTML text, atd.).
+2.  **Parsování:** Parser bere tento proud tokenů a konstruuje z něj smysluplnou stromovou strukturu reprezentující logiku a obsah šablony. Tento strom se nazývá **abstraktní syntaktický strom (AST)**.
+3.  **Kompilační průchody:** Před generováním PHP kódu Latte spouští [kompilační průchody |compiler passes]. Jsou to funkce, které procházejí celý AST a mohou jej upravovat nebo sbírat informace. Tento krok je klíčový pro funkce jako zabezpečení ([Sandbox |sandbox]) nebo optimalizace.
+4.  **Generování kódu:** Nakonec kompilátor prochází (potenciálně upravený) AST a generuje odpovídající kód PHP třídy. Tento PHP kód je to, co skutečně vykresluje šablonu při spuštění.
+5.  **Caching:** Vygenerovaný PHP kód je uložen na disk, což činí následná vykreslení velmi rychlými, protože kroky 1-4 jsou přeskočeny.
+
+Ve skutečnosti je kompilace o něco složitější. Latte **má dva** lexery a parsery: jeden pro HTML šablonu a druhý pro PHP-like kód uvnitř tagů. A také parsování neprobíhá až po tokenizaci, ale lexer i parser běží paralelně ve dvou "vláknech" a koordinují se. Věřte mi, naprogramovat to byla raketová věda :-)
+
+Celý proces, od načtení obsahu šablony, přes parsování, až po generování výsledného souboru, lze sekvencovat tímto kódem, se kterým můžete experimentovat a vypisovat mezivýsledky:
+
+```php
+$latte = new Latte\Engine;
+$source = $latte->getLoader()->getContent($file);
+$ast = $latte->parse($source);
+$latte->applyPasses($ast);
+$code = $latte->generate($ast, $file);
+```
+
+
+Anatomie tagu
+=============
+
+Vytvoření plně funkčního vlastního tagu v Latte zahrnuje několik propojených částí. Než se pustíme do implementace, pojďme pochopit základní koncepty a terminologii, s využitím analogie k HTML a Document Object Model (DOM).
+
+
+Tagy vs. Uzly (Analogie s HTML)
+-------------------------------
+
+V HTML píšeme **tagy** jako `<p>` nebo `<div>...</div>`. Tyto tagy jsou syntaxí ve zdrojovém kódu. Když prohlížeč parsuje toto HTML, vytváří paměťovou reprezentaci nazvanou **Document Object Model (DOM)**. V DOM jsou HTML tagy reprezentovány **uzly** (konkrétně uzly `Element` v terminologii JavaScriptového DOM). S těmito *uzly* programově pracujeme (např. pomocí JavaScriptového `document.getElementById(...)` se vrací uzel Element). Tag je pouze textová reprezentace ve zdrojovém souboru; uzel je objektová reprezentace v logickém stromu.
+
+Latte funguje podobně:
+
+- V souboru `.latte` šablony píšete **Latte tagy**, jako `{foreach ...}` a `{/foreach}`. Toto je syntaxe, se kterou vy jako autor šablony pracujete.
+- Když Latte **parsuje** šablonu, buduje **Abstract Syntax Tree (AST)**. Tento strom je složen z **uzlů**. Každý Latte tag, HTML element, kus textu nebo výraz v šabloně se stává jedním nebo více uzly v tomto stromu.
+- Základní třída pro všechny uzly v AST je `Latte\Compiler\Node`. Stejně jako DOM má různé typy uzlů (Element, Text, Comment), AST Latte má různé typy uzlů. Setkáte se s `Latte\Compiler\Nodes\TextNode` pro statický text, `Latte\Compiler\Nodes\Html\ElementNode` pro HTML elementy, `Latte\Compiler\Nodes\Php\ExpressionNode` pro výrazy uvnitř tagů a klíčově pro vlastní tagy, uzly dědící z `Latte\Compiler\Nodes\StatementNode`.
+
+
+Proč `StatementNode`?
+---------------------
+
+HTML elementy (`Html\ElementNode`) primárně reprezentují strukturu a obsah. PHP výrazy (`Php\ExpressionNode`) reprezentují hodnoty nebo výpočty. Ale co Latte tagy jako `{if}`, `{foreach}` nebo náš vlastní `{datetime}`? Tyto tagy *provádějí akce*, řídí tok programu nebo generují výstup na základě logiky. Jsou to funkční jednotky, které dělají z Latte mocný šablonovací *engine*, nikoli jen značkovací jazyk.
+
+V programování se takovéto jednotky provádějící akce často nazývají "statements" (příkazy). Proto uzly reprezentující tyto funkční Latte tagy typicky dědí z `Latte\Compiler\Nodes\StatementNode`. To je odlišuje od čistě strukturálních uzlů (jako HTML elementy) nebo uzlů reprezentujících hodnoty (jako výrazy).
+
+
+Klíčové komponenty
+==================
+
+Projděme si hlavní komponenty potřebné k vytvoření vlastního tagu:
+
+
+Funkce pro parsování tagu
+-------------------------
+
+- Tato PHP callable funkce parsuje syntaxi Latte tagu (`{...}`) ve zdrojové šabloně.
+- Dostává informace o tagu (jako jeho název, pozici a zda jde o n:atribut) prostřednictvím objektu [api:Latte\Compiler\Tag].
+- Jejím primárním nástrojem pro parsování argumentů a výrazů uvnitř oddělovačů tagu je objekt [api:Latte\Compiler\TagParser], přístupný přes `$tag->parser` (toto je jiný parser než ten, který parsuje celou šablonu).
+- Pro párové tagy používá `yield` k signalizaci Latte, aby parsovalo vnitřní obsah mezi počátečním a koncovým tagem.
+- Konečným cílem parsovací funkce je vytvořit a vrátit instanci **třídy uzlu**, která je přidána do AST.
+- Je zvykem (i když to není vyžadováno) implementovat parsovací funkci jako statickou metodu (často nazvanou `create`) přímo v odpovídající třídě uzlu. To udržuje parsovací logiku a reprezentaci uzlu úhledně v jednom balíčku, umožňuje přístup k privátním/chráněným prvkům třídy, je-li třeba, a zlepšuje organizaci.
+
+
+Třída uzlu
+----------
+
+- Reprezentuje *logickou funkci* vašeho tagu v **Abstract Syntax Tree (AST)**.
+- Obsahuje parsované informace (jako argumenty nebo obsah) jako veřejné vlastnosti. Tyto vlastnosti často obsahují jiné instance `Node` (např. `ExpressionNode` pro parsované argumenty, `AreaNode` pro parsovaný obsah).
+- Metoda `print(PrintContext $context): string` generuje *PHP kód* (příkaz nebo sérii příkazů), který provádí akci tagu během vykreslování šablony.
+- Metoda `getIterator(): \Generator` zpřístupňuje dětské uzly (argumenty, obsah) pro průchod **kompilačními průchody**. Musí poskytovat reference (`&`), aby umožnila průchodům potenciálně modifikovat nebo nahrazovat poduzly.
+- Poté, co je celá šablona zparsována do AST, Latte spouští řadu [kompilačních průchodů |compiler-passes]. Tyto průchody procházejí *celý* AST pomocí metody `getIterator()` poskytované každým uzlem. Mohou uzly kontrolovat, sbírat informace a dokonce *upravovat* strom (např. změnou veřejných vlastností uzlů nebo úplným nahrazením uzlů). Tento design, vyžadující komplexní `getIterator()`, je zásadní. Umožňuje mocným funkcím jako [Sandbox |sandbox] analyzovat a potenciálně měnit chování *jakékoli* části šablony, včetně vašich vlastních tagů, zajišťujíc bezpečnost a konzistenci.
+
+
+Registrace přes rozšíření
+-------------------------
+
+- Potřebujete informovat Latte o vašem novém tagu a která parsovací funkce má být pro něj použita. To se děje v rámci [Latte rozšíření |extending-latte#latte-extension].
+- Uvnitř vaší třídy rozšíření implementujete metodu `getTags(): array`. Tato metoda vrací asociativní pole, kde klíče jsou názvy tagů (např. `'mytag'`, `'n:myattribute'`) a hodnoty jsou PHP callable funkce reprezentující jejich příslušné parsovací funkce (např. `MyNamespace\DatetimeNode::create(...)`).
+
+Shrnutí: **Funkce parsování tagu** přeměňuje *zdrojový kód šablony* vašeho tagu na **uzel AST**. **Třída uzlu** pak umí přeměnit *sama sebe* na spustitelný *PHP kód* pro kompilovanou šablonu a zpřístupňuje své poduzly pro **kompilační průchody** přes `getIterator()`. **Registrace přes rozšíření** propojuje název tagu s parsovací funkcí a dává o něm vědět Latte.
+
+Nyní prozkoumáme, jak implementovat tyto komponenty krok za krokem.
+
+
+Vytvoření jednoduchého tagu
+===========================
+
+Pojďme se pustit do vytvoření vašeho prvního vlastního Latte tagu. Začneme s velmi jednoduchým příkladem: tag s názvem `{datetime}`, který vypisuje aktuální datum a čas. **Zpočátku tento tag nebude přijímat žádné argumenty**, ale vylepšíme ho později v sekci [#Parsování argumentů tagu]. Nemá také žádný vnitřní obsah.
+
+Tento příklad vás provede základními kroky: definování třídy uzlu, implementace jejích metod `print()` a `getIterator()`, vytvoření parsovací funkce a nakonec registrace tagu.
+
+**Cíl:** Implementovat `{datetime}` pro výstup aktuálního data a času pomocí PHP funkce `date()`.
+
+
+Vytvoření třídy uzlu
+--------------------
+
+Nejprve potřebujeme třídu, která bude reprezentovat náš tag v Abstract Syntax Tree (AST). Jak bylo diskutováno výše, dědíme z `Latte\Compiler\Nodes\StatementNode`.
+
+Vytvořte soubor (např. `DatetimeNode.php`) a definujte třídu:
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DatetimeNode extends StatementNode
+{
+	/**
+	 * Funkce parsování tagu, volaná když je nalezen {datetime}.
+	 */
+	public static function create(Tag $tag): self
+	{
+		// Náš jednoduchý tag aktuálně nepřijímá žádné argumenty, takže nemusíme nic parsovat
+		$node = $tag->node = new self;
+		return $node;
+	}
+
+	/**
+	 * Generuje PHP kód, který bude spuštěn při vykreslování šablony.
+	 */
+	public function print(PrintContext $context): string
+	{
+		return $context->format(
+			'echo date(\'Y-m-d H:i:s\') %line;',
+			$this->position,
+		);
+	}
+
+	/**
+	 * Poskytuje přístup k dětským uzlům pro kompilační průchody Latte.
+	 */
+	public function &getIterator(): \Generator
+	{
+		false && yield;
+	}
+}
+```
+
+Když Latte narazí na `{datetime}` v šabloně, zavolá parsovací funkci `create()`. Jejím úkolem je vrátit instanci `DatetimeNode`.
+
+Metoda `print()` generuje PHP kód, který bude spuštěn při vykreslování šablony. Voláme metodu `$context->format()`, která sestavuje výsledný řetězec PHP kódu pro kompilovanou šablonu. První argument, `'echo date('Y-m-d H:i:s') %line;'`, je maska, do které jsou doplněny následující parametry.
+Zástupný symbol `%line` říká metodě `format()`, aby použila druhý argument, kterým je `$this->position`, a vložila komentář jako `/* line 15 */`, který propojuje vygenerovaný PHP kód zpět na původní řádek šablony, což je klíčové pro ladění.
+
+Vlastnost `$this->position` je zděděna ze základní třídy `Node` a je automaticky nastavena parserem Latte. Obsahuje objekt [api:Latte\Compiler\Position], který indikuje, kde byl tag nalezen ve zdrojovém souboru `.latte`.
+
+Metoda `getIterator()` je zásadní pro kompilační průchody. Musí poskytovat všechny dětské uzly, ale náš jednoduchý `DatetimeNode` aktuálně nemá žádné argumenty ani obsah, tedy žádné dětské uzly. Nicméně metoda musí stále existovat a být generátorem, tj. klíčové slovo `yield` musí být nějakým způsobem přítomno v těle metody.
+
+
+Registrace přes rozšíření
+-------------------------
+
+Nakonec informujme Latte o novém tagu. Vytvořte [třídu rozšíření |extending-latte#latte-extension] (např. `MyLatteExtension.php`) a zaregistrujte tag v její metodě `getTags()`.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Extension;
+
+class MyLatteExtension extends Extension
+{
+	/**
+	 * Vrací seznam tagů poskytovaných tímto rozšířením.
+	 * @return array<string, callable> Mapa: 'nazev-tagu' => parsovaci-funkce
+	 */
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			// Později zde zaregistrujte více tagů
+		];
+	}
+}
+```
+
+Poté zaregistrujte toto rozšíření v Latte Engine:
+
+```php
+$latte = new Latte\Engine;
+$latte->addExtension(new App\Latte\MyLatteExtension);
+```
+
+Vytvořte šablonu:
+
+```latte
+<p>Stránka vygenerována: {datetime}</p>
+```
+
+Očekávaný výstup: `<p>Stránka vygenerována: 2023-10-27 11:00:00</p>`
+
+
+Shrnutí této fáze
+-----------------
+
+Úspěšně jsme vytvořili základní vlastní tag `{datetime}`. Definovali jsme jeho reprezentaci v AST (`DatetimeNode`), zpracovali jeho parsování (`create()`), specifikovali, jak by měl generovat PHP kód (`print()`), zajistili, že jeho děti jsou přístupné pro průchod (`getIterator()`), a zaregistrovali ho v Latte.
+
+V další sekci vylepšíme tento tag tak, aby přijímal argumenty, a ukážeme, jak parsovat výrazy a spravovat dětské uzly.
+
+
+Parsování argumentů tagu
+========================
+
+Náš jednoduchý tag `{datetime}` funguje, ale není příliš flexibilní. Vylepšeme ho, aby přijímal volitelný argument: formátovací řetězec pro funkci `date()`. Požadovaná syntaxe bude `{datetime $format}`.
+
+**Cíl:** Upravit `{datetime}` tak, aby přijímal volitelný PHP výraz jako argument, který bude použit jako formátovací řetězec pro `date()`.
+
+
+Představení `TagParser`
+-----------------------
+
+Než upravíme kód, je důležité pochopit nástroj, který budeme používat [api:Latte\Compiler\TagParser]. Když hlavní parser Latte (`TemplateParser`) narazí na Latte tag jako `{datetime ...}` nebo n:atribut, deleguje parsování obsahu *uvnitř* tagu (část mezi `{` a `}` nebo hodnota atributu) na specializovaný `TagParser`.
+
+Tento `TagParser` pracuje výhradně s **argumenty tagu**. Jeho úkolem je zpracovávat tokeny reprezentující tyto argumenty. Klíčové je, že **musí zpracovat celý obsah**, který je mu poskytnut. Pokud vaše parsovací funkce skončí, ale `TagParser` nedosáhl konce argumentů (kontrolováno přes `$tag->parser->isEnd()`), Latte vyhodí výjimku, protože to indikuje, že uvnitř tagu zbyly neočekávané tokeny. Naopak, pokud tag *vyžaduje* argumenty, měli byste na začátku vaší parsovací funkce zavolat `$tag->expectArguments()`. Tato metoda kontroluje, zda jsou argumenty přítomny, a vyhodí nápomocnou výjimku, pokud byl tag použit bez jakýchkoliv argumentů.
+
+`TagParser` nabízí užitečné metody pro parsování různých druhů argumentů:
+
+- `parseExpression(): ExpressionNode`: Parsuje PHP-podobný výraz (proměnné, literály, operátory, volání funkcí/metod, atd.). Zpracovává syntaktický cukr Latte, jako je například zacházení s jednoduchými alfanumerickými řetězci jako s řetězci v uvozovkách (např. `foo` je parsováno, jako by to bylo `'foo'`).
+- `parseUnquotedStringOrExpression(): ExpressionNode`: Parsuje buď standardní výraz, nebo *neuvozený řetězec*. Neuvozené řetězce jsou sekvence povolené Latte bez uvozovek, často používané pro věci jako cesty k souborům (např. `{include ../file.latte}`). Pokud parsuje neuvozený řetězec, vrátí `StringNode`.
+- `parseArguments(): ArrayNode`: Parsuje argumenty oddělené čárkami, potenciálně s klíči, jako `10, name: 'John', true`.
+- `parseModifier(): ModifierNode`: Parsuje filtry jako `|upper|truncate:10`.
+- `parseType(): ?SuperiorTypeNode`: Parsuje PHP typové nápovědy jako `int`, `?string`, `array|Foo`.
+
+Pro složitější nebo nižší úrovně parsovacích potřeb můžete přímo interagovat s [tokovým proudem |api:Latte\Compiler\TokenStream] přes `$tag->parser->stream`. Tento objekt poskytuje metody pro kontrolu a zpracování jednotlivých tokenů:
+
+- `$tag->parser->stream->is(...): bool`: Kontroluje, zda *aktuální* token odpovídá některému ze specifikovaných typů (např. `Token::Php_Variable`) nebo literálních hodnot (např. `'as'`) bez jeho konzumace. Užitečné pro pohled dopředu.
+- `$tag->parser->stream->consume(...): Token`: Konzumuje *aktuální* token a posouvá pozici proudu vpřed. Pokud jsou poskytnuty očekávané typy/hodnoty tokenů jako argumenty a aktuální token neodpovídá, vyhodí `CompileException`. Použijte toto, když *očekáváte* určitý token.
+- `$tag->parser->stream->tryConsume(...): ?Token`: Pokusí se konzumovat *aktuální* token *pouze pokud* odpovídá jednomu ze specifikovaných typů/hodnot. Pokud odpovídá, konzumuje token a vrací jej. Pokud neodpovídá, nechává pozici proudu nezměněnou a vrací `null`. Použijte toto pro volitelné tokeny nebo když volíte mezi různými syntaktickými cestami.
+
+
+Aktualizace parsovací funkce `create()`
+---------------------------------------
+
+S tímto pochopením upravme metodu `create()` v `DatetimeNode` tak, aby parsovala volitelný formátovací argument pomocí `$tag->parser`.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DatetimeNode extends StatementNode
+{
+	// Přidáme veřejnou vlastnost pro uchování parsovaného uzlu formátového výrazu
+	public ?ExpressionNode $format = null;
+
+	public static function create(Tag $tag): self
+	{
+		$node = $tag->node = new self;
+
+		// Zkontrolujeme, zda existují nějaké tokeny
+		if (!$tag->parser->isEnd()) {
+			// Parsujeme argument jako PHP-podobný výraz pomocí TagParser.
+			$node->format = $tag->parser->parseExpression();
+		}
+
+		return $node;
+	}
+
+	// ... metody print() a getIterator() budou aktualizovány dále ...
+}
+```
+
+Přidali jsme veřejnou vlastnost `$format`. V `create()` nyní používáme `$tag->parser->isEnd()` ke kontrole, zda *existují* argumenty. Pokud ano, `$tag->parser->parseExpression()` zpracovává tokeny pro výraz. Protože `TagParser` musí zpracovat všechny vstupní tokeny, Latte automaticky vyhodí chybu, pokud uživatel napíše něco neočekávaného po výrazu formátu (např. `{datetime 'Y-m-d', unexpected}`).
+
+
+Aktualizace metody `print()`
+----------------------------
+
+Nyní upravme metodu `print()` tak, aby používala parsovaný výraz formátu uložený v `$this->format`. Pokud nebyl poskytnut žádný formát (`$this->format` je `null`), měli bychom použít výchozí formátovací řetězec, například `'Y-m-d H:i:s'`.
+
+```php
+	public function print(PrintContext $context): string
+	{
+		$formatNode = $this->format ?? new StringNode('Y-m-d H:i:s');
+
+		// %node vytiskne PHP kódovou reprezentaci $formatNode.
+		return $context->format(
+			'echo date(%node) %line;',
+			$formatNode,
+			$this->position
+		);
+	}
+```
+
+Do proměnné `$formatNode` ukládáme uzel AST reprezentující formátovací řetězec pro PHP funkci `date()`. Používáme zde operátor nulového sloučení (`??`). Pokud uživatel poskytl argument v šabloně (např. `{datetime 'd.m.Y'}`), pak vlastnost `$this->format` obsahuje odpovídající uzel (v tomto případě `StringNode` s hodnotou `'d.m.Y'`), a tento uzel je použit. Pokud uživatel neposkytl argument (napsal jen `{datetime}`), vlastnost `$this->format` je `null`, a místo toho vytvoříme nový `StringNode` s výchozím formátem `'Y-m-d H:i:s'`. To zajišťuje, že `$formatNode` vždy obsahuje platný uzel AST pro formát.
+
+V masce `'echo date(%node) %line;'` je použit nový zástupný symbol `%node`, který říká metodě `format()`, aby vzala první následující argument (což je náš `$formatNode`), zavolala jeho metodu `print()` (která vrátí jeho PHP kódovou reprezentaci) a vložila výsledek na pozici zástupného symbolu.
+
+
+Implementace `getIterator()` pro poduzly
+----------------------------------------
+
+Náš `DatetimeNode` nyní má dětský uzel: výraz `$format`. **Musíme** tento dětský uzel zpřístupnit kompilačním průchodům poskytnutím v metodě `getIterator()`. Nezapomeňte poskytnout *referenci* (`&`), abyste umožnili průchodům potenciálně nahradit uzel.
+
+```php
+	public function &getIterator(): \Generator
+	{
+		if ($this->format) {
+			yield $this->format;
+		}
+	}
+```
+
+Proč je to zásadní? Představte si průchod Sandbox, který potřebuje zkontrolovat, zda argument `$format` neobsahuje zakázané volání funkce (např. `{datetime dangerousFunction()}`). Pokud `getIterator()` neposkytne `$this->format`, průchod Sandbox by nikdy neuviděl volání `dangerousFunction()` uvnitř argumentu našeho tagu, což by vytvořilo potenciální bezpečnostní díru. Poskytnutím mu umožňujeme Sandboxu (a dalším průchodům) kontrolovat a potenciálně modifikovat uzel výrazu `$format`.
+
+
+Použití vylepšeného tagu
+------------------------
+
+Tag nyní správně zpracovává volitelný argument:
+
+```latte
+Výchozí formát: {datetime}
+Vlastní formát: {datetime 'd.m.Y'}
+Použití proměnné: {datetime $userDateFormatPreference}
+
+{* Toto by způsobilo chybu po parsování 'd.m.Y', protože ", foo" je neočekávané *}
+{* {datetime 'd.m.Y', foo} *}
+```
+
+Dále se podíváme na vytváření párových tagů, které zpracovávají obsah mezi nimi.
+
+
+Zpracování párových tagů
+========================
+
+Dosud byl náš tag `{datetime}` *samouzavírací* (koncepčně). Nemá žádný obsah mezi počátečním a koncovým tagem. Mnoho užitečných tagů však pracuje s blokem obsahu šablony. Tyto se nazývají **párové tagy**. Příklady zahrnují `{if}...{/if}`, `{block}...{/block}` nebo vlastní tag, který nyní vytvoříme: `{debug}...{/debug}`.
+
+Tento tag nám umožní zahrnout do našich šablon ladící informace, které by měly být viditelné pouze během vývoje.
+
+**Cíl:** Vytvořit párový tag `{debug}`, jehož obsah je vykreslen pouze tehdy, když je aktivní specifický příznak "vývojového režimu".
+
+
+Představení poskytovatelů
+-------------------------
+
+Někdy vaše tagy potřebují přístup k datům nebo službám, které nejsou předávány přímo jako parametry šablony. Například určení, zda je aplikace ve vývojovém režimu, přístup k objektu uživatele nebo získání konfiguračních hodnot. Latte poskytuje mechanismus nazvaný **poskytovatelé** (Providers) pro tento účel.
+
+Poskytovatelé jsou registrováni ve vašem [rozšíření |extending-latte#latte-extension] pomocí metody `getProviders()`. Tato metoda vrací asociativní pole, kde klíče jsou názvy, pod kterými budou poskytovatelé přístupní v běhovém kódu šablony, a hodnoty jsou skutečná data nebo objekty.
+
+Uvnitř PHP kódu generovaného metodou `print()` vašeho tagu můžete k těmto poskytovatelům přistupovat prostřednictvím speciální vlastnosti objektu `$this->global`.
+Protože tato vlastnost je sdílena napříč všemi rozšířeními, je dobrou praxí **předpony názvy vašich poskytovatelů** pro zabránění potenciálních kolizí jmen s klíčovými poskytovateli Latte nebo poskytovateli z jiných rozšíření třetích stran. Běžnou konvencí je používat krátkou, jedinečnou předponu související s vaším výrobcem nebo názvem rozšíření. Pro náš příklad použijeme předponu `app` a příznak vývojového režimu bude dostupný jako `$this->global->appDevMode`.
+
+
+Klíčové slovo `yield` pro parsování obsahu
+------------------------------------------
+
+Jak říkáme parseru Latte, aby zpracoval obsah *mezi* `{debug}` a `{/debug}`? Zde přichází ke slovu klíčové slovo `yield`.
+
+Když je `yield` použito ve funkci `create()`, funkce se stává [PHP generátorem |https://www.php.net/manual/en/language.generators.overview.php]. Jeho vykonávání se pozastaví a řízení se vrátí k hlavnímu `TemplateParser`. `TemplateParser` pak pokračuje v parsování obsahu šablony *dokud* nenarazí na odpovídající uzavírací tag (`{/debug}` v našem případě).
+
+Jakmile je nalezen uzavírací tag, `TemplateParser` obnoví vykonávání naší funkce `create()` přímo za příkazem `yield`. Hodnota *vracená* příkazem `yield` je pole obsahující dva prvky:
+
+1.  `AreaNode` reprezentující zparsovaný obsah mezi počátečním a koncovým tagem.
+2.  Objekt `Tag` reprezentující uzavírací tag (např. `{/debug}`).
+
+Vytvořme třídu `DebugNode` a její metodu `create` využívající `yield`.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DebugNode extends StatementNode
+{
+	// Veřejná vlastnost pro uchování zparsovaného vnitřního obsahu
+	public AreaNode $content;
+
+	/**
+	 * Parsovací funkce pro párový tag {debug} ... {/debug}.
+	 */
+	public static function create(Tag $tag): \Generator // všimněte si návratového typu
+	{
+		$node = $tag->node = new self;
+
+		// Pozastavit parsování, získat vnitřní obsah a koncový tag, když je nalezen {/debug}
+		[$node->content, $endTag] = yield;
+
+		return $node;
+	}
+
+	// ... print() a getIterator() budou implementovány dále ...
+}
+```
+
+Poznámka: `$endTag` je `null`, pokud je tag použit jako n:atribut, tj. `<div n:debug>...</div>`.
+
+
+Implementace `print()` pro podmíněné vykreslování
+-------------------------------------------------
+
+Metoda `print()` nyní potřebuje generovat PHP kód, který za běhu zkontroluje poskytovatele `appDevMode` a pouze vykoná kód pro vnitřní obsah, pokud je příznak true.
+
+```php
+	public function print(PrintContext $context): string
+	{
+		// Vygeneruje PHP příkaz 'if', který za běhu zkontroluje poskytovatele
+		return $context->format(
+			<<<'XX'
+				if ($this->global->appDevMode) %line {
+					// Pokud je ve vývojovém režimu, vypíše vnitřní obsah
+					%node
+				}
+
+				XX,
+			$this->position, // Pro %line komentář
+			$this->content,  // Uzel obsahující AST vnitřního obsahu
+		);
+	}
+```
+
+To je jednoduché. Používáme `PrintContext::format()` k vytvoření standardního PHP příkazu `if`. Uvnitř `if` umisťujeme zástupný symbol `%node` pro `$this->content`. Latte rekurzivně zavolá `$this->content->print($context)` pro vygenerování PHP kódu pro vnitřní část tagu, ale pouze pokud `$this->global->appDevMode` vyhodnotí za běhu jako true.
+
+
+Implementace `getIterator()` pro obsah
+--------------------------------------
+
+Stejně jako u argumentového uzlu v předchozím příkladu, náš `DebugNode` nyní má dětský uzel: `AreaNode $content`. Musíme ho zpřístupnit poskytnutím v `getIterator()`:
+
+```php
+	public function &getIterator(): \Generator
+	{
+		// Poskytuje referenci na uzel obsahu
+		yield $this->content;
+	}
+```
+
+To umožňuje kompilačním průchodům sestoupit do obsahu našeho tagu `{debug}`, což je důležité i když je obsah podmíněně vykreslen. Například Sandbox potřebuje analyzovat obsah bez ohledu na to, zda je `appDevMode` true nebo false.
+
+
+Registrace a použití
+--------------------
+
+Zaregistrujte tag a poskytovatele ve vašem rozšíření:
+
+```php
+class MyLatteExtension extends Extension
+{
+	// Předpokládáme, že $isDevelopmentMode je určeno někde (např. z konfigurace)
+	public function __construct(
+		private bool $isDevelopmentMode,
+	) {
+	}
+
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...), // Registrace nového tagu
+		];
+	}
+
+	public function getProviders(): array
+	{
+		return [
+			'appDevMode' => $this->isDevelopmentMode, // Registrace poskytovatele
+		];
+	}
+}
+
+// Při registraci rozšíření:
+$isDev = true; // Určete toto na základě prostředí vaší aplikace
+$latte->addExtension(new App\Latte\MyLatteExtension($isDev));
+```
+
+A jeho použití v šabloně:
+
+```latte
+<p>Běžný obsah viditelný vždy.</p>
+
+{debug}
+	<div class="debug-panel">
+		ID aktuálního uživatele: {$user->id}
+		Čas požadavku: {=time()}
+	</div>
+{/debug}
+
+<p>Další běžný obsah.</p>
+```
+
+
+Integrace n:atributů
+--------------------
+
+Latte nabízí pohodlný zkrácený zápis pro mnoho párových tagů: [n:atributy |syntax#n:atributy]. Pokud máte párový tag jako `{tag}...{/tag}` a chcete, aby se jeho efekt aplikoval přímo na jediný HTML element, můžete ho často zapsat úsporněji jako atribut `n:tag` na tomto elementu.
+
+Pro většinu standardních párových tagů, které definujete (jako náš `{debug}`), Latte automaticky povolí odpovídající verzi `n:` atributu. Během registrace nemusíte dělat nic navíc:
+
+```latte
+{* Standardní použití párového tagu *}
+{debug}<div>Informace pro ladění</div>{/debug}
+
+{* Ekvivalentní použití s n:atributem *}
+<div n:debug>Informace pro ladění</div>
+```
+
+Obě verze vykreslí `<div>` pouze pokud je `$this->global->appDevMode` true. Předpony `inner-` a `tag-` také fungují podle očekávání.
+
+Někdy může logika vašeho tagu potřebovat chovat se mírně odlišně v závislosti na tom, zda je použit jako standardní párový tag nebo jako n:atribut, nebo zda je použita předpona jako `n:inner-tag` nebo `n:tag-tag`. Objekt `Latte\Compiler\Tag`, předaný vaší parsovací funkci `create()`, poskytuje tyto informace:
+
+- `$tag->isNAttribute(): bool`: Vrací `true`, pokud je tag parsován jako n:atribut
+- `$tag->prefix: ?string`: Vrací předponu použitou s n:atributem, což může být `null` (není n:atribut), `Tag::PrefixNone`, `Tag::PrefixInner` nebo `Tag::PrefixTag`
+
+Nyní, když rozumíme jednoduchým tagům, parsování argumentů, párovým tagům, poskytovatelům a n:atributům, pojďme se zabývat složitějším scénářem zahrnujícím tagy vnořené v jiných tazích, s využitím našeho tagu `{debug}` jako výchozího bodu.
+
+
+Mezilehlé tagy
+==============
+
+Některé párové tagy umožňují nebo dokonce vyžadují, aby se jiné tagy objevily *uvnitř* nich před konečným uzavíracím tagem. Tyto se nazývají **mezilehlé tagy**. Klasické příklady zahrnují `{if}...{elseif}...{else}...{/if}` nebo `{switch}...{case}...{default}...{/switch}`.
+
+Rozšiřme náš tag `{debug}` o podporu volitelné klauzule `{else}`, která bude vykreslena, když aplikace *není* ve vývojovém režimu.
+
+**Cíl:** Upravit `{debug}` tak, aby podporoval volitelný mezilehlý tag `{else}`. Konečná syntaxe by měla být `{debug} ... {else} ... {/debug}`.
+
+
+Parsování mezilehlých tagů pomocí `yield`
+-----------------------------------------
+
+Již víme, že `yield` pozastavuje parsovací funkci `create()` a vrací zparsovaný obsah spolu s koncovým tagem. `yield` však nabízí více kontroly: můžete mu poskytnout pole *názvů mezilehlých tagů*. Když parser narazí na kterýkoli z těchto specifikovaných tagů **na stejné úrovni vnoření** (tj. jako přímé děti rodičovského tagu, ne uvnitř jiných bloků nebo tagů uvnitř něj), také zastaví parsování.
+
+Když se parsování zastaví kvůli mezilehlému tagu, zastaví parsování obsahu, obnoví generátor `create()` a předá zpět částečně zparsovaný obsah a **mezilehlý tag** samotný (místo konečného koncového tagu). Naše funkce `create()` pak může zpracovat tento mezilehlý tag (např. parsovat jeho argumenty, pokud nějaké měl) a znovu použít `yield` pro parsování *další* části obsahu až do *konečného* koncového tagu nebo jiného očekávaného mezilehlého tagu.
+
+Upravme `DebugNode::create()` tak, aby očekával `{else}`:
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\NopNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DebugNode extends StatementNode
+{
+	// Obsah pro část {debug}
+	public AreaNode $thenContent;
+	// Volitelný obsah pro část {else}
+	public ?AreaNode $elseContent = null;
+
+	public static function create(Tag $tag): \Generator
+	{
+		$node = $tag->node = new self;
+
+		// yield a očekávat buď {/debug} nebo {else}
+		[$node->thenContent, $nextTag] = yield ['else'];
+
+		// Zkontrolovat, zda tag, u kterého jsme se zastavili, byl {else}
+		if ($nextTag?->name === 'else') {
+			// Yield znovu pro parsování obsahu mezi {else} a {/debug}
+			[$node->elseContent, $endTag] = yield;
+		}
+
+		return $node;
+	}
+
+	// ... print() a getIterator() budou aktualizovány dále ...
+}
+```
+
+Nyní `yield ['else']` říká Latte, aby zastavilo parsování nejen pro `{/debug}`, ale také pro `{else}`. Pokud je `{else}` nalezen, `$nextTag` bude obsahovat objekt `Tag` pro `{else}`. Pak znovu použijeme `yield` bez argumentů, což znamená, že nyní očekáváme pouze konečný tag `{/debug}`, a uložíme výsledek do `$node->elseContent`. Pokud `{else}` nebyl nalezen, `$nextTag` by byl `Tag` pro `{/debug}` (nebo `null`, pokud je použit jako n:atribut) a `$node->elseContent` by zůstal `null`.
+
+
+Implementace `print()` s `{else}`
+---------------------------------
+
+Metoda `print()` potřebuje odrážet novou strukturu. Měla by generovat PHP příkaz `if/else` založený na poskytovateli `devMode`.
+
+```php
+	public function print(PrintContext $context): string
+	{
+		return $context->format(
+			<<<'XX'
+				if ($this->global->appDevMode) %line {
+					%node // Kód pro větev 'then' (obsah {debug})
+				} else {
+					%node // Kód pro větev 'else' (obsah {else})
+				}
+
+				XX,
+			$this->position,    // Číslo řádku pro podmínku 'if'
+			$this->thenContent, // První zástupný symbol %node
+			$this->elseContent ?? new NopNode, // Druhý zástupný symbol %node
+		);
+	}
+```
+
+Toto je standardní PHP struktura `if/else`. Používáme `%node` dvakrát; `format()` nahrazuje poskytnuté uzly postupně. Používáme `?? new NopNode` pro vyhnutí se chybám, pokud je `$this->elseContent` `null` – `NopNode` jednoduše nevytiskne nic.
+
+
+Implementace `getIterator()` pro oba obsahy
+-------------------------------------------
+
+Nyní máme potenciálně dva dětské uzly obsahu (`$thenContent` a `$elseContent`). Musíme poskytnout oba, pokud existují:
+
+```php
+	public function &getIterator(): \Generator
+	{
+		yield $this->thenContent;
+		if ($this->elseContent) {
+			yield $this->elseContent;
+		}
+	}
+```
+
+
+Použití vylepšeného tagu
+------------------------
+
+Tag nyní může být použit s volitelnou klauzulí `{else}`:
+
+```latte
+{debug}
+	<p>Zobrazování ladících informací, protože devMode je ZAPNUTO.</p>
+{else}
+	<p>Ladící informace jsou skryty, protože devMode je VYPNUTO.</p>
+{/debug}
+```
+
+
+Zpracování stavu a vnoření
+==========================
+
+Naše předchozí příklady (`{datetime}`, `{debug}`) byly relativně bezstavové v rámci svých metod `print()`. Buď přímo vypisovaly obsah, nebo prováděly jednoduchou podmíněnou kontrolu založenou na globálním poskytovateli. Mnoho tagů však potřebuje spravovat nějakou formu **stavu** během vykreslování nebo zahrnuje vyhodnocení uživatelských výrazů, které by měly být spuštěny pouze jednou kvůli výkonu nebo správnosti. Dále musíme zvážit, co se stane, když jsou naše vlastní tagy **vnořeny**.
+
+Ilustrujme tyto koncepty vytvořením tagu `{repeat $count}...{/repeat}`. Tento tag bude opakovat svůj vnitřní obsah `$count`-krát.
+
+**Cíl:** Implementovat `{repeat $count}`, který opakuje svůj obsah specifikovaný počet krát.
+
+
+Potřeba dočasných & jedinečných proměnných
+------------------------------------------
+
+Představte si, že uživatel napíše:
+
+```latte
+{repeat rand(1, 5)} Obsah {/repeat}
+```
+
+Pokud bychom naivně vygenerovali PHP `for` cyklus tímto způsobem v naší metodě `print()`:
+
+```php
+// Zjednodušený, NESPRÁVNÝ generovaný kód
+for ($i = 0; $i < rand(1, 5); $i++) {
+	// výpis obsahu
+}
+```
+To by bylo špatně! Výraz `rand(1, 5)` by byl **znovu vyhodnocen při každé iteraci cyklu**, což by vedlo k nepředvídatelnému počtu opakování. Potřebujeme vyhodnotit výraz `$count` *jednou* před začátkem cyklu a uložit jeho výsledek.
+
+Vygenerujeme PHP kód, který nejprve vyhodnotí výraz počtu a uloží ho do **dočasné běhové proměnné**. Abychom zabránili kolizím s proměnnými definovanými uživatelem šablony *a* interními proměnnými Latte (jako `$ʟ_...`), použijeme konvenci předpony **`$__` (dvojité podtržítko)** pro naše dočasné proměnné.
+
+Vygenerovaný kód by pak vypadal takto:
+
+```php
+$__count = rand(1, 5);
+for ($__i = 0; $__i < $__count; $__i++) {
+	// výpis obsahu
+}
+```
+
+Nyní zvažme vnoření:
+
+```latte
+{repeat $countA}       {* Vnější cyklus *}
+	{repeat $countB}   {* Vnitřní cyklus *}
+		...
+	{/repeat}
+{/repeat}
+```
+
+Pokud by vnější i vnitřní tag `{repeat}` generoval kód používající *stejné* názvy dočasných proměnných (např. `$__count` a `$__i`), vnitřní cyklus by přepsal proměnné vnějšího cyklu, což by narušilo logiku.
+
+Potřebujeme zajistit, aby dočasné proměnné generované pro každou instanci tagu `{repeat}` byly **jedinečné**. Toho dosáhneme pomocí `PrintContext::generateId()`. Tato metoda vrací jedinečné celé číslo během kompilační fáze. Můžeme připojit toto ID k názvům našich dočasných proměnných.
+
+Takže místo `$__count` budeme generovat `$__count_1` pro první tag repeat, `$__count_2` pro druhý atd. Podobně pro počítadlo cyklu použijeme `$__i_1`, `$__i_2` atd.
+
+
+Implementace `RepeatNode`
+-------------------------
+
+Pojďme vytvořit třídu uzlu.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\CompileException;
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class RepeatNode extends StatementNode
+{
+	public ExpressionNode $count;
+	public AreaNode $content;
+
+	/**
+	 * Parsovací funkce pro {repeat $count} ... {/repeat}
+	 */
+	public static function create(Tag $tag): \Generator
+	{
+		$tag->expectArguments(); // ujistí se, že $count je poskytnut
+		$node = $tag->node = new self;
+		// Parsuje výraz počtu
+		$node->count = $tag->parser->parseExpression();
+		// Získání vnitřního obsahu
+		[$node->content] = yield;
+		return $node;
+	}
+
+	/**
+	 * Generuje PHP 'for' cyklus s jedinečnými názvy proměnných.
+	 */
+	public function print(PrintContext $context): string
+	{
+		// Generování jedinečných názvů proměnných
+		$id = $context->generateId();
+		$countVar = '$__count_' . $id; // např. $__count_1, $__count_2, atd.
+		$iteratorVar = '$__i_' . $id;  // např. $__i_1, $__i_2, atd.
+
+		return $context->format(
+			<<<'XX'
+				// Vyhodnocení výrazu počtu *jednou* a uložení
+				%raw = (int) (%node);
+				// Cyklus s použitím uloženého počtu a jedinečné iterační proměnné
+				for (%raw = 0; %2.raw < %0.raw; %2.raw++) %line {
+					%node // Vykreslení vnitřního obsahu
+				}
+
+				XX,
+			$countVar,          // %0 - Proměnná pro uložení počtu
+			$this->count,       // %1 - Uzel výrazu pro počet
+			$iteratorVar,       // %2 - Název iterační proměnné cyklu
+			$this->position,    // %3 - Komentář s číslem řádku pro cyklus samotný
+			$this->content      // %4 - Uzel vnitřního obsahu
+		);
+	}
+
+	/**
+	 * Poskytuje dětské uzly (výraz počtu a obsah).
+	 */
+	public function &getIterator(): \Generator
+	{
+		yield $this->count;
+		yield $this->content;
+	}
+}
+```
+
+Metoda `create()` parsuje požadovaný výraz `$count` pomocí `parseExpression()`. Nejprve je voláno `$tag->expectArguments()`. To zajišťuje, že uživatel poskytl *něco* po `{repeat}`. Zatímco `$tag->parser->parseExpression()` by selhalo, pokud by nic nebylo poskytnuto, chybová zpráva by mohla být o neočekávané syntaxi. Použití `expectArguments()` poskytuje mnohem jasnější chybu, konkrétně uvádějící, že argumenty chybí pro tag `{repeat}`.
+
+Metoda `print()` generuje PHP kód zodpovědný za provádění logiky opakování za běhu. Začíná generováním jedinečných názvů pro dočasné PHP proměnné, které bude potřebovat.
+
+Metoda `$context->format()` je volána s novým zástupným symbolem `%raw`, který vkládá *surový řetězec* poskytnutý jako odpovídající argument. Zde vkládá jedinečný název proměnné uložený v `$countVar` (např. `$__count_1`).
+A co `%0.raw` a `%2.raw`? To demonstruje **poziční zástupné symboly**. Místo pouhého `%raw`, který bere *další* dostupný surový argument, `%2.raw` explicitně bere argument na indexu 2 (což je `$iteratorVar`) a vkládá jeho surovou řetězcovou hodnotu. To nám umožňuje znovu použít řetězec `$iteratorVar` bez jeho vícenásobného předávání v seznamu argumentů pro `format()`.
+
+Toto pečlivě konstruované volání `format()` generuje efektivní a bezpečný PHP cyklus, který správně zpracovává výraz počtu a vyhýbá se kolizím názvů proměnných i když jsou tagy `{repeat}` vnořeny.
+
+
+Registrace a použití
+--------------------
+
+Zaregistrujte tag ve vašem rozšíření:
+
+```php
+use App\Latte\RepeatNode;
+
+class MyLatteExtension extends Extension
+{
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...),
+			'repeat' => RepeatNode::create(...), // Registrace tagu repeat
+		];
+	}
+}
+```
+
+Použijte ho v šabloně, včetně vnoření:
+
+```latte
+{var $rows = rand(5, 7)}
+{var $cols = rand(3, 5)}
+
+{repeat $rows}
+	<tr>
+		{repeat $cols}
+			<td>Vnitřní cyklus</td>
+		{/repeat}
+	</tr>
+{/repeat}
+```
+
+Tento příklad demonstruje, jak zpracovat stav (počítadla cyklů) a potenciální problémy s vnořením pomocí dočasných proměnných s předponou `$__` a jedinečných s ID od `PrintContext::generateId()`.
+
+
+Čisté n:atributy
+----------------
+
+Zatímco mnoho `n:atributů` jako `n:if` nebo `n:foreach` slouží jako pohodlné zkratky pro jejich protějšky v párových tazích (`{if}...{/if}`, `{foreach}...{/foreach}`), Latte také umožňuje definovat tagy, které *existují pouze* ve formě n:atributu. Ty se často používají k úpravě atributů nebo chování HTML elementu, ke kterému jsou připojeny.
+
+Standardní příklady vestavěné v Latte zahrnují [`n:class` |tags#n:class], který pomáhá dynamicky sestavit atribut `class`, a [`n:attr` |tags#n:attr], který může nastavit více libovolných atributů.
+
+Vytvořme si vlastní čistý n:atribut: `n:confirm`, který přidá JavaScript potvrzovací dialog před provedením akce (jako je následování odkazu nebo odeslání formuláře).
+
+**Cíl:** Implementovat `n:confirm="'Jste si jisti?'"`, který přidá obslužnou rutinu `onclick` pro zabránění výchozí akci, pokud uživatel zruší potvrzovací dialog.
+
+
+Implementace `ConfirmNode`
+--------------------------
+
+Potřebujeme třídu Node a parsovací funkci.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+
+class ConfirmNode extends StatementNode
+{
+	public ExpressionNode $message;
+
+	public static function create(Tag $tag): self
+	{
+		$tag->expectArguments();
+		$node = $tag->node = new self;
+		$node->message = $tag->parser->parseExpression();
+		return $node;
+	}
+
+	/**
+	 * Generuje kód atributu 'onclick' se správným escapováním.
+	 */
+	public function print(PrintContext $context): string
+	{
+		// Zajišťuje správné escapování pro kontexty JavaScript i HTML atributu.
+		return $context->format(
+			<<<'XX'
+				echo ' onclick="', LR\Filters::escapeHtmlAttr('return confirm(' . LR\Filters::escapeJs(%node) . ')'), '"' %line;
+				XX,
+			$this->message,
+			$this->position,
+		);
+	}
+
+	public function &getIterator(): \Generator
+	{
+		yield $this->message;
+	}
+}
+```
+
+Metoda `print()` generuje PHP kód, který nakonec během vykreslování šablony vypíše HTML atribut `onclick="..."`. Zpracování vnořených kontextů (JavaScript uvnitř HTML atributu) vyžaduje pečlivé escapování.
+Filtr `LR\Filters::escapeJs(%node)` je volán za běhu a escapuje zprávu správně pro použití uvnitř JavaScriptu (výstup by byl jako `"Sure?"`). Poté filtr `LR\Filters::escapeHtmlAttr(...)` escapuje znaky, které jsou speciální v HTML atributech, takže by to změnilo výstup na `return confirm(&quot;Sure?&quot;)`.
+Toto dvoustupňové běhové escapování zajišťuje, že zpráva je bezpečná pro JavaScript a výsledný JavaScript kód je bezpečný pro vložení do HTML atributu `onclick`.
+
+
+Registrace a použití
+--------------------
+
+Zaregistrujte n:atribut ve vašem rozšíření. Nezapomeňte na předponu `n:` v klíči:
+
+```php
+class MyLatteExtension extends Extension
+{
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...),
+			'repeat' => RepeatNode::create(...),
+			'n:confirm' => ConfirmNode::create(...), // Registrace n:confirm
+		];
+	}
+}
+```
+
+Nyní můžete použít `n:confirm` na odkazech, tlačítkách nebo prvcích formuláře:
+
+```latte
+<a href="delete.php?id=123" n:confirm='"Opravdu chcete smazat položku {$id}?"'>Smazat</a>
+```
+
+Vygenerované HTML:
+
+```html
+<a href="delete.php?id=123" onclick="return confirm(&quot;Opravdu chcete smazat položku 123?&quot;)">Smazat</a>
+```
+
+Když uživatel klikne na odkaz, prohlížeč provede kód `onclick`, zobrazí potvrzovací dialog a pouze přejde na `delete.php`, pokud uživatel klikne na "OK".
+
+Tento příklad demonstruje, jak lze vytvořit čistý n:atribut k úpravě chování nebo atributů svého hostitelského HTML elementu generováním vhodného PHP kódu v jeho metodě `print()`. Nezapomeňte na dvojité escapování, které je často vyžadováno: jednou pro cílový kontext (JavaScript v tomto případě) a znovu pro kontext HTML atributu.
+
+
+Pokročilá témata
+================
+
+Zatímco předchozí sekce pokrývají základní koncepty, zde je několik pokročilejších témat, na která můžete narazit při vytváření vlastních Latte tagů.
+
+
+Režimy výstupu tagů
+-------------------
+
+Objekt `Tag` předaný vaší funkci `create()` má vlastnost `outputMode`. Tato vlastnost ovlivňuje, jak Latte zachází s okolními mezerami a odsazením, zejména když je tag použit na vlastním řádku. Tuto vlastnost můžete upravit ve vaší funkci `create()`.
+
+- `Tag::OutputKeepIndentation` (Výchozí pro většinu tagů jako `{=...}`): Latte se snaží zachovat odsazení před tagem. Nové řádky *po* tagu jsou obecně zachovány. To je vhodné pro tagy, které vypisují obsah v řádku.
+- `Tag::OutputRemoveIndentation` (Výchozí pro blokové tagy jako `{if}`, `{foreach}`): Latte odstraňuje úvodní odsazení a potenciálně jeden následující nový řádek. To pomáhá udržet generovaný PHP kód čistší a zabraňuje dalším prázdným řádkům v HTML výstupu způsobeným samotným tagem. Použijte toto pro tagy, které reprezentují řídicí struktury nebo bloky, které by samy neměly přidávat mezery.
+- `Tag::OutputNone` (Používá se tagy jako `{var}`, `{default}`): Podobné jako `RemoveIndentation`, ale signalizuje silněji, že tag samotný neprodukuje přímý výstup, potenciálně ovlivňuje zpracování mezer kolem něj ještě agresivněji. Vhodné pro deklarační nebo nastavovací tagy.
+
+Vyberte režim, který nejlépe vyhovuje účelu vašeho tagu. Pro většinu strukturálních nebo řídicích tagů je obvykle vhodný `OutputRemoveIndentation`.
+
+
+Přístup k rodičovským/nejbližším tagům
+--------------------------------------
+
+Někdy chování tagu potřebuje záviset na kontextu, ve kterém je použit, konkrétně ve kterém rodičovském tagu(tazích) se nachází. Objekt `Tag` předaný vaší funkci `create()` poskytuje metodu `closestTag(array $classes, ?callable $condition = null): ?Tag` přesně pro tento účel.
+
+Tato metoda prohledává směrem nahoru hierarchii aktuálně otevřených tagů (včetně HTML elementů reprezentovaných interně během parsování) a vrací objekt `Tag` nejbližšího předka, který odpovídá specifickým kritériím. Pokud není nalezen žádný odpovídající předek, vrátí `null`.
+
+Pole `$classes` specifikuje, jaký druh předkových tagů hledáte. Kontroluje, zda je přidružený uzel předkového tagu (`$ancestorTag->node`) instancí této třídy.
+
+```php
+function create(Tag $tag)
+{
+	// Hledání nejbližšího předkového tagu, jehož uzel je instancí ForeachNode
+	$foreachTag = $tag->closestTag([ForeachNode::class]);
+	if ($foreachTag) {
+		// Můžeme přistupovat k instanci ForeachNode samotné:
+		$foreachNode = $foreachTag->node;
+	}
+}
+```
+
+Všimněte si `$foreachTag->node`: Toto funguje pouze proto, že je konvencí ve vývoji Latte tagů okamžitě přiřadit vytvořený uzel k `$tag->node` v rámci metody `create()`, jak jsme vždy dělali.
+
+Někdy pouhé porovnání typu uzlu nestačí. Můžete potřebovat zkontrolovat specifickou vlastnost potenciálního předkového tagu nebo jeho uzlu. Volitelný druhý argument pro `closestTag()` je callable, který přijímá potenciální předkový objekt `Tag` a měl by vracet, zda je platnou shodou.
+
+```php
+function create(Tag $tag)
+{
+	$dynamicBlockTag = $tag->closestTag(
+		[BlockNode::class],
+		// Podmínka: blok musí být dynamický
+		fn(Tag $blockTag) => $blockTag->node->block->isDynamic(),
+	);
+}
+```
+
+Použití `closestTag()` umožňuje vytvářet tagy, které jsou kontextově uvědomělé a vynucují správné použití v rámci struktury vaší šablony, což vede k robustnějším a srozumitelnějším šablonám.
+
+
+Zástupné symboly `PrintContext::format()`
+-----------------------------------------
+
+Často jsme používali `PrintContext::format()` ke generování PHP kódu v metodách `print()` našich uzlů. Přijímá řetězec masky a následující argumenty, které nahrazují zástupné symboly v masce. Zde je shrnutí dostupných zástupných symbolů:
+
+- **`%node`**: Argument musí být instance `Node`. Volá metodu `print()` uzlu a vkládá výsledný řetězec PHP kódu.
+- **`%dump`**: Argument je jakákoli PHP hodnota. Exportuje hodnotu do platného PHP kódu. Vhodné pro skaláry, pole, null.
+	- `$context->format('echo %dump;', 'Hello')` -> `echo 'Hello';`
+	- `$context->format('$arr = %dump;', [1, 2])` -> `$arr = [1, 2];`
+- **`%raw`**: Vkládá argument přímo do výstupního PHP kódu bez jakéhokoli escapování nebo úprav. **Používejte s opatrností**, primárně pro vkládání předgenerovaných PHP kódových fragmentů nebo názvů proměnných.
+	- `$context->format('%raw = 1;', '$variableName')` -> `$variableName = 1;`
+- **`%args`**: Argument musí být `Expression\ArrayNode`. Vypíše položky pole formátované jako argumenty pro volání funkce nebo metody (oddělené čárkami, zpracovává pojmenované argumenty, pokud jsou přítomny).
+	- `$argsNode = new ArrayNode([...]);`
+	- `$context->format('myFunc(%args);', $argsNode)` -> `myFunc(1, name: 'Joe');`
+- **`%line`**: Argument musí být objekt `Position` (obvykle `$this->position`). Vkládá PHP komentář `/* line X */` indikující číslo řádku zdroje.
+	- `$context->format('echo "Hi" %line;', $this->position)` -> `echo "Hi" /* line 42 */;`
+- **`%escape(...)`**: Generuje PHP kód, který *za běhu* escapuje vnitřní výraz pomocí aktuálních kontextově uvědomělých pravidel escapování.
+	- `$context->format('echo %escape(%node);', $variableNode)`
+- **`%modify(...)`**: Argument musí být `ModifierNode`. Generuje PHP kód, který aplikuje filtry specifikované v `ModifierNode` na vnitřní obsah, včetně kontextově uvědomělého escapování, pokud není zakázáno pomocí `|noescape`.
+	- `$context->format('%modify(%node);', $modifierNode, $variableNode)`
+- **`%modifyContent(...)`**: Podobné jako `%modify`, ale určené pro úpravu bloků zachyceného obsahu (často HTML).
+
+Můžete explicitně odkazovat na argumenty podle jejich indexu (od nuly): `%0.node`, `%1.dump`, `%2.raw`, atd. To umožňuje znovu použít argument několikrát v masce bez jeho opakovaného předávání do `format()`. Viz příklad tagu `{repeat}`, kde byly použity `%0.raw` a `%2.raw`.
+
+
+Příklad komplexního parsování argumentů
+---------------------------------------
+
+Zatímco `parseExpression()`, `parseArguments()`, atd., pokrývají mnoho případů, někdy potřebujete složitější parsovací logiku používající nižší úroveň `TokenStream` dostupnou přes `$tag->parser->stream`.
+
+**Cíl:** Vytvořit tag `{embedYoutube $videoID, width: 640, height: 480}`. Chceme parsovat požadované ID videa (řetězec nebo proměnnou) následované volitelnými páry klíč-hodnota pro rozměry.
+
+```php
+<?php
+namespace App\Latte;
+
+class YoutubeNode extends StatementNode
+{
+	public ExpressionNode $videoId;
+	public ?ExpressionNode $width = null;
+	public ?ExpressionNode $height = null;
+
+	public static function create(Tag $tag): self
+	{
+		$tag->expectArguments();
+		$node = $tag->node = new self;
+		// Parsování požadovaného ID videa
+		$node->videoId = $tag->parser->parseExpression();
+
+		// Parsování volitelných párů klíč-hodnota
+		$stream = $tag->parser->stream; // Získání tokového proudu
+		while ($stream->tryConsume(',')) { // Vyžaduje oddělení čárkou
+			// Očekávání identifikátoru 'width' nebo 'height'
+			$keyToken = $stream->consume(Token::Php_Identifier);
+			$key = strtolower($keyToken->text);
+
+			$stream->consume(':'); // Očekávání oddělovače dvojtečky
+
+			$value = $tag->parser->parseExpression(); // Parsování výrazu hodnoty
+
+			if ($key === 'width') {
+				$node->width = $value;
+			} elseif ($key === 'height') {
+				$node->height = $value;
+			} else {
+				throw new CompileException("Neznámý argument '$key'. Očekáváno 'width' nebo 'height'.", $keyToken->position);
+			}
+		}
+
+		return $node;
+	}
+}
+```
+
+Tato úroveň kontroly vám umožňuje definovat velmi specifické a komplexní syntaxe pro vaše vlastní tagy přímou interakcí s tokovým proudem.
+
+
+Použití `AuxiliaryNode`
+-----------------------
+
+Latte poskytuje obecné "pomocné" uzly pro speciální situace během generování kódu nebo v rámci kompilačních průchodů. Jsou to `AuxiliaryNode` a `Php\Expression\AuxiliaryNode`.
+
+Považujte `AuxiliaryNode` za flexibilní kontejnerový uzel, který deleguje své základní funkcionality - generování kódu a vystavení dětských uzlů - argumentům poskytnutým v jeho konstruktoru:
+
+- Delegace `print()`: První argument konstruktoru je PHP **closure**. Když Latte volá metodu `print()` na `AuxiliaryNode`, spustí tuto poskytnutou closure. Closure přijímá `PrintContext` a jakékoli uzly předané v druhém argumentu konstruktoru, což vám umožňuje definovat zcela vlastní logiku generování PHP kódu za běhu.
+- Delegace `getIterator()`: Druhý argument konstruktoru je **pole objektů `Node`**. Když Latte potřebuje projít děti `AuxiliaryNode` (např. během kompilačních průchodů), jeho metoda `getIterator()` jednoduše poskytuje uzly uvedené v tomto poli.
+
+Příklad:
+
+```php
+$node = new AuxiliaryNode(
+    // 1. Tato closure se stává tělem print()
+    fn(PrintContext $context, $arg1, $arg2) => $context->format('...%node...%node...', $arg1, $arg2),
+
+    // 2. Tyto uzly jsou poskytovány metodou getIterator() a předány closure výše
+    [$argumentNode1, $argumentNode2]
+);
+```
+
+Latte poskytuje dva odlišné typy založené na tom, kde potřebujete vložit generovaný kód:
+
+- `Latte\Compiler\Nodes\Php\Expression\AuxiliaryNode`: Použijte toto, když potřebujete generovat kus PHP kódu, který reprezentuje **výraz**
+- `Latte\Compiler\Nodes\AuxiliaryNode`: Použijte toto pro obecnější účely, když potřebujete vložit blok PHP kódu reprezentující jeden nebo více **příkazů**
+
+Důležitým důvodem k použití `AuxiliaryNode` namísto standardních uzlů (jako `StaticMethodCallNode`) v rámci vaší metody `print()` nebo kompilačního průchodu je **kontrola viditelnosti pro následující kompilační průchody**, zejména ty související s bezpečností, jako je Sandbox.
+
+Uvažte scénář: Váš kompilační průchod potřebuje obalit uživatelem poskytnutý výraz (`$userExpr`) voláním specifické, důvěryhodné pomocné funkce `myInternalSanitize($userExpr)`. Pokud vytvoříte standardní uzel `new FunctionCallNode('myInternalSanitize', [$userExpr])`, bude plně viditelný pro průchod AST. Pokud Sandbox průchod běží později a `myInternalSanitize` *není* na jeho seznamu povolených, Sandbox může toto volání *blokovat* nebo upravit, potenciálně narušující vnitřní logiku vašeho tagu, i když *vy*, autor tagu, víte, že toto specifické volání je bezpečné a nezbytné. Můžete tedy generovat volání přímo v rámci closure `AuxiliaryNode`.
+
+```php
+use Latte\Compiler\Nodes\Php\Expression\AuxiliaryNode;
+
+// ... uvnitř print() nebo kompilačního průchodu ...
+$wrappedNode = new AuxiliaryNode(
+	fn(PrintContext $context, $userExpr) => $context->format(
+		'myInternalSanitize(%node)', // Přímé generování PHP kódu
+		$userExpr,
+	),
+	// DŮLEŽITÉ: Stále předejte původní uzel uživatelského výrazu zde!
+	[$userExpr],
+);
+```
+
+V tomto případě průchod Sandbox vidí `AuxiliaryNode`, ale **neanalyzuje PHP kód generovaný jeho closure**. Nemůže přímo blokovat volání `myInternalSanitize` generované *uvnitř* closure.
+
+Zatímco generovaný PHP kód samotný je skryt před průchody, *vstupy* do tohoto kódu (uzly reprezentující uživatelská data nebo výrazy) **musí být stále průchodné**. Proto je druhý argument konstruktoru `AuxiliaryNode` zásadní. **Musíte** předat pole obsahující všechny původní uzly (jako `$userExpr` v příkladu výše), které vaše closure používá. `getIterator()` `AuxiliaryNode` **poskytne tyto uzly**, umožňující kompilačním průchodům jako Sandbox analyzovat je pro potenciální problémy.
+
+
+Osvědčené postupy
+=================
+
+- **Jasný účel:** Ujistěte se, že váš tag má jasný a nezbytný účel. Nevytvářejte tagy pro úkoly, které lze snadno řešit pomocí [filtrů |custom-filters] nebo [funkcí |custom-functions].
+- **Správně implementujte `getIterator()`:** Vždy implementujte `getIterator()` a poskytujte *reference* (`&`) na *všechny* dětské uzly (argumenty, obsah), které byly zparsovány ze šablony. To je nezbytné pro kompilační průchody, bezpečnost (Sandbox) a potenciální budoucí optimalizace.
+- **Veřejné vlastnosti pro uzly:** Vlastnosti obsahující dětské uzly dělejte veřejnými, aby je kompilační průchody mohly v případě potřeby upravovat.
+- **Používejte `PrintContext::format()`:** Využívejte metodu `format()` pro generování PHP kódu. Zpracovává uvozovky, správně escapuje zástupné symboly a přidává komentáře s číslem řádku automaticky.
+- **Dočasné proměnné (`$__`):** Při generování běhového PHP kódu, který potřebuje dočasné proměnné (např. pro ukládání mezisoučtů, počítadla cyklů), používejte konvenci předpony `$__` pro vyhnutí se kolizím s uživatelskými proměnnými a interními proměnnými Latte `$ʟ_`.
+- **Vnoření a jedinečná ID:** Pokud váš tag může být vnořený nebo potřebuje stav specifický pro instanci za běhu, použijte `$context->generateId()` v rámci vaší metody `print()` pro vytvoření jedinečných přípon pro vaše dočasné proměnné `$__`.
+- **Poskytovatelé pro externí data:** Používejte poskytovatele (registrované přes `Extension::getProviders()`) pro přístup k běhovým datům nebo službám ($this->global->...) místo hardcodování hodnot nebo spoléhání se na globální stav. Používejte předpony výrobce pro názvy poskytovatelů.
+- **Zvažte n:atributy:** Pokud váš párový tag logicky operuje na jednom HTML elementu, Latte pravděpodobně poskytuje automatickou podporu `n:atributu`. Mějte to na paměti pro pohodlí uživatele. Pokud vytváříte tag modifikující atribut, zvažte, zda je čistý `n:atribut` nejvhodnější formou.
+- **Testování:** Pište testy pro vaše tagy, pokrývající jak parsování různých syntaktických vstupů, tak správnost výstupu generovaného **PHP kódu**.
+
+Dodržováním těchto pokynů můžete vytvářet mocné, robustní a udržitelné vlastní tagy, které se bezproblémově integrují s šablonovacím enginem Latte.
+
+.[note]
+Studium tříd uzlů, které jsou součástí Latte, je nejlepší způsob, jak se naučit všechny podrobnosti o procesu parsování.

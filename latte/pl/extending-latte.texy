@@ -1,291 +1,227 @@
-Expanding Latte
-***************
+Rozszerzanie Latte
+******************
 
 .[perex]
-Latte jest bardzo elastyczny i może być rozszerzony na wiele sposobów: możesz dodać niestandardowe filtry, funkcje, tagi, loadery itp. Pokażemy ci, jak to zrobić.
-
-W tym rozdziale opisano różne sposoby rozszerzania Latte. Jeśli chcesz ponownie użyć swoich dostosowań w różnych projektach lub podzielić się nimi z innymi, powinieneś [utworzyć rozszerzenie |creating-extension].
+Latte zostało zaprojektowane z myślą o rozszerzalności. Chociaż jego standardowy zestaw znaczników, filtrów i funkcji obejmuje wiele przypadków użycia, często trzeba dodać własną, specyficzną logikę lub narzędzia pomocnicze. Ta strona zawiera przegląd sposobów rozszerzenia Latte, aby idealnie pasowało do wymagań Twojego projektu - od prostych pomocników po złożoną nową składnię.
 
 
-Ile dróg prowadzi do Rzymu? .[#toc-how-many-roads-lead-to-rome]
-===============================================================
+Sposoby rozszerzania Latte
+==========================
 
-Ponieważ niektóre sposoby przedłużania Latte mogą się łączyć, spróbujmy najpierw wyjaśnić różnice między nimi. Jako przykład spróbujemy zaimplementować generator *Lorem ipsum*, przekazaliśmy liczbę słów do wygenerowania.
+Oto szybki przegląd głównych sposobów dostosowywania i rozszerzania Latte:
 
-Głównym konstruktem języka Latte jest tag. Możemy zaimplementować generator poprzez rozszerzenie Latte o nowy tag:
+- **[Filtry niestandardowe |Custom Filters]:** Do formatowania lub przekształcania danych bezpośrednio w wyjściu szablonu (np. `{$var|myFilter}`). Idealne do zadań takich jak formatowanie dat, modyfikacje tekstu lub stosowanie specyficznego escapowania. Można je również użyć do modyfikacji większych bloków zawartości HTML, opakowując zawartość w anonimowy [`{block}` |tags#block] i stosując na nim własny filtr.
+- **[Funkcje niestandardowe |Custom Functions]:** Do dodawania logiki wielokrotnego użytku, którą można wywoływać w wyrażeniach w szablonie (np. `{myFunction($arg1, $arg2)}`). Przydatne do obliczeń, dostępu do funkcji pomocniczych aplikacji lub generowania małych fragmentów treści.
+- **[Znaczniki niestandardowe |Custom Tags]:** Do tworzenia zupełnie nowych konstrukcji językowych (`{mytag}...{/mytag}` lub `n:mytag`). Znaczniki oferują najwięcej możliwości, pozwalają definiować własne struktury, kontrolować parsowanie szablonu i implementować złożoną logikę renderowania.
+- **[Przejścia kompilatora |Compiler Passes]:** Funkcje, które modyfikują abstrakcyjne drzewo składni (AST) szablonu po parsowaniu, ale przed generowaniem kodu PHP. Używane do zaawansowanych optymalizacji, kontroli bezpieczeństwa (takich jak Sandbox) lub automatycznych modyfikacji kodu.
+- **[Niestandardowe loadery |loaders]:** Do zmiany sposobu, w jaki Latte wyszukuje i ładuje pliki szablonów (np. ładowanie z bazy danych, zaszyfrowanego magazynu itp.).
 
-```latte
-{lipsum 40}
-```
+Wybór odpowiedniej metody rozszerzenia jest kluczowy. Zanim stworzysz złożony znacznik, zastanów się, czy nie wystarczyłby prostszy filtr lub funkcja. Pokażmy to na przykładzie: implementacja generatora *Lorem ipsum*, który jako argument przyjmuje liczbę słów do wygenerowania.
 
-Przywieszka sprawdzi się znakomicie. Jednak generator w postaci znacznika może nie być wystarczająco elastyczny, ponieważ nie można go użyć w wyrażeniu. Przy okazji, w praktyce rzadko trzeba generować tagi; i to jest dobra wiadomość, ponieważ tagi są bardziej skomplikowanym sposobem na rozszerzenie.
+- **Jako znacznik?** `{lipsum 40}` - Możliwe, ale znaczniki są bardziej odpowiednie dla struktur sterujących lub generowania złożonych znaczników. Znaczników nie można używać bezpośrednio w wyrażeniach.
+- **Jako filtr?** `{=40|lipsum}` - Technicznie to działa, ale filtry są przeznaczone do *transformacji* wartości wejściowej. Tutaj `40` jest *argumentem*, a nie wartością, która jest transformowana. To wydaje się semantycznie niepoprawne.
+- **Jako funkcja?** `{lipsum(40)}` - To jest najbardziej naturalne rozwiązanie! Funkcje przyjmują argumenty i zwracają wartości, co jest idealne do użycia w dowolnym wyrażeniu: `{var $text = lipsum(40)}`.
 
-Ok, spróbujmy stworzyć filtr zamiast tagu:
-
-```latte
-{=40|lipsum}
-```
-
-Ponownie, ważna opcja. Ale filtr powinien przekształcić przekazaną wartość w coś innego. Tutaj używamy wartości `40`, która wskazuje na liczbę wygenerowanych słów, jako argumentu filtra, a nie jako wartości, którą chcemy przekształcić.
-
-Spróbujmy więc użyć funkcji:
-
-```latte
-{lipsum(40)}
-```
-
-To jest to! Dla tego konkretnego przykładu, tworzenie funkcji jest idealnym sposobem na rozszerzenie. Możesz go wywołać wszędzie tam, gdzie akceptowane jest wyrażenie, np:
-
-```latte
-{var $text = lipsum(40)}
-```
+**Ogólne zalecenie:** Używaj funkcji do obliczeń/generowania, filtrów do transformacji i znaczników do nowych konstrukcji językowych lub złożonych znaczników. Przejść używaj do manipulacji AST, a loaderów do pobierania szablonów.
 
 
-Filtry .[#toc-filters]
-======================
+Bezpośrednia rejestracja
+========================
 
-Utwórz filtr, rejestrując jego nazwę i dowolną możliwość wywołania w PHP, np. funkcję:
+Dla narzędzi pomocniczych specyficznych dla projektu lub szybkich rozszerzeń, Latte umożliwia bezpośrednią rejestrację filtrów i funkcji w obiekcie `Latte\Engine`.
+
+Do rejestracji filtra użyj metody `addFilter()`. Pierwszym argumentem Twojej funkcji filtrującej będzie wartość przed znakiem `|`, a kolejne argumenty to te, które są przekazywane za dwukropkiem `:`.
 
 ```php
 $latte = new Latte\Engine;
-$latte->addFilter('shortify', fn(string $s) => mb_substr($s, 0, 10)); // obcina tekst do 10 liter
+
+// Definicja filtra (obiekt wywoływalny: funkcja, metoda statyczna itp.)
+$myTruncate = fn(string $s, int $length = 50) => mb_substr($s, 0, $length);
+
+// Rejestracja
+$latte->addFilter('truncate', $myTruncate);
+
+// Użycie w szablonie: {$text|truncate} lub {$text|truncate:100}
 ```
 
-W tym przypadku przydałoby się, aby filtr akceptował dodatkowy parametr:
+Możesz również zarejestrować **Filter Loader**, funkcję, która dynamicznie dostarcza obiekty wywoływalne filtrów według żądanej nazwy:
 
 ```php
-$latte->addFilter('shortify', fn(string $s, int $len = 10) => mb_substr($s, 0, $len));
-```
-
-W szablonie jest on wtedy nazywany w następujący sposób:
-
-```latte
-<p>{$text|shortify}</p>
-<p>{$text|shortify:100}</p>
-```
-
-Jak widać, funkcja otrzymuje lewą stronę filtra przed fajką `|` jako první argument a argumenty předané filtru za `:` jako dodatkowe argumenty.
-
-Oczywiście funkcja reprezentująca filtr może przyjąć dowolną liczbę parametrów, obsługiwane są również parametry variadyczne.
-
-Jeśli filtr zwraca ciąg znaków w HTML, można go oznaczyć, aby Latte nie wykonywało automatycznego (a więc podwójnego) escapingu. Pozwala to uniknąć konieczności określania `|noescape` w szablonie.
-Najprostszym sposobem jest zawinięcie łańcucha w obiekt `Latte\Runtime\Html`, innym sposobem są [filtry kontekstowe |#Contextual Filters].
-
-```php
-$latte->addFilter('money', fn(float $amount) => new Latte\Runtime\Html("<i>$amount EUR</i>"));
-```
-
-.[note]
-W takim przypadku filtr musi zapewnić prawidłowe uciekanie danych.
-
-
-Filtry z wykorzystaniem klasy .[#toc-filters-using-the-class]
--------------------------------------------------------------
-
-Drugim sposobem na zdefiniowanie filtra jest [użycie klasy |develop#Parameters-as-a-Class]. Tworzymy metodę z atrybutem `TemplateFilter`:
-
-```php
-class TemplateParameters
-{
-	public function __construct(
-		// parametry
-	) {}
-
-	#[Latte\Attributes\TemplateFilter]
-	public function shortify(string $s, int $len = 10): string
-	{
-		return mb_substr($s, 0, $len);
-	}
-}
-
-$params = new TemplateParameters(/* ... */);
-$latte->render('template.latte', $params);
+$latte->addFilterLoader(fn(string $name) => /* zwraca obiekt wywoływalny lub null */);
 ```
 
 
-Ładowarka filtrów .[#toc-filter-loader]
----------------------------------------
-
-Zamiast rejestrować poszczególne filtry, można stworzyć tzw. loader, czyli funkcję, która jest wywoływana z nazwą filtra jako argumentem i zwraca jego wywołanie w PHP lub null.
-
-```php
-$latte->addFilterLoader([new Filters, 'load']);
-
-
-class Filters
-{
-	public function load(string $filter): ?callable
-	{
-		if (in_array($filter, get_class_methods($this))) {
-			return [$this, $filter];
-		}
-		return null;
-	}
-
-	public function shortify($s, $len = 10)
-	{
-		return mb_substr($s, 0, $len);
-	}
-
-	// ...
-}
-```
-
-
-Filtry kontekstowe .[#toc-contextual-filters]
----------------------------------------------
-
-Filtr kontekstowy to taki, który akceptuje obiekt [api:Latte\Runtime\FilterInfo] w pierwszym parametrze, a następnie inne parametry jak w klasycznych filtrach. Jest zarejestrowany w ten sam sposób, Latte samo rozpoznaje, że filtr jest kontekstowy:
-
-```php
-use Latte\Runtime\FilterInfo;
-
-$latte->addFilter('foo', function (FilterInfo $info, string $str): string {
-	// ...
-});
-```
-
-Filtry kontekstowe mogą wykrywać i modyfikować typ zawartości, który otrzymują w zmiennej `$info->contentType`. Jeśli filtr zostanie wywołany klasycznie nad zmienną (np. `{$var|foo}`), to `$info->contentType` będzie zawierał null.
-
-Filtr powinien najpierw sprawdzić, czy typ zawartości łańcucha wejściowego jest obsługiwany. Może też ją zmienić. Przykład filtra, który przyjmuje tekst (lub null) i zwraca HTML:
-
-```php
-use Latte\Runtime\FilterInfo;
-
-$latte->addFilter('money', function (FilterInfo $info, float $amount): string {
-	// nejprve oveříme, zda je vstupem content-type text
-	if (!in_array($info->contentType, [null, ContentType::Text])) {
-		throw new Exception("Filtr |money użyty w niekompatybilnym typie zawartości $info->contentType.");
-	}
-
-	// změníme content-type na HTML
-	$info->contentType = ContentType::Html;
-	return "<i>$amount EUR</i>";
-});
-```
-
-.[note]
-W tym przypadku filtr musi zapewnić prawidłową ucieczkę danych.
-
-Wszystkie filtry, które są używane nad [blokami |tags#block] (np. jako `{block|foo}...{/block}`) musi mieć charakter kontekstowy.
-
-
-Funkcja .[#toc-functions]
-=========================
-
-Domyślnie wszystkie natywne funkcje PHP mogą być używane w Latte, chyba że piaskownica to wyłączy. Ale można też zdefiniować własne funkcje. Mogą one nadpisać funkcje natywne.
-
-Tworzysz funkcję, rejestrując jej nazwę i dowolne wywołanie w PHP:
+Do rejestracji funkcji użytecznej w wyrażeniach szablonu użyj `addFunction()`.
 
 ```php
 $latte = new Latte\Engine;
-$latte->addFunction('random', function (...$args) {
-	return $args[array_rand($args)];
-});
+
+// Definicja funkcji
+$isWeekend = fn(DateTimeInterface $date) => $date->format('N') >= 6;
+
+// Rejestracja
+$latte->addFunction('isWeekend', $isWeekend);
+
+// Użycie w szablonie: {if isWeekend($myDate)}Weekend!{/if}
 ```
 
-Użycie jest wtedy takie samo jak w przypadku wywołania funkcji PHP:
-
-```latte
-{random(jablko, pomeranč, citron)} // vypíše například: jablko
-```
+Więcej informacji znajdziesz w części [Tworzenie niestandardowych filtrów |custom-filters] i [Funkcji |custom-functions].
 
 
-Funkcja wykorzystująca klasę .[#toc-functions-using-the-class]
---------------------------------------------------------------
+Solidny sposób: Rozszerzenie Latte .{toc: Latte Extension}
+==========================================================
 
-Drugim sposobem na zdefiniowanie funkcji jest [użycie klasy |develop#Parameters-as-a-Class]. Tworzymy metodę z atrybutem `TemplateFunction`:
+Chociaż bezpośrednia rejestracja jest prosta, standardowym i zalecanym sposobem pakowania i dystrybucji rozszerzeń Latte jest użycie klas **Extension**. Extension służy jako centralny punkt konfiguracyjny do rejestracji wielu znaczników, filtrów, funkcji, przejść kompilatora i innych elementów.
+
+Dlaczego używać Extensions?
+
+- **Organizacja:** Utrzymuje powiązane rozszerzenia (znaczniki, filtry itp. dla konkretnej funkcji) razem w jednej klasie.
+- **Wielokrotne użycie i udostępnianie:** Łatwo spakujesz swoje rozszerzenia do użytku w innych projektach lub do udostępnienia społeczności (np. przez Composer).
+- **Pełna moc:** Niestandardowe znaczniki i przejścia kompilatora *mogą być rejestrowane tylko* za pośrednictwem Extensions.
+
+
+Rejestracja Rozszerzenia
+------------------------
+
+Extension rejestruje się w Latte za pomocą metody `addExtension()` (lub za pośrednictwem [pliku konfiguracyjnego |application:configuration#sablony-latte]):
 
 ```php
-class TemplateParameters
+$latte = new Latte\Engine;
+$latte->addExtension(new MyProjectExtension);
+```
+
+Jeśli zarejestrujesz wiele rozszerzeń i definiują one tak samo nazwane znaczniki, filtry lub funkcje, pierwszeństwo ma ostatnio dodane rozszerzenie. Oznacza to również, że Twoje rozszerzenia mogą nadpisywać natywne znaczniki/filtry/funkcje.
+
+Za każdym razem, gdy dokonasz zmiany w klasie i automatyczne odświeżanie nie jest wyłączone, Latte automatycznie przekompiluje Twoje szablony.
+
+
+Tworzenie Rozszerzenia
+----------------------
+
+Aby utworzyć własne rozszerzenie, musisz utworzyć klasę, która dziedziczy z [api:Latte\Extension]. Aby zobaczyć, jak wygląda takie rozszerzenie, spójrz na wbudowane "CoreExtension":https://github.com/nette/latte/blob/master/src/Latte/Essential/CoreExtension.php.
+
+Przyjrzyjmy się metodom, które możesz zaimplementować:
+
+
+beforeCompile(Latte\Engine $engine): void .[method]
+---------------------------------------------------
+
+Wywoływane przed kompilacją szablonu. Metoda może być używana na przykład do inicjalizacji związanych z kompilacją.
+
+
+getTags(): array .[method]
+--------------------------
+
+Wywoływane podczas kompilacji szablonu. Zwraca tablicę asocjacyjną *nazwa znacznika => obiekt wywoływalny*, które są funkcjami do parsowania znaczników. [Więcej informacji |custom-tags].
+
+```php
+public function getTags(): array
 {
-	public function __construct(
-		// parametry
-	) {}
-
-	#[Latte\Attributes\TemplateFunction]
-	public function random(...$args)
-	{
-		return $args[array_rand($args)];
-	}
+	return [
+		'foo' => FooNode::create(...),
+		'bar' => BarNode::create(...),
+		'n:baz' => NBazNode::create(...),
+		// ...
+	];
 }
-
-$params = new TemplateParameters(/* ... */);
-$latte->render('template.latte', $params);
 ```
 
+Znacznik `n:baz` reprezentuje czysty [n:atrybut |syntax#n:atrybuty], czyli znacznik, który można zapisać tylko jako atrybut.
 
-Ładowarki .[#toc-loaders]
-=========================
+Dla znaczników `foo` i `bar` Latte automatycznie rozpozna, czy są to znaczniki parzyste, a jeśli tak, można je automatycznie zapisywać za pomocą n:atrybutów, w tym wariantów z prefiksami `n:inner-foo` i `n:tag-foo`.
 
-Loadery są odpowiedzialne za ładowanie szablonów ze źródła, takiego jak system plików. Ustawia się je metodą `setLoader()`:
+Kolejność wykonywania takich n:atrybutów jest określona przez ich kolejność w tablicy zwróconej przez metodę `getTags()`. Zatem `n:foo` jest zawsze wykonywany przed `n:bar`, nawet jeśli atrybuty w znaczniku HTML są wymienione w odwrotnej kolejności, jak `<div n:bar="..." n:foo="...">`.
+
+Jeśli potrzebujesz określić kolejność n:atrybutów w wielu rozszerzeniach, użyj metody pomocniczej `order()`, gdzie parametr `before` xor `after` określa, które znaczniki są sortowane przed lub za znacznikiem.
 
 ```php
-$latte->setLoader(new MyLoader);
+public function getTags(): array
+{
+	return [
+		'foo' => self::order(FooNode::create(...), before: 'bar'),
+		'bar' => self::order(BarNode::create(...), after: ['block', 'snippet']),
+	];
+}
 ```
 
-Wbudowane ładowarki to:
+
+getPasses(): array .[method]
+----------------------------
+
+Wywoływane podczas kompilacji szablonu. Zwraca tablicę asocjacyjną *nazwa przejścia => obiekt wywoływalny*, które są funkcjami reprezentującymi tzw. [przejścia kompilatora |compiler-passes], które przechodzą i modyfikują AST.
+
+Tutaj również można użyć metody pomocniczej `order()`. Wartość parametrów `before` lub `after` może być `*` o znaczeniu przed/po wszystkich.
+
+```php
+public function getPasses(): array
+{
+	return [
+		'optimize' => Passes::optimizePass(...),
+		'sandbox' => self::order($this->sandboxPass(...), before: '*'),
+		// ...
+	];
+}
+```
 
 
-FileLoader .[#toc-fileloader]
+beforeRender(Latte\Engine $engine): void .[method]
+--------------------------------------------------
+
+Wywoływane przed każdym renderowaniem szablonu. Metoda może być używana na przykład do inicjalizacji zmiennych używanych podczas renderowania.
+
+
+getFilters(): array .[method]
 -----------------------------
 
-Default loader. Ładuje szablony z systemu plików.
-
-Dostęp do plików może być ograniczony poprzez ustawienie katalogu podstawowego:
+Wywoływane przed renderowaniem szablonu. Zwraca filtry jako tablicę asocjacyjną *nazwa filtra => obiekt wywoływalny*. [Więcej informacji |custom-filters].
 
 ```php
-$latte->setLoader(new Latte\Loaders\FileLoader($templateDir));
-$latte->render('test.latte');
+public function getFilters(): array
+{
+	return [
+		'batch' => $this->batchFilter(...),
+		'trim' => $this->trimFilter(...),
+		// ...
+	];
+}
 ```
 
 
-StringLoader .[#toc-stringloader]
----------------------------------
+getFunctions(): array .[method]
+-------------------------------
 
-Ładuje szablony z ciągów znaków. Ten loader jest bardzo przydatny do testów. Może być również używany do małych projektów, w których sensowne może być przechowywanie wszystkich szablonów w jednym pliku PHP.
-
-```php
-$latte->setLoader(new Latte\Loaders\StringLoader([
-	'main.file' => '{include other.file}',
-	'other.file' => '{if true} {$var} {/if}',
-]));
-
-$latte->render('main.file');
-```
-
-Uproszczone użytkowanie:
+Wywoływane przed renderowaniem szablonu. Zwraca funkcje jako tablicę asocjacyjną *nazwa funkcji => obiekt wywoływalny*. [Więcej informacji |custom-functions].
 
 ```php
-$template = '{if true} {$var} {/if}';
-$latte->setLoader(new Latte\Loaders\StringLoader);
-$latte->render($template);
+public function getFunctions(): array
+{
+	return [
+		'clamp' => $this->clampFunction(...),
+		'divisibleBy' => $this->divisibleByFunction(...),
+		// ...
+	];
+}
 ```
 
 
-Stwórz swój własny program ładujący .[#toc-creating-a-custom-loader]
---------------------------------------------------------------------
+getProviders(): array .[method]
+-------------------------------
 
-Loader to klasa implementująca interfejs [api:Latte\Loader].
+Wywoływane przed renderowaniem szablonu. Zwraca tablicę dostawców, którzy są zazwyczaj obiektami używanymi przez znaczniki w czasie działania. Dostęp do nich uzyskuje się przez `$this->global->...`. [Więcej informacji |custom-tags#Wprowadzenie providerów].
 
-
-Tagi .[#toc-tags]
-=================
-
-Jedną z najciekawszych cech jądra templatki jest możliwość definiowania nowych konstrukcji językowych za pomocą znaczników. Jest to również bardziej złożona funkcjonalność i musisz zrozumieć, jak Latte działa wewnętrznie.
-
-W większości przypadków jednak znacznik nie jest potrzebny:
-- jeśli ma generować jakieś dane wyjściowe, użyj zamiast tego [funkcji |#Functions]
-- jeśli miałby zmodyfikować jakieś dane wejściowe i je zwrócić, użyj zamiast tego [filtra |#Filters]
-- jeśli miałby edytować obszar tekstu, owinąć go tagiem [`{block}` |tags#block] i użyj [filtra |#Contextual-Filters]
-- jeśli nie miałoby to nic dać, a jedynie wywołać funkcję, wywołaj ją za pomocą [`{do}` |tags#do]
-
-Jeśli nadal chcesz stworzyć tag, świetnie! Wszystkie najważniejsze informacje znajdziesz w rozdziale [Tworzenie rozszerzenia |creating-extension].
+```php
+public function getProviders(): array
+{
+	return [
+		'myFoo' => $this->foo,
+		'myBar' => $this->bar,
+		// ...
+	];
+}
+```
 
 
-Kompilator przechodzi .[#toc-compiler-passes]
-=============================================
+getCacheKey(Latte\Engine $engine): mixed .[method]
+--------------------------------------------------
 
-Przejścia kompilatora to funkcje, które modyfikują AST lub zbierają w nich informacje. W Latte, na przykład, piaskownica jest zaimplementowana w ten sposób: przemierza wszystkie węzły AST, znajduje wywołania funkcji i metod i zastępuje je wywołaniami, które kontroluje.
-
-Podobnie jak w przypadku tagów, jest to bardziej złożona funkcjonalność i musisz zrozumieć, jak Latte działa pod maską. Wszystkie najważniejsze informacje można znaleźć w rozdziale [Tworzenie rozszerzenia |creating-extension].
+Wywoływane przed renderowaniem szablonu. Wartość zwracana staje się częścią klucza, którego hash jest zawarty w nazwie pliku skompilowanego szablonu. Dla różnych wartości zwracanych Latte wygeneruje więc różne pliki cache.

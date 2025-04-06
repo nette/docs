@@ -1,0 +1,231 @@
+Creating Custom Filters
+***********************
+
+.[perex]
+Filters are powerful tools for formatting and modifying data directly within Latte templates. They offer a clean syntax using the pipe symbol (`|`) to transform variables or expression results into the desired output format.
+
+
+What are Filters?
+=================
+
+Filters in Latte are essentially **PHP functions designed specifically to transform an input value into an output value**. They are applied using the pipe (`|`) notation within template expressions (`{...}`).
+
+**Convenience:** Filters allow you to encapsulate common formatting tasks (like date formatting, case conversion, truncation) or data manipulations into reusable units. Instead of repeating complex PHP code in your templates, you can simply apply a filter:
+```latte
+{* Instead of complex PHP for truncation: *}
+{$article->text|truncate:100}
+
+{* Instead of date formatting code: *}
+{$event->startTime|date:'Y-m-d H:i'}
+
+{* Applying multiple transformations: *}
+{$product->name|lower|capitalize}
+```
+
+**Readability:** Using filters makes templates cleaner and more focused on presentation, moving the transformation logic into the filter's definition.
+
+**Context-Awareness:** A key strength of Latte filters is their ability to be [context-aware |#Contextual Filters]. This means a filter can understand the type of content it's operating on (HTML, JavaScript, plain text, etc.) and apply appropriate logic or escaping, which is crucial for security and correctness, especially when dealing with HTML generation.
+
+**Integration with Application Logic:** Just like custom functions, the PHP callable behind a filter can be a closure, a static method, or an instance method. This allows filters to access application services or data if needed, though their primary purpose remains *transforming the input value*.
+
+By default, Latte provides a rich set of [standard filters|filters]. Custom filters allow you to extend this set with your project-specific formatting and transformation needs.
+
+If you need to perform logic based on *multiple* inputs or don't have a primary value to transform, a [custom function|custom functions] is likely a better fit. If you need to generate complex markup or control template flow, consider a [custom tag|custom tags].
+
+
+Creating and Registering Filters
+================================
+
+There are several ways to define and register custom filters in Latte.
+
+
+Direct Registration via `addFilter()`
+-------------------------------------
+
+The simplest way to add a filter is using the `addFilter()` method directly on the `Latte\Engine` object. You provide the filter name (how it will be used in the template) and the corresponding PHP callable.
+
+```php
+$latte = new Latte\Engine;
+
+// Simple filter without arguments
+$latte->addFilter('initial', fn(string $s): string => mb_substr($s, 0, 1) . '.');
+
+// Filter with an optional argument
+$latte->addFilter('shortify', function (string $s, int $len = 10): string {
+	return mb_substr($s, 0, $len);
+});
+
+// Filter processing an array
+$latte->addFilter('sum', fn(array $numbers): int|float => array_sum($numbers));
+```
+
+**Usage in Template:**
+
+```latte
+{$name|initial}                 {* Outputs 'J.' if $name is 'John' *}
+{$description|shortify}         {* Uses default length 10 *}
+{$description|shortify:50}      {* Uses length 50 *}
+{$prices|sum}                   {* Outputs the sum of items in $prices array *}
+```
+
+**Argument Passing:**
+
+The value on the left side of the pipe (`|`) is always passed as the *first* argument to the filter function. Any parameters specified after the colon (`:`) in the template are passed as subsequent arguments.
+
+```latte
+{$text|shortify:30}
+// Calls the PHP function shortify($text, 30)
+```
+
+
+Registration via Extension
+--------------------------
+
+For better organization, especially when creating reusable sets of filters or sharing them as packages, the recommended way is to register them within a [Latte Extension |extending-latte#Latte Extension]:
+
+```php
+namespace App\Latte;
+
+use Latte\Extension;
+
+class MyLatteExtension extends Extension
+{
+	public function getFilters(): array
+	{
+		return [
+			'initial' => $this->initial(...),
+			'shortify' => $this->shortify(...),
+		];
+	}
+
+	public function initial(string $s): string
+	{
+		return mb_substr($s, 0, 1) . '.';
+	}
+
+	public function shortify(string $s, int $len = 10): string
+	{
+		return mb_substr($s, 0, $len);
+	}
+}
+
+// Registration
+$latte = new Latte\Engine;
+$latte->addExtension(new App\Latte\MyLatteExtension);
+```
+
+This approach keeps your filter logic encapsulated and makes registration straightforward.
+
+
+Using a Filter Loader
+---------------------
+
+Latte allows registering a filter loader via `addFilterLoader()`. This is a single callable that Latte asks for any unknown filter name during compilation. The loader returns the filter's PHP callable or `null`.
+
+```php
+$latte = new Latte\Engine;
+
+// Loader might dynamically create/fetch filter callables
+$latte->addFilterLoader(function (string $name): ?callable {
+	if ($name === 'myLazyFilter') {
+		// Imagine expensive initialization here...
+		$service = get_some_expensive_service();
+		return fn($value) => $service->process($value);
+	}
+	return null;
+});
+```
+
+This method was primarily intended for lazy loading filters with very **expensive initialization**. However, modern dependency injection practices usually handle lazy services more effectively.
+
+Filter loaders add complexity and are generally discouraged in favor of direct registration via `addFilter()` or within an Extension using `getFilters()`. Use loaders only if you have a strong, specific reason related to performance bottlenecks in filter initialization that cannot be addressed otherwise.
+
+
+Filters Using a Class with Attributes .{toc: Filters Using the Class}
+---------------------------------------------------------------------
+
+Another elegant way to define filters is by using methods within your [template parameters class |develop#Parameters as a Class]. Simply add the `#[Latte\Attributes\TemplateFilter]` attribute to the method.
+
+```php
+use Latte\Attributes\TemplateFilter;
+
+class TemplateParameters
+{
+	public function __construct(
+		public string $description,
+		// other parameters...
+	) {}
+
+	#[TemplateFilter]
+	public function shortify(string $s, int $len = 10): string
+	{
+		return mb_substr($s, 0, $len);
+	}
+}
+
+// Pass the object to the template
+$params = new TemplateParameters(description: '...');
+$latte->render('template.latte', $params);
+```
+
+Latte will automatically detect and register methods marked with this attribute when the `TemplateParameters` object is passed to the template. The filter name in the template will be the same as the method name (`shortify` in this case).
+
+```latte
+{* Use the filter defined in the parameters class *}
+{$description|shortify:50}
+```
+
+
+Contextual Filters
+==================
+
+Sometimes, a filter needs more information than just the input value. It might need to know the **content type** of the string it's processing (e.g., HTML, JavaScript, plain text) or even modify it. This is where contextual filters come in.
+
+A contextual filter is defined just like a regular filter, but its **first parameter must be** type-hinted as `Latte\Runtime\FilterInfo`. Latte automatically recognizes this signature and passes the `FilterInfo` object when calling the filter. Subsequent parameters receive the filter arguments as usual.
+
+```php
+use Latte\Runtime\FilterInfo;
+use Latte\ContentType;
+
+$latte->addFilter('money', function (FilterInfo $info, float $amount): string {
+	// 1. Check the input content type (optional but recommended)
+	//    Allow null (variable input) or plain text. Reject if applied on HTML etc.
+	if (!in_array($info->contentType, [null, ContentType::Text], true)) {
+		$actualType = $info->contentType ?? 'mixed';
+		throw new \RuntimeException(
+			"Filter |money used in incompatible content type $actualType. Expected text or null."
+		);
+	}
+
+	// 2. Perform the transformation
+	$formatted = number_format($amount, 2, '.', ',') . ' EUR';
+	$htmlOutput = '<i>' . htmlspecialchars($formatted) . '</i>'; // Ensure proper escaping!
+
+	// 3. Declare the output content type
+	$info->contentType = ContentType::Html;
+
+	// 4. Return the result
+	return $htmlOutput;
+});
+```
+
+`$info->contentType` is a string constant from `Latte\ContentType` (e.g., `ContentType::Html`, `ContentType::Text`, `ContentType::JavaScript`, etc.), or `null` if the filter is applied to a variable (`{$var|filter}`). You can **read** this to check the input context and **write** to it to declare the output context type.
+
+By setting the content type to HTML, you tell Latte that the string returned by your filter is safe HTML. Latte will then **not** perform its default auto-escaping on this result. This is crucial if your filter generates HTML markup.
+
+.[warning]
+If your filter generates HTML, **you are responsible for correctly escaping any input data** used within that HTML (like in the `htmlspecialchars($formatted)` call above). Failure to do so can create XSS vulnerabilities. If your filter only returns plain text, you don't need to set `$info->contentType`.
+
+
+Filters on Blocks
+-----------------
+
+All filters applied to [blocks|tags#block] *must* be contextual. This is because the block's content has a defined content type (usually HTML), which the filter needs to be aware of.
+
+```latte
+{block heading|money}1000{/block}
+{* The 'money' filter receives '1000' as the second argument
+   and $info->contentType will be ContentType::Html *}
+```
+
+Contextual filters provide powerful control over how data is processed based on its context, enabling advanced features and ensuring correct escaping behaviour, especially when generating HTML content.

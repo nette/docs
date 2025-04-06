@@ -1,0 +1,198 @@
+Loadery
+*******
+
+.[perex]
+Loadery jsou mechanismus, který Latte používá k získání zdrojového kódu vašich šablon. Nejčastěji jsou šablony uloženy jako soubory na disku, ale díky flexibilnímu systému loaderů je můžete načítat prakticky odkudkoliv nebo je dokonce dynamicky generovat.
+
+
+Co je to Loader?
+================
+
+Když pracujete se šablonami, obvykle si představíte soubory `.latte` umístěné ve struktuře adresářů vašeho projektu. O to se stará výchozí [FileLoader |#FileLoader] v Latte. Spojení mezi názvem šablony (jako `'main.latte'` nebo `'components/card.latte'`) a jejím skutečným zdrojovým kódem však *nemusí* být přímé mapování na cestu k souboru.
+
+Právě tady přicházejí na řadu loadery. Loader je objekt, který má za úkol vzít název šablony (identifikační řetězec) a poskytnout Latte její zdrojový kód. Latte se při tomto úkolu zcela spoléhá na nakonfigurovaný loader. To platí nejen pro počáteční šablonu vyžádanou pomocí `$latte->render('main.latte')`, ale také pro **každou šablonu odkazovanou uvnitř** pomocí tagů jako `{include ...}`, `{layout ...}`, `{embed ...}` nebo `{import ...}`.
+
+Proč používat vlastní loader?
+
+- **Načítání z alternativních zdrojů:** Získávání šablon uložených v databázi, v cache (jako Redis nebo Memcached), v systému správy verzí (jako Git, na základě konkrétního commitu) nebo dynamicky generovaných.
+- **Implementace vlastních konvencí pojmenování:** Můžete chtít používat kratší aliasy pro šablony nebo implementovat specifickou logiku vyhledávacích cest (např. nejprve hledat v adresáři tématu, pak se vrátit k výchozímu adresáři).
+- **Přidání zabezpečení nebo řízení přístupu:** Vlastní loader může před načtením určitých šablon ověřit uživatelská oprávnění.
+- **Předzpracování:** I když se to obecně nedoporučuje ([kompilační průchody |compiler-passes] jsou lepší), loader *by* teoreticky mohl předzpracovat obsah šablony, než ho předá do Latte.
+
+Loader pro instanci `Latte\Engine` nastavíte pomocí metody `setLoader()`:
+
+```php
+$latte = new Latte\Engine;
+
+// Použití výchozího FileLoaderu pro soubory v '/path/to/templates'
+$loader = new Latte\Loaders\FileLoader('/path/to/templates');
+$latte->setLoader($loader);
+```
+
+Loader musí implementovat rozhraní `Latte\Loader`.
+
+
+Vestavěné Loadery
+=================
+
+Latte nabízí několik standardních loaderů:
+
+
+FileLoader
+----------
+
+Toto je **výchozí loader** používaný třídou `Latte\Engine`, pokud není určen žádný jiný. Načítá šablony přímo ze souborového systému.
+
+Volitelně můžete nastavit kořenový adresář pro omezení přístupu:
+
+```php
+use Latte\Loaders\FileLoader;
+
+// Následující umožní načítání šablon pouze z adresáře /var/www/html/templates
+$loader = new FileLoader('/var/www/html/templates');
+$latte->setLoader($loader);
+
+// $latte->render('../../../etc/passwd'); // Toto by vyhodilo výjimku
+
+// Vykreslení šablony umístěné na /var/www/html/templates/pages/contact.latte
+$latte->render('pages/contact.latte');
+```
+
+Při použití tagů jako `{include}` nebo `{layout}` řeší názvy šablon relativně k aktuální šabloně, pokud není zadána absolutní cesta.
+
+
+StringLoader
+------------
+
+Tento loader získává obsah šablony z asociativního pole, kde klíče jsou názvy šablon (identifikátory) a hodnoty jsou řetězce zdrojového kódu šablony. Je zvláště užitečný pro testování nebo malé aplikace, kde mohou být šablony uloženy přímo v PHP kódu.
+
+```php
+use Latte\Loaders\StringLoader;
+
+$loader = new StringLoader([
+	'main.latte' => 'Hello {$name}, include is below:{include helper.latte}',
+	'helper.latte' => '{var $x = 10}Included content: {$x}',
+	// Přidejte další šablony podle potřeby
+]);
+
+$latte->setLoader($loader);
+
+$latte->render('main.latte', ['name' => 'World']);
+// Výstup: Hello World, include is below:Included content: 10
+```
+
+Pokud potřebujete vykreslit pouze jednu šablonu přímo z řetězce bez potřeby vkládání nebo dědičnosti odkazující na další pojmenované řetězcové šablony, můžete předat řetězec přímo metodě `render()` nebo `renderToString()` při použití `StringLoader` bez pole:
+
+```php
+$loader = new StringLoader;
+$latte->setLoader($loader);
+
+$templateString = 'Hello {$name}!';
+$output = $latte->renderToString($templateString, ['name' => 'Alice']);
+// $output obsahuje 'Hello Alice!'
+```
+
+
+Vytvoření vlastního Loaderu
+===========================
+
+Pro vytvoření vlastního loaderu (např. pro načítání šablon z databáze, cache, systému správy verzí nebo jiného zdroje) musíte vytvořit třídu, která implementuje rozhraní [api:Latte\Loader].
+
+Podívejme se, co musí každá metoda dělat.
+
+
+getContent(string $name): string .[method]
+------------------------------------------
+Toto je základní metoda loaderu. Jejím úkolem je získat a vrátit úplný zdrojový kód šablony identifikované pomocí `$name` (jak je předáno metodě `$latte->render()` nebo vráceno metodou [getReferredName() |#getReferredName()]).
+
+Pokud šablonu nelze najít nebo k ní přistupovat, tato metoda **musí vyhodit výjimku `Latte\RuntimeException`**.
+
+```php
+public function getContent(string $name): string
+{
+	// Příklad: Načtení z hypotetického interního úložiště
+	$content = $this->storage->read($name);
+	if ($content === null) {
+		throw new Latte\RuntimeException("Template '$name' cannot be loaded.");
+	}
+	return $content;
+}
+```
+
+
+getReferredName(string $name, string $referringName): string .[method]
+----------------------------------------------------------------------
+Tato metoda řeší překlad názvů šablon používaných v rámci tagů jako `{include}`, `{layout}` atd. Když Latte narazí například na `{include 'partial.latte'}` uvnitř `main.latte`, volá tuto metodu s `$name = 'partial.latte'` a `$referringName = 'main.latte'`.
+
+Úkolem metody je přeložit `$name` na kanonický identifikátor (např. absolutní cestu, jedinečný klíč databáze), který bude použit při volání dalších metod loaderu, na základě kontextu poskytnutého v `$referringName`.
+
+```php
+public function getReferredName(string $name, string $referringName): string
+{
+	return ...;
+}
+```
+
+
+getUniqueId(string $name): string .[method]
+-------------------------------------------
+Latte používá pro zlepšení výkonu mezipaměť kompilovaných šablon. Každý kompilovaný soubor šablony potřebuje jedinečný název odvozený od identifikátoru zdrojové šablony. Tato metoda poskytuje řetězec, který **jednoznačně identifikuje** šablonu `$name`.
+
+Pro šablony založené na souborech může posloužit absolutní cesta. Pro šablony v databázi je běžná kombinace prefixu a ID databáze.
+
+```php
+public function getUniqueId(string $name): string
+{
+	return ...;
+}
+```
+
+
+Příklad: Jednoduchý databázový Loader
+-------------------------------------
+
+Tento příklad ukazuje základní strukturu loaderu, který načítá šablony uložené v databázové tabulce nazvané `templates` se sloupci `name` (jedinečný identifikátor), `content` a `updated_at`.
+
+```php
+use Latte;
+
+class DatabaseLoader implements Latte\Loader
+{
+	public function __construct(
+		private \PDO $db,
+	) {
+	}
+
+	public function getContent(string $name): string
+	{
+		$stmt = $this->db->prepare('SELECT content FROM templates WHERE name = ?');
+		$stmt->execute([$name]);
+		$content = $stmt->fetchColumn();
+		if ($content === false) {
+			throw new Latte\RuntimeException("Template '$name' not found in database.");
+		}
+		return $content;
+	}
+
+	// Tento jednoduchý příklad předpokládá, že názvy šablon ('homepage', 'article', atd.)
+	// jsou jedinečnými ID a šablony na sebe neodkazují relativně.
+	public function getReferredName(string $name, string $referringName): string
+	{
+		return $name;
+	}
+
+	public function getUniqueId(string $name): string
+	{
+		// Použití prefixu a samotného názvu je zde jedinečné a dostatečné
+		return 'db_' . $name;
+	}
+}
+
+// Použití:
+$pdo = new \PDO(/* detaily připojení */);
+$loader = new DatabaseLoader($pdo);
+$latte->setLoader($loader);
+$latte->render('homepage'); // Načte šablonu s názvem 'homepage' z DB
+```
+
+Vlastní loadery vám dávají úplnou kontrolu nad tím, odkud vaše Latte šablony pocházejí, což umožňuje integraci s různými systémy úložišť a pracovními postupy.

@@ -1,0 +1,1140 @@
+Egyéni tagek létrehozása
+************************
+
+.[perex]
+Ez az oldal átfogó útmutatót nyújt az egyéni tagek létrehozásához a Latte-ban. Mindent megvitatunk az egyszerű tagektől a bonyolultabb, beágyazott tartalommal és specifikus parzolási igényekkel rendelkező forgatókönyvekig, építve arra a megértésre, hogy a Latte hogyan fordítja a sablonokat.
+
+Az egyéni tagek a legmagasabb szintű ellenőrzést biztosítják a sablon szintaxisa és a renderelési logika felett, de egyben a legbonyolultabb bővítési pontot is jelentik. Mielőtt úgy döntene, hogy egyéni taget hoz létre, mindig fontolja meg, hogy [nincs egyszerűbb megoldás |extending-latte#A Latte bővítésének módjai], vagy hogy nem létezik-e már megfelelő tag a [standard készletben |tags]. Csak akkor használjon egyéni tageket, ha az egyszerűbb alternatívák nem elegendőek az Ön igényeihez.
+
+
+A fordítási folyamat megértése
+==============================
+
+Az egyéni tagek hatékony létrehozásához hasznos elmagyarázni, hogyan dolgozza fel a Latte a sablonokat. Ennek a folyamatnak a megértése tisztázza, hogy a tagek miért éppen így vannak strukturálva, és hogyan illeszkednek a tágabb kontextusba.
+
+A sablon fordítása a Latte-ban, leegyszerűsítve, a következő kulcsfontosságú lépéseket tartalmazza:
+
+1.  **Lexikális elemzés:** A lexer beolvassa a sablon forráskódját (a `.latte` fájlt), és kis, különálló részekre, úgynevezett **tokenekre** bontja (pl. `{`, `foreach`, `$variable`, `}`, HTML szöveg stb.).
+2.  **Parzolás:** A parser veszi ezt a tokenfolyamot, és egy értelmes fastruktúrát épít belőle, amely a sablon logikáját és tartalmát reprezentálja. Ezt a fát **absztrakt szintaxisfának (AST)** nevezik.
+3.  **Fordítási menetek:** A PHP kód generálása előtt a Latte [fordítási meneteket |compiler-passes] futtat. Ezek olyan függvények, amelyek végigjárják a teljes AST-t, és módosíthatják azt, vagy információkat gyűjthetnek. Ez a lépés kulcsfontosságú az olyan funkciókhoz, mint a biztonság ([Sandbox |sandbox]) vagy az optimalizálás.
+4.  **Kódgenerálás:** Végül a fordító végigjárja a (potenciálisan módosított) AST-t, és generálja a megfelelő PHP osztálykódot. Ez a PHP kód az, ami ténylegesen rendereli a sablont futás közben.
+5.  **Gyorsítótárazás:** A generált PHP kód a lemezre kerül mentésre, ami a későbbi rendereléseket nagyon gyorssá teszi, mivel az 1-4. lépések kihagyásra kerülnek.
+
+Valójában a fordítás egy kicsit bonyolultabb. A Latte **két** lexerrel és parserrel rendelkezik: egy a HTML sablonhoz és egy másik a tageken belüli PHP-szerű kódhoz. És a parzolás sem a tokenizálás után történik, hanem a lexer és a parser párhuzamosan fut két "szálon", és koordinálnak. Hidd el, ennek a programozása rakétatudomány volt :-)
+
+Az egész folyamat, a sablon tartalmának betöltésétől a parzoláson át a végső fájl generálásáig, ezzel a kóddal szekvenálható, amellyel kísérletezhet és kiírathatja a köztes eredményeket:
+
+```php
+$latte = new Latte\Engine;
+$source = $latte->getLoader()->getContent($file);
+$ast = $latte->parse($source);
+$latte->applyPasses($ast);
+$code = $latte->generate($ast, $file);
+```
+
+
+Egy tag anatómiája
+==================
+
+Egy teljesen működőképes egyéni tag létrehozása a Latte-ban több összekapcsolt részből áll. Mielőtt belekezdenénk a implementációba, értsük meg az alapvető koncepciókat és terminológiát, a HTML és a Document Object Model (DOM) analógiáját használva.
+
+
+Tagek vs. Csomópontok (Analógia a HTML-lel)
+-------------------------------------------
+
+A HTML-ben **tageket** írunk, mint `<p>` vagy `<div>...</div>`. Ezek a tagek a forráskódban lévő szintaxist jelentik. Amikor a böngésző parzolja ezt a HTML-t, létrehoz egy memóriabeli reprezentációt, amelyet **Document Object Model (DOM)**-nak neveznek. A DOM-ban a HTML tageket **csomópontok** reprezentálják (konkrétan `Element` csomópontok a JavaScript DOM terminológiájában). Ezekkel a *csomópontokkal* dolgozunk programozottan (pl. a JavaScript `document.getElementById(...)` egy Element csomópontot ad vissza). A tag csak egy szöveges reprezentáció a forrásfájlban; a csomópont egy objektum reprezentáció a logikai fában.
+
+A Latte hasonlóan működik:
+
+- A `.latte` sablonfájlban **Latte tageket** ír, mint `{foreach ...}` és `{/foreach}`. Ez az a szintaxis, amellyel Ön, mint sablon szerző dolgozik.
+- Amikor a Latte **parzolja** a sablont, egy **Absztrakt Szintaxisfát (AST)** épít. Ez a fa **csomópontokból** áll. Minden Latte tag, HTML elem, szövegrész vagy kifejezés a sablonban egy vagy több csomóponttá válik ebben a fában.
+- Az AST összes csomópontjának alaposztálya a `Latte\Compiler\Node`. Ahogy a DOM-nak különböző típusú csomópontjai vannak (Element, Text, Comment), úgy a Latte AST-jének is különböző típusú csomópontjai vannak. Találkozni fog a `Latte\Compiler\Nodes\TextNode`-dal a statikus szöveghez, a `Latte\Compiler\Nodes\Html\ElementNode`-dal a HTML elemekhez, a `Latte\Compiler\Nodes\Php\ExpressionNode`-dal a tageken belüli kifejezésekhez, és kulcsfontosságúan az egyéni tagekhez, a `Latte\Compiler\Nodes\StatementNode`-ból öröklődő csomópontokkal.
+
+
+Miért `StatementNode`?
+----------------------
+
+A HTML elemek (`Html\ElementNode`) elsősorban struktúrát és tartalmat reprezentálnak. A PHP kifejezések (`Php\ExpressionNode`) értékeket vagy számításokat reprezentálnak. De mi a helyzet az olyan Latte tagekkel, mint `{if}`, `{foreach}` vagy a saját `{datetime}` tagünk? Ezek a tagek *akciókat hajtanak végre*, vezérlik a programfolyamatot, vagy logikán alapuló kimenetet generálnak. Funkcionális egységek, amelyek a Latte-t erőteljes sablon *motorrá* teszik, nem csak egy jelölőnyelvvé.
+
+A programozásban az ilyen akciókat végrehajtó egységeket gyakran "statements"-nek (utasításoknak) nevezik. Ezért az ezeket a funkcionális Latte tageket reprezentáló csomópontok tipikusan a `Latte\Compiler\Nodes\StatementNode`-ból öröklődnek. Ez megkülönbözteti őket a tisztán strukturális csomópontoktól (mint a HTML elemek) vagy az értékeket reprezentáló csomópontoktól (mint a kifejezések).
+
+
+Kulcsfontosságú komponensek
+===========================
+
+Nézzük át a fő komponenseket, amelyek egy egyéni tag létrehozásához szükségesek:
+
+
+Tag parzoló függvény
+--------------------
+
+- Ez a PHP callable függvény parzolja a Latte tag szintaxisát (`{...}`) a forrássablonban.
+- Információkat kap a tagről (mint a neve, pozíciója és hogy n:attribútum-e) a [api:Latte\Compiler\Tag] objektumon keresztül.
+- Elsődleges eszköze az argumentumok és kifejezések parzolására a tag határolóin belül a [api:Latte\Compiler\TagParser] objektum, amely a `$tag->parser`-en keresztül érhető el (ez egy másik parser, mint az, amelyik az egész sablont parzolja).
+- Páros tagek esetén a `yield` segítségével jelzi a Latte-nak, hogy parzolja a kezdő és záró tag közötti belső tartalmat.
+- A parzoló függvény végső célja egy **csomópont osztály** példányának létrehozása és visszaadása, amely hozzáadódik az AST-hez.
+- Szokás (bár nem kötelező) a parzoló függvényt statikus metódusként (gyakran `create`-nek nevezve) implementálni közvetlenül a megfelelő csomópont osztályban. Ez a parzolási logikát és a csomópont reprezentációját szépen egy csomagban tartja, lehetővé teszi az osztály privát/védett elemeihez való hozzáférést, ha szükséges, és javítja a szervezést.
+
+
+Csomópont osztály
+-----------------
+
+- Reprezentálja a tag *logikai funkcióját* az **Absztrakt Szintaxisfában (AST)**.
+- Tartalmazza a parzolt információkat (mint argumentumok vagy tartalom) publikus property-ként. Ezek a property-k gyakran más `Node` példányokat tartalmaznak (pl. `ExpressionNode` a parzolt argumentumokhoz, `AreaNode` a parzolt tartalomhoz).
+- A `print(PrintContext $context): string` metódus generálja a *PHP kódot* (utasítást vagy utasítássorozatot), amely végrehajtja a tag akcióját a sablon renderelése során.
+- A `getIterator(): \Generator` metódus hozzáférhetővé teszi a gyermek csomópontokat (argumentumok, tartalom) a **fordítási menetek** számára. Referenciákat (`&`) kell biztosítania, hogy lehetővé tegye a menetek számára a potenciális módosítást vagy a gyermek csomópontok cseréjét.
+- Miután az egész sablon AST-vé parzolódott, a Latte egy sor [fordítási menetet |compiler-passes] futtat. Ezek a menetek végigjárják a *teljes* AST-t a minden csomópont által biztosított `getIterator()` metódus segítségével. Ellenőrizhetik a csomópontokat, információkat gyűjthetnek, és akár *módosíthatják* is a fát (pl. a csomópontok publikus property-jeinek megváltoztatásával vagy a csomópontok teljes cseréjével). Ez a tervezés, amely egy komplex `getIterator()`-t igényel, alapvető. Lehetővé teszi az olyan erőteljes funkciók számára, mint a [Sandbox |sandbox], hogy elemezzék és potenciálisan megváltoztassák a sablon *bármely* részének viselkedését, beleértve az Ön egyéni tagjeit is, biztosítva a biztonságot és a konzisztenciát.
+
+
+Regisztráció kiterjesztésen keresztül
+-------------------------------------
+
+- Tájékoztatnia kell a Latte-t az új tagről és arról, hogy melyik parzoló függvényt kell hozzá használni. Ez egy [Latte kiterjesztésen |extending-latte#Latte Extension] belül történik.
+- A kiterjesztés osztályán belül implementálja a `getTags(): array` metódust. Ez a metódus egy asszociatív tömböt ad vissza, ahol a kulcsok a tag nevek (pl. `'mytag'`, `'n:myattribute'`), az értékek pedig a PHP callable függvények, amelyek a megfelelő parzoló függvényeiket reprezentálják (pl. `MyNamespace\DatetimeNode::create(...)`).
+
+Összefoglalás: A **tag parzoló függvény** átalakítja a tag *forráskódját a sablonban* egy **AST csomóponttá**. A **csomópont osztály** ezután képes átalakítani *önmagát* futtatható *PHP kóddá* a fordított sablonhoz, és hozzáférhetővé teszi a gyermek csomópontjait a **fordítási menetek** számára a `getIterator()`-on keresztül. A **regisztráció kiterjesztésen keresztül** összekapcsolja a tag nevét a parzoló függvénnyel, és tudatja a Latte-val.
+
+Most megvizsgáljuk, hogyan implementáljuk ezeket a komponenseket lépésről lépésre.
+
+
+Egyszerű tag létrehozása
+========================
+
+Kezdjünk bele az első egyéni Latte tag létrehozásába. Egy nagyon egyszerű példával kezdünk: egy `{datetime}` nevű taggel, amely kiírja az aktuális dátumot és időt. **Kezdetben ez a tag nem fogad argumentumokat**, de később javítjuk a [#"Tag argumentumok parzolása"] szakaszban. Nincs belső tartalma sem.
+
+Ez a példa végigvezet az alapvető lépéseken: a csomópont osztály definiálása, a `print()` és `getIterator()` metódusainak implementálása, a parzoló függvény létrehozása, és végül a tag regisztrálása.
+
+**Cél:** Implementálni a `{datetime}` taget az aktuális dátum és idő kiírására a PHP `date()` függvényével.
+
+
+A csomópont osztály létrehozása
+-------------------------------
+
+Először szükségünk van egy osztályra, amely reprezentálja a tagünket az Absztrakt Szintaxisfában (AST). Ahogy fentebb tárgyaltuk, a `Latte\Compiler\Nodes\StatementNode`-ból öröklünk.
+
+Hozzon létre egy fájlt (pl. `DatetimeNode.php`) és definiálja az osztályt:
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DatetimeNode extends StatementNode
+{
+	/**
+	 * Tag parzoló függvény, amelyet akkor hívunk meg, ha {datetime} található.
+	 */
+	public static function create(Tag $tag): self
+	{
+		// Az egyszerű tagünk jelenleg nem fogad argumentumokat, így nem kell semmit parzolnunk
+		$node = $tag->node = new self;
+		return $node;
+	}
+
+	/**
+	 * Generálja a PHP kódot, amely a sablon renderelésekor fut le.
+	 */
+	public function print(PrintContext $context): string
+	{
+		return $context->format(
+			'echo date(\'Y-m-d H:i:s\') %line;',
+			$this->position,
+		);
+	}
+
+	/**
+	 * Hozzáférést biztosít a gyermek csomópontokhoz a Latte fordítási menetei számára.
+	 */
+	public function &getIterator(): \Generator
+	{
+		false && yield;
+	}
+}
+```
+
+Amikor a Latte találkozik a `{datetime}` taggel a sablonban, meghívja a `create()` parzoló függvényt. Ennek feladata egy `DatetimeNode` példány visszaadása.
+
+A `print()` metódus generálja a PHP kódot, amely a sablon renderelésekor fut le. Meghívjuk a `$context->format()` metódust, amely összeállítja a végső PHP kódsztringet a fordított sablonhoz. Az első argumentum, `'echo date('Y-m-d H:i:s') %line;'`, egy maszk, amelybe a következő paraméterek kerülnek beillesztésre.
+A `%line` helyettesítő karakter azt mondja a `format()` metódusnak, hogy használja a második argumentumot, ami a `$this->position`, és illesszen be egy kommentárt, mint `/* line 15 */`, amely összekapcsolja a generált PHP kódot a sablon eredeti sorával, ami kulcsfontosságú a debuggoláshoz.
+
+A `$this->position` property az alap `Node` osztályból öröklődik, és a Latte parser automatikusan beállítja. Egy [api:Latte\Compiler\Position] objektumot tartalmaz, amely jelzi, hol található a tag a forrás `.latte` fájlban.
+
+A `getIterator()` metódus alapvető a fordítási menetekhez. Minden gyermek csomópontot biztosítania kell, de az egyszerű `DatetimeNode`-unknak jelenleg nincsenek argumentumai vagy tartalma, tehát nincsenek gyermek csomópontjai. Azonban a metódusnak továbbra is léteznie kell, és generátornak kell lennie, azaz a `yield` kulcsszónak valamilyen módon jelen kell lennie a metódus törzsében.
+
+
+Regisztráció kiterjesztésen keresztül
+-------------------------------------
+
+Végül tájékoztassuk a Latte-t az új tagről. Hozzon létre egy [kiterjesztés osztályt |extending-latte#Latte Extension] (pl. `MyLatteExtension.php`) és regisztrálja a taget a `getTags()` metódusában.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Extension;
+
+class MyLatteExtension extends Extension
+{
+	/**
+	 * Visszaadja a kiterjesztés által biztosított tagek listáját.
+	 * @return array<string, callable> Térkép: 'tag-neve' => parzolo-fuggveny
+	 */
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			// Később itt regisztráljon több taget
+		];
+	}
+}
+```
+
+Ezután regisztrálja ezt a kiterjesztést a Latte Engine-ben:
+
+```php
+$latte = new Latte\Engine;
+$latte->addExtension(new App\Latte\MyLatteExtension);
+```
+
+Hozzon létre egy sablont:
+
+```latte
+<p>Az oldal generálva: {datetime}</p>
+```
+
+Várható kimenet: `<p>Az oldal generálva: 2023-10-27 11:00:00</p>`
+
+
+Ennek a fázisnak az összefoglalása
+----------------------------------
+
+Sikeresen létrehoztunk egy alapvető egyéni `{datetime}` taget. Definiáltuk a reprezentációját az AST-ben (`DatetimeNode`), kezeltük a parzolását (`create()`), meghatároztuk, hogyan kell PHP kódot generálnia (`print()`), biztosítottuk, hogy a gyermekei hozzáférhetők legyenek a menetek számára (`getIterator()`), és regisztráltuk a Latte-ban.
+
+A következő szakaszban javítjuk ezt a taget, hogy argumentumokat fogadjon el, és megmutatjuk, hogyan kell kifejezéseket parzolni és gyermek csomópontokat kezelni.
+
+
+Tag argumentumok parzolása
+==========================
+
+Az egyszerű `{datetime}` tagünk működik, de nem túl rugalmas. Javítsuk meg, hogy elfogadjon egy opcionális argumentumot: egy formázó sztringet a `date()` függvényhez. A kívánt szintaxis `{datetime $format}` lesz.
+
+**Cél:** Módosítani a `{datetime}` taget úgy, hogy elfogadjon egy opcionális PHP kifejezést argumentumként, amelyet a `date()` formázó sztringjeként használunk.
+
+
+A `TagParser` bemutatása
+------------------------
+
+Mielőtt módosítanánk a kódot, fontos megérteni az eszközt, amelyet használni fogunk: a [api:Latte\Compiler\TagParser]-t. Amikor a Latte fő parsere (`TemplateParser`) találkozik egy Latte taggel, mint `{datetime ...}` vagy egy n:attribútummal, a tag *belsejének* (a `{` és `}` közötti résznek vagy az attribútum értékének) parzolását egy specializált `TagParser`-re delegálja.
+
+Ez a `TagParser` kizárólag a **tag argumentumokkal** dolgozik. Feladata a tokenek feldolgozása, amelyek ezeket az argumentumokat reprezentálják. Kulcsfontosságú, hogy **fel kell dolgoznia a teljes tartalmat**, amelyet kap. Ha a parzoló függvény befejeződik, de a `TagParser` nem érte el az argumentumok végét (ellenőrizve a `$tag->parser->isEnd()`-en keresztül), a Latte kivételt dob, mert ez azt jelzi, hogy váratlan tokenek maradtak a tagen belül. Ezzel szemben, ha a tag argumentumokat *követel meg*, akkor a parzoló függvény elején meg kell hívnia a `$tag->expectArguments()`-t. Ez a metódus ellenőrzi, hogy vannak-e argumentumok, és segítőkész kivételt dob, ha a taget argumentumok nélkül használták.
+
+A `TagParser` hasznos metódusokat kínál különböző típusú argumentumok parzolására:
+
+- `parseExpression(): ExpressionNode`: Parzol egy PHP-szerű kifejezést (változók, literálok, operátorok, függvény/metódus hívások stb.). Kezeli a Latte szintaktikai cukrait, mint például az egyszerű alfanumerikus sztringek idézőjeles sztringként való kezelése (pl. a `foo` úgy parzolódik, mintha `'foo'` lenne).
+- `parseUnquotedStringOrExpression(): ExpressionNode`: Parzol vagy egy standard kifejezést, vagy egy *idézőjel nélküli sztringet*. Az idézőjel nélküli sztringek a Latte által engedélyezett, idézőjelek nélküli szekvenciák, amelyeket gyakran használnak olyan dolgokhoz, mint a fájlútvonalak (pl. `{include ../file.latte}`). Ha idézőjel nélküli sztringet parzol, `StringNode`-ot ad vissza.
+- `parseArguments(): ArrayNode`: Parzol vesszővel elválasztott argumentumokat, potenciálisan kulcsokkal, mint `10, name: 'John', true`.
+- `parseModifier(): ModifierNode`: Parzol szűrőket, mint `|upper|truncate:10`.
+- `parseType(): ?SuperiorTypeNode`: Parzol PHP típus-hintet, mint `int`, `?string`, `array|Foo`.
+
+Bonyolultabb vagy alacsonyabb szintű parzolási igényekhez közvetlenül interakcióba léphet a [tokenfolyammal |api:Latte\Compiler\TokenStream] a `$tag->parser->stream`-en keresztül. Ez az objektum metódusokat biztosít az egyes tokenek ellenőrzésére és feldolgozására:
+
+- `$tag->parser->stream->is(...): bool`: Ellenőrzi, hogy az *aktuális* token megfelel-e a megadott típusoknak (pl. `Token::Php_Variable`) vagy literális értékeknek (pl. `'as'`) anélkül, hogy elfogyasztaná. Hasznos előretekintéshez.
+- `$tag->parser->stream->consume(...): Token`: Elfogyasztja az *aktuális* tokent, és előre mozgatja a folyam pozícióját. Ha várt token típusok/értékek vannak megadva argumentumként, és az aktuális token nem felel meg, `CompileException`-t dob. Használja ezt, ha *vár* egy bizonyos tokent.
+- `$tag->parser->stream->tryConsume(...): ?Token`: Megpróbálja elfogyasztani az *aktuális* tokent *csak akkor, ha* megfelel a megadott típusok/értékek egyikének. Ha megfelel, elfogyasztja a tokent és visszaadja. Ha nem felel meg, változatlanul hagyja a folyam pozícióját és `null`-t ad vissza. Használja ezt opcionális tokenekhez, vagy ha különböző szintaktikai utak között választ.
+
+
+A `create()` parzoló függvény frissítése
+----------------------------------------
+
+Ezzel a megértéssel módosítsuk a `create()` metódust a `DatetimeNode`-ban, hogy parzolja az opcionális formátum argumentumot a `$tag->parser` segítségével.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DatetimeNode extends StatementNode
+{
+	// Hozzáadunk egy publikus property-t a parzolt formátum kifejezés csomópont tárolására
+	public ?ExpressionNode $format = null;
+
+	public static function create(Tag $tag): self
+	{
+		$node = $tag->node = new self;
+
+		// Ellenőrizzük, hogy vannak-e tokenek
+		if (!$tag->parser->isEnd()) {
+			// Parzoljuk az argumentumot PHP-szerű kifejezésként a TagParser segítségével.
+			$node->format = $tag->parser->parseExpression();
+		}
+
+		return $node;
+	}
+
+	// ... a print() és getIterator() metódusok később frissülnek ...
+}
+```
+
+Hozzáadtunk egy publikus `$format` property-t. A `create()`-ben most a `$tag->parser->isEnd()`-t használjuk annak ellenőrzésére, hogy *léteznek-e* argumentumok. Ha igen, a `$tag->parser->parseExpression()` feldolgozza a kifejezés tokenjeit. Mivel a `TagParser`-nek fel kell dolgoznia az összes bemeneti tokent, a Latte automatikusan hibát dob, ha a felhasználó valami váratlant ír a formátum kifejezés után (pl. `{datetime 'Y-m-d', unexpected}`).
+
+
+A `print()` metódus frissítése
+------------------------------
+
+Most módosítsuk a `print()` metódust, hogy használja a `$this->format`-ban tárolt parzolt formátum kifejezést. Ha nem adtak meg formátumot (`$this->format` `null`), akkor egy alapértelmezett formázó sztringet kell használnunk, például `'Y-m-d H:i:s'`.
+
+```php
+	public function print(PrintContext $context): string
+	{
+		$formatNode = $this->format ?? new StringNode('Y-m-d H:i:s');
+
+		// A %node kiírja a $formatNode PHP kód reprezentációját.
+		return $context->format(
+			'echo date(%node) %line;',
+			$formatNode,
+			$this->position
+		);
+	}
+```
+
+A `$formatNode` változóba tároljuk az AST csomópontot, amely a PHP `date()` függvény formázó sztringjét reprezentálja. Itt a null coalescing operátort (`??`) használjuk. Ha a felhasználó megadott egy argumentumot a sablonban (pl. `{datetime 'd.m.Y'}`), akkor a `$this->format` property a megfelelő csomópontot tartalmazza (ebben az esetben egy `StringNode`-ot `'d.m.Y'` értékkel), és ezt a csomópontot használjuk. Ha a felhasználó nem adott meg argumentumot (csak `{datetime}`-et írt), a `$this->format` property `null`, és ehelyett létrehozunk egy új `StringNode`-ot az alapértelmezett `'Y-m-d H:i:s'` formátummal. Ez biztosítja, hogy a `$formatNode` mindig egy érvényes AST csomópontot tartalmazzon a formátumhoz.
+
+Az `'echo date(%node) %line;'` maszkban egy új `%node` helyettesítő karaktert használunk, amely azt mondja a `format()` metódusnak, hogy vegye az első következő argumentumot (ami a mi `$formatNode`-unk), hívja meg annak `print()` metódusát (amely visszaadja a PHP kód reprezentációját), és illessze be az eredményt a helyettesítő karakter pozíciójába.
+
+
+A `getIterator()` implementálása gyermek csomópontokhoz
+-------------------------------------------------------
+
+A `DatetimeNode`-unknak most van egy gyermek csomópontja: a `$format` kifejezés. **Muszáj** ezt a gyermek csomópontot hozzáférhetővé tennünk a fordítási menetek számára a `getIterator()` metódusban történő biztosítással. Ne felejtsen el *referenciát* (`&`) biztosítani, hogy lehetővé tegye a menetek számára a csomópont potenciális cseréjét.
+
+```php
+	public function &getIterator(): \Generator
+	{
+		if ($this->format) {
+			yield $this->format;
+		}
+	}
+```
+
+Miért alapvető ez? Képzeljen el egy Sandbox menetet, amelynek ellenőriznie kell, hogy a `$format` argumentum nem tartalmaz-e tiltott függvényhívást (pl. `{datetime dangerousFunction()}`). Ha a `getIterator()` nem biztosítja a `$this->format`-ot, a Sandbox menet soha nem látná a `dangerousFunction()` hívást a tagünk argumentumán belül, ami potenciális biztonsági rést hozna létre. Annak biztosításával lehetővé tesszük a Sandboxnak (és más meneteknek), hogy ellenőrizzék és potenciálisan módosítsák a `$format` kifejezés csomópontot.
+
+
+A javított tag használata
+-------------------------
+
+A tag most helyesen kezeli az opcionális argumentumot:
+
+```latte
+Alapértelmezett formátum: {datetime}
+Egyéni formátum: {datetime 'd.m.Y'}
+Változó használata: {datetime $userDateFormatPreference}
+
+{* Ez hibát okozna a 'd.m.Y' parzolása után, mert a ", foo" váratlan *}
+{* {datetime 'd.m.Y', foo} *}
+```
+
+Ezután megnézzük a páros tagek létrehozását, amelyek a közöttük lévő tartalmat dolgozzák fel.
+
+
+Páros tagek kezelése
+====================
+
+Eddig a `{datetime}` tagünk *önlezáró* volt (koncepcionálisan). Nem volt tartalma a kezdő és záró tag között. Sok hasznos tag azonban egy sablon tartalomblokkjával dolgozik. Ezeket **páros tageknek** nevezik. Példák erre a `{if}...{/if}`, `{block}...{/block}` vagy egy egyéni tag, amelyet most létrehozunk: `{debug}...{/debug}`.
+
+Ez a tag lehetővé teszi számunkra, hogy hibakeresési információkat tartalmazzunk a sablonjainkban, amelyek csak fejlesztés közben legyenek láthatók.
+
+**Cél:** Létrehozni egy `{debug}` páros taget, amelynek tartalma csak akkor renderelődik, ha egy specifikus "fejlesztői mód" jelző aktív.
+
+
+Szolgáltatók bemutatása
+-----------------------
+
+Néha a tageknek olyan adatokhoz vagy szolgáltatásokhoz kell hozzáférniük, amelyeket nem közvetlenül sablon paraméterként adnak át. Például annak meghatározása, hogy az alkalmazás fejlesztői módban van-e, hozzáférés a felhasználói objektumhoz, vagy konfigurációs értékek lekérése. A Latte egy **szolgáltatók** (Providers) nevű mechanizmust biztosít erre a célra.
+
+A szolgáltatókat a [kiterjesztésben |extending-latte#Latte Extension] regisztráljuk a `getProviders()` metódus segítségével. Ez a metódus egy asszociatív tömböt ad vissza, ahol a kulcsok azok a nevek, amelyek alatt a szolgáltatók elérhetők lesznek a sablon futásidejű kódjában, az értékek pedig a tényleges adatok vagy objektumok.
+
+A tag `print()` metódusa által generált PHP kódon belül ezekhez a szolgáltatókhoz a `$this->global` objektum speciális property-jén keresztül férhet hozzá.
+Mivel ez a property megosztott az összes kiterjesztés között, jó gyakorlat **előtaggal ellátni a szolgáltatók nevét**, hogy elkerüljük a potenciális névütközéseket a Latte kulcsfontosságú szolgáltatóival vagy más harmadik féltől származó kiterjesztések szolgáltatóival. Gyakori konvenció egy rövid, egyedi előtag használata, amely a gyártóhoz vagy a kiterjesztés nevéhez kapcsolódik. Példánkhoz az `app` előtagot fogjuk használni, és a fejlesztői mód jelzője `$this->global->appDevMode`-ként lesz elérhető.
+
+
+A `yield` kulcsszó a tartalom parzolásához
+------------------------------------------
+
+Hogyan mondjuk meg a Latte parsernek, hogy dolgozza fel a `{debug}` és `{/debug}` *közötti* tartalmat? Itt jön képbe a `yield` kulcsszó.
+
+Amikor a `yield`-et használjuk a `create()` függvényben, a függvény [PHP generátorrá |https://www.php.net/manual/en/language.generators.overview.php] válik. Végrehajtása felfüggesztődik, és a vezérlés visszatér a fő `TemplateParser`-hez. A `TemplateParser` ezután folytatja a sablon tartalmának parzolását, *amíg* nem találkozik a megfelelő záró taggel (`{/debug}` a mi esetünkben).
+
+Amint a záró taget megtalálja, a `TemplateParser` folytatja a `create()` függvényünk végrehajtását közvetlenül a `yield` utasítás után. A `yield` utasítás által *visszaadott* érték egy két elemet tartalmazó tömb:
+
+1.  Egy `AreaNode`, amely a kezdő és záró tag között parzolt tartalmat reprezentálja.
+2.  Egy `Tag` objektum, amely a záró taget reprezentálja (pl. `{/debug}`).
+
+Hozzuk létre a `DebugNode` osztályt és annak `create` metódusát, amely a `yield`-et használja.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DebugNode extends StatementNode
+{
+	// Publikus property a parzolt belső tartalom tárolására
+	public AreaNode $content;
+
+	/**
+	 * Parzoló függvény a {debug} ... {/debug} páros taghez.
+	 */
+	public static function create(Tag $tag): \Generator // vegye észre a visszatérési típust
+	{
+		$node = $tag->node = new self;
+
+		// Parzolás felfüggesztése, belső tartalom és záró tag lekérése, amikor {/debug} található
+		[$node->content, $endTag] = yield;
+
+		return $node;
+	}
+
+	// ... a print() és getIterator() később implementálódik ...
+}
+```
+
+Megjegyzés: Az `$endTag` `null`, ha a taget n:attribútumként használják, azaz `<div n:debug>...</div>`.
+
+
+A `print()` implementálása feltételes rendereléshez
+---------------------------------------------------
+
+A `print()` metódusnak most olyan PHP kódot kell generálnia, amely futásidőben ellenőrzi az `appDevMode` szolgáltatót, és csak akkor hajtja végre a belső tartalom kódját, ha a jelző igaz.
+
+```php
+	public function print(PrintContext $context): string
+	{
+		// Generál egy PHP 'if' utasítást, amely futásidőben ellenőrzi a szolgáltatót
+		return $context->format(
+			<<<'XX'
+				if ($this->global->appDevMode) %line {
+					// Ha fejlesztői módban van, kiírja a belső tartalmat
+					%node
+				}
+
+				XX,
+			$this->position, // A %line kommentárhoz
+			$this->content,  // A belső tartalom AST-jét tartalmazó csomópont
+		);
+	}
+```
+
+Ez egyszerű. A `PrintContext::format()`-ot használjuk egy standard PHP `if` utasítás létrehozásához. Az `if`-en belül a `%node` helyettesítő karaktert helyezzük el a `$this->content`-hez. A Latte rekurzívan meghívja a `$this->content->print($context)`-et, hogy generálja a PHP kódot a tag belső részéhez, de csak akkor, ha a `$this->global->appDevMode` futásidőben igazra értékelődik.
+
+
+A `getIterator()` implementálása tartalomhoz
+--------------------------------------------
+
+Ahogy az előző példában az argumentum csomópontnál, a `DebugNode`-unknak most van egy gyermek csomópontja: az `AreaNode $content`. Hozzáférhetővé kell tennünk a `getIterator()`-ban történő biztosítással:
+
+```php
+	public function &getIterator(): \Generator
+	{
+		// Referenciát biztosít a tartalom csomóponthoz
+		yield $this->content;
+	}
+```
+
+Ez lehetővé teszi a fordítási menetek számára, hogy leereszkedjenek a `{debug}` tagünk tartalmába, ami akkor is fontos, ha a tartalom feltételesen renderelődik. Például a Sandboxnak elemeznie kell a tartalmat, függetlenül attól, hogy az `appDevMode` igaz vagy hamis.
+
+
+Regisztráció és használat
+-------------------------
+
+Regisztrálja a taget és a szolgáltatót a kiterjesztésében:
+
+```php
+class MyLatteExtension extends Extension
+{
+	// Feltételezzük, hogy az $isDevelopmentMode valahol meghatározásra kerül (pl. konfigurációból)
+	public function __construct(
+		private bool $isDevelopmentMode,
+	) {
+	}
+
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...), // Az új tag regisztrálása
+		];
+	}
+
+	public function getProviders(): array
+	{
+		return [
+			'appDevMode' => $this->isDevelopmentMode, // A szolgáltató regisztrálása
+		];
+	}
+}
+
+// A kiterjesztés regisztrálásakor:
+$isDev = true; // Határozza meg ezt az alkalmazás környezete alapján
+$latte->addExtension(new App\Latte\MyLatteExtension($isDev));
+```
+
+És használata a sablonban:
+
+```latte
+<p>Mindig látható normál tartalom.</p>
+
+{debug}
+	<div class="debug-panel">
+		Aktuális felhasználó ID-ja: {$user->id}
+		Kérés ideje: {=time()}
+	</div>
+{/debug}
+
+<p>További normál tartalom.</p>
+```
+
+
+n:attribútum integráció
+-----------------------
+
+A Latte kényelmes rövidítést kínál sok páros taghez: az [n:attribútumokat |syntax#n:attribútumok]. Ha van egy páros tagje, mint `{tag}...{/tag}`, és azt szeretné, hogy hatása közvetlenül egyetlen HTML elemre vonatkozzon, gyakran tömörebben írhatja `n:tag` attribútumként ezen az elemen.
+
+A legtöbb standard páros taghez, amelyet definiál (mint a mi `{debug}` tagünk), a Latte automatikusan engedélyezi a megfelelő `n:` attribútum verziót. A regisztráció során nem kell semmi extrát tennie:
+
+```latte
+{* Standard páros tag használata *}
+{debug}<div>Hibakeresési információk</div>{/debug}
+
+{* Ekvivalens használat n:attribútummal *}
+<div n:debug>Hibakeresési információk</div>
+```
+
+Mindkét verzió csak akkor rendereli a `<div>`-et, ha a `$this->global->appDevMode` igaz. Az `inner-` és `tag-` előtagok is a várt módon működnek.
+
+Néha a tag logikájának kissé eltérően kell viselkednie attól függően, hogy standard páros tagként vagy n:attribútumként használják-e, vagy hogy használnak-e előtagot, mint `n:inner-tag` vagy `n:tag-tag`. A `Latte\Compiler\Tag` objektum, amelyet a `create()` parzoló függvénynek adnak át, biztosítja ezt az információt:
+
+- `$tag->isNAttribute(): bool`: `true`-t ad vissza, ha a taget n:attribútumként parzolják.
+- `$tag->prefix: ?string`: Visszaadja az n:attribútummal használt előtagot, ami lehet `null` (nem n:attribútum), `Tag::PrefixNone`, `Tag::PrefixInner` vagy `Tag::PrefixTag`.
+
+Most, hogy megértettük az egyszerű tageket, az argumentumok parzolását, a páros tageket, a szolgáltatókat és az n:attribútumokat, foglalkozzunk egy bonyolultabb forgatókönyvvel, amely más tagekbe ágyazott tageket tartalmaz, a `{debug}` tagünket kiindulópontként használva.
+
+
+Köztes tagek
+============
+
+Néhány páros tag lehetővé teszi, vagy akár megköveteli, hogy más tagek jelenjenek meg *bennük* a végső záró tag előtt. Ezeket **köztes tageknek** nevezik. Klasszikus példák a `{if}...{elseif}...{else}...{/if}` vagy a `{switch}...{case}...{default}...{/switch}`.
+
+Bővítsük a `{debug}` tagünket, hogy támogasson egy opcionális `{else}` klauzult, amely akkor renderelődik, amikor az alkalmazás *nincs* fejlesztői módban.
+
+**Cél:** Módosítani a `{debug}` taget, hogy támogasson egy opcionális `{else}` köztes taget. A végső szintaxisnak `{debug} ... {else} ... {/debug}`-nak kell lennie.
+
+
+Köztes tagek parzolása `yield`-del
+----------------------------------
+
+Már tudjuk, hogy a `yield` felfüggeszti a `create()` parzoló függvényt, és visszaadja a parzolt tartalmat a záró taggel együtt. A `yield` azonban több kontrollt kínál: megadhat neki egy tömböt a *köztes tag nevekből*. Amikor a parser találkozik ezen megadott tagek bármelyikével **ugyanazon a beágyazási szinten** (azaz a szülő tag közvetlen gyermekeiként, nem más blokkokon vagy tageken belül), szintén leállítja a parzolást.
+
+Amikor a parzolás egy köztes tag miatt áll le, leállítja a tartalom parzolását, folytatja a `create()` generátort, és visszaadja a részben parzolt tartalmat és magát a **köztes taget** (a végső záró tag helyett). A `create()` függvényünk ezután feldolgozhatja ezt a köztes taget (pl. parzolhatja az argumentumait, ha voltak), és újra használhatja a `yield`-et a tartalom *következő* részének parzolására egészen a *végső* záró tagig vagy egy másik várt köztes tagig.
+
+Módosítsuk a `DebugNode::create()`-et, hogy várja az `{else}`-t:
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\NopNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DebugNode extends StatementNode
+{
+	// Tartalom a {debug} részhez
+	public AreaNode $thenContent;
+	// Opcionális tartalom az {else} részhez
+	public ?AreaNode $elseContent = null;
+
+	public static function create(Tag $tag): \Generator
+	{
+		$node = $tag->node = new self;
+
+		// yield és várni vagy a {/debug}-ot vagy az {else}-t
+		[$node->thenContent, $nextTag] = yield ['else'];
+
+		// Ellenőrizni, hogy a tag, amelynél megálltunk, {else} volt-e
+		if ($nextTag?->name === 'else') {
+			// Újra yield a tartalom parzolásához az {else} és {/debug} között
+			[$node->elseContent, $endTag] = yield;
+		}
+
+		return $node;
+	}
+
+	// ... a print() és getIterator() később frissülnek ...
+}
+```
+
+Most a `yield ['else']` azt mondja a Latte-nak, hogy ne csak a `{/debug}`-ra, hanem az `{else}`-re is álljon le a parzolással. Ha `{else}` található, a `$nextTag` tartalmazni fogja az `{else}` `Tag` objektumát. Ezután újra használjuk a `yield`-et argumentumok nélkül, ami azt jelenti, hogy most már csak a végső `{/debug}` taget várjuk, és az eredményt a `$node->elseContent`-be mentjük. Ha az `{else}` nem található, a `$nextTag` a `{/debug}` `Tag`-ja lenne (vagy `null`, ha n:attribútumként használják), és a `$node->elseContent` `null` maradna.
+
+
+A `print()` implementálása `{else}`-szel
+----------------------------------------
+
+A `print()` metódusnak tükröznie kell az új struktúrát. Generálnia kell egy PHP `if/else` utasítást a `devMode` szolgáltató alapján.
+
+```php
+	public function print(PrintContext $context): string
+	{
+		return $context->format(
+			<<<'XX'
+				if ($this->global->appDevMode) %line {
+					%node // Kód a 'then' ághoz ({debug} tartalom)
+				} else {
+					%node // Kód az 'else' ághoz ({else} tartalom)
+				}
+
+				XX,
+			$this->position,    // Sorszám az 'if' feltételhez
+			$this->thenContent, // Első %node helyettesítő
+			$this->elseContent ?? new NopNode, // Második %node helyettesítő
+		);
+	}
+```
+
+Ez egy standard PHP `if/else` struktúra. Kétszer használjuk a `%node`-ot; a `format()` sorban helyettesíti a megadott csomópontokat. A `?? new NopNode`-ot használjuk a hibák elkerülésére, ha a `$this->elseContent` `null` – a `NopNode` egyszerűen nem nyomtat ki semmit.
+
+
+A `getIterator()` implementálása mindkét tartalomhoz
+----------------------------------------------------
+
+Most potenciálisan két gyermek tartalom csomópontunk van (`$thenContent` és `$elseContent`). Mindkettőt biztosítanunk kell, ha léteznek:
+
+```php
+	public function &getIterator(): \Generator
+	{
+		yield $this->thenContent;
+		if ($this->elseContent) {
+			yield $this->elseContent;
+		}
+	}
+```
+
+
+A javított tag használata
+-------------------------
+
+A tag most már használható az opcionális `{else}` klauzullal:
+
+```latte
+{debug}
+	<p>Hibakeresési információk megjelenítése, mert a devMode BE van kapcsolva.</p>
+{else}
+	<p>A hibakeresési információk elrejtve, mert a devMode KI van kapcsolva.</p>
+{/debug}
+```
+
+
+Állapot és beágyazás kezelése
+=============================
+
+Korábbi példáink (`{datetime}`, `{debug}`) viszonylag állapotmentesek voltak a `print()` metódusaikon belül. Vagy közvetlenül kiírták a tartalmat, vagy egyszerű feltételes ellenőrzést végeztek egy globális szolgáltató alapján. Sok tagnek azonban valamilyen formában **állapotot** kell kezelnie a renderelés során, vagy felhasználói kifejezések kiértékelését foglalja magában, amelyeket csak egyszer kellene futtatni a teljesítmény vagy a helyesség érdekében. Továbbá figyelembe kell vennünk, mi történik, ha az egyéni tagjeink **beágyazva** vannak.
+
+Illusztráljuk ezeket a koncepciókat egy `{repeat $count}...{/repeat}` tag létrehozásával. Ez a tag a belső tartalmát `$count`-szor ismétli meg.
+
+**Cél:** Implementálni a `{repeat $count}` taget, amely a tartalmát a megadott számú alkalommal ismétli meg.
+
+
+Ideiglenes és egyedi változók szükségessége
+-------------------------------------------
+
+Képzelje el, hogy a felhasználó ezt írja:
+
+```latte
+{repeat rand(1, 5)} Tartalom {/repeat}
+```
+
+Ha naivan generálnánk egy PHP `for` ciklust így a `print()` metódusunkban:
+
+```php
+// Egyszerűsített, HELYTELEN generált kód
+for ($i = 0; $i < rand(1, 5); $i++) {
+	// tartalom kiírása
+}
+```
+Ez rossz lenne! A `rand(1, 5)` kifejezés **minden ciklus iterációban újra kiértékelődne**, ami kiszámíthatatlan számú ismétléshez vezetne. Ki kell értékelnünk a `$count` kifejezést *egyszer* a ciklus kezdete előtt, és tárolnunk kell az eredményét.
+
+Generálunk egy PHP kódot, amely először kiértékeli a darabszám kifejezést, és egy **ideiglenes futásidejű változóba** menti. Annak érdekében, hogy elkerüljük az ütközéseket a sablon felhasználója által definiált változókkal *és* a Latte belső változóival (mint a `$ʟ_...`), a **`$__` (dupla aláhúzás)** előtag konvenciót használjuk az ideiglenes változóinkhoz.
+
+A generált kód ekkor így nézne ki:
+
+```php
+$__count = rand(1, 5);
+for ($__i = 0; $__i < $__count; $__i++) {
+	// tartalom kiírása
+}
+```
+
+Most vegyük fontolóra a beágyazást:
+
+```latte
+{repeat $countA}       {* Külső ciklus *}
+	{repeat $countB}   {* Belső ciklus *}
+		...
+	{/repeat}
+{/repeat}
+```
+
+Ha mind a külső, mind a belső `{repeat}` tag olyan kódot generálna, amely *ugyanazokat* az ideiglenes változóneveket használja (pl. `$__count` és `$__i`), a belső ciklus felülírná a külső ciklus változóit, ami megbontaná a logikát.
+
+Biztosítanunk kell, hogy az egyes `{repeat}` tag példányokhoz generált ideiglenes változók **egyediek** legyenek. Ezt a `PrintContext::generateId()` segítségével érjük el. Ez a metódus egy egyedi egész számot ad vissza a fordítási fázisban. Ezt az ID-t hozzáfűzhetjük az ideiglenes változóink nevéhez.
+
+Tehát a `$__count` helyett `$__count_1`-et generálunk az első repeat taghez, `$__count_2`-t a másodikhoz, és így tovább. Hasonlóképpen a ciklusszámlálóhoz `$__i_1`-et, `$__i_2`-t stb. használunk.
+
+
+A `RepeatNode` implementálása
+-----------------------------
+
+Hozzuk létre a csomópont osztályt.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\CompileException;
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class RepeatNode extends StatementNode
+{
+	public ExpressionNode $count;
+	public AreaNode $content;
+
+	/**
+	 * Parzoló függvény a {repeat $count} ... {/repeat} taghez
+	 */
+	public static function create(Tag $tag): \Generator
+	{
+		$tag->expectArguments(); // biztosítja, hogy a $count meg legyen adva
+		$node = $tag->node = new self;
+		// Parzolja a darabszám kifejezést
+		$node->count = $tag->parser->parseExpression();
+		// Belső tartalom lekérése
+		[$node->content] = yield;
+		return $node;
+	}
+
+	/**
+	 * Generál egy PHP 'for' ciklust egyedi változónevekkel.
+	 */
+	public function print(PrintContext $context): string
+	{
+		// Egyedi változónevek generálása
+		$id = $context->generateId();
+		$countVar = '$__count_' . $id; // pl. $__count_1, $__count_2, stb.
+		$iteratorVar = '$__i_' . $id;  // pl. $__i_1, $__i_2, stb.
+
+		return $context->format(
+			<<<'XX'
+				// A darabszám kifejezés kiértékelése *egyszer* és tárolása
+				%raw = (int) (%node);
+				// Ciklus a tárolt darabszámmal és egyedi iterációs változóval
+				for (%raw = 0; %2.raw < %0.raw; %2.raw++) %line {
+					%node // Belső tartalom renderelése
+				}
+
+				XX,
+			$countVar,          // %0 - Változó a darabszám tárolására
+			$this->count,       // %1 - Kifejezés csomópont a darabszámhoz
+			$iteratorVar,       // %2 - A ciklus iterációs változójának neve
+			$this->position,    // %3 - Kommentár a sorszámmal magához a ciklushoz
+			$this->content      // %4 - Belső tartalom csomópont
+		);
+	}
+
+	/**
+	 * Biztosítja a gyermek csomópontokat (darabszám kifejezés és tartalom).
+	 */
+	public function &getIterator(): \Generator
+	{
+		yield $this->count;
+		yield $this->content;
+	}
+}
+```
+
+A `create()` metódus parzolja a kötelező `$count` kifejezést a `parseExpression()` segítségével. Először a `$tag->expectArguments()` kerül meghívásra. Ez biztosítja, hogy a felhasználó megadott *valamit* a `{repeat}` után. Míg a `$tag->parser->parseExpression()` meghiúsulna, ha semmit sem adtak volna meg, a hibaüzenet váratlan szintaxisról szólhatna. Az `expectArguments()` használata sokkal világosabb hibát ad, konkrétan megjelölve, hogy hiányoznak az argumentumok a `{repeat}` taghez.
+
+A `print()` metódus generálja a PHP kódot, amely felelős az ismétlési logika futásidejű végrehajtásáért. Az egyedi nevek generálásával kezdődik az ideiglenes PHP változókhoz, amelyekre szüksége lesz.
+
+A `$context->format()` metódus egy új `%raw` helyettesítő karakterrel kerül meghívásra, amely beilleszti a megfelelő argumentumként megadott *nyers sztringet*. Itt beilleszti a `$countVar`-ban tárolt egyedi változónevet (pl. `$__count_1`).
+És mi a helyzet a `%0.raw`-val és a `%2.raw`-val? Ez a **pozíciós helyettesítőket** demonstrálja. Ahelyett, hogy csak a `%raw`-t használnánk, amely a *következő* elérhető nyers argumentumot veszi, a `%2.raw` expliciten a 2-es indexű argumentumot veszi (ami a `$iteratorVar`), és beilleszti annak nyers sztring értékét. Ez lehetővé teszi számunkra, hogy újra felhasználjuk a `$iteratorVar` sztringet anélkül, hogy többször átadnánk a `format()` argumentumlistájában.
+
+Ez a gondosan megkonstruált `format()` hívás hatékony és biztonságos PHP ciklust generál, amely helyesen kezeli a darabszám kifejezést, és elkerüli a változónév-ütközéseket még akkor is, ha a `{repeat}` tagek beágyazva vannak.
+
+
+Regisztráció és használat
+-------------------------
+
+Regisztrálja a taget a kiterjesztésében:
+
+```php
+use App\Latte\RepeatNode;
+
+class MyLatteExtension extends Extension
+{
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...),
+			'repeat' => RepeatNode::create(...), // A repeat tag regisztrálása
+		];
+	}
+}
+```
+
+Használja a sablonban, beleértve a beágyazást is:
+
+```latte
+{var $rows = rand(5, 7)}
+{var $cols = rand(3, 5)}
+
+{repeat $rows}
+	<tr>
+		{repeat $cols}
+			<td>Belső ciklus</td>
+		{/repeat}
+	</tr>
+{/repeat}
+```
+
+Ez a példa demonstrálja, hogyan kell kezelni az állapotot (ciklusszámlálók) és a potenciális beágyazási problémákat ideiglenes, `$__` előtagú és a `PrintContext::generateId()`-től származó egyedi ID-vel ellátott változók segítségével.
+
+
+Tiszta n:attribútumok
+---------------------
+
+Míg sok `n:attribútum`, mint az `n:if` vagy `n:foreach`, kényelmes rövidítésként szolgál a páros tag megfelelőikhez (`{if}...{/if}`, `{foreach}...{/foreach}`), a Latte lehetővé teszi olyan tagek definiálását is, amelyek *csak* n:attribútum formájában léteznek. Ezeket gyakran használják a HTML elem attribútumainak vagy viselkedésének módosítására, amelyhez csatolva vannak.
+
+A Latte-ba beépített standard példák közé tartozik a [`n:class` |tags#n:class], amely segít dinamikusan összeállítani a `class` attribútumot, és a [`n:attr` |tags#n:attr], amely több tetszőleges attribútumot állíthat be.
+
+Hozzuk létre saját tiszta n:attribútumunkat: `n:confirm`, amely egy JavaScript megerősítő párbeszédablakot ad hozzá egy művelet végrehajtása előtt (mint egy link követése vagy egy űrlap elküldése).
+
+**Cél:** Implementálni az `n:confirm="'Biztos benne?'"`-t, amely hozzáad egy `onclick` kezelőt az alapértelmezett művelet megakadályozására, ha a felhasználó megszakítja a megerősítő párbeszédablakot.
+
+
+A `ConfirmNode` implementálása
+------------------------------
+
+Szükségünk van egy Node osztályra és egy parzoló függvényre.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+
+class ConfirmNode extends StatementNode
+{
+	public ExpressionNode $message;
+
+	public static function create(Tag $tag): self
+	{
+		$tag->expectArguments();
+		$node = $tag->node = new self;
+		$node->message = $tag->parser->parseExpression();
+		return $node;
+	}
+
+	/**
+	 * Generálja az 'onclick' attribútum kódját helyes escapeléssel.
+	 */
+	public function print(PrintContext $context): string
+	{
+		// Biztosítja a helyes escapelést mind a JavaScript, mind a HTML attribútum kontextusokhoz.
+		return $context->format(
+			<<<'XX'
+				echo ' onclick="', LR\Filters::escapeHtmlAttr('return confirm(' . LR\Filters::escapeJs(%node) . ')'), '"' %line;
+				XX,
+			$this->message,
+			$this->position,
+		);
+	}
+
+	public function &getIterator(): \Generator
+	{
+		yield $this->message;
+	}
+}
+```
+
+A `print()` metódus generálja a PHP kódot, amely végül a sablon renderelése során kiírja a `onclick="..."` HTML attribútumot. A beágyazott kontextusok (JavaScript egy HTML attribútumon belül) kezelése gondos escapelést igényel.
+A `LR\Filters::escapeJs(%node)` szűrő futásidőben kerül meghívásra, és helyesen escapeli az üzenetet a JavaScripten belüli használathoz (a kimenet olyan lenne, mint `"Sure?"`). Ezután a `LR\Filters::escapeHtmlAttr(...)` szűrő escapeli azokat a karaktereket, amelyek speciálisak a HTML attribútumokban, így ez a kimenetet `return confirm(&quot;Sure?&quot;)`-re változtatná.
+Ez a kétlépcsős futásidejű escapelés biztosítja, hogy az üzenet biztonságos legyen a JavaScript számára, és az eredményül kapott JavaScript kód biztonságos legyen a `onclick` HTML attribútumba való beágyazáshoz.
+
+
+Regisztráció és használat
+-------------------------
+
+Regisztrálja az n:attribútumot a kiterjesztésében. Ne felejtse el az `n:` előtagot a kulcsban:
+
+```php
+class MyLatteExtension extends Extension
+{
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...),
+			'repeat' => RepeatNode::create(...),
+			'n:confirm' => ConfirmNode::create(...), // Az n:confirm regisztrálása
+		];
+	}
+}
+```
+
+Most már használhatja az `n:confirm`-ot linkeken, gombokon vagy űrlap elemeken:
+
+```latte
+<a href="delete.php?id=123" n:confirm='"Valóban törölni szeretné a(z) {$id} elemet?"'>Törlés</a>
+```
+
+Generált HTML:
+
+```html
+<a href="delete.php?id=123" onclick="return confirm(&quot;Valóban törölni szeretné a(z) 123 elemet?&quot;)">Törlés</a>
+```
+
+Amikor a felhasználó a linkre kattint, a böngésző végrehajtja az `onclick` kódot, megjeleníti a megerősítő párbeszédablakot, és csak akkor navigál a `delete.php`-re, ha a felhasználó az "OK"-ra kattint.
+
+Ez a példa demonstrálja, hogyan lehet létrehozni egy tiszta n:attribútumot a gazda HTML elem viselkedésének vagy attribútumainak módosítására a megfelelő PHP kód generálásával a `print()` metódusában. Ne feledkezzen meg a gyakran szükséges dupla escapelésről: egyszer a célkontextushoz (ebben az esetben JavaScript), és újra a HTML attribútum kontextusához.
+
+
+Haladó témák
+============
+
+Míg az előző szakaszok az alapvető koncepciókat fedték le, itt van néhány haladóbb téma, amellyel találkozhat az egyéni Latte tagek létrehozása során.
+
+
+Tag kimeneti módok
+------------------
+
+A `create()` függvénynek átadott `Tag` objektumnak van egy `outputMode` property-je. Ez a property befolyásolja, hogyan kezeli a Latte a környező szóközöket és behúzásokat, különösen, ha a taget saját sorában használják. Ezt a property-t módosíthatja a `create()` függvényében.
+
+- `Tag::OutputKeepIndentation` (Alapértelmezett a legtöbb tagnél, mint `{=...}`): A Latte megpróbálja megőrizni a tag előtti behúzást. A tag *utáni* új sorok általában megmaradnak. Ez alkalmas olyan tagekhez, amelyek soron belüli tartalmat írnak ki.
+- `Tag::OutputRemoveIndentation` (Alapértelmezett a blokk tageknél, mint `{if}`, `{foreach}`): A Latte eltávolítja a kezdő behúzást és potenciálisan egy következő új sort. Ez segít tisztábban tartani a generált PHP kódot, és megakadályozza a HTML kimenetben a tag által okozott további üres sorokat. Használja ezt olyan tagekhez, amelyek vezérlési struktúrákat vagy blokkokat reprezentálnak, amelyeknek maguknak nem szabadna szóközöket hozzáadniuk.
+- `Tag::OutputNone` (Olyan tagek használják, mint `{var}`, `{default}`): Hasonló a `RemoveIndentation`-höz, de erősebben jelzi, hogy a tag maga nem produkál közvetlen kimenetet, potenciálisan még agresszívebben befolyásolva a körülötte lévő szóközök kezelését. Alkalmas deklaratív vagy beállító tagekhez.
+
+Válassza ki azt a módot, amely a legjobban megfelel a tag céljának. A legtöbb strukturális vagy vezérlő taghez általában az `OutputRemoveIndentation` a megfelelő.
+
+
+Szülő/legközelebbi tagek elérése
+--------------------------------
+
+Néha egy tag viselkedésének attól a kontextustól kell függenie, amelyben használják, konkrétan attól, hogy melyik szülő tag(ek)ben található. A `create()` függvénynek átadott `Tag` objektum biztosítja a `closestTag(array $classes, ?callable $condition = null): ?Tag` metódust pontosan erre a célra.
+
+Ez a metódus felfelé keres a jelenleg nyitott tagek hierarchiájában (beleértve a parzolás során belsőleg reprezentált HTML elemeket is), és visszaadja a legközelebbi ős `Tag` objektumát, amely megfelel a specifikus kritériumoknak. Ha nem található megfelelő ős, `null`-t ad vissza.
+
+Az `$classes` tömb meghatározza, milyen típusú ős tageket keres. Ellenőrzi, hogy az ős tag társított csomópontja (`$ancestorTag->node`) ennek az osztálynak a példánya-e.
+
+```php
+function create(Tag $tag)
+{
+	// A legközelebbi ős tag keresése, amelynek csomópontja ForeachNode példány
+	$foreachTag = $tag->closestTag([ForeachNode::class]);
+	if ($foreachTag) {
+		// Hozzáférhetünk magához a ForeachNode példányhoz:
+		$foreachNode = $foreachTag->node;
+	}
+}
+```
+
+Vegye észre a `$foreachTag->node`-ot: Ez csak azért működik, mert konvenció a Latte tag fejlesztésben, hogy azonnal hozzárendeljük a létrehozott csomópontot a `$tag->node`-hoz a `create()` metóduson belül, ahogy mindig is tettük.
+
+Néha a csomópont típusának egyszerű összehasonlítása nem elegendő. Lehet, hogy ellenőriznie kell egy potenciális ős tag vagy annak csomópontjának specifikus property-jét. A `closestTag()` opcionális második argumentuma egy callable, amely megkapja a potenciális ős `Tag` objektumot, és vissza kell adnia, hogy érvényes egyezés-e.
+
+```php
+function create(Tag $tag)
+{
+	$dynamicBlockTag = $tag->closestTag(
+		[BlockNode::class],
+		// Feltétel: a blokknak dinamikusnak kell lennie
+		fn(Tag $blockTag) => $blockTag->node->block->isDynamic(),
+	);
+}
+```
+
+A `closestTag()` használata lehetővé teszi olyan tagek létrehozását, amelyek kontextus-tudatosak és kikényszerítik a helyes használatot a sablon struktúráján belül, ami robusztusabb és érthetőbb sablonokhoz vezet.
+
+
+`PrintContext::format()` helyettesítő karakterek
+------------------------------------------------
+
+Gyakran használtuk a `PrintContext::format()`-ot PHP kód generálására a csomópontjaink `print()` metódusaiban. Elfogad egy maszk sztringet és további argumentumokat, amelyek helyettesítik a maszkban lévő helyettesítő karaktereket. Itt van egy összefoglaló az elérhető helyettesítő karakterekről:
+
+- **`%node`**: Az argumentumnak `Node` példánynak kell lennie. Meghívja a csomópont `print()` metódusát, és beilleszti az eredményül kapott PHP kódsztringet.
+- **`%dump`**: Az argumentum bármilyen PHP érték. Exportálja az értéket érvényes PHP kódba. Alkalmas skalárokhoz, tömbökhöz, null-hoz.
+	- `$context->format('echo %dump;', 'Hello')` -> `echo 'Hello';`
+	- `$context->format('$arr = %dump;', [1, 2])` -> `$arr = [1, 2];`
+- **`%raw`**: Beilleszti az argumentumot közvetlenül a kimeneti PHP kódba bármilyen escapelés vagy módosítás nélkül. **Használja óvatosan**, elsősorban előre generált PHP kódrészletek vagy változónevek beillesztésére.
+	- `$context->format('%raw = 1;', '$variableName')` -> `$variableName = 1;`
+- **`%args`**: Az argumentumnak `Expression\ArrayNode`-nak kell lennie. Kiírja a tömb elemeit függvény- vagy metódushívás argumentumaként formázva (vesszővel elválasztva, kezeli a névvel ellátott argumentumokat, ha vannak).
+	- `$argsNode = new ArrayNode([...]);`
+	- `$context->format('myFunc(%args);', $argsNode)` -> `myFunc(1, name: 'Joe');`
+- **`%line`**: Az argumentumnak `Position` objektumnak kell lennie (általában `$this->position`). Beilleszt egy PHP kommentárt `/* line X */`, amely a forrás sorszámát jelzi.
+	- `$context->format('echo "Hi" %line;', $this->position)` -> `echo "Hi" /* line 42 */;`
+- **`%escape(...)`**: Generál egy PHP kódot, amely *futásidőben* escapeli a belső kifejezést az aktuális kontextus-tudatos escapelési szabályok szerint.
+	- `$context->format('echo %escape(%node);', $variableNode)`
+- **`%modify(...)`**: Az argumentumnak `ModifierNode`-nak kell lennie. Generál egy PHP kódot, amely alkalmazza a `ModifierNode`-ban megadott szűrőket a belső tartalomra, beleértve a kontextus-tudatos escapelést, hacsak nincs letiltva a `|noescape`-pel.
+	- `$context->format('%modify(%node);', $modifierNode, $variableNode)`
+- **`%modifyContent(...)`**: Hasonló a `%modify`-hoz, de elfogott tartalomblokkok (gyakran HTML) módosítására szolgál.
+
+Explicit módon hivatkozhat az argumentumokra az indexük alapján (nullától kezdve): `%0.node`, `%1.dump`, `%2.raw`, stb. Ez lehetővé teszi egy argumentum többszöri újrafelhasználását a maszkban anélkül, hogy ismételten át kellene adni a `format()`-nak. Lásd a `{repeat}` tag példáját, ahol a `%0.raw` és `%2.raw` volt használva.
+
+
+Komplex argumentum parzolási példa
+----------------------------------
+
+Míg a `parseExpression()`, `parseArguments()`, stb. sok esetet lefednek, néha bonyolultabb parzolási logikára van szükség az alacsonyabb szintű `TokenStream` használatával, amely a `$tag->parser->stream`-en keresztül érhető el.
+
+**Cél:** Létrehozni egy `{embedYoutube $videoID, width: 640, height: 480}` taget. Parzolni akarjuk a kötelező videó ID-t (sztring vagy változó), amelyet opcionális kulcs-érték párok követnek a méretekhez.
+
+```php
+<?php
+namespace App\Latte;
+
+class YoutubeNode extends StatementNode
+{
+	public ExpressionNode $videoId;
+	public ?ExpressionNode $width = null;
+	public ?ExpressionNode $height = null;
+
+	public static function create(Tag $tag): self
+	{
+		$tag->expectArguments();
+		$node = $tag->node = new self;
+		// Kötelező videó ID parzolása
+		$node->videoId = $tag->parser->parseExpression();
+
+		// Opcionális kulcs-érték párok parzolása
+		$stream = $tag->parser->stream; // Tokenfolyam lekérése
+		while ($stream->tryConsume(',')) { // Vesszővel való elválasztást követel meg
+			// 'width' vagy 'height' azonosító várása
+			$keyToken = $stream->consume(Token::Php_Identifier);
+			$key = strtolower($keyToken->text);
+
+			$stream->consume(':'); // Kettőspont elválasztó várása
+
+			$value = $tag->parser->parseExpression(); // Érték kifejezés parzolása
+
+			if ($key === 'width') {
+				$node->width = $value;
+			} elseif ($key === 'height') {
+				$node->height = $value;
+			} else {
+				throw new CompileException("Ismeretlen argumentum '$key'. Várt 'width' vagy 'height'.", $keyToken->position);
+			}
+		}
+
+		return $node;
+	}
+}
+```
+
+Ez a kontrollszint lehetővé teszi nagyon specifikus és komplex szintaxisok definiálását az egyéni tagekhez a tokenfolyammal való közvetlen interakció révén.
+
+
+Az `AuxiliaryNode` használata
+-----------------------------
+
+A Latte általános "segéd" csomópontokat biztosít speciális helyzetekhez a kódgenerálás során vagy a fordítási meneteken belül. Ezek az `AuxiliaryNode` és a `Php\Expression\AuxiliaryNode`.
+
+Tekintse az `AuxiliaryNode`-ot egy rugalmas konténer csomópontnak, amely delegálja alapvető funkcionalitásait - a kódgenerálást és a gyermek csomópontok kiadását - a konstruktorában megadott argumentumoknak:
+
+- `print()` delegálása: A konstruktor első argumentuma egy PHP **closure**. Amikor a Latte meghívja a `print()` metódust az `AuxiliaryNode`-on, végrehajtja ezt a megadott closure-t. A closure megkapja a `PrintContext`-et és a konstruktor második argumentumában átadott csomópontokat, lehetővé téve teljesen egyéni PHP kódgenerálási logika definiálását futásidőben.
+- `getIterator()` delegálása: A konstruktor második argumentuma egy **`Node` objektumokból álló tömb**. Amikor a Latte-nak végig kell járnia az `AuxiliaryNode` gyermekeit (pl. fordítási menetek során), annak `getIterator()` metódusa egyszerűen kiadja a ebben a tömbben felsorolt csomópontokat.
+
+Példa:
+
+```php
+$node = new AuxiliaryNode(
+    // 1. Ez a closure lesz a print() törzse
+    fn(PrintContext $context, $arg1, $arg2) => $context->format('...%node...%node...', $arg1, $arg2),
+
+    // 2. Ezeket a csomópontokat adja ki a getIterator() metódus, és adja át a fenti closure-nek
+    [$argumentNode1, $argumentNode2]
+);
+```
+
+A Latte két különböző típust biztosít attól függően, hogy hova kell beillesztenie a generált kódot:
+
+- `Latte\Compiler\Nodes\Php\Expression\AuxiliaryNode`: Használja ezt, ha olyan PHP kódrészletet kell generálnia, amely egy **kifejezést** reprezentál.
+- `Latte\Compiler\Nodes\AuxiliaryNode`: Használja ezt általánosabb célokra, amikor egy vagy több **utasítást** reprezentáló PHP kódblokkot kell beillesztenie.
+
+Fontos ok az `AuxiliaryNode` használatára a standard csomópontok (mint a `StaticMethodCallNode`) helyett a `print()` metódusában vagy egy fordítási menetben a **láthatóság ellenőrzése a következő fordítási menetek számára**, különösen azok számára, amelyek biztonsággal kapcsolatosak, mint a Sandbox.
+
+Vegye fontolóra a következő forgatókönyvet: A fordítási menete egy felhasználó által megadott kifejezést (`$userExpr`) egy specifikus, megbízható segédfüggvény `myInternalSanitize($userExpr)` hívásába kell csomagolnia. Ha egy standard `new FunctionCallNode('myInternalSanitize', [$userExpr])` csomópontot hoz létre, az teljesen látható lesz az AST menet számára. Ha a Sandbox menet később fut, és a `myInternalSanitize` *nincs* az engedélyezett listáján, a Sandbox *blokkolhatja* vagy módosíthatja ezt a hívást, potenciálisan megbontva a tag belső logikáját, még akkor is, ha *Ön*, a tag szerzője, tudja, hogy ez a specifikus hívás biztonságos és szükséges. Ezért generálhatja a hívást közvetlenül az `AuxiliaryNode` closure-én belül.
+
+```php
+use Latte\Compiler\Nodes\Php\Expression\AuxiliaryNode;
+
+// ... a print() vagy egy fordítási menetben ...
+$wrappedNode = new AuxiliaryNode(
+	fn(PrintContext $context, $userExpr) => $context->format(
+		'myInternalSanitize(%node)', // Közvetlen PHP kód generálása
+		$userExpr,
+	),
+	// FONTOS: Itt továbbra is adja át az eredeti felhasználói kifejezés csomópontot!
+	[$userExpr],
+);
+```
+
+Ebben az esetben a Sandbox menet látja az `AuxiliaryNode`-ot, de **nem elemzi a closure által generált PHP kódot**. Nem tudja közvetlenül blokkolni a closure *belsejében* generált `myInternalSanitize` hívást.
+
+Míg maga a generált PHP kód rejtve van a menetek elől, a kód *bemenetei* (a felhasználói adatokat vagy kifejezéseket reprezentáló csomópontok) **továbbra is bejárhatónak kell lenniük**. Ezért az `AuxiliaryNode` konstruktorának második argumentuma alapvető. **Muszáj** átadnia egy tömböt, amely tartalmazza az összes eredeti csomópontot (mint a `$userExpr` a fenti példában), amelyet a closure használ. Az `AuxiliaryNode` `getIterator()`-ja **kiadja ezeket a csomópontokat**, lehetővé téve a fordítási meneteknek, mint a Sandbox, hogy elemezzék őket potenciális problémák szempontjából.
+
+
+Bevált gyakorlatok
+==================
+
+- **Világos cél:** Győződjön meg róla, hogy a tagjának világos és szükséges célja van. Ne hozzon létre tageket olyan feladatokhoz, amelyeket könnyen meg lehet oldani [szűrőkkel |custom-filters] vagy [függvényekkel |custom-functions].
+- **Implementálja helyesen a `getIterator()`-t:** Mindig implementálja a `getIterator()`-t, és biztosítson *referenciákat* (`&`) *minden* gyermek csomóponthoz (argumentumok, tartalom), amelyeket a sablonból parzoltak. Ez elengedhetetlen a fordítási menetekhez, a biztonsághoz (Sandbox) és a potenciális jövőbeli optimalizációkhoz.
+- **Publikus property-k a csomópontokhoz:** Tegye publikussá a gyermek csomópontokat tartalmazó property-ket, hogy a fordítási menetek szükség esetén módosíthassák őket.
+- **Használja a `PrintContext::format()`-ot:** Használja ki a `format()` metódust PHP kód generálására. Kezeli az idézőjeleket, helyesen escapeli a helyettesítő karaktereket, és automatikusan hozzáadja a sorszám kommentárokat.
+- **Ideiglenes változók (`$__`):** Amikor futásidejű PHP kódot generál, amely ideiglenes változókat igényel (pl. köztes összegek tárolására, ciklusszámlálókhoz), használja a `$__` előtag konvenciót, hogy elkerülje az ütközéseket a felhasználói változókkal és a Latte belső `$ʟ_` változóival.
+- **Beágyazás és egyedi ID-k:** Ha a tagja beágyazható, vagy példány-specifikus állapotra van szüksége futásidőben, használja a `$context->generateId()`-t a `print()` metódusán belül, hogy egyedi utótagokat hozzon létre az ideiglenes `$__` változóihoz.
+- **Szolgáltatók külső adatokhoz:** Használjon szolgáltatókat (regisztrálva az `Extension::getProviders()`-en keresztül) futásidejű adatokhoz vagy szolgáltatásokhoz való hozzáféréshez (`$this->global->...`) ahelyett, hogy értékeket hardkódolna vagy globális állapotra támaszkodna. Használjon gyártói előtagokat a szolgáltatónevekhez.
+- **Fontolja meg az n:attribútumokat:** Ha a páros tagja logikailag egyetlen HTML elemen működik, a Latte valószínűleg automatikus `n:attribútum` támogatást nyújt. Tartsa ezt szem előtt a felhasználói kényelem érdekében. Ha attribútum-módosító taget hoz létre, fontolja meg, hogy egy tiszta `n:attribútum` a legmegfelelőbb forma-e.
+- **Tesztelés:** Írjon teszteket a tagjeihez, lefedve mind a különböző szintaktikai bemenetek parzolását, mind a generált **PHP kód** kimenetének helyességét.
+
+Ezen irányelvek követésével erőteljes, robusztus és karbantartható egyéni tageket hozhat létre, amelyek zökkenőmentesen integrálódnak a Latte sablonmotorral.
+
+.[note]
+A Latte részét képező csomópont osztályok tanulmányozása a legjobb módja annak, hogy megtanulja a parzolási folyamat minden részletét.

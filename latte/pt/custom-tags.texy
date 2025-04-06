@@ -1,0 +1,1140 @@
+Criando tags personalizadas
+***************************
+
+.[perex]
+Esta página fornece um guia abrangente para criar tags personalizadas no Latte. Discutiremos tudo, desde tags simples até cenários mais complexos com conteúdo aninhado e necessidades específicas de parsing, com base na sua compreensão de como o Latte compila templates.
+
+Tags personalizadas fornecem o mais alto nível de controle sobre a sintaxe do template e a lógica de renderização, mas também são o ponto de extensão mais complexo. Antes de decidir criar uma tag personalizada, sempre considere se [não existe uma solução mais simples |extending-latte#Formas de estender o Latte] ou se uma tag adequada já existe no [conjunto padrão |tags]. Use tags personalizadas apenas quando alternativas mais simples não forem suficientes para suas necessidades.
+
+
+Compreendendo o processo de compilação
+======================================
+
+Para criar tags personalizadas de forma eficaz, é útil explicar como o Latte processa templates. Compreender este processo esclarece por que as tags são estruturadas dessa forma e como elas se encaixam no contexto mais amplo.
+
+A compilação de um template no Latte, de forma simplificada, envolve estes passos principais:
+
+1.  **Análise Léxica:** O lexer lê o código-fonte do template (arquivo `.latte`) e o divide em uma sequência de pequenas partes distintas chamadas **tokens** (por exemplo, `{`, `foreach`, `$variable`, `}`, texto HTML, etc.).
+2.  **Parsing:** O parser pega esse fluxo de tokens e constrói a partir dele uma estrutura de árvore significativa que representa a lógica e o conteúdo do template. Essa árvore é chamada de **árvore de sintaxe abstrata (AST)**.
+3.  **Passos de Compilação:** Antes de gerar o código PHP, o Latte executa [passos de compilação |compiler-passes]. São funções que percorrem toda a AST e podem modificá-la ou coletar informações. Este passo é crucial para funcionalidades como segurança ([Sandbox |sandbox]) ou otimização.
+4.  **Geração de Código:** Finalmente, o compilador percorre a AST (potencialmente modificada) e gera o código da classe PHP correspondente. Este código PHP é o que realmente renderiza o template durante a execução.
+5.  **Caching:** O código PHP gerado é armazenado em disco, o que torna as renderizações subsequentes muito rápidas, pois os passos 1-4 são pulados.
+
+Na realidade, a compilação é um pouco mais complexa. O Latte **tem dois** lexers e parsers: um para o template HTML e outro para o código tipo PHP dentro das tags. E também o parsing não ocorre após a tokenização, mas o lexer e o parser rodam em paralelo em duas "threads" e se coordenam. Acredite, programar isso foi ciência de foguetes :-)
+
+Todo o processo, desde o carregamento do conteúdo do template, passando pelo parsing, até a geração do arquivo final, pode ser sequenciado com este código, com o qual você pode experimentar e exibir resultados intermediários:
+
+```php
+$latte = new Latte\Engine;
+$source = $latte->getLoader()->getContent($file);
+$ast = $latte->parse($source);
+$latte->applyPasses($ast);
+$code = $latte->generate($ast, $file);
+```
+
+
+A anatomia de uma tag
+=====================
+
+Criar uma tag personalizada totalmente funcional no Latte envolve várias partes interconectadas. Antes de mergulharmos na implementação, vamos entender os conceitos básicos e a terminologia, usando uma analogia com HTML e o Document Object Model (DOM).
+
+
+Tags vs. Nós (Analogia com HTML)
+--------------------------------
+
+Em HTML, escrevemos **tags** como `<p>` ou `<div>...</div>`. Essas tags são a sintaxe no código-fonte. Quando o navegador analisa este HTML, ele cria uma representação na memória chamada **Document Object Model (DOM)**. No DOM, as tags HTML são representadas por **nós** (especificamente, nós `Element` na terminologia do DOM JavaScript). Trabalhamos programaticamente com esses *nós* (por exemplo, usando `document.getElementById(...)` do JavaScript, que retorna um nó Element). A tag é apenas uma representação textual no arquivo de origem; o nó é uma representação de objeto na árvore lógica.
+
+O Latte funciona de forma semelhante:
+
+- No arquivo de template `.latte`, você escreve **tags Latte**, como `{foreach ...}` e `{/foreach}`. Esta é a sintaxe com a qual você, como autor do template, trabalha.
+- Quando o Latte **analisa (parses)** o template, ele constrói uma **Árvore de Sintaxe Abstrata (AST)**. Esta árvore é composta por **nós**. Cada tag Latte, elemento HTML, pedaço de texto ou expressão no template se torna um ou mais nós nesta árvore.
+- A classe base para todos os nós na AST é `Latte\Compiler\Node`. Assim como o DOM tem diferentes tipos de nós (Element, Text, Comment), a AST do Latte tem diferentes tipos de nós. Você encontrará `Latte\Compiler\Nodes\TextNode` para texto estático, `Latte\Compiler\Nodes\Html\ElementNode` para elementos HTML, `Latte\Compiler\Nodes\Php\ExpressionNode` para expressões dentro de tags e, crucialmente para tags personalizadas, nós que herdam de `Latte\Compiler\Nodes\StatementNode`.
+
+
+Por que `StatementNode`?
+------------------------
+
+Elementos HTML (`Html\ElementNode`) representam principalmente estrutura e conteúdo. Expressões PHP (`Php\ExpressionNode`) representam valores ou cálculos. Mas e as tags Latte como `{if}`, `{foreach}` ou nossa própria `{datetime}`? Essas tags *executam ações*, controlam o fluxo do programa ou geram saída com base na lógica. São unidades funcionais que tornam o Latte um poderoso *engine* de templates, não apenas uma linguagem de marcação.
+
+Na programação, essas unidades que executam ações são frequentemente chamadas de "statements" (instruções). Portanto, os nós que representam essas tags Latte funcionais normalmente herdam de `Latte\Compiler\Nodes\StatementNode`. Isso os distingue de nós puramente estruturais (como elementos HTML) ou nós que representam valores (como expressões).
+
+
+Os componentes chave
+====================
+
+Vamos percorrer os principais componentes necessários para criar uma tag personalizada:
+
+
+Função de parsing da tag
+------------------------
+
+- Esta função PHP callable analisa a sintaxe da tag Latte (`{...}`) no template de origem.
+- Recebe informações sobre a tag (como seu nome, posição e se é um n:attribute) através do objeto [api:Latte\Compiler\Tag].
+- Sua ferramenta principal para analisar argumentos e expressões dentro dos delimitadores da tag é o objeto [api:Latte\Compiler\TagParser], acessível via `$tag->parser` (este é um parser diferente daquele que analisa todo o template).
+- Para tags de par, usa `yield` para sinalizar ao Latte para analisar o conteúdo interno entre as tags de abertura e fechamento.
+- O objetivo final da função de parsing é criar e retornar uma instância da **classe do nó**, que é adicionada à AST.
+- É costume (embora não obrigatório) implementar a função de parsing como um método estático (frequentemente chamado `create`) diretamente na classe do nó correspondente. Isso mantém a lógica de parsing e a representação do nó organizadas em um único pacote, permite o acesso a elementos privados/protegidos da classe, se necessário, e melhora a organização.
+
+
+Classe do nó
+------------
+
+- Representa a *função lógica* da sua tag na **Árvore de Sintaxe Abstrata (AST)**.
+- Contém informações analisadas (como argumentos ou conteúdo) como propriedades públicas. Essas propriedades frequentemente contêm outras instâncias de `Node` (por exemplo, `ExpressionNode` para argumentos analisados, `AreaNode` para conteúdo analisado).
+- O método `print(PrintContext $context): string` gera o *código PHP* (uma instrução ou série de instruções) que executa a ação da tag durante a renderização do template.
+- O método `getIterator(): \Generator` expõe os nós filhos (argumentos, conteúdo) para travessia pelos **passos de compilação**. Deve fornecer referências (`&`) para permitir que os passos potencialmente modifiquem ou substituam subnós.
+- Depois que todo o template é analisado na AST, o Latte executa uma série de [passos de compilação |compiler-passes]. Esses passos percorrem *toda* a AST usando o método `getIterator()` fornecido por cada nó. Eles podem inspecionar nós, coletar informações e até *modificar* a árvore (por exemplo, alterando propriedades públicas de nós ou substituindo nós inteiramente). Este design, que requer um `getIterator()` abrangente, é crucial. Ele permite que funcionalidades poderosas como [Sandbox |sandbox] analisem e potencialmente alterem o comportamento de *qualquer* parte do template, incluindo suas próprias tags personalizadas, garantindo segurança e consistência.
+
+
+Registro via extensão
+---------------------
+
+- Você precisa informar o Latte sobre sua nova tag e qual função de parsing deve ser usada para ela. Isso é feito dentro de uma [extensão Latte |extending-latte#Latte Extension].
+- Dentro da sua classe de extensão, você implementa o método `getTags(): array`. Este método retorna um array associativo onde as chaves são os nomes das tags (por exemplo, `'mytag'`, `'n:myattribute'`) e os valores são funções PHP callable representando suas respectivas funções de parsing (por exemplo, `MyNamespace\DatetimeNode::create(...)`).
+
+Resumo: A **função de parsing da tag** transforma o *código-fonte do template* da sua tag em um **nó AST**. A **classe do nó** pode então transformar *a si mesma* em *código PHP* executável para o template compilado e expõe seus subnós para os **passos de compilação** via `getIterator()`. O **registro via extensão** conecta o nome da tag à função de parsing e informa o Latte sobre ela.
+
+Agora, vamos explorar como implementar esses componentes passo a passo.
+
+
+Criando uma tag simples
+=======================
+
+Vamos começar a criar sua primeira tag Latte personalizada. Começaremos com um exemplo muito simples: uma tag chamada `{datetime}` que exibe a data e hora atuais. **Inicialmente, esta tag não aceitará nenhum argumento**, mas a aprimoraremos posteriormente na seção [#Parsing de argumentos da tag]. Ela também não tem conteúdo interno.
+
+Este exemplo o guiará pelos passos básicos: definir a classe do nó, implementar seus métodos `print()` e `getIterator()`, criar a função de parsing e, finalmente, registrar a tag.
+
+**Objetivo:** Implementar `{datetime}` para exibir a data e hora atuais usando a função PHP `date()`.
+
+
+Criação da classe do nó
+-----------------------
+
+Primeiro, precisamos de uma classe que represente nossa tag na Árvore de Sintaxe Abstrata (AST). Conforme discutido acima, herdamos de `Latte\Compiler\Nodes\StatementNode`.
+
+Crie um arquivo (por exemplo, `DatetimeNode.php`) e defina a classe:
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DatetimeNode extends StatementNode
+{
+	/**
+	 * Função de parsing da tag, chamada quando {datetime} é encontrado.
+	 */
+	public static function create(Tag $tag): self
+	{
+		// Nossa tag simples atualmente não aceita argumentos, então não precisamos analisar nada
+		$node = $tag->node = new self;
+		return $node;
+	}
+
+	/**
+	 * Gera o código PHP que será executado durante a renderização do template.
+	 */
+	public function print(PrintContext $context): string
+	{
+		return $context->format(
+			'echo date(\'Y-m-d H:i:s\') %line;',
+			$this->position,
+		);
+	}
+
+	/**
+	 * Fornece acesso aos nós filhos para os passos de compilação do Latte.
+	 */
+	public function &getIterator(): \Generator
+	{
+		false && yield;
+	}
+}
+```
+
+Quando o Latte encontra `{datetime}` em um template, ele chama a função de parsing `create()`. Sua tarefa é retornar uma instância de `DatetimeNode`.
+
+O método `print()` gera o código PHP que será executado durante a renderização do template. Chamamos o método `$context->format()`, que monta a string final do código PHP para o template compilado. O primeiro argumento, `'echo date('Y-m-d H:i:s') %line;'`, é uma máscara na qual os parâmetros seguintes são inseridos.
+O placeholder `%line` diz ao método `format()` para usar o segundo argumento, que é `$this->position`, e inserir um comentário como `/* line 15 */`, que conecta o código PHP gerado de volta à linha original do template, o que é crucial para a depuração.
+
+A propriedade `$this->position` é herdada da classe base `Node` e é definida automaticamente pelo parser do Latte. Ela contém um objeto [api:Latte\Compiler\Position] que indica onde a tag foi encontrada no arquivo de origem `.latte`.
+
+O método `getIterator()` é essencial para os passos de compilação. Ele deve fornecer todos os nós filhos, mas nosso `DatetimeNode` simples atualmente não tem argumentos nem conteúdo, portanto, nenhum nó filho. No entanto, o método ainda deve existir e ser um gerador, ou seja, a palavra-chave `yield` deve estar presente de alguma forma no corpo do método.
+
+
+Registro via extensão
+---------------------
+
+Finalmente, vamos informar o Latte sobre a nova tag. Crie uma [classe de extensão |extending-latte#Latte Extension] (por exemplo, `MyLatteExtension.php`) e registre a tag em seu método `getTags()`.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Extension;
+
+class MyLatteExtension extends Extension
+{
+	/**
+	 * Retorna a lista de tags fornecidas por esta extensão.
+	 * @return array<string, callable> Mapa: 'nome-da-tag' => funcao-de-parsing
+	 */
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			// Registre mais tags aqui posteriormente
+		];
+	}
+}
+```
+
+Em seguida, registre esta extensão no Latte Engine:
+
+```php
+$latte = new Latte\Engine;
+$latte->addExtension(new App\Latte\MyLatteExtension);
+```
+
+Crie um template:
+
+```latte
+<p>Página gerada em: {datetime}</p>
+```
+
+Saída esperada: `<p>Página gerada em: 2023-10-27 11:00:00</p>`
+
+
+Resumo desta fase
+-----------------
+
+Criamos com sucesso uma tag personalizada básica `{datetime}`. Definimos sua representação na AST (`DatetimeNode`), tratamos seu parsing (`create()`), especificamos como ela deve gerar código PHP (`print()`), garantimos que seus filhos sejam acessíveis para travessia (`getIterator()`) e a registramos no Latte.
+
+Na próxima seção, aprimoraremos esta tag para aceitar argumentos e demonstraremos como analisar expressões e gerenciar nós filhos.
+
+
+Parsing de argumentos da tag
+============================
+
+Nossa tag simples `{datetime}` funciona, mas não é muito flexível. Vamos aprimorá-la para aceitar um argumento opcional: uma string de formatação para a função `date()`. A sintaxe desejada será `{datetime $format}`.
+
+**Objetivo:** Modificar `{datetime}` para aceitar uma expressão PHP opcional como argumento, que será usada como string de formatação para `date()`.
+
+
+Apresentando o `TagParser`
+--------------------------
+
+Antes de modificarmos o código, é importante entender a ferramenta que usaremos: [api:Latte\Compiler\TagParser]. Quando o parser principal do Latte (`TemplateParser`) encontra uma tag Latte como `{datetime ...}` ou um n:attribute, ele delega o parsing do conteúdo *dentro* da tag (a parte entre `{` e `}` ou o valor do atributo) para um `TagParser` especializado.
+
+Este `TagParser` trabalha exclusivamente com os **argumentos da tag**. Sua tarefa é processar os tokens que representam esses argumentos. Crucialmente, ele **deve processar todo o conteúdo** que lhe é fornecido. Se sua função de parsing terminar, mas o `TagParser` não tiver alcançado o final dos argumentos (verificado via `$tag->parser->isEnd()`), o Latte lançará uma exceção, pois isso indica que tokens inesperados foram deixados dentro da tag. Por outro lado, se a tag *requer* argumentos, você deve chamar `$tag->expectArguments()` no início da sua função de parsing. Este método verifica se os argumentos estão presentes e lança uma exceção útil se a tag foi usada sem nenhum argumento.
+
+O `TagParser` oferece métodos úteis para analisar diferentes tipos de argumentos:
+
+- `parseExpression(): ExpressionNode`: Analisa uma expressão semelhante a PHP (variáveis, literais, operadores, chamadas de função/método, etc.). Lida com o açúcar sintático do Latte, como tratar strings alfanuméricas simples como strings entre aspas (por exemplo, `foo` é analisado como se fosse `'foo'`).
+- `parseUnquotedStringOrExpression(): ExpressionNode`: Analisa uma expressão padrão ou uma *string sem aspas*. Strings sem aspas são sequências permitidas pelo Latte sem aspas, frequentemente usadas para coisas como caminhos de arquivo (por exemplo, `{include ../file.latte}`). Se analisar uma string sem aspas, retorna um `StringNode`.
+- `parseArguments(): ArrayNode`: Analisa argumentos separados por vírgula, potencialmente com chaves, como `10, name: 'John', true`.
+- `parseModifier(): ModifierNode`: Analisa filtros como `|upper|truncate:10`.
+- `parseType(): ?SuperiorTypeNode`: Analisa dicas de tipo PHP como `int`, `?string`, `array|Foo`.
+
+Para necessidades de parsing mais complexas ou de nível inferior, você pode interagir diretamente com o [fluxo de tokens |api:Latte\Compiler\TokenStream] via `$tag->parser->stream`. Este objeto fornece métodos para inspecionar e consumir tokens individuais:
+
+- `$tag->parser->stream->is(...): bool`: Verifica se o token *atual* corresponde a algum dos tipos especificados (por exemplo, `Token::Php_Variable`) ou valores literais (por exemplo, `'as'`) sem consumi-lo. Útil para olhar à frente.
+- `$tag->parser->stream->consume(...): Token`: Consome o token *atual* e avança a posição do fluxo. Se tipos/valores de token esperados forem fornecidos como argumentos e o token atual não corresponder, lança `CompileException`. Use isso quando você *espera* um determinado token.
+- `$tag->parser->stream->tryConsume(...): ?Token`: Tenta consumir o token *atual* *apenas se* ele corresponder a um dos tipos/valores especificados. Se corresponder, consome o token e o retorna. Se não corresponder, deixa a posição do fluxo inalterada e retorna `null`. Use isso para tokens opcionais ou ao escolher entre diferentes caminhos sintáticos.
+
+
+Atualizando a função de parsing `create()`
+------------------------------------------
+
+Com esse entendimento, vamos modificar o método `create()` em `DatetimeNode` para analisar o argumento de formato opcional usando `$tag->parser`.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DatetimeNode extends StatementNode
+{
+	// Adicionamos uma propriedade pública para armazenar o nó da expressão de formato analisado
+	public ?ExpressionNode $format = null;
+
+	public static function create(Tag $tag): self
+	{
+		$node = $tag->node = new self;
+
+		// Verificamos se existem alguns tokens
+		if (!$tag->parser->isEnd()) {
+			// Analisamos o argumento como uma expressão semelhante a PHP usando TagParser.
+			$node->format = $tag->parser->parseExpression();
+		}
+
+		return $node;
+	}
+
+	// ... os métodos print() e getIterator() serão atualizados a seguir ...
+}
+```
+
+Adicionamos uma propriedade pública `$format`. Em `create()`, agora usamos `$tag->parser->isEnd()` para verificar se *existem* argumentos. Se sim, `$tag->parser->parseExpression()` processa os tokens para a expressão. Como o `TagParser` deve processar todos os tokens de entrada, o Latte lançará automaticamente um erro se o usuário escrever algo inesperado após a expressão de formato (por exemplo, `{datetime 'Y-m-d', unexpected}`).
+
+
+Atualizando o método `print()`
+------------------------------
+
+Agora, vamos modificar o método `print()` para usar a expressão de formato analisada armazenada em `$this->format`. Se nenhum formato foi fornecido (`$this->format` é `null`), devemos usar uma string de formatação padrão, por exemplo, `'Y-m-d H:i:s'`.
+
+```php
+	public function print(PrintContext $context): string
+	{
+		$formatNode = $this->format ?? new StringNode('Y-m-d H:i:s');
+
+		// %node imprime a representação do código PHP de $formatNode.
+		return $context->format(
+			'echo date(%node) %line;',
+			$formatNode,
+			$this->position
+		);
+	}
+```
+
+Na variável `$formatNode`, armazenamos o nó AST que representa a string de formatação para a função PHP `date()`. Usamos o operador de coalescência nula (`??`) aqui. Se o usuário forneceu um argumento no template (por exemplo, `{datetime 'd.m.Y'}`), então a propriedade `$this->format` contém o nó correspondente (neste caso, um `StringNode` com o valor `'d.m.Y'`), e este nó é usado. Se o usuário não forneceu um argumento (escreveu apenas `{datetime}`), a propriedade `$this->format` é `null`, e em vez disso criamos um novo `StringNode` com o formato padrão `'Y-m-d H:i:s'`. Isso garante que `$formatNode` sempre contenha um nó AST válido para o formato.
+
+Na máscara `'echo date(%node) %line;'`, um novo placeholder `%node` é usado, que diz ao método `format()` para pegar o primeiro argumento seguinte (que é nosso `$formatNode`), chamar seu método `print()` (que retornará sua representação de código PHP) e inserir o resultado na posição do placeholder.
+
+
+Implementando `getIterator()` para subnós
+-----------------------------------------
+
+Nosso `DatetimeNode` agora tem um nó filho: a expressão `$format`. **Devemos** expor este nó filho aos passos de compilação, fornecendo-o no método `getIterator()`. Lembre-se de fornecer uma *referência* (`&`) para permitir que os passos potencialmente substituam o nó.
+
+```php
+	public function &getIterator(): \Generator
+	{
+		if ($this->format) {
+			yield $this->format;
+		}
+	}
+```
+
+Por que isso é crucial? Imagine um passo Sandbox que precisa verificar se o argumento `$format` não contém uma chamada de função proibida (por exemplo, `{datetime dangerousFunction()}`). Se `getIterator()` não fornecer `$this->format`, o passo Sandbox nunca veria a chamada `dangerousFunction()` dentro do argumento da nossa tag, criando uma potencial falha de segurança. Ao fornecê-lo, permitimos que o Sandbox (e outros passos) inspecionem e potencialmente modifiquem o nó da expressão `$format`.
+
+
+Usando a tag aprimorada
+-----------------------
+
+A tag agora lida corretamente com o argumento opcional:
+
+```latte
+Formato padrão: {datetime}
+Formato personalizado: {datetime 'd.m.Y'}
+Usando variável: {datetime $userDateFormatPreference}
+
+{* Isso causaria um erro após analisar 'd.m.Y', pois ", foo" é inesperado *}
+{* {datetime 'd.m.Y', foo} *}
+```
+
+A seguir, veremos a criação de tags de par, que processam o conteúdo entre elas.
+
+
+Tratando tags de par
+====================
+
+Até agora, nossa tag `{datetime}` era *auto-fechada* (conceitualmente). Ela não tinha conteúdo entre as tags de abertura e fechamento. No entanto, muitas tags úteis operam em um bloco de conteúdo de template. Estas são chamadas de **tags de par**. Exemplos incluem `{if}...{/if}`, `{block}...{/block}` ou uma tag personalizada que criaremos agora: `{debug}...{/debug}`.
+
+Esta tag nos permitirá incluir informações de depuração em nossos templates que devem ser visíveis apenas durante o desenvolvimento.
+
+**Objetivo:** Criar uma tag de par `{debug}` cujo conteúdo é renderizado apenas quando um sinalizador específico de "modo de desenvolvimento" está ativo.
+
+
+Apresentando os provedores
+--------------------------
+
+Às vezes, suas tags precisam acessar dados ou serviços que não são passados diretamente como parâmetros de template. Por exemplo, determinar se a aplicação está em modo de desenvolvimento, acessar o objeto do usuário ou obter valores de configuração. O Latte fornece um mecanismo chamado **provedores** (Providers) para este propósito.
+
+Os provedores são registrados em sua [extensão |extending-latte#Latte Extension] usando o método `getProviders()`. Este método retorna um array associativo onde as chaves são os nomes pelos quais os provedores serão acessíveis no código de tempo de execução do template, e os valores são os dados ou objetos reais.
+
+Dentro do código PHP gerado pelo método `print()` da sua tag, você pode acessar esses provedores através de uma propriedade especial do objeto `$this->global`.
+Como esta propriedade é compartilhada entre todas as extensões, é uma boa prática **prefixar os nomes dos seus provedores** para evitar possíveis conflitos de nomes com provedores principais do Latte ou provedores de outras extensões de terceiros. Uma convenção comum é usar um prefixo curto e único relacionado ao seu fornecedor ou nome da extensão. Para nosso exemplo, usaremos o prefixo `app` e o sinalizador de modo de desenvolvimento estará disponível como `$this->global->appDevMode`.
+
+
+A palavra-chave `yield` para parsing de conteúdo
+------------------------------------------------
+
+Como dizemos ao parser do Latte para processar o conteúdo *entre* `{debug}` e `{/debug}`? É aqui que entra a palavra-chave `yield`.
+
+Quando `yield` é usado na função `create()`, a função se torna um [gerador PHP |https://www.php.net/manual/en/language.generators.overview.php]. Sua execução é pausada e o controle retorna ao `TemplateParser` principal. O `TemplateParser` então continua a analisar o conteúdo do template *até* encontrar a tag de fechamento correspondente (`{/debug}` em nosso caso).
+
+Assim que a tag de fechamento é encontrada, o `TemplateParser` retoma a execução da nossa função `create()` logo após a instrução `yield`. O valor *retornado* pela instrução `yield` é um array contendo dois elementos:
+
+1.  Um `AreaNode` representando o conteúdo analisado entre as tags de abertura e fechamento.
+2.  Um objeto `Tag` representando a tag de fechamento (por exemplo, `{/debug}`).
+
+Vamos criar a classe `DebugNode` e seu método `create` utilizando `yield`.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DebugNode extends StatementNode
+{
+	// Propriedade pública para armazenar o conteúdo interno analisado
+	public AreaNode $content;
+
+	/**
+	 * Função de parsing para a tag de par {debug} ... {/debug}.
+	 */
+	public static function create(Tag $tag): \Generator // observe o tipo de retorno
+	{
+		$node = $tag->node = new self;
+
+		// Pausar o parsing, obter o conteúdo interno e a tag final quando {/debug} for encontrado
+		[$node->content, $endTag] = yield;
+
+		return $node;
+	}
+
+	// ... print() e getIterator() serão implementados a seguir ...
+}
+```
+
+Nota: `$endTag` é `null` se a tag for usada como um n:attribute, ou seja, `<div n:debug>...</div>`.
+
+
+Implementando `print()` para renderização condicional
+-----------------------------------------------------
+
+O método `print()` agora precisa gerar código PHP que, em tempo de execução, verifique o provedor `appDevMode` e execute o código para o conteúdo interno apenas se o sinalizador for verdadeiro.
+
+```php
+	public function print(PrintContext $context): string
+	{
+		// Gera uma instrução PHP 'if' que verifica o provedor em tempo de execução
+		return $context->format(
+			<<<'XX'
+				if ($this->global->appDevMode) %line {
+					// Se estiver em modo de desenvolvimento, imprime o conteúdo interno
+					%node
+				}
+
+				XX,
+			$this->position, // Para o comentário %line
+			$this->content,  // O nó contendo a AST do conteúdo interno
+		);
+	}
+```
+
+Isso é simples. Usamos `PrintContext::format()` para criar uma instrução PHP `if` padrão. Dentro do `if`, colocamos o placeholder `%node` para `$this->content`. O Latte chamará recursivamente `$this->content->print($context)` para gerar o código PHP para a parte interna da tag, mas apenas se `$this->global->appDevMode` avaliar como verdadeiro em tempo de execução.
+
+
+Implementando `getIterator()` para o conteúdo
+---------------------------------------------
+
+Assim como com o nó de argumento no exemplo anterior, nosso `DebugNode` agora tem um nó filho: `AreaNode $content`. Precisamos expô-lo fornecendo-o em `getIterator()`:
+
+```php
+	public function &getIterator(): \Generator
+	{
+		// Fornece uma referência ao nó de conteúdo
+		yield $this->content;
+	}
+```
+
+Isso permite que os passos de compilação desçam para o conteúdo da nossa tag `{debug}`, o que é importante mesmo que o conteúdo seja renderizado condicionalmente. Por exemplo, o Sandbox precisa analisar o conteúdo independentemente de `appDevMode` ser verdadeiro ou falso.
+
+
+Registro e uso
+--------------
+
+Registre a tag e o provedor em sua extensão:
+
+```php
+class MyLatteExtension extends Extension
+{
+	// Assumimos que $isDevelopmentMode é determinado em algum lugar (por exemplo, da configuração)
+	public function __construct(
+		private bool $isDevelopmentMode,
+	) {
+	}
+
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...), // Registro da nova tag
+		];
+	}
+
+	public function getProviders(): array
+	{
+		return [
+			'appDevMode' => $this->isDevelopmentMode, // Registro do provedor
+		];
+	}
+}
+
+// Ao registrar a extensão:
+$isDev = true; // Determine isso com base no ambiente da sua aplicação
+$latte->addExtension(new App\Latte\MyLatteExtension($isDev));
+```
+
+E seu uso no template:
+
+```latte
+<p>Conteúdo normal visível sempre.</p>
+
+{debug}
+	<div class="debug-panel">
+		ID do usuário atual: {$user->id}
+		Hora da requisição: {=time()}
+	</div>
+{/debug}
+
+<p>Outro conteúdo normal.</p>
+```
+
+
+Integração de n:attributes
+--------------------------
+
+O Latte oferece uma notação abreviada conveniente para muitas tags de par: [n:attributes |syntax#n:atributos]. Se você tem uma tag de par como `{tag}...{/tag}` e deseja que seu efeito seja aplicado diretamente a um único elemento HTML, muitas vezes pode escrevê-la de forma mais concisa como um atributo `n:tag` nesse elemento.
+
+Para a maioria das tags de par padrão que você define (como nossa `{debug}`), o Latte habilitará automaticamente a versão do atributo `n:` correspondente. Você não precisa fazer nada extra durante o registro:
+
+```latte
+{* Uso padrão da tag de par *}
+{debug}<div>Informação de depuração</div>{/debug}
+
+{* Uso equivalente com n:attribute *}
+<div n:debug>Informação de depuração</div>
+```
+
+Ambas as versões renderizarão o `<div>` apenas se `$this->global->appDevMode` for verdadeiro. Os prefixos `inner-` e `tag-` também funcionam como esperado.
+
+Às vezes, a lógica da sua tag pode precisar se comportar de maneira ligeiramente diferente dependendo se ela é usada como uma tag de par padrão ou como um n:attribute, ou se um prefixo como `n:inner-tag` ou `n:tag-tag` é usado. O objeto `Latte\Compiler\Tag`, passado para sua função de parsing `create()`, fornece essas informações:
+
+- `$tag->isNAttribute(): bool`: Retorna `true` se a tag estiver sendo analisada como um n:attribute
+- `$tag->prefix: ?string`: Retorna o prefixo usado com o n:attribute, que pode ser `null` (não é um n:attribute), `Tag::PrefixNone`, `Tag::PrefixInner` ou `Tag::PrefixTag`
+
+Agora que entendemos tags simples, parsing de argumentos, tags de par, provedores e n:attributes, vamos abordar um cenário mais complexo envolvendo tags aninhadas dentro de outras tags, usando nossa tag `{debug}` como ponto de partida.
+
+
+Tags intermediárias
+===================
+
+Algumas tags de par permitem ou até exigem que outras tags apareçam *dentro* delas antes da tag de fechamento final. Estas são chamadas de **tags intermediárias**. Exemplos clássicos incluem `{if}...{elseif}...{else}...{/if}` ou `{switch}...{case}...{default}...{/switch}`.
+
+Vamos estender nossa tag `{debug}` para suportar uma cláusula opcional `{else}`, que será renderizada quando a aplicação *não* estiver em modo de desenvolvimento.
+
+**Objetivo:** Modificar `{debug}` para suportar uma tag intermediária opcional `{else}`. A sintaxe final deve ser `{debug} ... {else} ... {/debug}`.
+
+
+Parsing de tags intermediárias com `yield`
+------------------------------------------
+
+Já sabemos que `yield` pausa a função de parsing `create()` e retorna o conteúdo analisado junto com a tag final. No entanto, `yield` oferece mais controle: você pode fornecer a ele um array de *nomes de tags intermediárias*. Quando o parser encontra qualquer uma dessas tags especificadas **no mesmo nível de aninhamento** (ou seja, como filhos diretos da tag pai, não dentro de outros blocos ou tags dentro dela), ele também para o parsing.
+
+Quando o parsing para devido a uma tag intermediária, ele para de analisar o conteúdo, retoma o gerador `create()` e passa de volta o conteúdo parcialmente analisado e a **tag intermediária** em si (em vez da tag final). Nossa função `create()` pode então processar esta tag intermediária (por exemplo, analisar seus argumentos, se houver) e usar `yield` novamente para analisar a *próxima* parte do conteúdo até a tag final *ou* outra tag intermediária esperada.
+
+Vamos modificar `DebugNode::create()` para esperar `{else}`:
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\NopNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DebugNode extends StatementNode
+{
+	// Conteúdo para a parte {debug}
+	public AreaNode $thenContent;
+	// Conteúdo opcional para a parte {else}
+	public ?AreaNode $elseContent = null;
+
+	public static function create(Tag $tag): \Generator
+	{
+		$node = $tag->node = new self;
+
+		// yield e esperar por {/debug} ou {else}
+		[$node->thenContent, $nextTag] = yield ['else'];
+
+		// Verificar se a tag onde paramos era {else}
+		if ($nextTag?->name === 'else') {
+			// Yield novamente para analisar o conteúdo entre {else} e {/debug}
+			[$node->elseContent, $endTag] = yield;
+		}
+
+		return $node;
+	}
+
+	// ... print() e getIterator() serão atualizados a seguir ...
+}
+```
+
+Agora, `yield ['else']` diz ao Latte para parar o parsing não apenas para `{/debug}`, mas também para `{else}`. Se `{else}` for encontrado, `$nextTag` conterá o objeto `Tag` para `{else}`. Em seguida, usamos `yield` novamente sem argumentos, o que significa que agora esperamos apenas a tag final `{/debug}`, e armazenamos o resultado em `$node->elseContent`. Se `{else}` não foi encontrado, `$nextTag` seria o `Tag` para `{/debug}` (ou `null`, se usado como n:attribute) e `$node->elseContent` permaneceria `null`.
+
+
+Implementando `print()` com `{else}`
+------------------------------------
+
+O método `print()` precisa refletir a nova estrutura. Ele deve gerar uma instrução PHP `if/else` baseada no provedor `devMode`.
+
+```php
+	public function print(PrintContext $context): string
+	{
+		return $context->format(
+			<<<'XX'
+				if ($this->global->appDevMode) %line {
+					%node // Código para o ramo 'then' (conteúdo {debug})
+				} else {
+					%node // Código para o ramo 'else' (conteúdo {else})
+				}
+
+				XX,
+			$this->position,    // Número da linha para a condição 'if'
+			$this->thenContent, // Primeiro placeholder %node
+			$this->elseContent ?? new NopNode, // Segundo placeholder %node
+		);
+	}
+```
+
+Esta é uma estrutura PHP `if/else` padrão. Usamos `%node` duas vezes; `format()` substitui os nós fornecidos sequencialmente. Usamos `?? new NopNode` para evitar erros se `$this->elseContent` for `null` – `NopNode` simplesmente não imprime nada.
+
+
+Implementando `getIterator()` para ambos os conteúdos
+-----------------------------------------------------
+
+Agora temos potencialmente dois nós filhos de conteúdo (`$thenContent` e `$elseContent`). Precisamos fornecer ambos, se existirem:
+
+```php
+	public function &getIterator(): \Generator
+	{
+		yield $this->thenContent;
+		if ($this->elseContent) {
+			yield $this->elseContent;
+		}
+	}
+```
+
+
+Usando a tag aprimorada
+-----------------------
+
+A tag agora pode ser usada com a cláusula opcional `{else}`:
+
+```latte
+{debug}
+	<p>Exibindo informações de depuração, porque devMode está LIGADO.</p>
+{else}
+	<p>Informações de depuração estão ocultas, porque devMode está DESLIGADO.</p>
+{/debug}
+```
+
+
+Tratando estado e aninhamento
+=============================
+
+Nossos exemplos anteriores (`{datetime}`, `{debug}`) eram relativamente sem estado dentro de seus métodos `print()`. Eles imprimiam conteúdo diretamente ou realizavam uma verificação condicional simples baseada em um provedor global. No entanto, muitas tags precisam gerenciar alguma forma de **estado** durante a renderização ou envolvem a avaliação de expressões do usuário que devem ser executadas apenas uma vez por desempenho ou correção. Além disso, precisamos considerar o que acontece quando nossas tags personalizadas são **aninhadas**.
+
+Vamos ilustrar esses conceitos criando uma tag `{repeat $count}...{/repeat}`. Esta tag repetirá seu conteúdo interno `$count` vezes.
+
+**Objetivo:** Implementar `{repeat $count}`, que repete seu conteúdo um número especificado de vezes.
+
+
+A necessidade de variáveis temporárias e únicas
+-----------------------------------------------
+
+Imagine que o usuário escreva:
+
+```latte
+{repeat rand(1, 5)} Conteúdo {/repeat}
+```
+
+Se gerássemos ingenuamente um loop `for` PHP desta forma em nosso método `print()`:
+
+```php
+// Código gerado simplificado, INCORRETO
+for ($i = 0; $i < rand(1, 5); $i++) {
+	// imprimir conteúdo
+}
+```
+Isso estaria errado! A expressão `rand(1, 5)` seria **reavaliada a cada iteração do loop**, levando a um número imprevisível de repetições. Precisamos avaliar a expressão `$count` *uma vez* antes do início do loop e armazenar seu resultado.
+
+Geraremos código PHP que primeiro avalia a expressão de contagem e a armazena em uma **variável temporária de tempo de execução**. Para evitar colisões com variáveis definidas pelo usuário do template *e* variáveis internas do Latte (como `$ʟ_...`), usaremos a convenção de prefixar nossas variáveis temporárias com **`$__` (sublinhado duplo)**.
+
+O código gerado ficaria assim:
+
+```php
+$__count = rand(1, 5);
+for ($__i = 0; $__i < $__count; $__i++) {
+	// imprimir conteúdo
+}
+```
+
+Agora, considere o aninhamento:
+
+```latte
+{repeat $countA}       {* Loop externo *}
+	{repeat $countB}   {* Loop interno *}
+		...
+	{/repeat}
+{/repeat}
+```
+
+Se as tags `{repeat}` externa e interna gerassem código usando os *mesmos* nomes de variáveis temporárias (por exemplo, `$__count` e `$__i`), o loop interno sobrescreveria as variáveis do loop externo, quebrando a lógica.
+
+Precisamos garantir que as variáveis temporárias geradas para cada instância da tag `{repeat}` sejam **únicas**. Conseguimos isso usando `PrintContext::generateId()`. Este método retorna um inteiro único durante a fase de compilação. Podemos anexar este ID aos nomes de nossas variáveis temporárias.
+
+Então, em vez de `$__count`, geraremos `$__count_1` para a primeira tag repeat, `$__count_2` para a segunda, etc. Da mesma forma, para o contador do loop, usaremos `$__i_1`, `$__i_2`, etc.
+
+
+Implementando `RepeatNode`
+--------------------------
+
+Vamos criar a classe do nó.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\CompileException;
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class RepeatNode extends StatementNode
+{
+	public ExpressionNode $count;
+	public AreaNode $content;
+
+	/**
+	 * Função de parsing para {repeat $count} ... {/repeat}
+	 */
+	public static function create(Tag $tag): \Generator
+	{
+		$tag->expectArguments(); // garante que $count seja fornecido
+		$node = $tag->node = new self;
+		// Analisa a expressão de contagem
+		$node->count = $tag->parser->parseExpression();
+		// Obtém o conteúdo interno
+		[$node->content] = yield;
+		return $node;
+	}
+
+	/**
+	 * Gera um loop 'for' PHP com nomes de variáveis únicos.
+	 */
+	public function print(PrintContext $context): string
+	{
+		// Geração de nomes de variáveis únicos
+		$id = $context->generateId();
+		$countVar = '$__count_' . $id; // ex. $__count_1, $__count_2, etc.
+		$iteratorVar = '$__i_' . $id;  // ex. $__i_1, $__i_2, etc.
+
+		return $context->format(
+			<<<'XX'
+				// Avalia a expressão de contagem *uma vez* e armazena
+				%raw = (int) (%node);
+				// Loop usando a contagem armazenada e variável de iteração única
+				for (%raw = 0; %2.raw < %0.raw; %2.raw++) %line {
+					%node // Renderiza o conteúdo interno
+				}
+
+				XX,
+			$countVar,          // %0 - Variável para armazenar a contagem
+			$this->count,       // %1 - Nó da expressão para a contagem
+			$iteratorVar,       // %2 - Nome da variável de iteração do loop
+			$this->position,    // %3 - Comentário com número da linha para o próprio loop
+			$this->content      // %4 - Nó do conteúdo interno
+		);
+	}
+
+	/**
+	 * Fornece os nós filhos (expressão de contagem e conteúdo).
+	 */
+	public function &getIterator(): \Generator
+	{
+		yield $this->count;
+		yield $this->content;
+	}
+}
+```
+
+O método `create()` analisa a expressão `$count` necessária usando `parseExpression()`. Primeiro, `$tag->expectArguments()` é chamado. Isso garante que o usuário forneceu *algo* após `{repeat}`. Embora `$tag->parser->parseExpression()` falhasse se nada fosse fornecido, a mensagem de erro poderia ser sobre sintaxe inesperada. Usar `expectArguments()` fornece um erro muito mais claro, indicando especificamente que faltam argumentos para a tag `{repeat}`.
+
+O método `print()` gera o código PHP responsável por executar a lógica de repetição em tempo de execução. Ele começa gerando nomes únicos para as variáveis PHP temporárias que precisará.
+
+O método `$context->format()` é chamado com um novo placeholder `%raw`, que insere a *string bruta* fornecida como o argumento correspondente. Aqui, ele insere o nome da variável única armazenado em `$countVar` (por exemplo, `$__count_1`).
+E quanto a `%0.raw` e `%2.raw`? Isso demonstra **placeholders posicionais**. Em vez de apenas `%raw`, que pega o *próximo* argumento bruto disponível, `%2.raw` pega explicitamente o argumento no índice 2 (que é `$iteratorVar`) e insere seu valor de string bruto. Isso nos permite reutilizar a string `$iteratorVar` sem passá-la várias vezes na lista de argumentos para `format()`.
+
+Esta chamada `format()` cuidadosamente construída gera um loop PHP eficiente e seguro que lida corretamente com a expressão de contagem e evita colisões de nomes de variáveis, mesmo quando as tags `{repeat}` estão aninhadas.
+
+
+Registro e uso
+--------------
+
+Registre a tag em sua extensão:
+
+```php
+use App\Latte\RepeatNode;
+
+class MyLatteExtension extends Extension
+{
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...),
+			'repeat' => RepeatNode::create(...), // Registro da tag repeat
+		];
+	}
+}
+```
+
+Use-a no template, incluindo aninhamento:
+
+```latte
+{var $rows = rand(5, 7)}
+{var $cols = rand(3, 5)}
+
+{repeat $rows}
+	<tr>
+		{repeat $cols}
+			<td>Loop interno</td>
+		{/repeat}
+	</tr>
+{/repeat}
+```
+
+Este exemplo demonstra como lidar com estado (contadores de loop) e potenciais problemas de aninhamento usando variáveis temporárias prefixadas com `$__` e tornadas únicas com IDs de `PrintContext::generateId()`.
+
+
+n:attributes puros
+------------------
+
+Enquanto muitos `n:attributes` como `n:if` ou `n:foreach` servem como atalhos convenientes para suas contrapartes em tags de par (`{if}...{/if}`, `{foreach}...{/foreach}`), o Latte também permite definir tags que *existem apenas* na forma de n:attribute. Estes são frequentemente usados para modificar atributos ou comportamento do elemento HTML ao qual estão anexados.
+
+Exemplos padrão integrados no Latte incluem [`n:class` |tags#n:class], que ajuda a construir dinamicamente o atributo `class`, e [`n:attr` |tags#n:attr], que pode definir múltiplos atributos arbitrários.
+
+Vamos criar nosso próprio n:attribute puro: `n:confirm`, que adiciona um diálogo de confirmação JavaScript antes de executar uma ação (como seguir um link ou enviar um formulário).
+
+**Objetivo:** Implementar `n:confirm="'Tem certeza?'"`, que adiciona um manipulador `onclick` para prevenir a ação padrão se o usuário cancelar o diálogo de confirmação.
+
+
+Implementando `ConfirmNode`
+---------------------------
+
+Precisamos de uma classe Node e uma função de parsing.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+
+class ConfirmNode extends StatementNode
+{
+	public ExpressionNode $message;
+
+	public static function create(Tag $tag): self
+	{
+		$tag->expectArguments();
+		$node = $tag->node = new self;
+		$node->message = $tag->parser->parseExpression();
+		return $node;
+	}
+
+	/**
+	 * Gera o código do atributo 'onclick' com escaping correto.
+	 */
+	public function print(PrintContext $context): string
+	{
+		// Garante o escaping correto para os contextos de atributo JavaScript e HTML.
+		return $context->format(
+			<<<'XX'
+				echo ' onclick="', LR\Filters::escapeHtmlAttr('return confirm(' . LR\Filters::escapeJs(%node) . ')'), '"' %line;
+				XX,
+			$this->message,
+			$this->position,
+		);
+	}
+
+	public function &getIterator(): \Generator
+	{
+		yield $this->message;
+	}
+}
+```
+
+O método `print()` gera código PHP que, eventualmente, durante a renderização do template, imprimirá o atributo HTML `onclick="..."`. Lidar com contextos aninhados (JavaScript dentro de um atributo HTML) requer escaping cuidadoso.
+O filtro `LR\Filters::escapeJs(%node)` é chamado em tempo de execução e escapa a mensagem corretamente para uso dentro do JavaScript (a saída seria como `"Sure?"`). Em seguida, o filtro `LR\Filters::escapeHtmlAttr(...)` escapa caracteres que são especiais em atributos HTML, então isso mudaria a saída para `return confirm(&quot;Sure?&quot;)`.
+Este escaping de tempo de execução em duas etapas garante que a mensagem seja segura para JavaScript e que o código JavaScript resultante seja seguro para incorporação no atributo HTML `onclick`.
+
+
+Registro e uso
+--------------
+
+Registre o n:attribute em sua extensão. Não se esqueça do prefixo `n:` na chave:
+
+```php
+class MyLatteExtension extends Extension
+{
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...),
+			'repeat' => RepeatNode::create(...),
+			'n:confirm' => ConfirmNode::create(...), // Registro de n:confirm
+		];
+	}
+}
+```
+
+Agora você pode usar `n:confirm` em links, botões ou elementos de formulário:
+
+```latte
+<a href="delete.php?id=123" n:confirm='"Realmente deseja excluir o item {$id}?"'>Excluir</a>
+```
+
+HTML gerado:
+
+```html
+<a href="delete.php?id=123" onclick="return confirm(&quot;Realmente deseja excluir o item 123?&quot;)">Excluir</a>
+```
+
+Quando o usuário clica no link, o navegador executa o código `onclick`, exibe o diálogo de confirmação e só navega para `delete.php` se o usuário clicar em "OK".
+
+Este exemplo demonstra como um n:attribute puro pode ser criado para modificar o comportamento ou atributos de seu elemento HTML hospedeiro, gerando código PHP apropriado em seu método `print()`. Lembre-se do duplo escaping que muitas vezes é necessário: uma vez para o contexto de destino (JavaScript neste caso) e novamente para o contexto do atributo HTML.
+
+
+Tópicos avançados
+=================
+
+Embora as seções anteriores cubram os conceitos básicos, aqui estão alguns tópicos mais avançados que você pode encontrar ao criar tags Latte personalizadas.
+
+
+Modos de saída de tags
+----------------------
+
+O objeto `Tag` passado para sua função `create()` has uma propriedade `outputMode`. Esta propriedade influencia como o Latte trata espaços em branco e indentação ao redor, especialmente quando a tag é usada em sua própria linha. Você pode modificar esta propriedade em sua função `create()`.
+
+- `Tag::OutputKeepIndentation` (Padrão para a maioria das tags como `{=...}`): O Latte tenta preservar a indentação antes da tag. Novas linhas *após* a tag são geralmente preservadas. Isso é adequado para tags que imprimem conteúdo inline.
+- `Tag::OutputRemoveIndentation` (Padrão para tags de bloco como `{if}`, `{foreach}`): O Latte remove a indentação inicial e potencialmente uma nova linha seguinte. Isso ajuda a manter o código PHP gerado mais limpo e evita linhas em branco extras na saída HTML causadas pela própria tag. Use isso para tags que representam estruturas de controle ou blocos que não devem adicionar espaços em branco por si só.
+- `Tag::OutputNone` (Usado por tags como `{var}`, `{default}`): Semelhante a `RemoveIndentation`, mas sinaliza mais fortemente que a tag em si não produz saída direta, potencialmente afetando o tratamento de espaços em branco ao redor dela de forma ainda mais agressiva. Adequado para tags declarativas ou de configuração.
+
+Escolha o modo que melhor se adapta ao propósito da sua tag. Para a maioria das tags estruturais ou de controle, `OutputRemoveIndentation` geralmente é apropriado.
+
+
+Acessando tags pai/mais próximas
+--------------------------------
+
+Às vezes, o comportamento de uma tag precisa depender do contexto em que é usada, especificamente em qual(is) tag(s) pai ela reside. O objeto `Tag` passado para sua função `create()` fornece o método `closestTag(array $classes, ?callable $condition = null): ?Tag` exatamente para este propósito.
+
+Este método pesquisa para cima na hierarquia das tags atualmente abertas (incluindo elementos HTML representados internamente durante o parsing) e retorna o objeto `Tag` do ancestral mais próximo que corresponde a critérios específicos. Se nenhum ancestral correspondente for encontrado, retorna `null`.
+
+O array `$classes` especifica que tipo de tags ancestrais você está procurando. Ele verifica se o nó associado da tag ancestral (`$ancestorTag->node`) é uma instância desta classe.
+
+```php
+function create(Tag $tag)
+{
+	// Procura a tag ancestral mais próxima cujo nó é uma instância de ForeachNode
+	$foreachTag = $tag->closestTag([ForeachNode::class]);
+	if ($foreachTag) {
+		// Podemos acessar a instância ForeachNode em si:
+		$foreachNode = $foreachTag->node;
+	}
+}
+```
+
+Observe `$foreachTag->node`: Isso funciona apenas porque é uma convenção no desenvolvimento de tags Latte atribuir imediatamente o nó criado a `$tag->node` dentro do método `create()`, como sempre fizemos.
+
+Às vezes, apenas comparar o tipo do nó não é suficiente. Você pode precisar verificar uma propriedade específica da tag ancestral potencial ou seu nó. O segundo argumento opcional para `closestTag()` é um callable que recebe o objeto `Tag` ancestral potencial e deve retornar se é uma correspondência válida.
+
+```php
+function create(Tag $tag)
+{
+	$dynamicBlockTag = $tag->closestTag(
+		[BlockNode::class],
+		// Condição: o bloco deve ser dinâmico
+		fn(Tag $blockTag) => $blockTag->node->block->isDynamic(),
+	);
+}
+```
+
+Usar `closestTag()` permite criar tags que são conscientes do contexto e impõem o uso adequado dentro da estrutura do seu template, levando a templates mais robustos e compreensíveis.
+
+
+Placeholders `PrintContext::format()`
+-------------------------------------
+
+Usamos frequentemente `PrintContext::format()` para gerar código PHP nos métodos `print()` de nossos nós. Ele aceita uma string de máscara e argumentos subsequentes que substituem os placeholders na máscara. Aqui está um resumo dos placeholders disponíveis:
+
+- **`%node`**: O argumento deve ser uma instância de `Node`. Chama o método `print()` do nó e insere a string de código PHP resultante.
+- **`%dump`**: O argumento é qualquer valor PHP. Exporta o valor para código PHP válido. Adequado para escalares, arrays, null.
+	- `$context->format('echo %dump;', 'Hello')` -> `echo 'Hello';`
+	- `$context->format('$arr = %dump;', [1, 2])` -> `$arr = [1, 2];`
+- **`%raw`**: Insere o argumento diretamente no código PHP de saída sem qualquer escaping ou modificação. **Use com cautela**, principalmente para inserir fragmentos de código PHP pré-gerados ou nomes de variáveis.
+	- `$context->format('%raw = 1;', '$variableName')` -> `$variableName = 1;`
+- **`%args`**: O argumento deve ser um `Expression\ArrayNode`. Imprime os itens do array formatados como argumentos para uma chamada de função ou método (separados por vírgula, lida com argumentos nomeados se presentes).
+	- `$argsNode = new ArrayNode([...]);`
+	- `$context->format('myFunc(%args);', $argsNode)` -> `myFunc(1, name: 'Joe');`
+- **`%line`**: O argumento deve ser um objeto `Position` (geralmente `$this->position`). Insere um comentário PHP `/* line X */` indicando o número da linha da fonte.
+	- `$context->format('echo "Hi" %line;', $this->position)` -> `echo "Hi" /* line 42 */;`
+- **`%escape(...)`**: Gera código PHP que *em tempo de execução* escapa a expressão interna usando as regras de escaping conscientes do contexto atuais.
+	- `$context->format('echo %escape(%node);', $variableNode)`
+- **`%modify(...)`**: O argumento deve ser um `ModifierNode`. Gera código PHP que aplica os filtros especificados no `ModifierNode` ao conteúdo interno, incluindo escaping consciente do contexto, a menos que desabilitado com `|noescape`.
+	- `$context->format('%modify(%node);', $modifierNode, $variableNode)`
+- **`%modifyContent(...)`**: Semelhante a `%modify`, mas destinado a modificar blocos de conteúdo capturado (frequentemente HTML).
+
+Você pode referenciar explicitamente argumentos por seu índice (baseado em zero): `%0.node`, `%1.dump`, `%2.raw`, etc. Isso permite reutilizar um argumento várias vezes na máscara sem passá-lo repetidamente para `format()`. Veja o exemplo da tag `{repeat}`, onde `%0.raw` e `%2.raw` foram usados.
+
+
+Exemplo de parsing de argumentos complexos
+------------------------------------------
+
+Embora `parseExpression()`, `parseArguments()`, etc., cubram muitos casos, às vezes você precisa de lógica de parsing mais complexa usando o `TokenStream` de nível inferior disponível via `$tag->parser->stream`.
+
+**Objetivo:** Criar uma tag `{embedYoutube $videoID, width: 640, height: 480}`. Queremos analisar o ID do vídeo obrigatório (string ou variável) seguido por pares chave-valor opcionais para as dimensões.
+
+```php
+<?php
+namespace App\Latte;
+
+class YoutubeNode extends StatementNode
+{
+	public ExpressionNode $videoId;
+	public ?ExpressionNode $width = null;
+	public ?ExpressionNode $height = null;
+
+	public static function create(Tag $tag): self
+	{
+		$tag->expectArguments();
+		$node = $tag->node = new self;
+		// Analisar o ID do vídeo obrigatório
+		$node->videoId = $tag->parser->parseExpression();
+
+		// Analisar pares chave-valor opcionais
+		$stream = $tag->parser->stream; // Obter o fluxo de tokens
+		while ($stream->tryConsume(',')) { // Requer separação por vírgula
+			// Esperar um identificador 'width' ou 'height'
+			$keyToken = $stream->consume(Token::Php_Identifier);
+			$key = strtolower($keyToken->text);
+
+			$stream->consume(':'); // Esperar o separador de dois pontos
+
+			$value = $tag->parser->parseExpression(); // Analisar a expressão do valor
+
+			if ($key === 'width') {
+				$node->width = $value;
+			} elseif ($key === 'height') {
+				$node->height = $value;
+			} else {
+				throw new CompileException("Argumento desconhecido '$key'. Esperado 'width' ou 'height'.", $keyToken->position);
+			}
+		}
+
+		return $node;
+	}
+}
+```
+
+Este nível de controle permite definir sintaxes muito específicas e complexas para suas tags personalizadas, interagindo diretamente com o fluxo de tokens.
+
+
+Usando `AuxiliaryNode`
+----------------------
+
+O Latte fornece nós "auxiliares" genéricos para situações especiais durante a geração de código ou dentro de passos de compilação. São eles `AuxiliaryNode` e `Php\Expression\AuxiliaryNode`.
+
+Considere `AuxiliaryNode` como um nó contêiner flexível que delega suas funcionalidades principais - geração de código e exposição de nós filhos - aos argumentos fornecidos em seu construtor:
+
+- Delegação de `print()`: O primeiro argumento do construtor é uma **closure** PHP. Quando o Latte chama o método `print()` em um `AuxiliaryNode`, ele executa esta closure fornecida. A closure recebe o `PrintContext` e quaisquer nós passados no segundo argumento do construtor, permitindo que você defina lógica de geração de código PHP completamente personalizada em tempo de execução.
+- Delegação de `getIterator()`: O segundo argumento do construtor é um **array de objetos `Node`**. Quando o Latte precisa percorrer os filhos de um `AuxiliaryNode` (por exemplo, durante os passos de compilação), seu método `getIterator()` simplesmente fornece os nós listados neste array.
+
+Exemplo:
+
+```php
+$node = new AuxiliaryNode(
+    // 1. Esta closure se torna o corpo de print()
+    fn(PrintContext $context, $arg1, $arg2) => $context->format('...%node...%node...', $arg1, $arg2),
+
+    // 2. Estes nós são fornecidos pelo método getIterator() e passados para a closure acima
+    [$argumentNode1, $argumentNode2]
+);
+```
+
+O Latte fornece dois tipos distintos com base em onde você precisa inserir o código gerado:
+
+- `Latte\Compiler\Nodes\Php\Expression\AuxiliaryNode`: Use isso quando precisar gerar um pedaço de código PHP que representa uma **expressão**.
+- `Latte\Compiler\Nodes\AuxiliaryNode`: Use isso para fins mais gerais, quando precisar inserir um bloco de código PHP representando uma ou mais **instruções**.
+
+Uma razão importante para usar `AuxiliaryNode` em vez de nós padrão (como `StaticMethodCallNode`) dentro do seu método `print()` ou passo de compilação é **controlar a visibilidade para os passos de compilação subsequentes**, especialmente aqueles relacionados à segurança, como o Sandbox.
+
+Considere um cenário: Seu passo de compilação precisa envolver uma expressão fornecida pelo usuário (`$userExpr`) em uma chamada para uma função auxiliar específica e confiável `myInternalSanitize($userExpr)`. Se você criar um nó padrão `new FunctionCallNode('myInternalSanitize', [$userExpr])`, ele será totalmente visível para a travessia da AST. Se um passo Sandbox for executado posteriormente e `myInternalSanitize` *não* estiver em sua lista de permissões, o Sandbox pode *bloquear* ou modificar essa chamada, potencialmente quebrando a lógica interna da sua tag, mesmo que *você*, o autor da tag, saiba que essa chamada específica é segura e necessária. Você pode, portanto, gerar a chamada diretamente dentro da closure do `AuxiliaryNode`.
+
+```php
+use Latte\Compiler\Nodes\Php\Expression\AuxiliaryNode;
+
+// ... dentro de print() ou passo de compilação ...
+$wrappedNode = new AuxiliaryNode(
+	fn(PrintContext $context, $userExpr) => $context->format(
+		'myInternalSanitize(%node)', // Geração direta de código PHP
+		$userExpr,
+	),
+	// IMPORTANTE: Ainda passe o nó da expressão do usuário original aqui!
+	[$userExpr],
+);
+```
+
+Neste caso, o passo Sandbox vê o `AuxiliaryNode`, mas **não analisa o código PHP gerado por sua closure**. Ele não pode bloquear diretamente a chamada `myInternalSanitize` gerada *dentro* da closure.
+
+Embora o próprio código PHP gerado esteja oculto dos passos, as *entradas* para esse código (nós representando dados ou expressões do usuário) **ainda devem ser atravessáveis**. É por isso que o segundo argumento do construtor `AuxiliaryNode` é crucial. Você **deve** passar um array contendo todos os nós originais (como `$userExpr` no exemplo acima) que sua closure usa. O `getIterator()` do `AuxiliaryNode` **fornecerá esses nós**, permitindo que passos de compilação como o Sandbox os analisem em busca de problemas potenciais.
+
+
+Melhores práticas
+=================
+
+- **Propósito claro:** Certifique-se de que sua tag tenha um propósito claro e necessário. Não crie tags para tarefas que podem ser facilmente resolvidas com [filtros |custom-filters] ou [funções |custom-functions].
+- **Implemente `getIterator()` corretamente:** Sempre implemente `getIterator()` e forneça *referências* (`&`) para *todos* os nós filhos (argumentos, conteúdo) que foram analisados do template. Isso é essencial para os passos de compilação, segurança (Sandbox) e potenciais otimizações futuras.
+- **Propriedades públicas para nós:** Torne públicas as propriedades que contêm nós filhos para que os passos de compilação possam modificá-los, se necessário.
+- **Use `PrintContext::format()`:** Utilize o método `format()` para gerar código PHP. Ele lida com aspas, escapa corretamente os placeholders e adiciona comentários de número de linha automaticamente.
+- **Variáveis temporárias (`$__`):** Ao gerar código PHP de tempo de execução que precisa de variáveis temporárias (por exemplo, para armazenar subtotais, contadores de loop), use a convenção de prefixo `$__` para evitar colisões com variáveis do usuário e variáveis internas do Latte `$ʟ_`.
+- **Aninhamento e IDs únicos:** Se sua tag pode ser aninhada ou precisa de estado específico da instância em tempo de execução, use `$context->generateId()` dentro do seu método `print()` para criar sufixos únicos para suas variáveis temporárias `$__`.
+- **Provedores para dados externos:** Use provedores (registrados via `Extension::getProviders()`) para acessar dados ou serviços em tempo de execução (`$this->global->...`) em vez de codificar valores ou depender de estado global. Use prefixos de fornecedor para nomes de provedores.
+- **Considere n:attributes:** Se sua tag de par opera logicamente em um único elemento HTML, o Latte provavelmente fornecerá suporte automático a `n:attribute`. Tenha isso em mente para conveniência do usuário. Se estiver criando uma tag modificadora de atributo, considere se um `n:attribute` puro é a forma mais apropriada.
+- **Testes:** Escreva testes para suas tags, cobrindo tanto o parsing de diferentes entradas sintáticas quanto a correção da saída do **código PHP** gerado.
+
+Seguindo estas diretrizes, você pode criar tags personalizadas poderosas, robustas e sustentáveis que se integram perfeitamente com o engine de templates Latte.
+
+.[note]
+Estudar as classes de nós que fazem parte do Latte é a melhor maneira de aprender todos os detalhes sobre o processo de parsing.

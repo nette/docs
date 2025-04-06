@@ -1,0 +1,554 @@
+Derleme Geçişleri
+*****************
+
+.[perex]
+Derleme geçişleri, Latte şablonlarını soyut sözdizimi ağacına (AST) ayrıştırıldıktan *sonra* ve son PHP kodu oluşturulmadan *önce* analiz etmek ve değiştirmek için güçlü bir mekanizma sağlar. Bu, şablonların gelişmiş manipülasyonunu, optimizasyonları, güvenlik kontrollerini (Sandbox gibi) ve şablonlar hakkında bilgi toplamayı mümkün kılar. Bu kılavuz, kendi derleme geçişlerinizi oluşturma konusunda size yol gösterecektir.
+
+
+Derleme Geçişi Nedir?
+=====================
+
+Derleme geçişlerinin rolünü anlamak için [Latte derleme sürecine |custom-tags#Derleme Sürecini Anlama] göz atın. Gördüğünüz gibi, derleme geçişleri kritik bir aşamada çalışır ve ilk ayrıştırma ile son kod çıktısı arasında derin müdahaleye izin verir.
+
+Özünde, bir derleme geçişi basitçe tek bir argüman alan bir PHP çağrılabilir nesnesidir (fonksiyon, statik metot veya örnek metodu gibi): şablonun kök AST düğümü, ki bu her zaman `Latte\Compiler\Nodes\TemplateNode` örneğidir.
+
+Bir derleme geçişinin birincil amacı genellikle aşağıdakilerden biri veya her ikisidir:
+
+- Analiz: AST'yi dolaşarak şablon hakkında bilgi toplamak (örneğin, tanımlanmış tüm blokları bulmak, belirli etiketlerin kullanımını kontrol etmek, belirli güvenlik kısıtlamalarının karşılandığından emin olmak).
+- Değişiklik: AST'nin yapısını veya düğümlerin niteliklerini değiştirmek (örneğin, otomatik olarak HTML nitelikleri eklemek, belirli etiket kombinasyonlarını optimize etmek, kullanımdan kaldırılmış etiketleri yenileriyle değiştirmek, Sandbox kurallarını uygulamak).
+
+
+Kayıt
+=====
+
+Derleme geçişleri, [uzantının |extending-latte#getPasses] `getPasses()` yöntemi kullanılarak kaydedilir. Bu yöntem, anahtarların benzersiz geçiş adları (dahili olarak ve sıralama için kullanılır) ve değerlerin geçiş mantığını uygulayan PHP çağrılabilir nesneleri olduğu ilişkisel bir dizi döndürür.
+
+```php
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Extension;
+
+class MyExtension extends Extension
+{
+	public function getPasses(): array
+	{
+		return [
+			'modificationPass' => $this->modifyTemplateAst(...),
+			// ... diğer geçişler ...
+		];
+	}
+
+	public function modifyTemplateAst(TemplateNode $templateNode): void
+	{
+		// Uygulama...
+	}
+}
+```
+
+Latte'nin temel uzantıları ve kendi uzantılarınız tarafından kaydedilen geçişler sırayla çalışır. Sıra önemli olabilir, özellikle bir geçiş başka bir geçişin sonuçlarına veya değişikliklerine bağlıysa. Latte, gerekirse bu sırayı kontrol etmek için yardımcı bir mekanizma sağlar; ayrıntılar için [`Extension::getPasses()` |extending-latte#getPasses] dokümantasyonuna bakın.
+
+
+AST Örneği
+==========
+
+AST hakkında daha iyi bir fikir vermek için bir örnek ekliyoruz. Bu kaynak şablondur:
+
+```latte
+{foreach $category->getItems() as $item}
+	<li>{$item->name|upper}</li>
+	{else}
+	öğe bulunamadı
+{/foreach}
+```
+
+Ve bu onun AST biçimindeki temsilidir:
+
+/--pre
+Latte\Compiler\Nodes\<b>TemplateNode</b>(
+   Latte\Compiler\Nodes\<b>FragmentNode</b>(
+      - Latte\Essential\Nodes\<b>ForeachNode</b>(
+           expression: Latte\Compiler\Nodes\Php\Expression\<b>MethodCallNode</b>(
+              object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$category')
+              name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('getItems')
+           )
+           value: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+           content: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+              - Latte\Compiler\Nodes\<b>TextNode</b>('  ')
+              - Latte\Compiler\Nodes\<b>Html\ElementNode</b>('li')(
+                   content: Latte\Essential\Nodes\<b>PrintNode</b>(
+                      expression: Latte\Compiler\Nodes\Php\Expression\<b>PropertyFetchNode</b>(
+                         object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+                         name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('name')
+                      )
+                      modifier: Latte\Compiler\Nodes\Php\<b>ModifierNode</b>(
+                         filters:
+                            - Latte\Compiler\Nodes\Php\<b>FilterNode</b>('upper')
+                      )
+                   )
+                )
+            )
+            else: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+               - Latte\Compiler\Nodes\<b>TextNode</b>('öğe bulunamadı')
+            )
+        )
+   )
+)
+\--
+
+
+`NodeTraverser` ile AST'yi Dolaşma
+==================================
+
+Karmaşık AST yapısını dolaşmak için özyinelemeli fonksiyonları manuel olarak yazmak sıkıcı ve hataya açıktır. Latte bu amaç için özel bir araç sağlar: [api:Latte\Compiler\NodeTraverser]. Bu sınıf, [Ziyaretçi tasarım desenini |https://en.wikipedia.org/wiki/Visitor_pattern] uygular, bu da AST dolaşımını sistematik ve yönetimi kolay hale getirir.
+
+Temel kullanım, bir `NodeTraverser` örneği oluşturmayı ve `traverse()` yöntemini çağırmayı, AST'nin kök düğümünü ve bir veya iki "ziyaretçi" çağrılabilir nesnesini geçirmeyi içerir:
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+
+(new NodeTraverser)->traverse(
+	$templateNode,
+
+	// 'enter' ziyaretçisi: Düğüme girerken çağrılır (çocuklarından önce)
+	enter: function (Node $node) {
+		echo "Düğüm türüne giriş: " . $node::class . "\n";
+		// Burada düğümü inceleyebilirsiniz
+		if ($node instanceof Nodes\TextNode) {
+			// echo "Metin bulundu: " . $node->content . "\n";
+		}
+	},
+
+	// 'leave' ziyaretçisi: Düğümden çıkarken çağrılır (çocuklarından sonra)
+	leave: function (Node $node) {
+		echo "Düğüm türünden çıkış: " . $node::class . "\n";
+		// Burada çocukları işledikten sonra eylemler gerçekleştirebilirsiniz
+	},
+);
+```
+
+İhtiyaçlarınıza bağlı olarak yalnızca `enter` ziyaretçisini, yalnızca `leave` ziyaretçisini veya her ikisini de sağlayabilirsiniz.
+
+**`enter(Node $node)`:** Bu fonksiyon, dolaşan bu düğümün herhangi bir çocuğunu ziyaret etmeden **önce** her düğüm için yürütülür. Şunlar için kullanışlıdır:
+
+- Ağaçta aşağı doğru ilerlerken bilgi toplama.
+- Çocukları işlemeden *önce* karar verme (onları atlama kararı gibi, bkz. [#Dolaşımı Optimize Etme]).
+- Çocukları ziyaret etmeden önce düğümü potansiyel olarak değiştirme (daha az yaygın).
+
+**`leave(Node $node)`:** Bu fonksiyon, tüm çocukları (ve tüm alt ağaçları) tamamen ziyaret edildikten (hem giriş hem de çıkış) **sonra** her düğüm için yürütülür.
+
+Hem `enter` hem de `leave` ziyaretçileri, dolaşım sürecini etkilemek için isteğe bağlı olarak bir değer döndürebilir. `null` (veya hiçbir şey) döndürmek dolaşıma normal şekilde devam eder, bir `Node` örneği döndürmek geçerli düğümü değiştirir ve `NodeTraverser::RemoveNode` veya `NodeTraverser::StopTraversal` gibi özel sabitleri döndürmek, sonraki bölümlerde açıklandığı gibi akışı değiştirir.
+
+
+Dolaşım Nasıl Çalışır
+---------------------
+
+`NodeTraverser` dahili olarak, her `Node` sınıfının uygulaması gereken `getIterator()` yöntemini kullanır ([Özel Etiketler Oluşturma |custom-tags#Implementing getIterator() for Subnodes] bölümünde tartışıldığı gibi). `getIterator()` aracılığıyla elde edilen çocuklar üzerinde yinelenir, üzerlerinde özyinelemeli olarak `traverse()` çağırır ve `enter` ve `leave` ziyaretçilerinin, yineleyiciler aracılığıyla erişilebilen ağaçtaki her düğüm için doğru derinlik öncelikli sırada çağrılmasını sağlar. Bu, özel etiket düğümlerinizde doğru şekilde uygulanan `getIterator()`'ın derleme geçişlerinin doğru çalışması için neden kesinlikle gerekli olduğunu tekrar vurgular.
+
+Şablonda `{do}` etiketinin (`Latte\Essential\Nodes\DoNode` ile temsil edilir) kaç kez kullanıldığını sayan basit bir geçiş yazalım.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\DoNode;
+
+function countDoTags(TemplateNode $templateNode): void
+{
+	$count = 0;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use (&$count): void {
+			if ($node instanceof DoNode) {
+				$count++;
+			}
+		},
+		// 'leave' ziyaretçisi bu görev için gerekli değil
+	);
+
+	echo "{do} etiketi $count kez bulundu.\n";
+}
+
+$latte = new Latte\Engine;
+$ast = $latte->parse($templateSource);
+countDoTags($ast);
+```
+
+Bu örnekte, ziyaret edilen her düğümün türünü kontrol etmek için yalnızca `enter` ziyaretçisine ihtiyacımız vardı.
+
+Ardından, bu ziyaretçilerin AST'yi gerçekte nasıl değiştirdiğini inceleyeceğiz.
+
+
+AST'yi Değiştirme
+=================
+
+Derleme geçişlerinin ana amaçlarından biri soyut sözdizimi ağacını değiştirmektir. Bu, PHP kodu oluşturulmadan önce doğrudan şablon yapısı üzerinde güçlü dönüşümler, optimizasyonlar veya kural uygulamalarına olanak tanır. `NodeTraverser`, `enter` ve `leave` ziyaretçileri içinde bunu başarmanın birkaç yolunu sunar.
+
+**Önemli Not:** AST'yi değiştirmek dikkat gerektirir. Yanlış değişiklikler – temel düğümleri kaldırmak veya bir düğümü uyumsuz bir türle değiştirmek gibi – kod oluşturma sırasında hatalara yol açabilir veya çalışma zamanında beklenmedik davranışlara neden olabilir. Değişiklik geçişlerinizi her zaman kapsamlı bir şekilde test edin.
+
+
+Düğüm Özelliklerini Değiştirme
+------------------------------
+
+Ağacı değiştirmenin en basit yolu, dolaşım sırasında ziyaret edilen düğümlerin **genel özelliklerini** doğrudan değiştirmektir. Tüm düğümler, ayrıştırılmış argümanlarını, içeriklerini veya niteliklerini genel özelliklerde saklar.
+
+**Örnek:** Tüm statik metin düğümlerini (`TextNode`, Latte etiketleri dışındaki normal HTML veya metni temsil eder) bulan ve içeriklerini *doğrudan AST'de* büyük harflere dönüştüren bir geçiş oluşturalım.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\TextNode;
+
+function uppercaseStaticText(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// TextNode'un işlenecek çocuğu olmadığı için 'enter' kullanabiliriz
+		enter: function (Node $node) {
+			// Bu düğüm statik bir metin bloğu mu?
+			if ($node instanceof TextNode) {
+				// Evet! Doğrudan genel 'content' özelliğini değiştiriyoruz.
+				$node->content = mb_strtoupper(html_entity_decode($node->content));
+			}
+			// Hiçbir şey döndürmeye gerek yok; değişiklik doğrudan uygulanır.
+		},
+	);
+}
+```
+
+Bu örnekte, `enter` ziyaretçisi geçerli `$node`'un `TextNode` türünde olup olmadığını kontrol eder. Eğer öyleyse, genel `$content` özelliğini doğrudan `mb_strtoupper()` kullanarak güncelleriz. Bu, PHP kodu oluşturulmadan *önce* AST'de depolanan statik metnin içeriğini doğrudan değiştirir. Nesneyi doğrudan değiştirdiğimiz için ziyaretçiden hiçbir şey döndürmemiz gerekmez.
+
+Etki: Şablon `<p>Merhaba</p>{= $var }<span>Dünya</span>` içeriyorsa, bu geçişten sonra AST şuna benzer bir şeyi temsil edecektir: `<p>MERHABA</p>{= $var }<span>DÜNYA</span>`. Bu, $var'ın içeriğini ETKİLEMEZ.
+
+
+Düğümleri Değiştirme
+--------------------
+
+Daha güçlü bir değişiklik tekniği, bir düğümü tamamen başka bir düğümle değiştirmektir. Bu, `enter` veya `leave` ziyaretçisinden **yeni bir `Node` örneği döndürerek** yapılır. `NodeTraverser` daha sonra orijinal düğümü, ebeveyn düğümünün yapısında döndürülen düğümle değiştirir.
+
+**Örnek:** `PHP_VERSION` sabitinin (`ConstantFetchNode` ile temsil edilir) tüm kullanımlarını bulan ve bunları *derleme sırasında* algılanan *gerçek* PHP sürümünü içeren bir dize literali (`StringNode`) ile doğrudan değiştiren bir geçiş oluşturalım. Bu, derleme zamanı optimizasyonunun bir biçimidir.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\Php\Expression\ConstantFetchNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+
+function inlinePhpVersion(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// 'leave' genellikle değiştirme için kullanılır, çocukların (varsa)
+		// önce işlenmesini sağlar, ancak burada 'enter' da çalışırdı.
+		leave: function (Node $node) {
+			// Bu düğüm bir sabit erişimi mi ve sabit adı 'PHP_VERSION' mu?
+			if ($node instanceof ConstantFetchNode && (string) $node->name === 'PHP_VERSION') {
+				// Geçerli PHP sürümünü içeren yeni bir StringNode oluşturuyoruz
+				$newNode = new StringNode(PHP_VERSION);
+
+				// İsteğe bağlı, ancak iyi bir uygulama: konum bilgilerini kopyalayın
+				$newNode->position = $node->position;
+
+				// Yeni StringNode'u döndürüyoruz. Traverser,
+				// orijinal ConstantFetchNode'u bu $newNode ile değiştirecektir.
+				return $newNode;
+			}
+			// Eğer bir Node döndürmezsek, orijinal $node korunur.
+		},
+	);
+}
+```
+
+Burada `leave` ziyaretçisi, `PHP_VERSION` için belirli bir `ConstantFetchNode`'u tanımlar. Ardından, *derleme zamanında* `PHP_VERSION` sabitinin değerini içeren tamamen yeni bir `StringNode` oluşturur. Bu `$newNode`'u döndürerek, traverser'a orijinal `ConstantFetchNode`'u AST'de değiştirmesini söyler.
+
+Etki: Şablon `{= PHP_VERSION }` içeriyorsa ve derleme PHP 8.2.1 üzerinde çalışıyorsa, bu geçişten sonraki AST etkili bir şekilde `{= '8.2.1' }` temsil edecektir.
+
+**Değiştirme için `enter` vs. `leave` seçimi:**
+
+- Yeni düğümü oluşturmak, eski düğümün çocuklarını işlemenin sonuçlarına bağlıysa veya çocukların değiştirilmeden önce ziyaret edilmesini basitçe sağlamak istiyorsanız (yaygın uygulama) `leave` kullanın.
+- Bir düğümü çocukları hiç ziyaret edilmeden *önce* değiştirmek istiyorsanız `enter` kullanın.
+
+
+Düğümleri Kaldırma
+------------------
+
+Ziyaretçiden özel `NodeTraverser::RemoveNode` sabitini döndürerek bir düğümü AST'den tamamen kaldırabilirsiniz.
+
+**Örnek:** Latte çekirdeği tarafından oluşturulan AST'de `CommentNode` ile temsil edilen tüm şablon yorumlarını (`{* ... *}`) kaldıralım (genellikle daha önce işlense de, bu bir örnek olarak hizmet eder).
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\CommentNode;
+
+function removeCommentNodes(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Yorumu kaldırmak için çocuk bilgisine ihtiyacımız olmadığı için 'enter' burada uygundur
+		enter: function (Node $node) {
+			if ($node instanceof CommentNode) {
+				// Traverser'a bu düğümü AST'den kaldırmasını işaret ediyoruz
+				return NodeTraverser::RemoveNode;
+			}
+		},
+	);
+}
+```
+
+**Uyarı:** `RemoveNode`'u dikkatli kullanın. Temel içeriği içeren veya yapıyı etkileyen bir düğümü kaldırmak (bir döngünün içerik düğümünü kaldırmak gibi), bozuk şablonlara veya geçersiz oluşturulmuş koda yol açabilir. Gerçekten isteğe bağlı veya bağımsız olan düğümler (yorumlar veya hata ayıklama etiketleri gibi) veya boş yapısal düğümler (örneğin, boş bir `FragmentNode` bazı bağlamlarda bir temizleme geçişi tarafından güvenle kaldırılabilir) için en güvenlidir.
+
+Bu üç yöntem - özellikleri değiştirme, düğümleri değiştirme ve düğümleri kaldırma - derleme geçişleriniz içinde AST'yi manipüle etmek için temel araçları sağlar.
+
+
+Dolaşımı Optimize Etme
+======================
+
+Şablonların AST'si oldukça büyük olabilir ve potansiyel olarak binlerce düğüm içerebilir. Geçişiniz yalnızca ağacın belirli bölümleriyle ilgileniyorsa, her bir düğümü dolaşmak gereksiz olabilir ve derleme performansını etkileyebilir. `NodeTraverser`, dolaşımı optimize etmenin yollarını sunar:
+
+
+Çocukları Atlama
+----------------
+
+Belirli bir düğüm türüne rastladığınızda, torunlarından hiçbirinin aradığınız düğümleri içeremeyeceğini biliyorsanız, traverser'a çocuklarını ziyaret etmeyi atlamasını söyleyebilirsiniz. Bu, **`enter`** ziyaretçisinden `NodeTraverser::DontTraverseChildren` sabitini döndürerek yapılır. Bu, dolaşım sırasında tüm dalları atlar, potansiyel olarak önemli ölçüde zaman kazandırır, özellikle etiketler içinde karmaşık PHP ifadeleri olan şablonlarda.
+
+
+Dolaşımı Durdurma
+-----------------
+
+Geçişinizin yalnızca bir şeyin *ilk* örneğini bulması gerekiyorsa (belirli bir düğüm türü, bir koşulun karşılanması), bulduğunuz anda tüm dolaşım sürecini tamamen durdurabilirsiniz. Bu, `enter` veya `leave` ziyaretçisinden `NodeTraverser::StopTraversal` sabitini döndürerek başarılır. `traverse()` yöntemi başka herhangi bir düğümü ziyaret etmeyi durdurur. Potansiyel olarak çok büyük bir ağaçta yalnızca ilk eşleşmeye ihtiyacınız varsa bu son derece etkilidir.
+
+
+Kullanışlı Yardımcı `NodeHelpers`
+=================================
+
+`NodeTraverser` ince ayarlı kontrol sunarken, Latte ayrıca birkaç yaygın arama ve analiz görevi için `NodeTraverser`'ı kapsayan pratik bir yardımcı sınıf olan [api:Latte\Compiler\NodeHelpers]'ı da sağlar ve genellikle daha az standart kod gerektirir.
+
+
+find(Node $startNode, callable $filter): array .[method]
+--------------------------------------------------------
+
+Bu statik yöntem, `$startNode`'dan başlayan (dahil) alt ağaçtaki `$filter` geri çağrısını karşılayan **tüm** düğümleri bulur. Eşleşen düğümlerin bir dizisini döndürür.
+
+**Örnek:** Tüm şablondaki tüm değişken düğümlerini (`VariableNode`) bulun.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\Expression\VariableNode;
+use Latte\Compiler\Nodes\TemplateNode;
+
+function findAllVariables(TemplateNode $templateNode): array
+{
+	return NodeHelpers::find(
+		$templateNode,
+		fn($node) => $node instanceof VariableNode,
+	);
+}
+```
+
+
+findFirst(Node $startNode, callable $filter): ?Node  .[method]
+--------------------------------------------------------------
+
+`find`'a benzer, ancak `$filter` geri çağrısını karşılayan **ilk** düğümü bulduktan hemen sonra dolaşımı durdurur. Bulunan `Node` nesnesini veya eşleşen düğüm bulunamazsa `null` döndürür. Bu, esasen `NodeTraverser::StopTraversal` etrafında pratik bir sarmalayıcıdır.
+
+**Örnek:** `{parameters}` düğümünü bulun (daha önceki manuel örnekle aynı, ancak daha kısa).
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\ParametersNode;
+
+function findParametersNodeHelper(TemplateNode $templateNode): ?ParametersNode
+{
+	return NodeHelpers::findFirst(
+		$templateNode->head, // Verimlilik için yalnızca ana bölümde arama yapın
+		fn($node) => $node instanceof ParametersNode,
+	);
+}
+```
+
+
+toValue(ExpressionNode $node, bool $constants = false): mixed .[method]
+-----------------------------------------------------------------------
+
+Bu statik yöntem, bir `ExpressionNode`'u **derleme zamanında** değerlendirmeye çalışır ve karşılık gelen PHP değerini döndürür. Yalnızca basit literal düğümler (`StringNode`, `IntegerNode`, `FloatNode`, `BooleanNode`, `NullNode`) ve yalnızca bu tür değerlendirilebilir öğeleri içeren `ArrayNode` örnekleri için güvenilir bir şekilde çalışır.
+
+Eğer `$constants` `true` olarak ayarlanırsa, `defined()` kontrol ederek ve `constant()` kullanarak `ConstantFetchNode` ve `ClassConstantFetchNode`'u çözmeye de çalışacaktır.
+
+Düğüm değişkenler, fonksiyon çağrıları veya diğer dinamik öğeler içeriyorsa, derleme zamanında değerlendirilemez ve yöntem bir `InvalidArgumentException` fırlatır.
+
+**Kullanım Durumu:** Derleme zamanı kararları için derleme sırasında bir etiket argümanının statik değerini elde etme.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+
+function getStaticStringArgument(ExpressionNode $argumentNode): ?string
+{
+	try {
+		$value = NodeHelpers::toValue($argumentNode);
+		return is_string($value) ? $value : null;
+	} catch (\InvalidArgumentException $e) {
+		// Argüman statik bir literal dize değildi
+		return null;
+	}
+}
+```
+
+
+toText(?Node $node): ?string .[method]
+--------------------------------------
+
+Bu statik yöntem, basit düğümlerden düz metin içeriğini çıkarmak için kullanışlıdır. Öncelikle şunlarla çalışır:
+- `TextNode`: `$content`'ini döndürür.
+- `FragmentNode`: Tüm çocukları için `toText()` sonucunu birleştirir. Herhangi bir çocuk metne dönüştürülemezse (örneğin, bir `PrintNode` içeriyorsa), `null` döndürür.
+- `NopNode`: Boş bir dize döndürür.
+- Diğer düğüm türleri: `null` döndürür.
+
+**Kullanım Durumu:** Bir derleme geçişi sırasında analiz için bir HTML niteliğinin veya basit bir HTML öğesinin statik metin içeriğini elde etme.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Html\AttributeNode;
+
+function getStaticAttributeValue(AttributeNode $attr): ?string
+{
+	// $attr->value tipik olarak bir AreaNode'dur (FragmentNode veya TextNode gibi)
+	return NodeHelpers::toText($attr->value);
+}
+
+// Geçişte kullanım örneği:
+// if ($node instanceof Html\ElementNode && $node->name === 'meta') {
+//     $nameAttrValue = getStaticAttributeValue($node->getAttributeNode('name'));
+//     if ($nameAttrValue === 'description') { ... }
+// }
+```
+
+`NodeHelpers`, yaygın AST dolaşım ve analiz görevleri için hazır çözümler sunarak derleme geçişlerinizi basitleştirebilir.
+
+
+Pratik Örnekler
+===============
+
+Bazı pratik sorunları çözmek için AST dolaşım ve değişiklik kavramlarını uygulayalım. Bu örnekler, derleme geçişlerinde kullanılan yaygın desenleri gösterir.
+
+
+`<img>`'ye Otomatik Olarak `loading="lazy"` Ekleme
+--------------------------------------------------
+
+Modern tarayıcılar, `loading="lazy"` niteliğini kullanarak görüntüler için yerel geç yüklemeyi destekler. Henüz bir `loading` niteliği olmayan tüm `<img>` etiketlerine bu niteliği otomatik olarak ekleyen bir geçiş oluşturalım.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Html;
+
+function addLazyLoading(Nodes\TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Düğümü doğrudan değiştirdiğimiz ve bu karar için çocuklara bağlı olmadığımız için 'enter' kullanabiliriz.
+		enter: function (Node $node) {
+			// Bu 'img' adlı bir HTML öğesi mi?
+			if ($node instanceof Html\ElementNode && $node->name === 'img') {
+				// Nitelik düğümünün var olduğundan emin olun
+				$node->attributes ??= new Nodes\FragmentNode;
+
+				// Zaten bir 'loading' niteliğinin olup olmadığını kontrol edin (büyük/küçük harf duyarsız)
+				foreach ($node->attributes->children as $attrNode) {
+					if ($attrNode instanceof Html\AttributeNode
+						&& $attrNode->name instanceof Nodes\TextNode // Statik nitelik adı
+						&& strtolower($attrNode->name->content) === 'loading'
+					) {
+						return; // Zaten var, hiçbir şey yapma
+					}
+				}
+
+				// Nitelikler boş değilse bir boşluk ekleyin
+				if ($node->attributes->children) {
+					$node->attributes->children[] = new Nodes\TextNode(' ');
+				}
+
+				// Yeni bir nitelik düğümü oluşturun: loading="lazy"
+				$node->attributes->children[] = new Html\AttributeNode(
+					name: new Nodes\TextNode('loading'),
+					value: new Nodes\TextNode('lazy'),
+					quote: '"',
+				);
+				// Değişiklik doğrudan nesnede uygulanır, hiçbir şey döndürmeye gerek yoktur.
+			}
+		},
+	);
+}
+```
+
+Açıklama:
+- `enter` ziyaretçisi, `img` adlı `Html\ElementNode` düğümlerini arar.
+- Mevcut nitelikleri (`$node->attributes->children`) yineler ve `loading` niteliğinin zaten mevcut olup olmadığını kontrol eder.
+- Bulunamazsa, `loading="lazy"` temsil eden yeni bir `Html\AttributeNode` oluşturur.
+
+
+Fonksiyon Çağrılarını Kontrol Etme
+----------------------------------
+
+Derleme geçişleri, Latte Sandbox'ın temelidir. Gerçek Sandbox karmaşık olsa da, yasaklanmış fonksiyon çağrılarını kontrol etmenin temel prensibini gösterebiliriz.
+
+**Amaç:** Şablon ifadeleri içinde potansiyel olarak tehlikeli `shell_exec` fonksiyonunun kullanımını önlemek.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Php;
+use Latte\SecurityViolationException;
+
+function checkForbiddenFunctions(Nodes\TemplateNode $templateNode): void
+{
+	$forbiddenFunctions = ['shell_exec' => true, 'exec' => true]; // Basit liste
+
+	$traverser = new NodeTraverser;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use ($forbiddenFunctions) {
+			// Bu doğrudan bir fonksiyon çağrı düğümü mü?
+			if ($node instanceof Php\Expression\FunctionCallNode
+				&& $node->name instanceof Php\NameNode
+				&& isset($forbiddenFunctions[strtolower((string) $node->name)])
+			) {
+				throw new SecurityViolationException(
+					"{$node->name}() fonksiyonuna izin verilmiyor.",
+					$node->position,
+				);
+			}
+		},
+	);
+}
+```
+
+Açıklama:
+- Yasaklanmış fonksiyon adlarının bir listesini tanımlıyoruz.
+- `enter` ziyaretçisi `FunctionCallNode`'u kontrol eder.
+- Fonksiyon adı (`$node->name`) statik bir `NameNode` ise, küçük harfli dize temsilini yasaklı listemizle karşılaştırırız.
+- Yasaklanmış bir fonksiyon bulunursa, güvenlik kuralı ihlalini açıkça belirten ve derlemeyi durduran bir `Latte\SecurityViolationException` fırlatırız.
+
+Bu örnekler, `NodeTraverser` kullanarak derleme geçişlerinin, doğrudan şablonun AST yapısıyla etkileşime girerek analiz, otomatik değişiklikler ve güvenlik kısıtlamalarının uygulanması için nasıl kullanılabileceğini gösterir.
+
+
+En İyi Uygulamalar
+==================
+
+Derleme geçişleri yazarken, sağlam, sürdürülebilir ve verimli uzantılar oluşturmak için bu yönergeleri aklınızda bulundurun:
+
+- **Sıra Önemlidir:** Geçişlerin çalıştığı sıranın farkında olun. Geçişiniz başka bir geçiş tarafından oluşturulan AST yapısına (örneğin, Latte'nin temel geçişleri veya başka bir özel geçiş) bağlıysa veya diğer geçişler sizin değişikliklerinize bağlı olabiliyorsa, bağımlılıkları tanımlamak için `Extension::getPasses()` tarafından sağlanan sıralama mekanizmasını kullanın (`before`/`after`). Ayrıntılar için [`Extension::getPasses()` |extending-latte#getPasses] dokümantasyonuna bakın.
+- **Tek Sorumluluk:** İyi tanımlanmış tek bir görevi yerine getiren geçişler hedefleyin. Karmaşık dönüşümler için, mantığı birden fazla geçişe bölmeyi düşünün – belki biri analiz için, diğeri analiz sonuçlarına dayalı değişiklik için. Bu, netliği ve test edilebilirliği artırır.
+- **Performans:** Derleme geçişlerinin şablon derleme süresine ekleme yaptığını unutmayın (genellikle şablon değişene kadar yalnızca bir kez gerçekleşse de). Mümkünse geçişlerinizde hesaplama açısından pahalı işlemlerden kaçının. AST'nin belirli bölümlerini ziyaret etmeniz gerekmediğini bildiğinizde `NodeTraverser::DontTraverseChildren` ve `NodeTraverser::StopTraversal` gibi dolaşım optimizasyonlarından yararlanın.
+- **`NodeHelpers` Kullanın:** Belirli düğümleri bulmak veya basit ifadeleri statik olarak değerlendirmek gibi yaygın görevler için, kendi `NodeTraverser` mantığınızı yazmadan önce `Latte\Compiler\NodeHelpers`'ın uygun bir yöntem sunup sunmadığını kontrol edin. Bu, zaman kazandırabilir ve standart kod miktarını azaltabilir.
+- **Hata İşleme:** Geçişiniz şablon AST'sinde bir hata veya geçersiz durum algılarsa, net bir mesaj ve ilgili `Position` nesnesiyle (genellikle `$node->position`) bir `Latte\CompileException` (veya güvenlik sorunları için `Latte\SecurityViolationException`) fırlatın. Bu, şablon geliştiricisine yararlı geri bildirim sağlar.
+- **İdempotans (Mümkünse):** İdeal olarak, geçişinizi aynı AST üzerinde birden çok kez çalıştırmak, bir kez çalıştırmakla aynı sonucu üretmelidir. Bu her zaman mümkün değildir, ancak başarıldığında hata ayıklamayı ve geçiş etkileşimleri hakkında akıl yürütmeyi basitleştirir. Örneğin, değişiklik geçişinizin, değişikliği tekrar uygulamadan önce zaten uygulanıp uygulanmadığını kontrol ettiğinden emin olun.
+
+Bu uygulamaları takip ederek, Latte'nin yeteneklerini güçlü ve güvenilir bir şekilde genişletmek için derleme geçişlerini etkili bir şekilde kullanabilir, daha güvenli, daha optimize edilmiş veya işlevsel olarak daha zengin şablon işlemeye katkıda bulunabilirsiniz.

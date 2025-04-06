@@ -1,0 +1,1140 @@
+Ustvarjanje lastnih značk
+*************************
+
+.[perex]
+Ta stran ponuja obsežen vodnik za ustvarjanje lastnih značk v Latte. Obravnavali bomo vse od preprostih značk do bolj zapletenih scenarijev z gnezdeno vsebino in specifičnimi potrebami razčlenjevanja, pri čemer bomo gradili na vašem razumevanju, kako Latte prevaja predloge.
+
+Lastne značke zagotavljajo najvišjo raven nadzora nad sintakso predloge in logiko izrisovanja, vendar so tudi najbolj zapletena točka razširitve. Preden se odločite ustvariti lastno značko, vedno razmislite, ali [ne obstaja enostavnejša rešitev |extending-latte#toc-ways-to-extend-latte] ali če ustrezna značka že ne obstaja v [standardnem naboru |tags]. Lastne značke uporabljajte le, če enostavnejše alternative ne zadostujejo za vaše potrebe.
+
+
+Razumevanje postopka prevajanja .[#toc-understanding-the-compilation-process]
+=============================================================================
+
+Za učinkovito ustvarjanje lastnih značk je koristno pojasniti, kako Latte obdeluje predloge. Razumevanje tega postopka pojasnjuje, zakaj so značke strukturirane ravno tako in kako se prilegajo širšemu kontekstu.
+
+Prevajanje predloge v Latte, poenostavljeno, vključuje te ključne korake:
+
+1.  **Leksična analiza:** Lekser bere izvorno kodo predloge (datoteko `.latte`) in jo razdeli na zaporedje majhnih, ločenih delov, imenovanih **žetoni** (npr. `{`, `foreach`, `$variable`, `}`, besedilo HTML itd.).
+2.  **Razčlenjevanje:** Razčlenjevalnik vzame ta tok žetonov in iz njega zgradi smiselno drevesno strukturo, ki predstavlja logiko in vsebino predloge. To drevo se imenuje **abstraktno sintaktično drevo (AST)**.
+3.  **Prevajalski prehodi:** Pred generiranjem PHP kode Latte zažene [prevajalske prehode |compiler passes]. To so funkcije, ki prehajajo celoten AST in ga lahko spreminjajo ali zbirajo informacije. Ta korak je ključen za funkcije, kot sta varnost ([Sandbox |sandbox]) ali optimizacija.
+4.  **Generiranje kode:** Na koncu prevajalnik preide (potencialno spremenjen) AST in generira ustrezno kodo PHP razreda. Ta PHP koda je tisto, kar dejansko izriše predlogo ob zagonu.
+5.  **Predpomnjenje (Caching):** Generirana PHP koda se shrani na disk, kar naredi nadaljnja izrisovanja zelo hitra, saj so koraki 1-4 preskočeni.
+
+V resnici je prevajanje nekoliko bolj zapleteno. Latte **ima dva** lekserja in razčlenjevalnika: enega za HTML predlogo in drugega za PHP-podobno kodo znotraj značk. Prav tako se razčlenjevanje ne zgodi šele po tokenizaciji, ampak lekser in razčlenjevalnik tečeta vzporedno v dveh "nitih" in se usklajujeta. Verjemite mi, programiranje tega je bila raketna znanost :-)
+
+Celoten postopek, od nalaganja vsebine predloge, preko razčlenjevanja, do generiranja končne datoteke, je mogoče zaporedno izvesti s to kodo, s katero lahko eksperimentirate in izpisujete vmesne rezultate:
+
+```php
+$latte = new Latte\Engine;
+$source = $latte->getLoader()->getContent($file);
+$ast = $latte->parse($source);
+$latte->applyPasses($ast);
+$code = $latte->generate($ast, $file);
+```
+
+
+Anatomija značke .[#toc-the-anatomy-of-a-tag]
+=============================================
+
+Ustvarjanje popolnoma delujoče lastne značke v Latte vključuje več medsebojno povezanih delov. Preden se lotimo implementacije, razumimo osnovne koncepte in terminologijo z uporabo analogije s HTML in Document Object Model (DOM).
+
+
+Značke proti Vozliščem (Analogija s HTML) .[#toc-tags-vs-nodes-analogy-with-html]
+---------------------------------------------------------------------------------
+
+V HTML pišemo **značke** kot `<p>` ali `<div>...</div>`. Te značke so sintaksa v izvorni kodi. Ko brskalnik razčleni ta HTML, ustvari pomnilniško predstavitev, imenovano **Document Object Model (DOM)**. V DOM so HTML značke predstavljene z **vozlišči** (natančneje vozlišči `Element` v terminologiji JavaScript DOM). S temi *vozlišči* programsko delamo (npr. z JavaScript `document.getElementById(...)` se vrne vozlišče Element). Značka je samo besedilna predstavitev v izvorni datoteki; vozlišče je objektna predstavitev v logičnem drevesu.
+
+Latte deluje podobno:
+
+- V datoteki `.latte` predloge pišete **Latte značke**, kot sta `{foreach ...}` in `{/foreach}`. To je sintaksa, s katero delate kot avtor predloge.
+- Ko Latte **razčleni** predlogo, zgradi **Abstract Syntax Tree (AST)**. To drevo je sestavljeno iz **vozlišč**. Vsaka Latte značka, HTML element, kos besedila ali izraz v predlogi postane eno ali več vozlišč v tem drevesu.
+- Osnovni razred za vsa vozlišča v AST je `Latte\Compiler\Node`. Tako kot ima DOM različne vrste vozlišč (Element, Text, Comment), ima AST Latte različne vrste vozlišč. Srečali se boste z `Latte\Compiler\Nodes\TextNode` za statično besedilo, `Latte\Compiler\Nodes\Html\ElementNode` za HTML elemente, `Latte\Compiler\Nodes\Php\ExpressionNode` za izraze znotraj značk in ključno za lastne značke, vozlišči, ki dedujejo iz `Latte\Compiler\Nodes\StatementNode`.
+
+
+Zakaj `StatementNode`? .[#toc-why-statementnode]
+------------------------------------------------
+
+HTML elementi (`Html\ElementNode`) primarno predstavljajo strukturo in vsebino. PHP izrazi (`Php\ExpressionNode`) predstavljajo vrednosti ali izračune. Kaj pa Latte značke kot `{if}`, `{foreach}` ali naša lastna `{datetime}`? Te značke *izvajajo dejanja*, nadzorujejo tok programa ali generirajo izpis na podlagi logike. So funkcionalne enote, ki naredijo Latte močan *engine* za predloge, ne le označevalni jezik.
+
+V programiranju se takšne enote, ki izvajajo dejanja, pogosto imenujejo "statements" (stavki). Zato vozlišča, ki predstavljajo te funkcionalne Latte značke, tipično dedujejo iz `Latte\Compiler\Nodes\StatementNode`. To jih loči od čisto strukturnih vozlišč (kot so HTML elementi) ali vozlišč, ki predstavljajo vrednosti (kot so izrazi).
+
+
+Ključne komponente .[#toc-the-key-components]
+=============================================
+
+Poglejmo glavne komponente, potrebne za ustvarjanje lastne značke:
+
+
+Funkcija za razčlenjevanje značke .[#toc-tag-parsing-function]
+--------------------------------------------------------------
+
+- Ta PHP klicna funkcija (callable) razčleni sintakso Latte značke (`{...}`) v izvorni predlogi.
+- Prejme informacije o znački (kot so njeno ime, položaj in ali gre za n:atribut) preko objekta [api:Latte\Compiler\Tag].
+- Njeno primarno orodje za razčlenjevanje parametrov in izrazov znotraj ločil značke je objekt [api:Latte\Compiler\TagParser], dostopen preko `$tag->parser` (to je drug razčlenjevalnik kot tisti, ki razčleni celotno predlogo).
+- Za parne značke uporablja `yield` za signaliziranje Latteju, naj razčleni notranjo vsebino med začetno in končno značko.
+- Končni cilj funkcije za razčlenjevanje je ustvariti in vrniti instanco **razreda vozlišča**, ki je dodana v AST.
+- Navada je (čeprav ni zahtevano) implementirati funkcijo za razčlenjevanje kot statično metodo (pogosto imenovano `create`) neposredno v ustreznem razredu vozlišča. To ohranja logiko razčlenjevanja in predstavitev vozlišča lepo v enem paketu, omogoča dostop do zasebnih/zaščitenih elementov razreda, če je potrebno, in izboljšuje organizacijo.
+
+
+Razred vozlišča .[#toc-node-class]
+----------------------------------
+
+- Predstavlja *logično funkcijo* vaše značke v **Abstract Syntax Tree (AST)**.
+- Vsebuje razčlenjene informacije (kot so parametri ali vsebina) kot javne lastnosti. Te lastnosti pogosto vsebujejo druge instance `Node` (npr. `ExpressionNode` za razčlenjene parametre, `AreaNode` za razčlenjeno vsebino).
+- Metoda `print(PrintContext $context): string` generira *PHP kodo* (stavek ali serijo stavkov), ki izvaja dejanje značke med izrisovanjem predloge.
+- Metoda `getIterator(): \Generator` omogoča dostop do podrejenih vozlišč (parametrov, vsebine) za prehod **prevajalskih prehodov**. Mora zagotavljati reference (`&`), da omogoči prehodom potencialno spreminjanje ali zamenjavo podvozlišč.
+- Ko je celotna predloga razčlenjena v AST, Latte zažene vrsto [prevajalskih prehodov |compiler-passes]. Ti prehodi prehajajo *celoten* AST z uporabo metode `getIterator()`, ki jo zagotavlja vsako vozlišče. Lahko pregledujejo vozlišča, zbirajo informacije in celo *spreminjajo* drevo (npr. s spreminjanjem javnih lastnosti vozlišč ali popolno zamenjavo vozlišč). Ta zasnova, ki zahteva celovit `getIterator()`, je temeljna. Omogoča močnim funkcijam, kot je [Sandbox |sandbox], da analizirajo in potencialno spremenijo obnašanje *katerega koli* dela predloge, vključno z vašimi lastnimi značkami, kar zagotavlja varnost in doslednost.
+
+
+Registracija preko razširitve .[#toc-registration-via-an-extension]
+-------------------------------------------------------------------
+
+- Latte morate obvestiti o vaši novi znački in katera funkcija za razčlenjevanje naj se zanjo uporabi. To se zgodi znotraj [razširitve Latte |extending-latte#latte-extension].
+- Znotraj vašega razreda razširitve implementirate metodo `getTags(): array`. Ta metoda vrne asociativno polje, kjer so ključi imena značk (npr. `'mytag'`, `'n:myattribute'`), vrednosti pa so PHP klicne funkcije (callable), ki predstavljajo njihove ustrezne funkcije za razčlenjevanje (npr. `MyNamespace\DatetimeNode::create(...)`).
+
+Povzetek: **Funkcija za razčlenjevanje značke** pretvori *izvorno kodo predloge* vaše značke v **vozlišče AST**. **Razred vozlišča** nato zna pretvoriti *samega sebe* v izvedljivo *PHP kodo* za prevedeno predlogo in omogoča dostop do svojih podvozlišč za **prevajalske prehode** preko `getIterator()`. **Registracija preko razširitve** poveže ime značke s funkcijo za razčlenjevanje in o njej obvesti Latte.
+
+Zdaj bomo raziskali, kako implementirati te komponente korak za korakom.
+
+
+Ustvarjanje preproste značke .[#toc-creating-a-simple-tag]
+==========================================================
+
+Lotimo se ustvarjanja vaše prve lastne Latte značke. Začeli bomo z zelo preprostim primerom: značko z imenom `{datetime}`, ki izpiše trenutni datum in čas. **Sprva ta značka ne bo sprejemala nobenih parametrov**, vendar jo bomo izboljšali kasneje v razdelku ["Razčlenjevanje parametrov značke" |#Parsing Tag Arguments]. Prav tako nima nobene notranje vsebine.
+
+Ta primer vas bo vodil skozi osnovne korake: definiranje razreda vozlišča, implementacija njegovih metod `print()` in `getIterator()`, ustvarjanje funkcije za razčlenjevanje in končno registracija značke.
+
+**Cilj:** Implementirati `{datetime}` za izpis trenutnega datuma in časa z uporabo PHP funkcije `date()`.
+
+
+Ustvarjanje razreda vozlišča .[#toc-creation-of-the-node-class]
+---------------------------------------------------------------
+
+Najprej potrebujemo razred, ki bo predstavljal našo značko v Abstract Syntax Tree (AST). Kot smo že omenili, dedujemo iz `Latte\Compiler\Nodes\StatementNode`.
+
+Ustvarite datoteko (npr. `DatetimeNode.php`) in definirajte razred:
+
+```php .{file: DatetimeNode.php}
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DatetimeNode extends StatementNode
+{
+	/**
+	 * Funkcija za razčlenjevanje značke, klicana, ko je najden {datetime}.
+	 */
+	public static function create(Tag $tag): self
+	{
+		// Naša preprosta značka trenutno ne sprejema nobenih parametrov, zato nam ni treba ničesar razčlenjevati
+		$node = $tag->node = new self;
+		return $node;
+	}
+
+	/**
+	 * Generira PHP kodo, ki se bo izvedla pri izrisovanju predloge.
+	 */
+	public function print(PrintContext $context): string
+	{
+		return $context->format(
+			'echo date(\'Y-m-d H:i:s\') %line;',
+			$this->position,
+		);
+	}
+
+	/**
+	 * Omogoča dostop do podrejenih vozlišč za prevajalske prehode Latte.
+	 */
+	public function &getIterator(): \Generator
+	{
+		false && yield;
+	}
+}
+```
+
+Ko Latte naleti na `{datetime}` v predlogi, pokliče funkcijo za razčlenjevanje `create()`. Njena naloga je vrniti instanco `DatetimeNode`.
+
+Metoda `print()` generira PHP kodo, ki se bo izvedla pri izrisovanju predloge. Kličemo metodo `$context->format()`, ki sestavi končni niz PHP kode za prevedeno predlogo. Prvi parameter, `'echo date('Y-m-d H:i:s') %line;'`, je maska, v katero se dopolnijo naslednji parametri.
+Nadomestni znak `%line` pove metodi `format()`, naj uporabi drugi parameter, ki je `$this->position`, in vstavi komentar kot `/* line 15 */`, ki povezuje generirano PHP kodo nazaj na izvirno vrstico predloge, kar je ključno za razhroščevanje.
+
+Lastnost `$this->position` je podedovana iz osnovnega razreda `Node` in jo samodejno nastavi razčlenjevalnik Latte. Vsebuje objekt [api:Latte\Compiler\Position], ki označuje, kje je bila značka najdena v izvorni datoteki `.latte`.
+
+Metoda `getIterator()` je temeljna za prevajalske prehode. Mora zagotoviti vsa podrejena vozlišča, vendar naš preprost `DatetimeNode` trenutno nima nobenih parametrov ali vsebine, torej nobenih podrejenih vozlišč. Kljub temu mora metoda še vedno obstajati in biti generator, tj. ključna beseda `yield` mora biti nekako prisotna v telesu metode.
+
+
+Registracija preko razširitve .[#toc-registration-via-an-extension]
+-------------------------------------------------------------------
+
+Končno obvestimo Latte o novi znački. Ustvarite [razred razširitve |extending-latte#latte-extension] (npr. `MyLatteExtension.php`) in registrirajte značko v njeni metodi `getTags()`.
+
+```php .{file: MyLatteExtension.php}
+<?php
+
+namespace App\Latte;
+
+use Latte\Extension;
+
+class MyLatteExtension extends Extension
+{
+	/**
+	 * Vrne seznam značk, ki jih ponuja ta razširitev.
+	 * @return array<string, callable> Mapa: 'ime-značke' => funkcija-za-razčlenjevanje
+	 */
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			// Kasneje tukaj registrirajte več značk
+		];
+	}
+}
+```
+
+Nato registrirajte to razširitev v Latte Engine:
+
+```php
+$latte = new Latte\Engine;
+$latte->addExtension(new App\Latte\MyLatteExtension);
+```
+
+Ustvarite predlogo:
+
+```latte
+<p>Stran generirana: {datetime}</p>
+```
+
+Pričakovan izpis: `<p>Stran generirana: 2023-10-27 11:00:00</p>`
+
+
+Povzetek te faze .[#toc-summary-of-this-phase]
+----------------------------------------------
+
+Uspešno smo ustvarili osnovno lastno značko `{datetime}`. Definirali smo njeno predstavitev v AST (`DatetimeNode`), obdelali njeno razčlenjevanje (`create()`), določili, kako naj generira PHP kodo (`print()`), zagotovili, da so njeni otroci dostopni za prehod (`getIterator()`), in jo registrirali v Latte.
+
+V naslednjem razdelku bomo to značko izboljšali tako, da bo sprejemala parametre, in pokazali, kako razčlenjevati izraze ter upravljati podrejena vozlišča.
+
+
+Razčlenjevanje parametrov značke .[#toc-parsing-tag-arguments]
+==============================================================
+
+Naša preprosta značka `{datetime}` deluje, vendar ni zelo prilagodljiva. Izboljšajmo jo, da bo sprejemala neobvezen parameter: formatni niz za funkcijo `date()`. Zahtevana sintaksa bo `{datetime $format}`.
+
+**Cilj:** Prilagoditi `{datetime}` tako, da sprejema neobvezen PHP izraz kot parameter, ki bo uporabljen kot formatni niz za `date()`.
+
+
+Predstavitev `TagParser` .[#toc-introducing-tagparser]
+------------------------------------------------------
+
+Preden prilagodimo kodo, je pomembno razumeti orodje, ki ga bomo uporabljali: [api:Latte\Compiler\TagParser]. Ko glavni razčlenjevalnik Latte (`TemplateParser`) naleti na Latte značko, kot je `{datetime ...}` ali n:atribut, prenese razčlenjevanje vsebine *znotraj* značke (del med `{` in `}` ali vrednost atributa) na specializiran `TagParser`.
+
+Ta `TagParser` deluje izključno s **parametri značke**. Njegova naloga je obdelati žetone, ki predstavljajo te parametre. Ključno je, da **mora obdelati celotno vsebino**, ki mu je na voljo. Če se vaša funkcija za razčlenjevanje konča, vendar `TagParser` ni dosegel konca parametrov (preverjeno preko `$tag->parser->isEnd()`), bo Latte vrgel izjemo, saj to kaže, da so znotraj značke ostali nepričakovani žetoni. Nasprotno, če značka *zahteva* parametre, morate na začetku vaše funkcije za razčlenjevanje poklicati `$tag->expectArguments()`. Ta metoda preveri, ali so parametri prisotni, in vrže koristno izjemo, če je bila značka uporabljena brez kakršnih koli parametrov.
+
+`TagParser` ponuja uporabne metode za razčlenjevanje različnih vrst parametrov:
+
+- `parseExpression(): ExpressionNode`: Razčleni PHP-podoben izraz (spremenljivke, literale, operatorje, klice funkcij/metod itd.). Obravnava sintaktični sladkor Latte, kot je na primer obravnavanje preprostih alfanumeričnih nizov kot nizov v narekovajih (npr. `foo` se razčleni, kot da bi bilo `'foo'`).
+- `parseUnquotedStringOrExpression(): ExpressionNode`: Razčleni bodisi standardni izraz bodisi *nenarekovajni niz*. Nenarekovajni nizi so zaporedja, ki jih Latte dovoljuje brez narekovajev, pogosto uporabljena za stvari, kot so poti do datotek (npr. `{include ../file.latte}`). Če razčleni nenarekovajni niz, vrne `StringNode`.
+- `parseArguments(): ArrayNode`: Razčleni parametre, ločene z vejicami, potencialno s ključi, kot `10, name: 'John', true`.
+- `parseModifier(): ModifierNode`: Razčleni filtre kot `|upper|truncate:10`.
+- `parseType(): ?SuperiorTypeNode`: Razčleni PHP namige tipov kot `int`, `?string`, `array|Foo`.
+
+Za bolj zapletene ali nižje ravni potreb po razčlenjevanju lahko neposredno komunicirate s [tokom žetonov |api:Latte\Compiler\TokenStream] preko `$tag->parser->stream`. Ta objekt ponuja metode za preverjanje in obdelavo posameznih žetonov:
+
+- `$tag->parser->stream->is(...): bool`: Preveri, ali *trenutni* žeton ustreza kateri od določenih vrst (npr. `Token::Php_Variable`) ali literalnih vrednosti (npr. `'as'`), ne da bi ga porabil. Uporabno za pogled naprej.
+- `$tag->parser->stream->consume(...): Token`: Porabi *trenutni* žeton in premakne položaj toka naprej. Če so kot parametri podane pričakovane vrste/vrednosti žetonov in trenutni žeton ne ustreza, vrže `CompileException`. Uporabite to, ko *pričakujete* določen žeton.
+- `$tag->parser->stream->tryConsume(...): ?Token`: Poskusi porabiti *trenutni* žeton *samo če* ustreza eni od določenih vrst/vrednosti. Če ustreza, porabi žeton in ga vrne. Če ne ustreza, pusti položaj toka nespremenjen in vrne `null`. Uporabite to za neobvezne žetone ali ko izbirate med različnimi sintaktičnimi potmi.
+
+
+Posodobitev funkcije za razčlenjevanje `create()` .[#toc-updating-the-parsing-function-create]
+----------------------------------------------------------------------------------------------
+
+S tem razumevanjem prilagodimo metodo `create()` v `DatetimeNode` tako, da razčleni neobvezen formatni parameter z uporabo `$tag->parser`.
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DatetimeNode extends StatementNode
+{
+	// Dodamo javno lastnost za shranjevanje razčlenjenega vozlišča formatnega izraza
+	public ?ExpressionNode $format = null;
+
+	public static function create(Tag $tag): self
+	{
+		$node = $tag->node = new self;
+
+		// Preverimo, ali obstajajo kakšni žetoni
+		if (!$tag->parser->isEnd()) {
+			// Razčlenimo parameter kot PHP-podoben izraz z uporabo TagParser.
+			$node->format = $tag->parser->parseExpression();
+		}
+
+		return $node;
+	}
+
+	// ... metodi print() in getIterator() bosta posodobljeni kasneje ...
+}
+```
+
+Dodali smo javno lastnost `$format`. V `create()` zdaj uporabljamo `$tag->parser->isEnd()` za preverjanje, ali *obstajajo* parametri. Če obstajajo, `$tag->parser->parseExpression()` obdela žetone za izraz. Ker mora `TagParser` obdelati vse vhodne žetone, bo Latte samodejno vrgel napako, če uporabnik napiše nekaj nepričakovanega za formatnim izrazom (npr. `{datetime 'Y-m-d', unexpected}`).
+
+
+Posodobitev metode `print()` .[#toc-updating-the-print-method]
+--------------------------------------------------------------
+
+Zdaj prilagodimo metodo `print()` tako, da uporablja razčlenjen formatni izraz, shranjen v `$this->format`. Če format ni bil podan (`$this->format` je `null`), moramo uporabiti privzeti formatni niz, na primer `'Y-m-d H:i:s'`.
+
+```php
+	public function print(PrintContext $context): string
+	{
+		$formatNode = $this->format ?? new StringNode('Y-m-d H:i:s');
+
+		// %node izpiše PHP kodno predstavitev $formatNode.
+		return $context->format(
+			'echo date(%node) %line;',
+			$formatNode,
+			$this->position
+		);
+	}
+```
+
+V spremenljivko `$formatNode` shranimo vozlišče AST, ki predstavlja formatni niz za PHP funkcijo `date()`. Tukaj uporabljamo operator ničnega združevanja (`??`). Če je uporabnik podal parameter v predlogi (npr. `{datetime 'd.m.Y'}`), potem lastnost `$this->format` vsebuje ustrezno vozlišče (v tem primeru `StringNode` z vrednostjo `'d.m.Y'`), in to vozlišče se uporabi. Če uporabnik ni podal parametra (napisal je samo `{datetime}`), je lastnost `$this->format` `null`, in namesto tega ustvarimo nov `StringNode` s privzetim formatom `'Y-m-d H:i:s'`. To zagotavlja, da `$formatNode` vedno vsebuje veljavno vozlišče AST za format.
+
+V maski `'echo date(%node) %line;'` je uporabljen nov nadomestni znak `%node`, ki pove metodi `format()`, naj vzame prvi naslednji parameter (kar je naš `$formatNode`), pokliče njegovo metodo `print()` (ki vrne njegovo PHP kodno predstavitev) in vstavi rezultat na mesto nadomestnega znaka.
+
+
+Implementacija `getIterator()` za podvozlišča .[#toc-implementing-getiterator-for-subnodes]
+-------------------------------------------------------------------------------------------
+
+Naš `DatetimeNode` ima zdaj podrejeno vozlišče: izraz `$format`. **Moramo** to podrejeno vozlišče omogočiti dostop prevajalskim prehodom tako, da ga zagotovimo v metodi `getIterator()`. Ne pozabite zagotoviti *reference* (`&`), da omogočite prehodom potencialno zamenjavo vozlišča.
+
+```php
+	public function &getIterator(): \Generator
+	{
+		if ($this->format) {
+			yield $this->format;
+		}
+	}
+```
+
+Zakaj je to ključno? Predstavljajte si prehod Sandbox, ki mora preveriti, ali parameter `$format` ne vsebuje prepovedanega klica funkcije (npr. `{datetime dangerousFunction()}`). Če `getIterator()` ne zagotovi `$this->format`, prehod Sandbox nikoli ne bi videl klica `dangerousFunction()` znotraj parametra naše značke, kar bi ustvarilo potencialno varnostno luknjo. Z zagotavljanjem mu omogočimo Sandboxu (in drugim prehodom), da preverijo in potencialno spremenijo vozlišče izraza `$format`.
+
+
+Uporaba izboljšane značke .[#toc-using-the-enhanced-tag]
+--------------------------------------------------------
+
+Značka zdaj pravilno obravnava neobvezen parameter:
+
+```latte
+Privzeti format: {datetime}
+Lastni format: {datetime 'd.m.Y'}
+Uporaba spremenljivke: {datetime $userDateFormatPreference}
+
+{* To bi povzročilo napako po razčlenjevanju 'd.m.Y', ker je ", foo" nepričakovano *}
+{* {datetime 'd.m.Y', foo} *}
+```
+
+Nato si bomo ogledali ustvarjanje parnih značk, ki obdelujejo vsebino med njimi.
+
+
+Obravnavanje parnih značk .[#toc-handling-paired-tags]
+======================================================
+
+Do sedaj je bila naša značka `{datetime}` *samozapirajoča* (konceptualno). Nima nobene vsebine med začetno in končno značko. Vendar pa veliko uporabnih značk deluje z blokom vsebine predloge. Te se imenujejo **parne značke**. Primeri vključujejo `{if}...{/if}`, `{block}...{/block}` ali lastno značko, ki jo bomo zdaj ustvarili: `{debug}...{/debug}`.
+
+Ta značka nam bo omogočila vključitev informacij za razhroščevanje v naše predloge, ki naj bi bile vidne samo med razvojem.
+
+**Cilj:** Ustvariti parno značko `{debug}`, katere vsebina se izriše samo, če je aktivna specifična zastavica "razvojnega načina".
+
+
+Predstavitev ponudnikov .[#toc-introducing-providers]
+-----------------------------------------------------
+
+Včasih vaše značke potrebujejo dostop do podatkov ali storitev, ki niso posredovane neposredno kot parametri predloge. Na primer, določanje, ali je aplikacija v razvojnem načinu, dostop do objekta uporabnika ali pridobivanje konfiguracijskih vrednosti. Latte zagotavlja mehanizem, imenovan **ponudniki** (Providers) za ta namen.
+
+Ponudniki so registrirani v vaši [razširitvi |extending-latte#latte-extension] z uporabo metode `getProviders()`. Ta metoda vrne asociativno polje, kjer so ključi imena, pod katerimi bodo ponudniki dostopni v izvajalni kodi predloge, vrednosti pa so dejanski podatki ali objekti.
+
+Znotraj PHP kode, ki jo generira metoda `print()` vaše značke, lahko do teh ponudnikov dostopate preko posebne lastnosti objekta `$this->global`.
+Ker je ta lastnost deljena med vsemi razširitvami, je dobra praksa **predpona imen vaših ponudnikov** za preprečevanje potencialnih kolizij imen s ključnimi ponudniki Latte ali ponudniki iz drugih razširitev tretjih oseb. Običajna konvencija je uporaba kratke, edinstvene predpone, povezane z vašim proizvajalcem ali imenom razširitve. Za naš primer bomo uporabili predpono `app` in zastavica razvojnega načina bo dostopna kot `$this->global->appDevMode`.
+
+
+Ključna beseda `yield` za razčlenjevanje vsebine .[#toc-the-yield-keyword-for-parsing-content]
+----------------------------------------------------------------------------------------------
+
+Kako povemo razčlenjevalniku Latte, naj obdela vsebino *med* `{debug}` in `{/debug}`? Tukaj pride v poštev ključna beseda `yield`.
+
+Ko se `yield` uporabi v funkciji `create()`, funkcija postane [PHP generator |https://www.php.net/manual/en/language.generators.overview.php]. Njegovo izvajanje se zaustavi in nadzor se vrne glavnemu `TemplateParser`. `TemplateParser` nato nadaljuje z razčlenjevanjem vsebine predloge, *dokler* ne naleti na ustrezno zapiralno značko (`{/debug}` v našem primeru).
+
+Ko je najdena zapiralna značka, `TemplateParser` nadaljuje izvajanje naše funkcije `create()` takoj za stavkom `yield`. Vrednost, ki jo *vrne* stavek `yield`, je polje, ki vsebuje dva elementa:
+
+1.  `AreaNode`, ki predstavlja razčlenjeno vsebino med začetno in končno značko.
+2.  Objekt `Tag`, ki predstavlja zapiralno značko (npr. `{/debug}`).
+
+Ustvarimo razred `DebugNode` in njegovo metodo `create`, ki uporablja `yield`.
+
+```php .{file: DebugNode.php}
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DebugNode extends StatementNode
+{
+	// Javna lastnost za shranjevanje razčlenjene notranje vsebine
+	public AreaNode $content;
+
+	/**
+	 * Funkcija za razčlenjevanje parne značke {debug} ... {/debug}.
+	 */
+	public static function create(Tag $tag): \Generator // opazite vrnjeni tip
+	{
+		$node = $tag->node = new self;
+
+		// Zaustavi razčlenjevanje, pridobi notranjo vsebino in končno značko, ko je najden {/debug}
+		[$node->content, $endTag] = yield;
+
+		return $node;
+	}
+
+	// ... print() in getIterator() bosta implementirani kasneje ...
+}
+```
+
+Opomba: `$endTag` je `null`, če je značka uporabljena kot n:atribut, tj. `<div n:debug>...</div>`.
+
+
+Implementacija `print()` za pogojno izrisovanje .[#toc-implementing-print-for-conditional-rendering]
+----------------------------------------------------------------------------------------------------
+
+Metoda `print()` mora zdaj generirati PHP kodo, ki ob izvajanju preveri ponudnika `appDevMode` in izvede kodo za notranjo vsebino le, če je zastavica true.
+
+```php
+	public function print(PrintContext $context): string
+	{
+		// Generira PHP stavek 'if', ki ob izvajanju preveri ponudnika
+		return $context->format(
+			<<<'XX'
+				if ($this->global->appDevMode) %line {
+					// Če je v razvojnem načinu, izpiše notranjo vsebino
+					%node
+				}
+
+				XX,
+			$this->position, // Za %line komentar
+			$this->content,  // Vozlišče, ki vsebuje AST notranje vsebine
+		);
+	}
+```
+
+To je preprosto. Uporabljamo `PrintContext::format()` za ustvarjanje standardnega PHP stavka `if`. Znotraj `if` postavimo nadomestni znak `%node` za `$this->content`. Latte rekurzivno pokliče `$this->content->print($context)` za generiranje PHP kode za notranji del značke, vendar le, če `$this->global->appDevMode` ob izvajanju vrne true.
+
+
+Implementacija `getIterator()` za vsebino .[#toc-implementing-getiterator-for-content]
+--------------------------------------------------------------------------------------
+
+Tako kot pri vozlišču parametra v prejšnjem primeru, ima naš `DebugNode` zdaj podrejeno vozlišče: `AreaNode $content`. Moramo ga omogočiti dostop tako, da ga zagotovimo v `getIterator()`:
+
+```php
+	public function &getIterator(): \Generator
+	{
+		// Zagotavlja referenco na vozlišče vsebine
+		yield $this->content;
+	}
+```
+
+To omogoča prevajalskim prehodom, da se spustijo v vsebino naše značke `{debug}`, kar je pomembno, tudi če je vsebina pogojno izrisana. Na primer, Sandbox mora analizirati vsebino ne glede na to, ali je `appDevMode` true ali false.
+
+
+Registracija in uporaba .[#toc-registration-and-usage]
+------------------------------------------------------
+
+Registrirajte značko in ponudnika v vaši razširitvi:
+
+```php .{file: MyLatteExtension.php}
+class MyLatteExtension extends Extension
+{
+	// Predpostavljamo, da je $isDevelopmentMode določen nekje (npr. iz konfiguracije)
+	public function __construct(
+		private bool $isDevelopmentMode,
+	) {
+	}
+
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...), // Registracija nove značke
+		];
+	}
+
+	public function getProviders(): array
+	{
+		return [
+			'appDevMode' => $this->isDevelopmentMode, // Registracija ponudnika
+		];
+	}
+}
+
+// Pri registraciji razširitve:
+$isDev = true; // Določite to na podlagi okolja vaše aplikacije
+$latte->addExtension(new App\Latte\MyLatteExtension($isDev));
+```
+
+In njegova uporaba v predlogi:
+
+```latte
+<p>Običajna vsebina, vedno vidna.</p>
+
+{debug}
+	<div class="debug-panel">
+		ID trenutnega uporabnika: {$user->id}
+		Čas zahteve: {=time()}
+	</div>
+{/debug}
+
+<p>Druga običajna vsebina.</p>
+```
+
+
+Integracija n:atributov .[#toc-n-attributes-integration]
+--------------------------------------------------------
+
+Latte ponuja priročen skrajšan zapis za mnoge parne značke: [n:atributi |syntax#n:atributy]. Če imate parno značko, kot je `{tag}...{/tag}`, in želite, da se njen učinek uporabi neposredno na enem samem HTML elementu, jo lahko pogosto zapišete bolj jedrnato kot atribut `n:tag` na tem elementu.
+
+Za večino standardnih parnih značk, ki jih definirate (kot je naša `{debug}`), bo Latte samodejno omogočil ustrezno različico `n:` atributa. Med registracijo vam ni treba storiti ničesar dodatnega:
+
+```latte
+{* Standardna uporaba parne značke *}
+{debug}<div>Informacije za razhroščevanje</div>{/debug}
+
+{* Enakovredna uporaba z n:atributom *}
+<div n:debug>Informacije za razhroščevanje</div>
+```
+
+Obe različici bosta izrisali `<div>` samo, če je `$this->global->appDevMode` true. Predpone `inner-` in `tag-` prav tako delujejo po pričakovanjih.
+
+Včasih se mora logika vaše značke obnašati nekoliko drugače, odvisno od tega, ali je uporabljena kot standardna parna značka ali kot n:atribut, ali če je uporabljena predpona kot `n:inner-tag` ali `n:tag-tag`. Objekt `Latte\Compiler\Tag`, posredovan vaši funkciji za razčlenjevanje `create()`, zagotavlja te informacije:
+
+- `$tag->isNAttribute(): bool`: Vrne `true`, če je značka razčlenjena kot n:atribut.
+- `$tag->prefix: ?string`: Vrne predpono, uporabljeno z n:atributom, kar je lahko `null` (ni n:atribut), `Tag::PrefixNone`, `Tag::PrefixInner` ali `Tag::PrefixTag`.
+
+Zdaj, ko razumemo preproste značke, razčlenjevanje parametrov, parne značke, ponudnike in n:atribute, se lotimo bolj zapletenega scenarija, ki vključuje značke, gnezdenih v drugih značkah, z uporabo naše značke `{debug}` kot izhodišča.
+
+
+Vmesne značke .[#toc-intermediate-tags]
+=======================================
+
+Nekatere parne značke omogočajo ali celo zahtevajo, da se druge značke pojavijo *znotraj* njih pred končno zapiralno značko. Te se imenujejo **vmesne značke**. Klasični primeri vključujejo `{if}...{elseif}...{else}...{/if}` ali `{switch}...{case}...{default}...{/switch}`.
+
+Razširimo našo značko `{debug}` tako, da podpira neobvezno klavzulo `{else}`, ki bo izrisana, ko aplikacija *ni* v razvojnem načinu.
+
+**Cilj:** Prilagoditi `{debug}` tako, da podpira neobvezno vmesno značko `{else}`. Končna sintaksa naj bi bila `{debug} ... {else} ... {/debug}`.
+
+
+Razčlenjevanje vmesnih značk z `yield` .[#toc-parsing-intermediate-tags-with-yield]
+-----------------------------------------------------------------------------------
+
+Že vemo, da `yield` zaustavi funkcijo za razčlenjevanje `create()` in vrne razčlenjeno vsebino skupaj s končno značko. Vendar `yield` ponuja več nadzora: lahko mu posredujete polje *imen vmesnih značk*. Ko razčlenjevalnik naleti na katero koli od teh določenih značk **na isti ravni gnezdenja** (tj. kot neposredne otroke starševske značke, ne znotraj drugih blokov ali značk znotraj nje), prav tako ustavi razčlenjevanje.
+
+Ko se razčlenjevanje ustavi zaradi vmesne značke, ustavi razčlenjevanje vsebine, nadaljuje generator `create()` in preda nazaj delno razčlenjeno vsebino in **vmesno značko** samo (namesto končne zapiralne značke). Naša funkcija `create()` lahko nato obdela to vmesno značko (npr. razčleni njene parametre, če jih je imela) in ponovno uporabi `yield` za razčlenjevanje *naslednjega* dela vsebine do *končne* zapiralne značke ali druge pričakovane vmesne značke.
+
+Prilagodimo `DebugNode::create()` tako, da pričakuje `{else}`:
+
+```php .{file: DebugNode.php}
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\NopNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DebugNode extends StatementNode
+{
+	// Vsebina za del {debug}
+	public AreaNode $thenContent;
+	// Neobvezna vsebina za del {else}
+	public ?AreaNode $elseContent = null;
+
+	public static function create(Tag $tag): \Generator
+	{
+		$node = $tag->node = new self;
+
+		// yield in pričakovati bodisi {/debug} ali {else}
+		[$node->thenContent, $nextTag] = yield ['else'];
+
+		// Preveriti, ali je bila značka, pri kateri smo se ustavili, {else}
+		if ($nextTag?->name === 'else') {
+			// Yield ponovno za razčlenjevanje vsebine med {else} in {/debug}
+			[$node->elseContent, $endTag] = yield;
+		}
+
+		return $node;
+	}
+
+	// ... print() in getIterator() bosta posodobljeni kasneje ...
+}
+```
+
+Zdaj `yield ['else']` pove Latteju, naj ustavi razčlenjevanje ne samo za `{/debug}`, ampak tudi za `{else}`. Če je `{else}` najden, bo `$nextTag` vseboval objekt `Tag` za `{else}`. Nato ponovno uporabimo `yield` brez parametrov, kar pomeni, da zdaj pričakujemo samo končno značko `{/debug}`, in shranimo rezultat v `$node->elseContent`. Če `{else}` ni bil najden, bi bil `$nextTag` `Tag` za `{/debug}` (ali `null`, če je uporabljen kot n:atribut) in `$node->elseContent` bi ostal `null`.
+
+
+Implementacija `print()` z `{else}` .[#toc-implementing-print-with-else]
+------------------------------------------------------------------------
+
+Metoda `print()` mora odražati novo strukturo. Morala bi generirati PHP stavek `if/else`, ki temelji na ponudniku `devMode`.
+
+```php
+	public function print(PrintContext $context): string
+	{
+		return $context->format(
+			<<<'XX'
+				if ($this->global->appDevMode) %line {
+					%node // Koda za vejo 'then' (vsebina {debug})
+				} else {
+					%node // Koda za vejo 'else' (vsebina {else})
+				}
+
+				XX,
+			$this->position,    // Številka vrstice za pogoj 'if'
+			$this->thenContent, // Prvi nadomestni znak %node
+			$this->elseContent ?? new NopNode, // Drugi nadomestni znak %node
+		);
+	}
+```
+
+To je standardna PHP struktura `if/else`. Uporabljamo `%node` dvakrat; `format()` zaporedno zamenja podana vozlišča. Uporabljamo `?? new NopNode` za izogibanje napakam, če je `$this->elseContent` `null` – `NopNode` preprosto ne izpiše ničesar.
+
+
+Implementacija `getIterator()` za obe vsebini .[#toc-implementing-getiterator-for-both-contents]
+------------------------------------------------------------------------------------------------
+
+Zdaj imamo potencialno dve podrejeni vozlišči vsebine (`$thenContent` in `$elseContent`). Zagotoviti moramo obe, če obstajata:
+
+```php
+	public function &getIterator(): \Generator
+	{
+		yield $this->thenContent;
+		if ($this->elseContent) {
+			yield $this->elseContent;
+		}
+	}
+```
+
+
+Uporaba izboljšane značke .[#toc-using-the-enhanced-tag]
+--------------------------------------------------------
+
+Značka se zdaj lahko uporablja z neobvezno klavzulo `{else}`:
+
+```latte
+{debug}
+	<p>Prikazovanje informacij za razhroščevanje, ker je devMode VKLOPLJEN.</p>
+{else}
+	<p>Informacije za razhroščevanje so skrite, ker je devMode IZKLOPLJEN.</p>
+{/debug}
+```
+
+
+Obravnavanje stanja in gnezdenja .[#toc-handling-state-and-nesting]
+===================================================================
+
+Naši prejšnji primeri (`{datetime}`, `{debug}`) so bili relativno brez stanja znotraj svojih metod `print()`. Bodisi so neposredno izpisovali vsebino bodisi izvajali preprosto pogojno preverjanje na podlagi globalnega ponudnika. Vendar pa morajo mnoge značke upravljati neko obliko **stanja** med izrisovanjem ali vključujejo vrednotenje uporabniških izrazov, ki naj bi se zaradi učinkovitosti ali pravilnosti zagnali samo enkrat. Poleg tega moramo razmisliti, kaj se zgodi, ko so naše lastne značke **gnezdenje**.
+
+Ilustrirajmo te koncepte z ustvarjanjem značke `{repeat $count}...{/repeat}`. Ta značka bo ponovila svojo notranjo vsebino `$count`-krat.
+
+**Cilj:** Implementirati `{repeat $count}`, ki ponovi svojo vsebino določeno število krat.
+
+
+Potreba po začasnih & edinstvenih spremenljivkah .[#toc-the-need-for-temporary-unique-variables]
+------------------------------------------------------------------------------------------------
+
+Predstavljajte si, da uporabnik napiše:
+
+```latte
+{repeat rand(1, 5)} Vsebina {/repeat}
+```
+
+Če bi naivno generirali PHP `for` zanko na ta način v naši metodi `print()`:
+
+```php
+// Poenostavljena, NAPAČNA generirana koda
+for ($i = 0; $i < rand(1, 5); $i++) {
+	// izpis vsebine
+}
+```
+To bi bilo narobe! Izraz `rand(1, 5)` bi bil **ponovno ovrednoten pri vsaki iteraciji zanke**, kar bi vodilo do nepredvidljivega števila ponovitev. Izraz `$count` moramo ovrednotiti *enkrat* pred začetkom zanke in shraniti njegov rezultat.
+
+Generirali bomo PHP kodo, ki najprej ovrednoti izraz števila in ga shrani v **začasno izvajalno spremenljivko**. Da bi preprečili kolizije s spremenljivkami, ki jih definira uporabnik predloge, *in* notranjimi spremenljivkami Latte (kot je `$ʟ_...`), bomo uporabili konvencijo predpone **`$__` (dvojno podčrtaj)** za naše začasne spremenljivke.
+
+Generirana koda bi potem izgledala takole:
+
+```php
+$__count = rand(1, 5);
+for ($__i = 0; $__i < $__count; $__i++) {
+	// izpis vsebine
+}
+```
+
+Zdaj razmislimo o gnezdenju:
+
+```latte
+{repeat $countA}       {* Zunanja zanka *}
+	{repeat $countB}   {* Notranja zanka *}
+		...
+	{/repeat}
+{/repeat}
+```
+
+Če bi tako zunanja kot notranja značka `{repeat}` generirali kodo, ki uporablja *ista* imena začasnih spremenljivk (npr. `$__count` in `$__i`), bi notranja zanka prepisala spremenljivke zunanje zanke, kar bi porušilo logiko.
+
+Zagotoviti moramo, da so začasne spremenljivke, generirane za vsako instanco značke `{repeat}`, **edinstvene**. To dosežemo z uporabo `PrintContext::generateId()`. Ta metoda vrne edinstveno celo število med fazo prevajanja. To ID lahko pripnemo k imenom naših začasnih spremenljivk.
+
+Torej namesto `$__count` bomo generirali `$__count_1` za prvo značko repeat, `$__count_2` za drugo itd. Podobno bomo za števec zanke uporabili `$__i_1`, `$__i_2` itd.
+
+
+Implementacija `RepeatNode` .[#toc-implementing-repeatnode]
+-----------------------------------------------------------
+
+Ustvarimo razred vozlišča.
+
+```php .{file: RepeatNode.php}
+<?php
+
+namespace App\Latte;
+
+use Latte\CompileException;
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class RepeatNode extends StatementNode
+{
+	public ExpressionNode $count;
+	public AreaNode $content;
+
+	/**
+	 * Funkcija za razčlenjevanje za {repeat $count} ... {/repeat}
+	 */
+	public static function create(Tag $tag): \Generator
+	{
+		$tag->expectArguments(); // zagotovi, da je $count podan
+		$node = $tag->node = new self;
+		// Razčleni izraz števila
+		$node->count = $tag->parser->parseExpression();
+		// Pridobivanje notranje vsebine
+		[$node->content] = yield;
+		return $node;
+	}
+
+	/**
+	 * Generira PHP 'for' zanko z edinstvenimi imeni spremenljivk.
+	 */
+	public function print(PrintContext $context): string
+	{
+		// Generiranje edinstvenih imen spremenljivk
+		$id = $context->generateId();
+		$countVar = '$__count_' . $id; // npr. $__count_1, $__count_2, itd.
+		$iteratorVar = '$__i_' . $id;  // npr. $__i_1, $__i_2, itd.
+
+		return $context->format(
+			<<<'XX'
+				// Ovrednotenje izraza števila *enkrat* in shranjevanje
+				%raw = (int) (%node);
+				// Zanka z uporabo shranjenega števila in edinstvene iteracijske spremenljivke
+				for (%raw = 0; %2.raw < %0.raw; %2.raw++) %line {
+					%node // Izrisovanje notranje vsebine
+				}
+
+				XX,
+			$countVar,          // %0 - Spremenljivka za shranjevanje števila
+			$this->count,       // %1 - Vozlišče izraza za število
+			$iteratorVar,       // %2 - Ime iteracijske spremenljivke zanke
+			$this->position,    // %3 - Komentar s številko vrstice za samo zanko
+			$this->content      // %4 - Vozlišče notranje vsebine
+		);
+	}
+
+	/**
+	 * Zagotavlja podrejena vozlišča (izraz števila in vsebina).
+	 */
+	public function &getIterator(): \Generator
+	{
+		yield $this->count;
+		yield $this->content;
+	}
+}
+```
+
+Metoda `create()` razčleni zahtevani izraz `$count` z uporabo `parseExpression()`. Najprej se pokliče `$tag->expectArguments()`. To zagotavlja, da je uporabnik podal *nekaj* za `{repeat}`. Medtem ko bi `$tag->parser->parseExpression()` spodletel, če nič ne bi bilo podano, bi sporočilo o napaki lahko bilo o nepričakovani sintaksi. Uporaba `expectArguments()` zagotavlja veliko jasnejšo napako, ki posebej navaja, da manjkajo parametri za značko `{repeat}`.
+
+Metoda `print()` generira PHP kodo, odgovorno za izvajanje logike ponavljanja ob izvajanju. Začne z generiranjem edinstvenih imen za začasne PHP spremenljivke, ki jih bo potrebovala.
+
+Metoda `$context->format()` je klicana z novim nadomestnim znakom `%raw`, ki vstavi *surov niz*, podan kot ustrezen parameter. Tukaj vstavi edinstveno ime spremenljivke, shranjeno v `$countVar` (npr. `$__count_1`).
+Kaj pa `%0.raw` in `%2.raw`? To prikazuje **pozicijske nadomestne znake**. Namesto samo `%raw`, ki vzame *naslednji* razpoložljiv surovi parameter, `%2.raw` eksplicitno vzame parameter na indeksu 2 (kar je `$iteratorVar`) in vstavi njegovo surovo nizovno vrednost. To nam omogoča ponovno uporabo niza `$iteratorVar`, ne da bi ga večkrat posredovali v seznamu parametrov za `format()`.
+
+Ta skrbno sestavljen klic `format()` generira učinkovito in varno PHP zanko, ki pravilno obravnava izraz števila in se izogiba kolizijam imen spremenljivk, tudi ko so značke `{repeat}` gnezdenje.
+
+
+Registracija in uporaba .[#toc-registration-and-usage]
+------------------------------------------------------
+
+Registrirajte značko v vaši razširitvi:
+
+```php
+use App\Latte\RepeatNode;
+
+class MyLatteExtension extends Extension
+{
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...),
+			'repeat' => RepeatNode::create(...), // Registracija značke repeat
+		];
+	}
+}
+```
+
+Uporabite jo v predlogi, vključno z gnezdenjem:
+
+```latte
+{var $rows = rand(5, 7)}
+{var $cols = rand(3, 5)}
+
+{repeat $rows}
+	<tr>
+		{repeat $cols}
+			<td>Notranja zanka</td>
+		{/repeat}
+	</tr>
+{/repeat}
+```
+
+Ta primer prikazuje, kako obravnavati stanje (števce zank) in potencialne težave z gnezdenjem z uporabo začasnih spremenljivk s predpono `$__` in edinstvenih z ID-jem od `PrintContext::generateId()`.
+
+
+Čisti n:atributi .[#toc-pure-n-attributes]
+------------------------------------------
+
+Medtem ko mnogi `n:atributi`, kot sta `n:if` ali `n:foreach`, služijo kot priročne okrajšave za njihove ustrezne parne značke (`{if}...{/if}`, `{foreach}...{/foreach}`), Latte omogoča tudi definiranje značk, ki *obstajajo samo* v obliki n:atributa. Te se pogosto uporabljajo za spreminjanje atributov ali obnašanja HTML elementa, na katerega so pripeti.
+
+Standardni primeri, vgrajeni v Latte, vključujejo [`n:class` |tags#n:class], ki pomaga dinamično sestaviti atribut `class`, in [`n:attr` |tags#n:attr], ki lahko nastavi več poljubnih atributov.
+
+Ustvarimo si lasten čisti n:atribut: `n:confirm`, ki doda JavaScript potrditveno pogovorno okno pred izvedbo dejanja (kot je sledenje povezavi ali pošiljanje obrazca).
+
+**Cilj:** Implementirati `n:confirm="'Ste prepričani?'"`, ki doda obravnavnik `onclick` za preprečitev privzetega dejanja, če uporabnik prekliče potrditveno pogovorno okno.
+
+
+Implementacija `ConfirmNode` .[#toc-implementing-confirmnode]
+-------------------------------------------------------------
+
+Potrebujemo razred Node in funkcijo za razčlenjevanje.
+
+```php .{file: ConfirmNode.php}
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+
+class ConfirmNode extends StatementNode
+{
+	public ExpressionNode $message;
+
+	public static function create(Tag $tag): self
+	{
+		$tag->expectArguments();
+		$node = $tag->node = new self;
+		$node->message = $tag->parser->parseExpression();
+		return $node;
+	}
+
+	/**
+	 * Generira kodo atributa 'onclick' s pravilnim ubežanjem znakov.
+	 */
+	public function print(PrintContext $context): string
+	{
+		// Zagotavlja pravilno ubežanje znakov za kontekste JavaScript in HTML atributa.
+		return $context->format(
+			<<<'XX'
+				echo ' onclick="', LR\Filters::escapeHtmlAttr('return confirm(' . LR\Filters::escapeJs(%node) . ')'), '"' %line;
+				XX,
+			$this->message,
+			$this->position,
+		);
+	}
+
+	public function &getIterator(): \Generator
+	{
+		yield $this->message;
+	}
+}
+```
+
+Metoda `print()` generira PHP kodo, ki na koncu med izrisovanjem predloge izpiše HTML atribut `onclick="..."`. Obravnavanje gnezdenih kontekstov (JavaScript znotraj HTML atributa) zahteva skrbno ubežanje znakov.
+Filter `LR\Filters::escapeJs(%node)` se pokliče ob izvajanju in pravilno ubeži sporočilo za uporabo znotraj JavaScripta (izpis bi bil kot `"Sure?"`). Nato filter `LR\Filters::escapeHtmlAttr(...)` ubeži znake, ki so posebni v HTML atributih, tako da bi to spremenilo izpis v `return confirm(&quot;Sure?&quot;)`.
+To dvostopenjsko ubežanje znakov ob izvajanju zagotavlja, da je sporočilo varno za JavaScript in da je nastala JavaScript koda varna za vstavljanje v HTML atribut `onclick`.
+
+
+Registracija in uporaba .[#toc-registration-and-usage]
+------------------------------------------------------
+
+Registrirajte n:atribut v vaši razširitvi. Ne pozabite na predpono `n:` v ključu:
+
+```php .{file: MyLatteExtension.php}
+class MyLatteExtension extends Extension
+{
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...),
+			'repeat' => RepeatNode::create(...),
+			'n:confirm' => ConfirmNode::create(...), // Registracija n:confirm
+		];
+	}
+}
+```
+
+Zdaj lahko uporabite `n:confirm` na povezavah, gumbih ali elementih obrazca:
+
+```latte
+<a href="delete.php?id=123" n:confirm='"Ali res želite izbrisati element {$id}?"'>Izbriši</a>
+```
+
+Generirana HTML koda:
+
+```html
+<a href="delete.php?id=123" onclick="return confirm(&quot;Ali res želite izbrisati element 123?&quot;)">Izbriši</a>
+```
+
+Ko uporabnik klikne na povezavo, brskalnik izvede kodo `onclick`, prikaže potrditveno pogovorno okno in preide na `delete.php` samo, če uporabnik klikne "OK".
+
+Ta primer prikazuje, kako je mogoče ustvariti čisti n:atribut za spreminjanje obnašanja ali atributov svojega gostiteljskega HTML elementa z generiranjem ustrezne PHP kode v njegovi metodi `print()`. Ne pozabite na dvojno ubežanje znakov, ki je pogosto zahtevano: enkrat za ciljni kontekst (JavaScript v tem primeru) in ponovno za kontekst HTML atributa.
+
+
+Napredne teme .[#toc-advanced-topics]
+=====================================
+
+Medtem ko prejšnji razdelki pokrivajo osnovne koncepte, je tukaj nekaj naprednejših tem, na katere lahko naletite pri ustvarjanju lastnih Latte značk.
+
+
+Načini izpisa značk .[#toc-tag-output-modes]
+--------------------------------------------
+
+Objekt `Tag`, posredovan vaši funkciji `create()`, ima lastnost `outputMode`. Ta lastnost vpliva na to, kako Latte obravnava okoliške presledke in zamike, zlasti ko je značka uporabljena v svoji vrstici. To lastnost lahko spremenite v vaši funkciji `create()`.
+
+- `Tag::OutputKeepIndentation` (Privzeto za večino značk kot `{=...}`): Latte poskuša ohraniti zamik pred značko. Nove vrstice *po* znački so na splošno ohranjene. To je primerno za značke, ki izpisujejo vsebino v vrstici.
+- `Tag::OutputRemoveIndentation` (Privzeto za blokovne značke kot `{if}`, `{foreach}`): Latte odstrani začetni zamik in potencialno eno naslednjo novo vrstico. To pomaga ohranjati generirano PHP kodo čistejšo in preprečuje dodatne prazne vrstice v HTML izpisu, ki jih povzroči sama značka. Uporabite to za značke, ki predstavljajo kontrolne strukture ali bloke, ki sami ne bi smeli dodajati presledkov.
+- `Tag::OutputNone` (Uporabljajo ga značke kot `{var}`, `{default}`): Podobno kot `RemoveIndentation`, vendar močneje signalizira, da značka sama ne proizvaja neposrednega izpisa, kar potencialno še bolj agresivno vpliva na obdelavo presledkov okoli nje. Primerno za deklarativne ali nastavitvene značke.
+
+Izberite način, ki najbolje ustreza namenu vaše značke. Za večino strukturnih ali kontrolnih značk je običajno primeren `OutputRemoveIndentation`.
+
+
+Dostop do starševskih/najbližjih značk .[#toc-accessing-parent-closest-tags]
+----------------------------------------------------------------------------
+
+Včasih mora obnašanje značke biti odvisno od konteksta, v katerem se uporablja, natančneje, v kateri starševski znački(ah) se nahaja. Objekt `Tag`, posredovan vaši funkciji `create()`, zagotavlja metodo `closestTag(array $classes, ?callable $condition = null): ?Tag` natančno za ta namen.
+
+Ta metoda išče navzgor po hierarhiji trenutno odprtih značk (vključno s HTML elementi, ki so interno predstavljeni med razčlenjevanjem) in vrne objekt `Tag` najbližjega prednika, ki ustreza specifičnim kriterijem. Če ni najden noben ustrezen prednik, vrne `null`.
+
+Polje `$classes` določa, kakšno vrsto predniških značk iščete. Preverja, ali je povezano vozlišče predniške značke (`$ancestorTag->node`) instanca tega razreda.
+
+```php
+function create(Tag $tag)
+{
+	// Iskanje najbližje predniške značke, katere vozlišče je instanca ForeachNode
+	$foreachTag = $tag->closestTag([ForeachNode::class]);
+	if ($foreachTag) {
+		// Lahko dostopamo do instance ForeachNode same:
+		$foreachNode = $foreachTag->node;
+	}
+}
+```
+
+Opazite `$foreachTag->node`: To deluje samo zato, ker je konvencija pri razvoju Latte značk takoj dodeliti ustvarjeno vozlišče k `$tag->node` znotraj metode `create()`, kot smo vedno počeli.
+
+Včasih samo primerjava tipa vozlišča ni dovolj. Morda boste morali preveriti specifično lastnost potencialne predniške značke ali njenega vozlišča. Neobvezni drugi parameter za `closestTag()` je klicna funkcija (callable), ki prejme potencialni predniški objekt `Tag` in mora vrniti, ali je veljavno ujemanje.
+
+```php
+function create(Tag $tag)
+{
+	$dynamicBlockTag = $tag->closestTag(
+		[BlockNode::class],
+		// Pogoj: blok mora biti dinamičen
+		fn(Tag $blockTag) => $blockTag->node->block->isDynamic(),
+	);
+}
+```
+
+Uporaba `closestTag()` omogoča ustvarjanje značk, ki so kontekstno zavedne in uveljavljajo pravilno uporabo znotraj strukture vaše predloge, kar vodi do bolj robustnih in razumljivih predlog.
+
+
+Nadomestni znaki `PrintContext::format()`
+-----------------------------------------
+
+Pogosto smo uporabljali `PrintContext::format()` za generiranje PHP kode v metodah `print()` naših vozlišč. Sprejme niz maske in naslednje parametre, ki nadomestijo nadomestne znake v maski. Tukaj je povzetek razpoložljivih nadomestnih znakov:
+
+- **`%node`**: Parameter mora biti instanca `Node`. Pokliče metodo `print()` vozlišča in vstavi nastali niz PHP kode.
+- **`%dump`**: Parameter je katera koli PHP vrednost. Izvozi vrednost v veljavno PHP kodo. Primerno za skalarje, polja, null.
+	- `$context->format('echo %dump;', 'Hello')` -> `echo 'Hello';`
+	- `$context->format('$arr = %dump;', [1, 2])` -> `$arr = [1, 2];`
+- **`%raw`**: Vstavi parameter neposredno v izhodno PHP kodo brez kakršnega koli ubežanja znakov ali prilagoditev. **Uporabljajte previdno**, predvsem za vstavljanje predgeneriranih fragmentov PHP kode ali imen spremenljivk.
+	- `$context->format('%raw = 1;', '$variableName')` -> `$variableName = 1;`
+- **`%args`**: Parameter mora biti `Expression\ArrayNode`. Izpiše elemente polja, formatirane kot parametri za klic funkcije ali metode (ločeni z vejicami, obravnava poimenovane parametre, če so prisotni).
+	- `$argsNode = new ArrayNode([...]);`
+	- `$context->format('myFunc(%args);', $argsNode)` -> `myFunc(1, name: 'Joe');`
+- **`%line`**: Parameter mora biti objekt `Position` (običajno `$this->position`). Vstavi PHP komentar `/* line X */`, ki označuje številko vrstice vira.
+	- `$context->format('echo "Hi" %line;', $this->position)` -> `echo "Hi" /* line 42 */;`
+- **`%escape(...)`**: Generira PHP kodo, ki *ob izvajanju* ubeži notranji izraz z uporabo trenutnih kontekstno zavednih pravil ubežanja znakov.
+	- `$context->format('echo %escape(%node);', $variableNode)`
+- **`%modify(...)`**: Parameter mora biti `ModifierNode`. Generira PHP kodo, ki uporabi filtre, določene v `ModifierNode`, na notranji vsebini, vključno s kontekstno zavednim ubežanjem znakov, če ni onemogočeno z `|noescape`.
+	- `$context->format('%modify(%node);', $modifierNode, $variableNode)`
+- **`%modifyContent(...)`**: Podobno kot `%modify`, vendar namenjeno za spreminjanje blokov zajete vsebine (pogosto HTML).
+
+Lahko eksplicitno sklicujete na parametre po njihovem indeksu (od nič): `%0.node`, `%1.dump`, `%2.raw`, itd. To omogoča ponovno uporabo parametra večkrat v maski, ne da bi ga ponovno posredovali v `format()`. Glejte primer značke `{repeat}`, kjer sta bila uporabljena `%0.raw` in `%2.raw`.
+
+
+Primer kompleksnega razčlenjevanja parametrov .[#toc-complex-argument-parsing-example]
+--------------------------------------------------------------------------------------
+
+Medtem ko `parseExpression()`, `parseArguments()`, itd., pokrivajo mnoge primere, včasih potrebujete bolj zapleteno logiko razčlenjevanja z uporabo nižje ravni `TokenStream`, ki je na voljo preko `$tag->parser->stream`.
+
+**Cilj:** Ustvariti značko `{embedYoutube $videoID, width: 640, height: 480}`. Želimo razčleniti zahtevani ID videa (niz ali spremenljivko), ki mu sledijo neobvezni pari ključ-vrednost za dimenzije.
+
+```php .{file: YoutubeNode.php}
+<?php
+namespace App\Latte;
+
+class YoutubeNode extends StatementNode
+{
+	public ExpressionNode $videoId;
+	public ?ExpressionNode $width = null;
+	public ?ExpressionNode $height = null;
+
+	public static function create(Tag $tag): self
+	{
+		$tag->expectArguments();
+		$node = $tag->node = new self;
+		// Razčlenjevanje zahtevanega ID-ja videa
+		$node->videoId = $tag->parser->parseExpression();
+
+		// Razčlenjevanje neobveznih parov ključ-vrednost
+		$stream = $tag->parser->stream; // Pridobivanje toka žetonov
+		while ($stream->tryConsume(',')) { // Zahteva ločitev z vejico
+			// Pričakovanje identifikatorja 'width' ali 'height'
+			$keyToken = $stream->consume(Token::Php_Identifier);
+			$key = strtolower($keyToken->text);
+
+			$stream->consume(':'); // Pričakovanje ločila dvopičja
+
+			$value = $tag->parser->parseExpression(); // Razčlenjevanje izraza vrednosti
+
+			if ($key === 'width') {
+				$node->width = $value;
+			} elseif ($key === 'height') {
+				$node->height = $value;
+			} else {
+				throw new CompileException("Neznan parameter '$key'. Pričakovano 'width' ali 'height'.", $keyToken->position);
+			}
+		}
+
+		return $node;
+	}
+}
+```
+
+Ta raven nadzora vam omogoča definiranje zelo specifičnih in kompleksnih sintaks za vaše lastne značke z neposredno interakcijo s tokom žetonov.
+
+
+Uporaba `AuxiliaryNode` .[#toc-using-auxiliarynode]
+---------------------------------------------------
+
+Latte ponuja splošna "pomožna" vozlišča za posebne situacije med generiranjem kode ali znotraj prevajalskih prehodov. To sta `AuxiliaryNode` in `Php\Expression\AuxiliaryNode`.
+
+Predstavljajte si `AuxiliaryNode` kot prilagodljivo vsebniško vozlišče, ki svoje osnovne funkcionalnosti - generiranje kode in izpostavljanje podrejenih vozlišč - prenese na parametre, podane v njegovem konstruktorju:
+
+- Delegacija `print()`: Prvi parameter konstruktorja je PHP **closure**. Ko Latte pokliče metodo `print()` na `AuxiliaryNode`, izvede to podano closure. Closure prejme `PrintContext` in katera koli vozlišča, posredovana v drugem parametru konstruktorja, kar vam omogoča definiranje popolnoma lastne logike generiranja PHP kode ob izvajanju.
+- Delegacija `getIterator()`: Drugi parameter konstruktorja je **polje objektov `Node`**. Ko mora Latte preiti otroke `AuxiliaryNode` (npr. med prevajalskimi prehodi), njegova metoda `getIterator()` preprosto zagotovi vozlišča, navedena v tem polju.
+
+Primer:
+
+```php
+$node = new AuxiliaryNode(
+    // 1. Ta closure postane telo print()
+    fn(PrintContext $context, $arg1, $arg2) => $context->format('...%node...%node...', $arg1, $arg2),
+
+    // 2. Ta vozlišča so zagotovljena z metodo getIterator() in posredovana zgornji closure
+    [$argumentNode1, $argumentNode2]
+);
+```
+
+Latte ponuja dva različna tipa, ki temeljita na tem, kje morate vstaviti generirano kodo:
+
+- `Latte\Compiler\Nodes\Php\Expression\AuxiliaryNode`: Uporabite to, ko morate generirati kos PHP kode, ki predstavlja **izraz**.
+- `Latte\Compiler\Nodes\AuxiliaryNode`: Uporabite to za bolj splošne namene, ko morate vstaviti blok PHP kode, ki predstavlja enega ali več **stavkov**.
+
+Pomemben razlog za uporabo `AuxiliaryNode` namesto standardnih vozlišč (kot je `StaticMethodCallNode`) znotraj vaše metode `print()` ali prevajalskega prehoda je **nadzor vidnosti za naslednje prevajalske prehode**, zlasti tiste, povezane z varnostjo, kot je Sandbox.
+
+Razmislite o scenariju: Vaš prevajalski prehod mora oviti izraz, ki ga je podal uporabnik (`$userExpr`), s klicem specifične, zaupanja vredne pomožne funkcije `myInternalSanitize($userExpr)`. Če ustvarite standardno vozlišče `new FunctionCallNode('myInternalSanitize', [$userExpr])`, bo popolnoma vidno za prehod AST. Če prehod Sandbox teče kasneje in `myInternalSanitize` *ni* na njegovem seznamu dovoljenih, lahko Sandbox ta klic *blokira* ali spremeni, kar potencialno poruši notranjo logiko vaše značke, čeprav *vi*, avtor značke, veste, da je ta specifičen klic varen in potreben. Zato lahko klic generirate neposredno znotraj closure `AuxiliaryNode`.
+
+```php
+use Latte\Compiler\Nodes\Php\Expression\AuxiliaryNode;
+
+// ... znotraj print() ali prevajalskega prehoda ...
+$wrappedNode = new AuxiliaryNode(
+	fn(PrintContext $context, $userExpr) => $context->format(
+		'myInternalSanitize(%node)', // Neposredno generiranje PHP kode
+		$userExpr,
+	),
+	// POMEMBNO: Še vedno tukaj posredujte izvirno vozlišče uporabniškega izraza!
+	[$userExpr],
+);
+```
+
+V tem primeru prehod Sandbox vidi `AuxiliaryNode`, vendar **ne analizira PHP kode, ki jo generira njegova closure**. Ne more neposredno blokirati klica `myInternalSanitize`, generiranega *znotraj* closure.
+
+Medtem ko je generirana PHP koda sama skrita pred prehodi, morajo biti *vhodi* v to kodo (vozlišča, ki predstavljajo uporabniške podatke ali izraze) **še vedno prehodni**. Zato je drugi parameter konstruktorja `AuxiliaryNode` ključen. **Morate** posredovati polje, ki vsebuje vsa izvirna vozlišča (kot je `$userExpr` v zgornjem primeru), ki jih vaša closure uporablja. `getIterator()` `AuxiliaryNode` **bo zagotovil ta vozlišča**, kar omogoča prevajalskim prehodom, kot je Sandbox, da jih analizirajo za potencialne težave.
+
+
+Najboljše prakse .[#toc-best-practices]
+=======================================
+
+- **Jasen namen:** Zagotovite, da ima vaša značka jasen in nujen namen. Ne ustvarjajte značk za naloge, ki jih je mogoče enostavno rešiti z uporabo [filtrov |custom-filters] ali [funkcij |custom-functions].
+- **Pravilno implementirajte `getIterator()`:** Vedno implementirajte `getIterator()` in zagotovite *reference* (`&`) na *vsa* podrejena vozlišča (parametre, vsebino), ki so bila razčlenjena iz predloge. To je nujno za prevajalske prehode, varnost (Sandbox) in potencialne prihodnje optimizacije.
+- **Javne lastnosti za vozlišča:** Lastnosti, ki vsebujejo podrejena vozlišča, naredite javne, da jih lahko prevajalski prehodi po potrebi spreminjajo.
+- **Uporabljajte `PrintContext::format()`:** Izkoristite metodo `format()` za generiranje PHP kode. Obravnava narekovaje, pravilno ubeži nadomestne znake in samodejno dodaja komentarje s številko vrstice.
+- **Začasne spremenljivke (`$__`):** Pri generiranju izvajalne PHP kode, ki potrebuje začasne spremenljivke (npr. za shranjevanje vmesnih vsot, števce zank), uporabljajte konvencijo predpone `$__` za izogibanje kolizijam z uporabniškimi spremenljivkami in notranjimi spremenljivkami Latte `$ʟ_`.
+- **Gnezdenje in edinstveni ID-ji:** Če je vaša značka lahko gnezdena ali potrebuje stanje, specifično za instanco ob izvajanju, uporabite `$context->generateId()` znotraj vaše metode `print()` za ustvarjanje edinstvenih pripon za vaše začasne spremenljivke `$__`.
+- **Ponudniki za zunanje podatke:** Uporabljajte ponudnike (registrirane preko `Extension::getProviders()`) za dostop do izvajalnih podatkov ali storitev ($this->global->...) namesto trdega kodiranja vrednosti ali zanašanja na globalno stanje. Uporabljajte predpone proizvajalca za imena ponudnikov.
+- **Razmislite o n:atributih:** Če vaša parna značka logično deluje na enem samem HTML elementu, Latte verjetno zagotavlja samodejno podporo `n:atributu`. Imejte to v mislih za udobje uporabnika. Če ustvarjate značko, ki spreminja atribut, razmislite, ali je čisti `n:atribut` najprimernejša oblika.
+- **Testiranje:** Pišite teste za vaše značke, ki pokrivajo tako razčlenjevanje različnih sintaktičnih vnosov kot pravilnost izpisa generirane **PHP kode**.
+
+Z upoštevanjem teh smernic lahko ustvarite močne, robustne in vzdržljive lastne značke, ki se brezhibno integrirajo z mehanizmom predlog Latte.
+
+.[note]
+Študij razredov vozlišč, ki so del Latte, je najboljši način za učenje vseh podrobnosti o postopku razčlenjevanja.

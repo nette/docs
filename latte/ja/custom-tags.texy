@@ -1,0 +1,1140 @@
+カスタムタグの作成
+*********
+
+.[perex]
+このページでは、Latteでカスタムタグを作成するための包括的なガイドを提供します。Latteがテンプレートをどのようにコンパイルするかについての理解を基に、単純なタグから、ネストされたコンテンツや特定の解析ニーズを持つより複雑なシナリオまで、すべてを説明します。
+
+カスタムタグは、テンプレートの構文とレンダリングロジックに対する最高レベルの制御を提供しますが、拡張機能としては最も複雑な点でもあります。[より簡単な解決策が存在しないか | extending-latte#toc-ways-to-extend-latte]、または適切なタグがすでに[標準セット | tags]に存在しないかを常に検討してください。カスタムタグは、ニーズに対してより簡単な代替手段が不十分な場合にのみ使用してください。
+
+
+コンパイルプロセスの理解 .[#toc-understanding-the-compilation-process]
+==========================================================
+
+カスタムタグを効果的に作成するためには、Latteがテンプレートをどのように処理するかを説明することが役立ちます。このプロセスを理解することで、タグがなぜこのように構造化されているのか、そしてそれらがより広いコンテキストにどのように適合するのかが明らかになります。
+
+Latteでのテンプレートのコンパイルは、簡単に言うと、以下の主要なステップを含みます：
+
+1.  **字句解析:** レキサー（Lexer）はテンプレートのソースコード（`.latte`ファイル）を読み取り、それを**トークン**（例：`{`、`foreach`、`$variable`、`}`、HTMLテキストなど）と呼ばれる小さく、区別可能な部分のシーケンスに分割します。
+2.  **構文解析:** パーサー（Parser）はこのトークンのストリームを受け取り、テンプレートのロジックとコンテンツを表す意味のあるツリー構造を構築します。このツリーは**抽象構文木（AST）**と呼ばれます。
+3.  **コンパイルパス:** PHPコードを生成する前に、Latteは[コンパイルパス | compiler passes]を実行します。これらはAST全体を走査し、それを変更したり情報を収集したりできる関数です。このステップは、セキュリティ（[Sandbox | sandbox]）や最適化などの機能にとって重要です。
+4.  **コード生成:** 最後に、コンパイラは（潜在的に変更された）ASTを走査し、対応するPHPクラスコードを生成します。このPHPコードが、実行時に実際にテンプレートをレンダリングするものです。
+5.  **キャッシング:** 生成されたPHPコードはディスクに保存され、ステップ1〜4がスキップされるため、後続のレンダリングが非常に高速になります。
+
+実際には、コンパイルはもう少し複雑です。Latteには**2つの**レキサーとパーサーがあります。1つはHTMLテンプレート用、もう1つはタグ内のPHPライクなコード用です。また、構文解析はトークン化の後に行われるのではなく、レキサーとパーサーは2つの「スレッド」で並行して実行され、連携します。信じてください、これをプログラムするのはロケット科学でした :-)
+
+テンプレートコンテンツの読み込みから、解析、最終的なファイルの生成までの全プロセスは、以下のコードでシーケンス化できます。これを使って実験し、中間結果を出力することができます：
+
+```php
+$latte = new Latte\Engine;
+$source = $latte->getLoader()->getContent($file);
+$ast = $latte->parse($source);
+$latte->applyPasses($ast);
+$code = $latte->generate($ast, $file);
+```
+
+
+タグの構造 .[#toc-the-anatomy-of-a-tag]
+==================================
+
+Latteで完全に機能するカスタムタグを作成するには、いくつかの連携する部分が含まれます。実装に入る前に、HTMLとDocument Object Model（DOM）との類推を使用して、基本的な概念と用語を理解しましょう。
+
+
+タグ vs ノード (HTMLとの類推) .[#toc-tags-vs-nodes-analogy-with-html]
+------------------------------------------------------------
+
+HTMLでは、`<p>`や`<div>...</div>`のような**タグ**を書きます。これらのタグはソースコード内の構文です。ブラウザがこのHTMLを解析すると、**Document Object Model（DOM）**と呼ばれるメモリ内の表現を作成します。DOMでは、HTMLタグは**ノード**（具体的にはJavaScript DOMの用語で`Element`ノード）によって表されます。これらの*ノード*をプログラムで操作します（例：JavaScriptの`document.getElementById(...)`はElementノードを返します）。タグはソースファイル内のテキスト表現にすぎません。ノードは論理ツリー内のオブジェクト表現です。
+
+Latteも同様に機能します：
+
+- `.latte`テンプレートファイルでは、`{foreach ...}`や`{/foreach}`のような**Latteタグ**を書きます。これは、テンプレートの作者としてあなたが扱う構文です。
+- Latteがテンプレートを**解析**すると、**抽象構文木（AST）**を構築します。このツリーは**ノード**で構成されます。テンプレート内の各Latteタグ、HTML要素、テキストの一部、または式は、このツリー内の1つ以上のノードになります。
+- AST内のすべてのノードの基本クラスは`Latte\Compiler\Node`です。DOMにさまざまなタイプのノード（Element、Text、Comment）があるように、LatteのASTにもさまざまなタイプのノードがあります。静的テキスト用の`Latte\Compiler\Nodes\TextNode`、HTML要素用の`Latte\Compiler\Nodes\Html\ElementNode`、タグ内の式用の`Latte\Compiler\Nodes\Php\ExpressionNode`、そしてカスタムタグにとって重要な、`Latte\Compiler\Nodes\StatementNode`から継承するノードに出会うでしょう。
+
+
+なぜ `StatementNode` なのか？ .[#toc-why-statementnode]
+-------------------------------------------------
+
+HTML要素（`Html\ElementNode`）は主に構造とコンテンツを表します。PHP式（`Php\ExpressionNode`）は値や計算を表します。しかし、`{if}`、`{foreach}`、または私たちのカスタム`{datetime}`のようなLatteタグはどうでしょうか？これらのタグは*アクションを実行*し、プログラムの流れを制御したり、ロジックに基づいて出力を生成したりします。これらはLatteを単なるマークアップ言語ではなく、強力なテンプレート*エンジン*にする機能的な単位です。
+
+プログラミングでは、アクションを実行するこのような単位はしばしば「ステートメント」（文）と呼ばれます。そのため、これらの機能的なLatteタグを表すノードは、通常`Latte\Compiler\Nodes\StatementNode`から継承します。これにより、純粋に構造的なノード（HTML要素など）や値を表すノード（式など）と区別されます。
+
+
+主要なコンポーネント .[#toc-the-key-components]
+=====================================
+
+カスタムタグを作成するために必要な主要なコンポーネントを見ていきましょう：
+
+
+タグ解析関数 .[#toc-tag-parsing-function]
+-----------------------------------
+
+- このPHPコーラブル関数は、ソーステンプレート内のLatteタグ（`{...}`）の構文を解析します。
+- タグに関する情報（名前、位置、n:属性かどうかなど）を[api:Latte\Compiler\Tag]オブジェクトを通じて受け取ります。
+- タグの区切り文字内の引数や式を解析するための主要なツールは、[api:Latte\Compiler\TagParser]オブジェクトであり、`$tag->parser`を通じてアクセスできます（これはテンプレート全体を解析するパーサーとは異なります）。
+- ペアタグの場合、`yield`を使用してLatteに開始タグと終了タグの間の内部コンテンツを解析するように指示します。
+- 解析関数の最終的な目標は、ASTに追加される**ノードクラス**のインスタンスを作成して返すことです。
+- （必須ではありませんが）解析関数を対応するノードクラス内に直接静的メソッド（しばしば`create`と呼ばれる）として実装するのが慣例です。これにより、解析ロジックとノード表現がきれいに1つのパッケージにまとめられ、必要に応じてクラスのプライベート/プロテクテッドメンバーにアクセスでき、整理が向上します。
+
+
+ノードクラス .[#toc-node-class]
+-------------------------
+
+- **抽象構文木（AST）**におけるタグの*論理的な機能*を表します。
+- 解析された情報（引数やコンテンツなど）をパブリックプロパティとして含みます。これらのプロパティはしばしば他の`Node`インスタンスを含みます（例：解析された引数用の`ExpressionNode`、解析されたコンテンツ用の`AreaNode`）。
+- `print(PrintContext $context): string`メソッドは、テンプレートのレンダリング中にタグのアクションを実行する*PHPコード*（ステートメントまたは一連のステートメント）を生成します。
+- `getIterator(): \Generator`メソッドは、**コンパイルパス**による走査のために子ノード（引数、コンテンツ）を公開します。パスが潜在的にサブノードを変更または置換できるように、参照（`&`）を提供する必要があります。
+- テンプレート全体がASTに解析された後、Latteは一連の[コンパイルパス | compiler-passes]を実行します。これらのパスは、各ノードによって提供される`getIterator()`メソッドを使用して*AST全体*を走査します。ノードを検査し、情報を収集し、さらにはツリーを*変更*することができます（例：ノードのパブリックプロパティを変更したり、ノードを完全に置き換えたり）。複雑な`getIterator()`を必要とするこの設計は不可欠です。[Sandbox | sandbox]のような強力な機能が、カスタムタグを含むテンプレートの*任意*の部分の動作を分析し、潜在的に変更することを可能にし、安全性と一貫性を確保します。
+
+
+拡張機能による登録 .[#toc-registration-via-an-extension]
+-----------------------------------------------
+
+- 新しいタグと、それに対して使用する解析関数についてLatteに通知する必要があります。これは[Latte拡張機能 | extending-latte#latte-extension]内で行われます。
+- 拡張機能クラス内で`getTags(): array`メソッドを実装します。このメソッドは連想配列を返し、キーはタグ名（例：`'mytag'`、`'n:myattribute'`）、値はその対応する解析関数を表すPHPコーラブル関数（例：`MyNamespace\DatetimeNode::create(...)`）です。
+
+要約：**タグ解析関数**は、タグの*テンプレートソースコード*を**ASTノード**に変換します。**ノードクラス**は、*自身*をコンパイル済みテンプレート用の実行可能な*PHPコード*に変換し、`getIterator()`を通じて**コンパイルパス**のためにそのサブノードを公開します。**拡張機能による登録**は、タグ名を解析関数にリンクし、Latteにそれを知らせます。
+
+次に、これらのコンポーネントを段階的に実装する方法を探ります。
+
+
+シンプルなタグの作成 .[#toc-creating-a-simple-tag]
+========================================
+
+最初のカスタムLatteタグの作成に取り掛かりましょう。非常に簡単な例から始めます：現在の日付と時刻を出力する`{datetime}`という名前のタグです。**最初は、このタグは引数を受け付けません**が、後で[「タグ引数の解析」 | #Parsing Tag Arguments]セクションで改善します。また、内部コンテンツもありません。
+
+この例では、基本的な手順を説明します：ノードクラスの定義、`print()`および`getIterator()`メソッドの実装、解析関数の作成、そして最後にタグの登録です。
+
+**目標:** PHP関数`date()`を使用して現在の日付と時刻を出力する`{datetime}`を実装します。
+
+
+ノードクラスの作成 .[#toc-creation-of-the-node-class]
+--------------------------------------------
+
+まず、抽象構文木（AST）でタグを表すクラスが必要です。上で説明したように、`Latte\Compiler\Nodes\StatementNode`から継承します。
+
+ファイル（例：`DatetimeNode.php`）を作成し、クラスを定義します：
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DatetimeNode extends StatementNode
+{
+	/**
+	 * タグ解析関数。{datetime}が見つかったときに呼び出されます。
+	 */
+	public static function create(Tag $tag): self
+	{
+		// シンプルなタグは現在引数を受け付けないので、何も解析する必要はありません
+		$node = $tag->node = new self;
+		return $node;
+	}
+
+	/**
+	 * テンプレートレンダリング時に実行されるPHPコードを生成します。
+	 */
+	public function print(PrintContext $context): string
+	{
+		return $context->format(
+			'echo date(\'Y-m-d H:i:s\') %line;',
+			$this->position,
+		);
+	}
+
+	/**
+	 * Latteコンパイルパスのために子ノードへのアクセスを提供します。
+	 */
+	public function &getIterator(): \Generator
+	{
+		false && yield;
+	}
+}
+```
+
+Latteがテンプレート内で`{datetime}`に遭遇すると、解析関数`create()`を呼び出します。その仕事は`DatetimeNode`のインスタンスを返すことです。
+
+`print()`メソッドは、テンプレートのレンダリング時に実行されるPHPコードを生成します。`$context->format()`メソッドを呼び出し、コンパイル済みテンプレート用の最終的なPHPコード文字列を構築します。最初の引数`'echo date('Y-m-d H:i:s') %line;'`は、後続のパラメータが補完されるマスクです。
+プレースホルダー`%line`は、`format()`メソッドに2番目の引数である`$this->position`を使用し、`/* line 15 */`のようなコメントを挿入するように指示します。これにより、生成されたPHPコードが元のテンプレート行にリンクされ、デバッグに不可欠です。
+
+`$this->position`プロパティは基本クラス`Node`から継承され、Latteパーサーによって自動的に設定されます。これには、タグがソース`.latte`ファイル内で見つかった場所を示す[api:Latte\Compiler\Position]オブジェクトが含まれます。
+
+`getIterator()`メソッドはコンパイルパスにとって不可欠です。すべての子ノードを提供する必要がありますが、私たちのシンプルな`DatetimeNode`は現在、引数もコンテンツも持たないため、子ノードはありません。ただし、メソッドは存在し、ジェネレータである必要があります。つまり、`yield`キーワードがメソッド本体のどこかに存在する必要があります。
+
+
+拡張機能による登録 .[#toc-registration-via-an-extension]
+-----------------------------------------------
+
+最後に、Latteに新しいタグについて通知しましょう。[拡張機能クラス | extending-latte#latte-extension]（例：`MyLatteExtension.php`）を作成し、その`getTags()`メソッドでタグを登録します。
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Extension;
+
+class MyLatteExtension extends Extension
+{
+	/**
+	 * この拡張機能によって提供されるタグのリストを返します。
+	 * @return array<string, callable> マップ: 'tag-name' => parsing-function
+	 */
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			// 後でここにより多くのタグを登録します
+		];
+	}
+}
+```
+
+次に、この拡張機能をLatte Engineに登録します：
+
+```php
+$latte = new Latte\Engine;
+$latte->addExtension(new App\Latte\MyLatteExtension);
+```
+
+テンプレートを作成します：
+
+```latte
+<p>ページ生成日時: {datetime}</p>
+```
+
+期待される出力：`<p>ページ生成日時: 2023-10-27 11:00:00</p>`
+
+
+このフェーズの要約 .[#toc-summary-of-this-phase]
+---------------------------------------
+
+基本的なカスタムタグ`{datetime}`の作成に成功しました。ASTでの表現（`DatetimeNode`）を定義し、その解析（`create()`）を処理し、PHPコードを生成する方法（`print()`）を指定し、その子が走査可能であることを確認し（`getIterator()`）、Latteに登録しました。
+
+次のセクションでは、このタグを引数を受け入れるように強化し、式を解析し、子ノードを管理する方法を示します。
+
+
+タグ引数の解析 .[#toc-parsing-tag-arguments]
+=====================================
+
+シンプルな`{datetime}`タグは機能しますが、あまり柔軟ではありません。`date()`関数のフォーマット文字列というオプションの引数を受け入れるように強化しましょう。必要な構文は`{datetime $format}`になります。
+
+**目標:** `date()`のフォーマット文字列として使用されるオプションのPHP式を引数として受け入れるように`{datetime}`を変更します。
+
+
+`TagParser`の紹介 .[#toc-introducing-tagparser]
+--------------------------------------------
+
+コードを変更する前に、使用するツール[api:Latte\Compiler\TagParser]を理解することが重要です。メインのLatteパーサー（`TemplateParser`）が`{datetime ...}`やn:属性のようなLatteタグに遭遇すると、タグ*内部*のコンテンツ（`{`と`}`の間、または属性値）の解析を専門の`TagParser`に委譲します。
+
+この`TagParser`は**タグ引数**のみを扱います。その仕事は、これらの引数を表すトークンを処理することです。重要なのは、**提供されたすべてのコンテンツを処理しなければならない**ということです。解析関数が終了しても`TagParser`が引数の終わりに達していない場合（`$tag->parser->isEnd()`でチェック）、Latteは例外をスローします。これは、タグ内に予期しないトークンが残っていることを示します。逆に、タグが引数を*必要とする*場合は、解析関数の最初に`$tag->expectArguments()`を呼び出す必要があります。このメソッドは引数が存在するかどうかをチェックし、タグが引数なしで使用された場合に役立つ例外をスローします。
+
+`TagParser`は、さまざまな種類の引数を解析するための便利なメソッドを提供します：
+
+- `parseExpression(): ExpressionNode`: PHPライクな式（変数、リテラル、演算子、関数/メソッド呼び出しなど）を解析します。単純な英数字文字列を引用符で囲まれた文字列として扱うなど、Latteのシンタックスシュガーを処理します（例：`foo`は`'foo'`であるかのように解析されます）。
+- `parseUnquotedStringOrExpression(): ExpressionNode`: 標準的な式または*引用符なし文字列*のいずれかを解析します。引用符なし文字列は、Latteが引用符なしで許可するシーケンスであり、ファイルパス（例：`{include ../file.latte}`）などによく使用されます。引用符なし文字列を解析した場合、`StringNode`を返します。
+- `parseArguments(): ArrayNode`: `10, name: 'John', true`のように、キーを持つ可能性のあるカンマ区切りの引数を解析します。
+- `parseModifier(): ModifierNode`: `|upper|truncate:10`のようなフィルタを解析します。
+- `parseType(): ?SuperiorTypeNode`: `int`、`?string`、`array|Foo`のようなPHPタイプヒントを解析します。
+
+より複雑な、または低レベルの解析ニーズのために、`$tag->parser->stream`を通じて[トークンストリーム | api:Latte\Compiler\TokenStream]と直接対話できます。このオブジェクトは、個々のトークンを検査および処理するためのメソッドを提供します：
+
+- `$tag->parser->stream->is(...): bool`: *現在の*トークンが指定されたタイプ（例：`Token::Php_Variable`）またはリテラル値（例：`'as'`）のいずれかに一致するかどうかを、消費せずにチェックします。先読みするのに便利です。
+- `$tag->parser->stream->consume(...): Token`: *現在の*トークンを消費し、ストリームの位置を進めます。期待されるトークンタイプ/値が引数として提供され、現在のトークンが一致しない場合、`CompileException`をスローします。特定のトークンを*期待する*場合に使用します。
+- `$tag->parser->stream->tryConsume(...): ?Token`: *現在の*トークンが指定されたタイプ/値のいずれかに一致する場合*のみ*、それを消費しようとします。一致する場合、トークンを消費して返します。一致しない場合、ストリームの位置を変更せずに`null`を返します。オプションのトークンや、異なる構文パス間で選択する場合に使用します。
+
+
+解析関数 `create()` の更新 .[#toc-updating-the-parsing-function-create]
+----------------------------------------------------------------
+
+この理解をもとに、`DatetimeNode`の`create()`メソッドを修正して、`$tag->parser`を使用してオプションのフォーマット引数を解析するようにしましょう。
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DatetimeNode extends StatementNode
+{
+	// 解析されたフォーマット式ノードを保持するためのパブリックプロパティを追加
+	public ?ExpressionNode $format = null;
+
+	public static function create(Tag $tag): self
+	{
+		$node = $tag->node = new self;
+
+		// トークンが存在するかどうかを確認
+		if (!$tag->parser->isEnd()) {
+			// TagParserを使用して引数をPHPライクな式として解析します。
+			$node->format = $tag->parser->parseExpression();
+		}
+
+		return $node;
+	}
+
+	// ... print() と getIterator() メソッドは後で更新されます ...
+}
+```
+
+パブリックプロパティ`$format`を追加しました。`create()`では、`$tag->parser->isEnd()`を使用して引数が*存在するか*どうかをチェックします。存在する場合、`$tag->parser->parseExpression()`が式のトークンを処理します。`TagParser`はすべての入力トークンを処理する必要があるため、ユーザーがフォーマット式の後に予期しないものを記述した場合（例：`{datetime 'Y-m-d', unexpected}`）、Latteは自動的にエラーをスローします。
+
+
+`print()` メソッドの更新 .[#toc-updating-the-print-method]
+---------------------------------------------------
+
+次に、`$this->format`に格納されている解析されたフォーマット式を使用するように`print()`メソッドを修正しましょう。フォーマットが提供されなかった場合（`$this->format`が`null`の場合）、デフォルトのフォーマット文字列（例：`'Y-m-d H:i:s'`）を使用する必要があります。
+
+```php
+	public function print(PrintContext $context): string
+	{
+		$formatNode = $this->format ?? new StringNode('Y-m-d H:i:s');
+
+		// %nodeは$formatNodeのPHPコード表現を出力します。
+		return $context->format(
+			'echo date(%node) %line;',
+			$formatNode,
+			$this->position
+		);
+	}
+```
+
+変数`$formatNode`に、PHP関数`date()`のフォーマット文字列を表すASTノードを格納します。ここではnull合体演算子（`??`）を使用しています。ユーザーがテンプレートで引数を提供した場合（例：`{datetime 'd.m.Y'}`）、`$this->format`プロパティには対応するノード（この場合は値`'d.m.Y'`を持つ`StringNode`）が含まれ、このノードが使用されます。ユーザーが引数を提供しなかった場合（単に`{datetime}`と記述した場合）、`$this->format`プロパティは`null`であり、代わりにデフォルトのフォーマット`'Y-m-d H:i:s'`を持つ新しい`StringNode`を作成します。これにより、`$formatNode`には常にフォーマット用の有効なASTノードが含まれることが保証されます。
+
+マスク`'echo date(%node) %line;'`では、新しいプレースホルダー`%node`が使用されています。これは`format()`メソッドに、次の引数（私たちの`$formatNode`）を取り、その`print()`メソッド（PHPコード表現を返す）を呼び出し、その結果をプレースホルダーの位置に挿入するように指示します。
+
+
+サブノードのための `getIterator()` の実装 .[#toc-implementing-getiterator-for-subnodes]
+---------------------------------------------------------------------------
+
+`DatetimeNode`には子ノード `$format` 式があります。**必ず** `getIterator()` メソッドで提供することにより、この子ノードをコンパイルパスに公開する必要があります。パスがノードを潜在的に置き換えることができるように、*参照* (`&`) を提供することを忘れないでください。
+
+```php
+	public function &getIterator(): \Generator
+	{
+		if ($this->format) {
+			yield $this->format;
+		}
+	}
+```
+
+なぜこれが不可欠なのでしょうか？Sandboxパスが、`$format`引数に禁止された関数呼び出しが含まれていないか（例：`{datetime dangerousFunction()}`）をチェックする必要があると想像してみてください。`getIterator()`が`$this->format`を提供しない場合、Sandboxパスはタグの引数内の`dangerousFunction()`呼び出しを決して見ることができず、潜在的なセキュリティホールが作成されます。提供することで、Sandbox（および他のパス）が`$format`式ノードを検査し、潜在的に変更することを可能にします。
+
+
+強化されたタグの使用 .[#toc-using-the-enhanced-tag]
+-----------------------------------------
+
+タグはオプションの引数を正しく処理するようになりました：
+
+```latte
+デフォルトフォーマット: {datetime}
+カスタムフォーマット: {datetime 'd.m.Y'}
+変数の使用: {datetime $userDateFormatPreference}
+
+{* これは 'd.m.Y' の解析後にエラーを引き起こします。 ", foo" は予期されていません *}
+{* {datetime 'd.m.Y', foo} *}
+```
+
+次に、ペアタグの作成を見ていきましょう。これは、それらの間のコンテンツを処理します。
+
+
+ペアタグの処理 .[#toc-handling-paired-tags]
+====================================
+
+これまでのところ、`{datetime}`タグは*自己完結型*（概念的に）でした。開始タグと終了タグの間にコンテンツはありません。しかし、多くの便利なタグはテンプレートコンテンツのブロックを操作します。これらは**ペアタグ**と呼ばれます。例としては、`{if}...{/if}`、`{block}...{/block}`、またはこれから作成するカスタムタグ`{debug}...{/debug}`があります。
+
+このタグを使用すると、開発中にのみ表示されるべきデバッグ情報をテンプレートに含めることができます。
+
+**目標:** 特定の「開発モード」フラグがアクティブな場合にのみコンテンツがレンダリングされるペアタグ`{debug}`を作成します。
+
+
+プロバイダの紹介 .[#toc-introducing-providers]
+--------------------------------------
+
+タグが、テンプレートパラメータとして直接渡されないデータやサービスにアクセスする必要がある場合があります。たとえば、アプリケーションが開発モードであるかどうかを判断したり、ユーザーオブジェクトにアクセスしたり、設定値を取得したりする場合です。Latteはこの目的のために**プロバイダ**（Providers）と呼ばれるメカニズムを提供します。
+
+プロバイダは、`getProviders()`メソッドを使用して[拡張機能 | extending-latte#latte-extension]に登録されます。このメソッドは連想配列を返し、キーはテンプレートのランタイムコードでプロバイダにアクセスする名前、値は実際のデータまたはオブジェクトです。
+
+タグの`print()`メソッドによって生成されたPHPコード内では、特別な`$this->global`オブジェクトプロパティを通じてこれらのプロバイダにアクセスできます。
+このプロパティはすべての拡張機能で共有されるため、Latteのコアプロバイダや他のサードパーティ拡張機能からのプロバイダとの潜在的な名前の衝突を避けるために、**プロバイダ名にプレフィックスを付ける**ことが良い習慣です。一般的な慣例は、ベンダーまたは拡張機能名に関連する短く、一意のプレフィックスを使用することです。例として、プレフィックス`app`を使用し、開発モードフラグは`$this->global->appDevMode`として利用可能になります。
+
+
+コンテンツ解析のための `yield` キーワード .[#toc-the-yield-keyword-for-parsing-content]
+-----------------------------------------------------------------------
+
+`{debug}`と`{/debug}`の*間*のコンテンツを処理するようにLatteパーサーに指示するにはどうすればよいでしょうか？ここで`yield`キーワードが登場します。
+
+`create()`関数内で`yield`が使用されると、関数は[PHPジェネレータ | https://www.php.net/manual/en/language.generators.overview.php]になります。その実行は一時停止され、制御はメインの`TemplateParser`に戻ります。`TemplateParser`は、対応する終了タグ（この場合は`{/debug}`）に遭遇する*まで*テンプレートコンテンツの解析を続行します。
+
+終了タグが見つかると、`TemplateParser`は`yield`ステートメントの直後で`create()`関数の実行を再開します。`yield`ステートメントによって*返される*値は、2つの要素を含む配列です：
+
+1.  開始タグと終了タグの間で解析されたコンテンツを表す`AreaNode`。
+2.  終了タグ（例：`{/debug}`）を表す`Tag`オブジェクト。
+
+`DebugNode`クラスとその`create`メソッドを作成し、`yield`を利用しましょう。
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DebugNode extends StatementNode
+{
+	// 解析された内部コンテンツを保持するためのパブリックプロパティ
+	public AreaNode $content;
+
+	/**
+	 * ペアタグ {debug} ... {/debug} のための解析関数。
+	 */
+	public static function create(Tag $tag): \Generator // 戻り値の型に注意
+	{
+		$node = $tag->node = new self;
+
+		// 解析を一時停止し、{/debug}が見つかったときに内部コンテンツと終了タグを取得します
+		[$node->content, $endTag] = yield;
+
+		return $node;
+	}
+
+	// ... print() と getIterator() は後で実装されます ...
+}
+```
+
+注意：タグがn:属性として使用されている場合、つまり`<div n:debug>...</div>`の場合、`$endTag`は`null`になります。
+
+
+条件付きレンダリングのための `print()` の実装 .[#toc-implementing-print-for-conditional-rendering]
+---------------------------------------------------------------------------------
+
+`print()`メソッドは、実行時に`appDevMode`プロバイダをチェックし、フラグがtrueの場合にのみ内部コンテンツのコードを実行するPHPコードを生成する必要があります。
+
+```php
+	public function print(PrintContext $context): string
+	{
+		// 実行時にプロバイダをチェックするPHP 'if' ステートメントを生成します
+		return $context->format(
+			<<<'XX'
+				if ($this->global->appDevMode) %line {
+					// 開発モードの場合、内部コンテンツを出力します
+					%node
+				}
+
+				XX,
+			$this->position, // %line コメント用
+			$this->content,  // 内部コンテンツのASTを含むノード
+		);
+	}
+```
+
+これは簡単です。`PrintContext::format()`を使用して標準的なPHP `if`ステートメントを作成します。`if`の内側に、`$this->content`のプレースホルダー`%node`を配置します。Latteは再帰的に`$this->content->print($context)`を呼び出してタグの内部部分のPHPコードを生成しますが、これは`$this->global->appDevMode`が実行時にtrueと評価された場合に限ります。
+
+
+コンテンツのための `getIterator()` の実装 .[#toc-implementing-getiterator-for-content]
+--------------------------------------------------------------------------
+
+前の例の引数ノードと同様に、`DebugNode`には子ノード `AreaNode $content` があります。`getIterator()`で提供することにより、これを公開する必要があります：
+
+```php
+	public function &getIterator(): \Generator
+	{
+		// コンテンツノードへの参照を提供します
+		yield $this->content;
+	}
+```
+
+これにより、コンパイルパスが`{debug}`タグのコンテンツに降りていくことができます。これは、コンテンツが条件付きでレンダリングされる場合でも重要です。たとえば、Sandboxは`appDevMode`がtrueかfalseかに関係なくコンテンツを分析する必要があります。
+
+
+登録と使用法 .[#toc-registration-and-usage]
+-------------------------------------
+
+拡張機能でタグとプロバイダを登録します：
+
+```php
+class MyLatteExtension extends Extension
+{
+	// $isDevelopmentMode がどこかで決定されると仮定します（例：設定から）
+	public function __construct(
+		private bool $isDevelopmentMode,
+	) {
+	}
+
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...), // 新しいタグの登録
+		];
+	}
+
+	public function getProviders(): array
+	{
+		return [
+			'appDevMode' => $this->isDevelopmentMode, // プロバイダの登録
+		];
+	}
+}
+
+// 拡張機能を登録する際：
+$isDev = true; // アプリケーションの環境に基づいてこれを決定します
+$latte->addExtension(new App\Latte\MyLatteExtension($isDev));
+```
+
+そしてテンプレートでの使用法：
+
+```latte
+<p>常に表示される通常のコンテンツ。</p>
+
+{debug}
+	<div class="debug-panel">
+		現在のユーザーID: {$user->id}
+		リクエスト時間: {=time()}
+	</div>
+{/debug}
+
+<p>その他の通常のコンテンツ。</p>
+```
+
+
+n:属性の統合 .[#toc-n-attributes-integration]
+----------------------------------------
+
+Latteは、多くのペアタグに対して便利な短縮記法を提供します：[n:属性 | syntax#n:atributy]。`{tag}...{/tag}`のようなペアタグがあり、その効果を単一のHTML要素に直接適用したい場合、多くの場合、その要素の`n:tag`属性としてより簡潔に記述できます。
+
+定義するほとんどの標準的なペアタグ（私たちの`{debug}`のような）に対して、Latteは対応する`n:`属性バージョンを自動的に有効にします。登録中に特別なことをする必要はありません：
+
+```latte
+{* 標準的なペアタグの使用法 *}
+{debug}<div>デバッグ情報</div>{/debug}
+
+{* n:属性を使用した同等の使用法 *}
+<div n:debug>デバッグ情報</div>
+```
+
+どちらのバージョンも、`$this->global->appDevMode`がtrueの場合にのみ`<div>`をレンダリングします。`inner-`および`tag-`プレフィックスも期待どおりに機能します。
+
+タグのロジックが、標準的なペアタグとして使用されるか、n:属性として使用されるか、または`n:inner-tag`や`n:tag-tag`のようなプレフィックスが使用されるかによって、わずかに異なる動作をする必要がある場合があります。解析関数`create()`に渡される`Latte\Compiler\Tag`オブジェクトは、この情報を提供します：
+
+- `$tag->isNAttribute(): bool`: タグがn:属性として解析されている場合は`true`を返します
+- `$tag->prefix: ?string`: n:属性で使用されるプレフィックスを返します。これは`null`（n:属性ではない）、`Tag::PrefixNone`、`Tag::PrefixInner`、または`Tag::PrefixTag`のいずれかになります
+
+これで、単純なタグ、引数の解析、ペアタグ、プロバイダ、n:属性を理解したので、`{debug}`タグを出発点として使用し、他のタグ内にネストされたタグを含む、より複雑なシナリオに取り組みましょう。
+
+
+中間タグ .[#toc-intermediate-tags]
+==============================
+
+一部のペアタグは、最終的な終了タグの前に他のタグが*内部に*出現することを許可、あるいは要求さえします。これらは**中間タグ**と呼ばれます。古典的な例としては、`{if}...{elseif}...{else}...{/if}`や`{switch}...{case}...{default}...{/switch}`があります。
+
+アプリケーションが開発モード*でない*場合にレンダリングされるオプションの`{else}`句をサポートするように、`{debug}`タグを拡張しましょう。
+
+**目標:** オプションの中間タグ`{else}`をサポートするように`{debug}`を修正します。最終的な構文は`{debug} ... {else} ... {/debug}`であるべきです。
+
+
+`yield` を使用した中間タグの解析 .[#toc-parsing-intermediate-tags-with-yield]
+-----------------------------------------------------------------
+
+`yield`が`create()`解析関数を一時停止し、解析されたコンテンツと終了タグを返すことはすでに知っています。しかし、`yield`はより多くの制御を提供します：*中間タグ名の配列*を提供できます。パーサーがこれらの指定されたタグのいずれかに**同じネストレベルで**（つまり、親タグの直接の子として、他のブロックやタグの内部ではなく）遭遇すると、解析も停止します。
+
+中間タグのために解析が停止すると、コンテンツの解析を停止し、`create()`ジェネレータを再開し、部分的に解析されたコンテンツと**中間タグ**自体（最終的な終了タグの代わりに）を返します。`create()`関数は、この中間タグを処理し（例：引数があれば解析する）、*最終的な*終了タグまたは別の期待される中間タグまでの*次の*コンテンツ部分を解析するために再度`yield`を使用できます。
+
+`{else}`を期待するように`DebugNode::create()`を修正しましょう：
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\NopNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class DebugNode extends StatementNode
+{
+	// {debug} 部分のコンテンツ
+	public AreaNode $thenContent;
+	// {else} 部分のオプションのコンテンツ
+	public ?AreaNode $elseContent = null;
+
+	public static function create(Tag $tag): \Generator
+	{
+		$node = $tag->node = new self;
+
+		// yield して {/debug} または {else} のいずれかを期待します
+		[$node->thenContent, $nextTag] = yield ['else'];
+
+		// 停止したタグが {else} であったかどうかを確認します
+		if ($nextTag?->name === 'else') {
+			// {else} と {/debug} の間のコンテンツを解析するために再度 yield します
+			[$node->elseContent, $endTag] = yield;
+		}
+
+		return $node;
+	}
+
+	// ... print() と getIterator() は後で更新されます ...
+}
+```
+
+これで`yield ['else']`は、Latteに`{/debug}`だけでなく`{else}`でも解析を停止するように指示します。`{else}`が見つかった場合、`$nextTag`には`{else}`の`Tag`オブジェクトが含まれます。次に、引数なしで再度`yield`を使用します。これは、最終的な`{/debug}`タグのみを期待していることを意味し、結果を`$node->elseContent`に格納します。`{else}`が見つからなかった場合、`$nextTag`は`{/debug}`の`Tag`（またはn:属性として使用されている場合は`null`）になり、`$node->elseContent`は`null`のままになります。
+
+
+`{else}` を伴う `print()` の実装 .[#toc-implementing-print-with-else]
+---------------------------------------------------------------
+
+`print()`メソッドは新しい構造を反映する必要があります。`devMode`プロバイダに基づいてPHP `if/else`ステートメントを生成する必要があります。
+
+```php
+	public function print(PrintContext $context): string
+	{
+		return $context->format(
+			<<<'XX'
+				if ($this->global->appDevMode) %line {
+					%node // 'then' ブランチのコード ({debug} コンテンツ)
+				} else {
+					%node // 'else' ブランチのコード ({else} コンテンツ)
+				}
+
+				XX,
+			$this->position,    // 'if' 条件の行番号
+			$this->thenContent, // 最初の %node プレースホルダー
+			$this->elseContent ?? new NopNode, // 2番目の %node プレースホルダー
+		);
+	}
+```
+
+これは標準的なPHP `if/else`構造です。`%node`を2回使用しています。`format()`は提供されたノードを順番に置き換えます。`$this->elseContent`が`null`の場合のエラーを回避するために`?? new NopNode`を使用しています – `NopNode`は単に何も出力しません。
+
+
+両方のコンテンツのための `getIterator()` の実装 .[#toc-implementing-getiterator-for-both-contents]
+-----------------------------------------------------------------------------------
+
+潜在的に2つのコンテンツ子ノード（`$thenContent`と`$elseContent`）があります。存在する場合は両方を提供する必要があります：
+
+```php
+	public function &getIterator(): \Generator
+	{
+		yield $this->thenContent;
+		if ($this->elseContent) {
+			yield $this->elseContent;
+		}
+	}
+```
+
+
+強化されたタグの使用 .[#toc-using-the-enhanced-tag]
+-----------------------------------------
+
+タグはオプションの`{else}`句で使用できるようになりました：
+
+```latte
+{debug}
+	<p>devModeがONなのでデバッグ情報を表示しています。</p>
+{else}
+	<p>devModeがOFFなのでデバッグ情報は非表示です。</p>
+{/debug}
+```
+
+
+状態とネストの処理 .[#toc-handling-state-and-nesting]
+============================================
+
+以前の例（`{datetime}`、`{debug}`）は、`print()`メソッド内で比較的ステートレスでした。コンテンツを直接出力するか、グローバルプロバイダに基づいて単純な条件付きチェックを実行するかのいずれかでした。しかし、多くのタグは、レンダリング中に何らかの形の**状態**を管理する必要があるか、パフォーマンスや正確性のために一度だけ実行されるべきユーザー式の評価を含みます。さらに、カスタムタグが**ネスト**された場合に何が起こるかを考慮する必要があります。
+
+これらの概念を説明するために、`{repeat $count}...{/repeat}`タグを作成しましょう。このタグは、内部コンテンツを`$count`回繰り返します。
+
+**目標:** 指定された回数だけコンテンツを繰り返す`{repeat $count}`を実装します。
+
+
+一時的 & 一意な変数の必要性 .[#toc-the-need-for-temporary-unique-variables]
+---------------------------------------------------------------
+
+ユーザーが次のように書いたと想像してください：
+
+```latte
+{repeat rand(1, 5)} コンテンツ {/repeat}
+```
+
+`print()`メソッドで単純にPHP `for`ループをこのように生成した場合：
+
+```php
+// 簡略化された、誤った生成コード
+for ($i = 0; $i < rand(1, 5); $i++) {
+	// コンテンツの出力
+}
+```
+これは間違っています！`rand(1, 5)`式は**ループの各反復で再評価**され、予測不能な繰り返し回数につながります。ループを開始する前に`$count`式を*一度*評価し、その結果を保存する必要があります。
+
+カウント式を最初に評価し、それを**一時的なランタイム変数**に格納するPHPコードを生成します。テンプレートユーザーによって定義された変数*および*Latteの内部変数（`$ʟ_...`など）との衝突を避けるために、一時変数には**`$__`（二重アンダースコア）**プレフィックスの規約を使用します。
+
+生成されるコードは次のようになります：
+
+```php
+$__count = rand(1, 5);
+for ($__i = 0; $__i < $__count; $__i++) {
+	// コンテンツの出力
+}
+```
+
+次に、ネストを考えてみましょう：
+
+```latte
+{repeat $countA}       {* 外側のループ *}
+	{repeat $countB}   {* 内側のループ *}
+		...
+	{/repeat}
+{/repeat}
+```
+
+外側と内側の両方の`{repeat}`タグが*同じ*一時変数名（例：`$__count`と`$__i`）を使用するコードを生成した場合、内側のループは外側のループの変数を上書きし、ロジックを壊します。
+
+`{repeat}`タグの各インスタンスに対して生成される一時変数が**一意**であることを確認する必要があります。これは`PrintContext::generateId()`を使用して実現します。このメソッドは、コンパイルフェーズ中に一意の整数を返します。このIDを一時変数名に追加できます。
+
+したがって、`$__count`の代わりに、最初のrepeatタグには`$__count_1`、2番目には`$__count_2`などを生成します。同様に、ループカウンタには`$__i_1`、`$__i_2`などを使用します。
+
+
+`RepeatNode` の実装 .[#toc-implementing-repeatnode]
+------------------------------------------------
+
+ノードクラスを作成しましょう。
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\CompileException;
+use Latte\Compiler\Nodes\AreaNode;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+
+class RepeatNode extends StatementNode
+{
+	public ExpressionNode $count;
+	public AreaNode $content;
+
+	/**
+	 * {repeat $count} ... {/repeat} のための解析関数
+	 */
+	public static function create(Tag $tag): \Generator
+	{
+		$tag->expectArguments(); // $count が提供されていることを確認します
+		$node = $tag->node = new self;
+		// カウント式を解析します
+		$node->count = $tag->parser->parseExpression();
+		// 内部コンテンツを取得します
+		[$node->content] = yield;
+		return $node;
+	}
+
+	/**
+	 * 一意な変数名を持つPHP 'for' ループを生成します。
+	 */
+	public function print(PrintContext $context): string
+	{
+		// 一意な変数名を生成します
+		$id = $context->generateId();
+		$countVar = '$__count_' . $id; // 例：$__count_1, $__count_2, など
+		$iteratorVar = '$__i_' . $id;  // 例：$__i_1, $__i_2, など
+
+		return $context->format(
+			<<<'XX'
+				// カウント式を *一度* 評価して保存します
+				%raw = (int) (%node);
+				// 保存されたカウントと一意なイテレータ変数を使用してループします
+				for (%raw = 0; %2.raw < %0.raw; %2.raw++) %line {
+					%node // 内部コンテンツをレンダリングします
+				}
+
+				XX,
+			$countVar,          // %0 - カウントを保存する変数
+			$this->count,       // %1 - カウントの式ノード
+			$iteratorVar,       // %2 - ループイテレータ変数名
+			$this->position,    // %3 - ループ自体の行番号コメント
+			$this->content      // %4 - 内部コンテンツノード
+		);
+	}
+
+	/**
+	 * 子ノード（カウント式とコンテンツ）を提供します。
+	 */
+	public function &getIterator(): \Generator
+	{
+		yield $this->count;
+		yield $this->content;
+	}
+}
+```
+
+`create()`メソッドは、`parseExpression()`を使用して必須の`$count`式を解析します。最初に`$tag->expectArguments()`が呼び出されます。これにより、ユーザーが`{repeat}`の後に*何か*を提供したことが保証されます。`$tag->parser->parseExpression()`は何も提供されなければ失敗しますが、エラーメッセージは予期しない構文に関するものである可能性があります。`expectArguments()`を使用すると、`{repeat}`タグに引数が欠落していることを具体的に示す、はるかに明確なエラーが提供されます。
+
+`print()`メソッドは、実行時に繰り返しロジックを実行する責任があるPHPコードを生成します。必要となる一時的なPHP変数の一意な名前を生成することから始まります。
+
+`$context->format()`メソッドは、新しいプレースホルダー`%raw`と共に呼び出されます。これは、対応する引数として提供された*生の文字列*を挿入します。ここでは、`$countVar`に格納されている一意な変数名（例：`$__count_1`）を挿入します。
+そして`%0.raw`と`%2.raw`はどうでしょうか？これは**位置指定プレースホルダー**を示します。単に*次の*利用可能な生引数を取る`%raw`の代わりに、`%2.raw`は明示的にインデックス2の引数（`$iteratorVar`）を取り、その生の文字列値を挿入します。これにより、`format()`の引数リストで複数回渡すことなく、`$iteratorVar`文字列を再利用できます。
+
+この慎重に構築された`format()`呼び出しは、カウント式を正しく処理し、`{repeat}`タグがネストされている場合でも変数名の衝突を回避する、効率的で安全なPHPループを生成します。
+
+
+登録と使用法 .[#toc-registration-and-usage]
+-------------------------------------
+
+拡張機能でタグを登録します：
+
+```php
+use App\Latte\RepeatNode;
+
+class MyLatteExtension extends Extension
+{
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...),
+			'repeat' => RepeatNode::create(...), // repeat タグの登録
+		];
+	}
+}
+```
+
+ネストを含め、テンプレートで使用します：
+
+```latte
+{var $rows = rand(5, 7)}
+{var $cols = rand(3, 5)}
+
+{repeat $rows}
+	<tr>
+		{repeat $cols}
+			<td>内側のループ</td>
+		{/repeat}
+	</tr>
+{/repeat}
+```
+
+この例は、`$__`プレフィックス付きの一時変数と`PrintContext::generateId()`からの一意なIDを使用して、状態（ループカウンタ）と潜在的なネストの問題を処理する方法を示しています。
+
+
+純粋なn:属性 .[#toc-pure-n-attributes]
+---------------------------------
+
+`n:if`や`n:foreach`のような多くの`n:属性`は、ペアタグの対応物（`{if}...{/if}`、`{foreach}...{/foreach}`）の便利な短縮形として機能しますが、Latteはn:属性の形で*のみ*存在するタグを定義することもできます。これらは、しばしば、それらが付けられているHTML要素の属性や動作を変更するために使用されます。
+
+Latteに組み込まれている標準的な例には、動的に`class`属性を構築するのに役立つ[`n:class` | tags#n:class]や、複数の任意の属性を設定できる[`n:attr` | tags#n:attr]があります。
+
+独自の純粋なn:属性を作成しましょう：`n:confirm`。これは、アクション（リンクのフォローやフォームの送信など）を実行する前にJavaScriptの確認ダイアログを追加します。
+
+**目標:** ユーザーが確認ダイアログをキャンセルした場合にデフォルトのアクションを防ぐ`onclick`ハンドラを追加する`n:confirm="'よろしいですか？'"`を実装します。
+
+
+`ConfirmNode` の実装 .[#toc-implementing-confirmnode]
+--------------------------------------------------
+
+Nodeクラスと解析関数が必要です。
+
+```php
+<?php
+
+namespace App\Latte;
+
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\PrintContext;
+use Latte\Compiler\Tag;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+
+class ConfirmNode extends StatementNode
+{
+	public ExpressionNode $message;
+
+	public static function create(Tag $tag): self
+	{
+		$tag->expectArguments();
+		$node = $tag->node = new self;
+		$node->message = $tag->parser->parseExpression();
+		return $node;
+	}
+
+	/**
+	 * 適切なエスケープを含む 'onclick' 属性コードを生成します。
+	 */
+	public function print(PrintContext $context): string
+	{
+		// JavaScript と HTML 属性の両方のコンテキストで適切なエスケープを保証します。
+		return $context->format(
+			<<<'XX'
+				echo ' onclick="', LR\Filters::escapeHtmlAttr('return confirm(' . LR\Filters::escapeJs(%node) . ')'), '"' %line;
+				XX,
+			$this->message,
+			$this->position,
+		);
+	}
+
+	public function &getIterator(): \Generator
+	{
+		yield $this->message;
+	}
+}
+```
+
+`print()`メソッドは、最終的にテンプレートのレンダリング中にHTML属性`onclick="..."`を出力するPHPコードを生成します。ネストされたコンテキスト（HTML属性内のJavaScript）の処理には、慎重なエスケープが必要です。
+フィルタ`LR\Filters::escapeJs(%node)`は実行時に呼び出され、JavaScript内で使用するためにメッセージを適切にエスケープします（出力は`"Sure?"`のようになります）。次に、フィルタ`LR\Filters::escapeHtmlAttr(...)`はHTML属性で特別な文字をエスケープするため、出力を`return confirm(&quot;Sure?&quot;)`に変更します。
+この2段階のランタイムエスケープにより、メッセージがJavaScriptに対して安全であり、結果のJavaScriptコードがHTML `onclick`属性に埋め込むのに安全であることが保証されます。
+
+
+登録と使用法 .[#toc-registration-and-usage]
+-------------------------------------
+
+拡張機能でn:属性を登録します。キーの`n:`プレフィックスを忘れないでください：
+
+```php
+class MyLatteExtension extends Extension
+{
+	public function getTags(): array
+	{
+		return [
+			'datetime' => DatetimeNode::create(...),
+			'debug' => DebugNode::create(...),
+			'repeat' => RepeatNode::create(...),
+			'n:confirm' => ConfirmNode::create(...), // n:confirm の登録
+		];
+	}
+}
+```
+
+これで、リンク、ボタン、またはフォーム要素で`n:confirm`を使用できます：
+
+```latte
+<a href="delete.php?id=123" n:confirm='"本当にアイテム {$id} を削除しますか？"'>削除</a>
+```
+
+生成されたHTML：
+
+```html
+<a href="delete.php?id=123" onclick="return confirm(&quot;本当にアイテム 123 を削除しますか？&quot;)">削除</a>
+```
+
+ユーザーがリンクをクリックすると、ブラウザは`onclick`コードを実行し、確認ダイアログを表示し、ユーザーが「OK」をクリックした場合にのみ`delete.php`に移動します。
+
+この例は、`print()`メソッドで適切なPHPコードを生成することにより、ホストHTML要素の動作や属性を変更するための純粋なn:属性を作成する方法を示しています。しばしば必要となる二重エスケープを忘れないでください：ターゲットコンテキスト（この場合はJavaScript）用に1回、HTML属性コンテキスト用に再度。
+
+
+高度なトピック .[#toc-advanced-topics]
+===============================
+
+前のセクションでは基本的な概念をカバーしましたが、カスタムLatteタグを作成する際に遭遇する可能性のある、より高度なトピックをいくつか紹介します。
+
+
+タグ出力モード .[#toc-tag-output-modes]
+--------------------------------
+
+`create()`関数に渡される`Tag`オブジェクトには`outputMode`プロパティがあります。このプロパティは、特にタグが独自の行で使用される場合に、Latteが周囲の空白やインデントをどのように扱うかに影響します。`create()`関数でこのプロパティを変更できます。
+
+- `Tag::OutputKeepIndentation`（`{=...}`のようなほとんどのタグのデフォルト）：Latteはタグの前のインデントを保持しようとします。タグの*後*の改行は一般的に保持されます。インラインでコンテンツを出力するタグに適しています。
+- `Tag::OutputRemoveIndentation`（`{if}`、`{foreach}`のようなブロックタグのデフォルト）：Latteは先頭のインデントと、潜在的に1つの後続の改行を削除します。これは、生成されたPHPコードをよりきれいに保ち、タグ自体によって引き起こされるHTML出力の余分な空白行を防ぐのに役立ちます。制御構造やブロックを表し、それ自体が空白を追加すべきでないタグに使用します。
+- `Tag::OutputNone`（`{var}`、`{default}`のようなタグで使用）：`RemoveIndentation`に似ていますが、タグ自体が直接的な出力を生成しないことをより強く示し、周囲の空白の処理にさらに積極的に影響を与える可能性があります。宣言型または設定型のタグに適しています。
+
+タグの目的に最も適したモードを選択してください。ほとんどの構造的または制御的なタグには、通常`OutputRemoveIndentation`が適しています。
+
+
+親/最も近いタグへのアクセス .[#toc-accessing-parent-closest-tags]
+----------------------------------------------------
+
+タグの動作が、それが使用されるコンテキスト、具体的にはどの親タグ内にあるかに依存する必要がある場合があります。`create()`関数に渡される`Tag`オブジェクトは、まさにこの目的のために`closestTag(array $classes, ?callable $condition = null): ?Tag`メソッドを提供します。
+
+このメソッドは、現在開いているタグ（解析中に内部的に表されるHTML要素を含む）の階層を上方に検索し、特定の基準に一致する最も近い祖先の`Tag`オブジェクトを返します。一致する祖先が見つからない場合は`null`を返します。
+
+`$classes`配列は、探している祖先タグの種類を指定します。祖先タグに関連付けられたノード（`$ancestorTag->node`）がこのクラスのインスタンスであるかどうかをチェックします。
+
+```php
+function create(Tag $tag)
+{
+	// ノードが ForeachNode のインスタンスである最も近い祖先タグを検索します
+	$foreachTag = $tag->closestTag([ForeachNode::class]);
+	if ($foreachTag) {
+		// ForeachNode インスタンス自体にアクセスできます：
+		$foreachNode = $foreachTag->node;
+	}
+}
+```
+
+`$foreachTag->node`に注意してください：これは、Latteタグ開発の慣例として、作成されたノードを`create()`メソッド内で即座に`$tag->node`に割り当てるためだけに機能します。これは、私たちが行ってきたことです。
+
+ノードタイプを比較するだけでは不十分な場合があります。潜在的な祖先タグまたはそのノードの特定のプロパティを確認する必要があるかもしれません。`closestTag()`のオプションの2番目の引数は、潜在的な祖先`Tag`オブジェクトを受け取り、それが有効な一致であるかどうかを返す必要があるコーラブルです。
+
+```php
+function create(Tag $tag)
+{
+	$dynamicBlockTag = $tag->closestTag(
+		[BlockNode::class],
+		// 条件：ブロックは動的でなければなりません
+		fn(Tag $blockTag) => $blockTag->node->block->isDynamic(),
+	);
+}
+```
+
+`closestTag()`を使用すると、コンテキストを認識し、テンプレート構造内での適切な使用を強制するタグを作成でき、より堅牢で理解しやすいテンプレートにつながります。
+
+
+`PrintContext::format()` プレースホルダー
+---------------------------------
+
+ノードの`print()`メソッドでPHPコードを生成するために`PrintContext::format()`を頻繁に使用してきました。これはマスク文字列と、マスク内のプレースホルダーを置き換える後続の引数を受け取ります。利用可能なプレースホルダーの概要は次のとおりです：
+
+- **`%node`**: 引数は`Node`のインスタンスでなければなりません。ノードの`print()`メソッドを呼び出し、結果のPHPコード文字列を挿入します。
+- **`%dump`**: 引数は任意のPHP値です。値を有効なPHPコードにエクスポートします。スカラー、配列、nullに適しています。
+	- `$context->format('echo %dump;', 'Hello')` -> `echo 'Hello';`
+	- `$context->format('$arr = %dump;', [1, 2])` -> `$arr = [1, 2];`
+- **`%raw`**: 引数をエスケープや変更なしで出力PHPコードに直接挿入します。**注意して使用してください**。主に、事前に生成されたPHPコードフラグメントや変数名を挿入するために使用します。
+	- `$context->format('%raw = 1;', '$variableName')` -> `$variableName = 1;`
+- **`%args`**: 引数は`Expression\ArrayNode`でなければなりません。関数またはメソッド呼び出しの引数としてフォーマットされた配列項目を出力します（カンマ区切り、存在する場合は名前付き引数を処理します）。
+	- `$argsNode = new ArrayNode([...]);`
+	- `$context->format('myFunc(%args);', $argsNode)` -> `myFunc(1, name: 'Joe');`
+- **`%line`**: 引数は`Position`オブジェクト（通常は`$this->position`）でなければなりません。ソース行番号を示すPHPコメント`/* line X */`を挿入します。
+	- `$context->format('echo "Hi" %line;', $this->position)` -> `echo "Hi" /* line 42 */;`
+- **`%escape(...)`**: *実行時に*現在のコンテキスト対応エスケープルールを使用して内部式をエスケープするPHPコードを生成します。
+	- `$context->format('echo %escape(%node);', $variableNode)`
+- **`%modify(...)`**: 引数は`ModifierNode`でなければなりません。`ModifierNode`で指定されたフィルタを内部コンテンツに適用するPHPコードを生成します。`|noescape`で無効にされていない限り、コンテキスト対応エスケープを含みます。
+	- `$context->format('%modify(%node);', $modifierNode, $variableNode)`
+- **`%modifyContent(...)`**: `%modify`に似ていますが、キャプチャされたコンテンツ（多くの場合HTML）のブロックを変更するために設計されています。
+
+インデックス（ゼロから）によって引数を明示的に参照できます：`%0.node`、`%1.dump`、`%2.raw`など。これにより、`format()`に繰り返し渡すことなく、マスク内で引数を複数回再利用できます。`%0.raw`と`%2.raw`が使用された`{repeat}`タグの例を参照してください。
+
+
+複雑な引数解析の例 .[#toc-complex-argument-parsing-example]
+--------------------------------------------------
+
+`parseExpression()`、`parseArguments()`などが多くのケースをカバーしますが、`$tag->parser->stream`を通じて利用可能な低レベルの`TokenStream`を使用した、より複雑な解析ロジックが必要になる場合があります。
+
+**目標:** `{embedYoutube $videoID, width: 640, height: 480}`タグを作成します。必須のビデオID（文字列または変数）と、それに続くオプションのキーと値のペア（次元用）を解析したいです。
+
+```php
+<?php
+namespace App\Latte;
+
+class YoutubeNode extends StatementNode
+{
+	public ExpressionNode $videoId;
+	public ?ExpressionNode $width = null;
+	public ?ExpressionNode $height = null;
+
+	public static function create(Tag $tag): self
+	{
+		$tag->expectArguments();
+		$node = $tag->node = new self;
+		// 必須のビデオIDを解析します
+		$node->videoId = $tag->parser->parseExpression();
+
+		// オプションのキーと値のペアを解析します
+		$stream = $tag->parser->stream; // トークンストリームを取得します
+		while ($stream->tryConsume(',')) { // カンマ区切りが必要です
+			// 'width' または 'height' 識別子を期待します
+			$keyToken = $stream->consume(Token::Php_Identifier);
+			$key = strtolower($keyToken->text);
+
+			$stream->consume(':'); // コロン区切り文字を期待します
+
+			$value = $tag->parser->parseExpression(); // 値の式を解析します
+
+			if ($key === 'width') {
+				$node->width = $value;
+			} elseif ($key === 'height') {
+				$node->height = $value;
+			} else {
+				throw new CompileException("不明な引数 '$key'。'width' または 'height' が期待されます。", $keyToken->position);
+			}
+		}
+
+		return $node;
+	}
+}
+```
+
+このレベルの制御により、トークンストリームと直接対話することで、カスタムタグに対して非常に具体的で複雑な構文を定義できます。
+
+
+`AuxiliaryNode` の使用 .[#toc-using-auxiliarynode]
+-----------------------------------------------
+
+Latteは、コード生成中またはコンパイルパス内の特別な状況のために、一般的な「補助」ノードを提供します。これらは`AuxiliaryNode`と`Php\Expression\AuxiliaryNode`です。
+
+`AuxiliaryNode`を、そのコア機能（コード生成と子ノードの公開）をコンストラクタで提供される引数に委譲する、柔軟なコンテナノードと考えてください：
+
+- `print()`の委譲：コンストラクタの最初の引数はPHP**クロージャ**です。Latteが`AuxiliaryNode`で`print()`メソッドを呼び出すと、提供されたこのクロージャを実行します。クロージャは`PrintContext`と、コンストラクタの2番目の引数で渡されたノードを受け取り、完全にカスタムなPHPコード生成ロジックを実行時に定義できます。
+- `getIterator()`の委譲：コンストラクタの2番目の引数は**`Node`オブジェクトの配列**です。Latteが`AuxiliaryNode`の子を走査する必要がある場合（例：コンパイルパス中）、その`getIterator()`メソッドはこの配列にリストされているノードを単純に提供します。
+
+例：
+
+```php
+$node = new AuxiliaryNode(
+    // 1. このクロージャが print() の本体になります
+    fn(PrintContext $context, $arg1, $arg2) => $context->format('...%node...%node...', $arg1, $arg2),
+
+    // 2. これらのノードは getIterator() メソッドによって提供され、上記のクロージャに渡されます
+    [$argumentNode1, $argumentNode2]
+);
+```
+
+Latteは、生成されたコードをどこに挿入する必要があるかに基づいて、2つの異なるタイプを提供します：
+
+- `Latte\Compiler\Nodes\Php\Expression\AuxiliaryNode`: **式**を表すPHPコードの一部を生成する必要がある場合に使用します
+- `Latte\Compiler\Nodes\AuxiliaryNode`: 1つ以上の**ステートメント**を表すPHPコードのブロックを挿入する必要がある、より一般的な目的で使用します
+
+`print()`メソッドまたはコンパイルパス内で標準ノード（`StaticMethodCallNode`など）の代わりに`AuxiliaryNode`を使用する重要な理由は、**後続のコンパイルパス、特にSandboxなどのセキュリティ関連のものに対する可視性の制御**です。
+
+シナリオを考えてみましょう：コンパイルパスが、ユーザー提供の式（`$userExpr`）を特定の信頼できるヘルパー関数`myInternalSanitize($userExpr)`の呼び出しでラップする必要があるとします。標準の`new FunctionCallNode('myInternalSanitize', [$userExpr])`ノードを作成すると、ASTパスに対して完全に表示されます。Sandboxパスが後で実行され、`myInternalSanitize`が許可リストに*ない*場合、Sandboxはこの呼び出しを*ブロック*または変更する可能性があり、タグの作成者である*あなた*がこの特定の呼び出しが安全で必要であると知っていても、タグの内部ロジックを潜在的に壊す可能性があります。したがって、`AuxiliaryNode`クロージャ内で直接呼び出しを生成できます。
+
+```php
+use Latte\Compiler\Nodes\Php\Expression\AuxiliaryNode;
+
+// ... print() またはコンパイルパス内 ...
+$wrappedNode = new AuxiliaryNode(
+	fn(PrintContext $context, $userExpr) => $context->format(
+		'myInternalSanitize(%node)', // PHPコードを直接生成
+		$userExpr,
+	),
+	// 重要：元のユーザー式ノードをここに渡してください！
+	[$userExpr],
+);
+```
+
+この場合、Sandboxパスは`AuxiliaryNode`を見ますが、そのクロージャによって生成されたPHPコードを**解析しません**。クロージャ*内部*で生成された`myInternalSanitize`呼び出しを直接ブロックすることはできません。
+
+生成されたPHPコード自体はパスから隠されていますが、そのコードへの*入力*（ユーザーデータや式を表すノード）は**依然として走査可能でなければなりません**。これが、`AuxiliaryNode`のコンストラクタの2番目の引数が不可欠である理由です。クロージャが使用するすべての元のノード（上記の例の`$userExpr`など）を含む配列を**必ず**渡す必要があります。`AuxiliaryNode`の`getIterator()`は**これらのノードを提供し**、Sandboxのようなコンパイルパスが潜在的な問題についてそれらを分析できるようにします。
+
+
+ベストプラクティス .[#toc-best-practices]
+================================
+
+- **明確な目的:** タグが明確で必要な目的を持っていることを確認してください。[フィルタ | custom-filters]や[関数 | custom-functions]で簡単に解決できるタスクのためにタグを作成しないでください。
+- **`getIterator()`を正しく実装する:** 常に`getIterator()`を実装し、テンプレートから解析された*すべて*の子ノード（引数、コンテンツ）への*参照*（`&`）を提供してください。これは、コンパイルパス、セキュリティ（Sandbox）、および将来の潜在的な最適化に不可欠です。
+- **ノードのパブリックプロパティ:** 子ノードを含むプロパティは、必要に応じてコンパイルパスが変更できるようにパブリックにしてください。
+- **`PrintContext::format()`を使用する:** PHPコードを生成するために`format()`メソッドを活用してください。引用符を処理し、プレースホルダーを適切にエスケープし、行番号コメントを自動的に追加します。
+- **一時変数（`$__`）:** 一時変数が必要なランタイムPHPコードを生成する場合（例：中間合計、ループカウンタを格納するため）、ユーザー変数やLatteの内部変数`$ʟ_`との衝突を避けるために`$__`プレフィックス規約を使用してください。
+- **ネストと一意なID:** タグがネストされる可能性がある場合、または実行時にインスタンス固有の状態が必要な場合は、`print()`メソッド内で`$context->generateId()`を使用して、`$__`一時変数の一意なサフィックスを作成してください。
+- **外部データ用のプロバイダ:** ランタイムデータやサービス（`$this->global->...`）にアクセスするために、値をハードコーディングしたりグローバル状態に依存したりする代わりに、プロバイダ（`Extension::getProviders()`を通じて登録）を使用してください。プロバイダ名にはベンダープレフィックスを使用してください。
+- **n:属性を検討する:** ペアタグが論理的に単一のHTML要素で動作する場合、Latteはおそらく自動的な`n:属性`サポートを提供します。ユーザーの利便性のためにこれを念頭に置いてください。属性変更タグを作成する場合は、純粋な`n:属性`が最も適切な形式であるかどうかを検討してください。
+- **テスト:** さまざまな構文入力の解析と、生成された**PHPコード**の出力の正確性の両方をカバーするタグのテストを作成してください。
+
+これらのガイドラインに従うことで、Latteテンプレートエンジンとシームレスに統合する、強力で堅牢、かつ保守可能なカスタムタグを作成できます。
+
+.[note]
+Latteに含まれるノードクラスを研究することは、解析プロセスのすべての詳細を学ぶための最良の方法です。

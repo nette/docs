@@ -1,0 +1,555 @@
+Trecerea de compilare
+*********************
+
+.[perex]
+Trecerea de compilare oferă un mecanism puternic pentru analiza și modificarea șabloanelor Latte *după* ce acestea sunt parsate într-un arbore sintactic abstract (AST) și *înainte* de generarea codului PHP final. Acest lucru permite manipularea avansată a șabloanelor, optimizări, verificări de securitate (cum ar fi Sandbox) și colectarea de informații despre șabloane. Acest ghid vă va îndruma în crearea propriilor treceri de compilare.
+
+
+Ce este o trecere de compilare? .[#toc-what-is-a-compiler-pass]
+===============================================================
+
+Pentru a înțelege rolul trecerilor de compilare, consultați [procesul de compilare Latte |custom-tags#Understanding the Compilation Process]. După cum puteți vedea, trecerile de compilare operează într-o fază cheie, permițând o intervenție profundă între parsarea inițială și ieșirea finală a codului.
+
+În esență, o trecere de compilare este pur și simplu un obiect PHP apelabil (cum ar fi o funcție, o metodă statică sau o metodă de instanță) care acceptă un singur argument: nodul rădăcină al AST-ului șablonului, care este întotdeauna o instanță a `Latte\Compiler\Nodes\TemplateNode`.
+
+Scopul principal al unei treceri de compilare este de obicei unul sau ambele dintre următoarele:
+
+- Analiză: Parcurgerea AST-ului și colectarea de informații despre șablon (de exemplu, găsirea tuturor blocurilor definite, verificarea utilizării unor tag-uri specifice, asigurarea îndeplinirii anumitor restricții de securitate).
+- Modificare: Schimbarea structurii AST-ului sau a atributelor nodurilor (de exemplu, adăugarea automată a atributelor HTML, optimizarea anumitor combinații de tag-uri, înlocuirea tag-urilor depreciate cu altele noi, implementarea regulilor sandbox).
+
+
+Înregistrare .[#toc-registration]
+=================================
+
+Trecerea de compilare este înregistrată folosind metoda [extensiei |extending-latte#getPasses()] `getPasses()`. Această metodă returnează un array asociativ unde cheile sunt nume unice ale trecerilor (utilizate intern și pentru sortare) iar valorile sunt obiecte PHP apelabile care implementează logica trecerii.
+
+```php
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Extension;
+
+class MyExtension extends Extension
+{
+	public function getPasses(): array
+	{
+		return [
+			'modificationPass' => $this->modifyTemplateAst(...),
+			// ... alte treceri ...
+		];
+	}
+
+	public function modifyTemplateAst(TemplateNode $templateNode): void
+	{
+		// Implementare...
+	}
+}
+```
+
+Trecerea înregistrată de extensiile de bază Latte și extensiile dvs. proprii rulează secvențial. Ordinea poate fi importantă, mai ales dacă o trecere depinde de rezultatele sau modificările alteia. Latte oferă un mecanism auxiliar pentru controlul acestei ordini, dacă este necesar; consultați documentația pentru [`Extension::getPasses()` |extending-latte#getPasses()] pentru detalii.
+
+
+Exemplu AST .[#toc-example-of-ast]
+==================================
+
+Pentru o mai bună înțelegere a AST-ului, adăugăm un exemplu. Acesta este șablonul sursă:
+
+```latte
+{foreach $category->getItems() as $item}
+	<li>{$item->name|upper}</li>
+	{else}
+	no items found
+{/foreach}
+```
+
+Și aceasta este reprezentarea sa sub formă de AST:
+
+/--pre
+Latte\Compiler\Nodes\<b>TemplateNode</b>(
+   Latte\Compiler\Nodes\<b>FragmentNode</b>(
+      - Latte\Essential\Nodes\<b>ForeachNode</b>(
+           expression: Latte\Compiler\Nodes\Php\Expression\<b>MethodCallNode</b>(
+              object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$category')
+              name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('getItems')
+           )
+           value: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+           content: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+              - Latte\Compiler\Nodes\<b>TextNode</b>('  ')
+              - Latte\Compiler\Nodes\<b>Html\ElementNode</b>('li')(
+                   content: Latte\Essential\Nodes\<b>PrintNode</b>(
+                      expression: Latte\Compiler\Nodes\Php\Expression\<b>PropertyFetchNode</b>(
+                         object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+                         name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('name')
+                      )
+                      modifier: Latte\Compiler\Nodes\Php\<b>ModifierNode</b>(
+                         filters:
+                            - Latte\Compiler\Nodes\Php\<b>FilterNode</b>('upper')
+                      )
+                   )
+                )
+            )
+            else: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+               - Latte\Compiler\Nodes\<b>TextNode</b>('no items found')
+            )
+        )
+   )
+)
+\--
+
+
+Parcurgerea AST folosind `NodeTraverser` .[#toc-traversing-the-ast-with-nodetraverser]
+======================================================================================
+
+Scrierea manuală a funcțiilor recursive pentru parcurgerea structurii complexe a AST-ului este obositoare și predispusă la erori. Latte oferă un instrument special pentru acest scop: [api:Latte\Compiler\NodeTraverser]. Această clasă implementează [pattern-ul de design Visitor |https://en.wikipedia.org/wiki/Visitor_pattern], datorită căruia parcurgerea AST-ului este sistematică și ușor de gestionat.
+
+Utilizarea de bază implică crearea unei instanțe `NodeTraverser` și apelarea metodei sale `traverse()`, transmițând nodul rădăcină al AST-ului și unul sau doi „visitor” apelabili:
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+
+(new NodeTraverser)->traverse(
+	$templateNode,
+
+	// 'enter' visitor: Apelat la intrarea în nod (înainte de copiii săi)
+	enter: function (Node $node) {
+		echo "Intrare în nod de tip: " . $node::class . "\n";
+		// Aici puteți examina nodul
+		if ($node instanceof Nodes\TextNode) {
+			// echo "Text găsit: " . $node->content . "\n";
+		}
+	},
+
+	// 'leave' visitor: Apelat la părăsirea nodului (după copiii săi)
+	leave: function (Node $node) {
+		echo "Părăsire nod de tip: " . $node::class . "\n";
+		// Aici puteți efectua acțiuni după procesarea copiilor
+	},
+);
+```
+
+Puteți furniza doar visitor-ul `enter`, doar visitor-ul `leave`, sau ambii, în funcție de nevoile dvs.
+
+**`enter(Node $node)`:** Această funcție este executată pentru fiecare nod **înainte** ca traverser-ul să viziteze oricare dintre copiii acestui nod. Este utilă pentru:
+
+- Colectarea informațiilor în timpul parcurgerii arborelui în jos.
+- Luarea deciziilor *înainte* de procesarea copiilor (cum ar fi decizia de a-i sări, vezi [Optimizarea parcurgerii |#Optimizing Traversal]).
+- Modificări potențiale ale nodului înainte de vizitarea copiilor (mai puțin frecvent).
+
+**`leave(Node $node)`:** Această funcție este executată pentru fiecare nod **după** ce toți copiii săi (și subarborii lor întregi) au fost complet vizitați (atât intrare cât și părăsire). Este cel mai frecvent loc pentru:
+
+Ambii vizitatori `enter` și `leave` pot returna opțional o valoare pentru a influența procesul de parcurgere. Returnarea `null` (sau nimic) continuă parcurgerea normal, returnarea unei instanțe `Node` înlocuiește nodul curent, iar returnarea constantelor speciale precum `NodeTraverser::RemoveNode` sau `NodeTraverser::StopTraversal` modifică fluxul, așa cum este explicat în secțiunile următoare.
+
+
+Cum funcționează parcurgerea .[#toc-how-traversal-works]
+--------------------------------------------------------
+
+`NodeTraverser` utilizează intern metoda `getIterator()`, pe care trebuie să o implementeze fiecare clasă `Node` (așa cum s-a discutat în [Crearea tag-urilor personalizate |custom-tags#Implementing getIterator() for Subnodes]). Iterează peste copiii obținuți prin `getIterator()`, apelează recursiv `traverse()` pe ei și asigură că vizitatorii `enter` și `leave` sunt apelați în ordinea corectă de parcurgere în adâncime pentru fiecare nod din arbore accesibil prin iteratori. Acest lucru subliniază din nou de ce un `getIterator()` implementat corect în nodurile dvs. de tag-uri personalizate este absolut necesar pentru funcționarea corectă a trecerilor de compilare.
+
+Să scriem o trecere simplă care numără de câte ori este utilizat tag-ul `{do}` (reprezentat de `Latte\Essential\Nodes\DoNode`) în șablon.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\DoNode;
+
+function countDoTags(TemplateNode $templateNode): void
+{
+	$count = 0;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use (&$count): void {
+			if ($node instanceof DoNode) {
+				$count++;
+			}
+		},
+		// visitor-ul 'leave' nu este necesar pentru această sarcină
+	);
+
+	echo "Tag-ul {do} a fost găsit de $count ori.\n";
+}
+
+$latte = new Latte\Engine;
+$ast = $latte->parse($templateSource);
+countDoTags($ast);
+```
+
+În acest exemplu, am avut nevoie doar de visitor-ul `enter` pentru a verifica tipul fiecărui nod vizitat.
+
+În continuare, vom explora cum acești vizitatori modifică efectiv AST-ul.
+
+
+Modificarea AST-ului .[#toc-modifying-the-ast]
+==============================================
+
+Unul dintre scopurile principale ale trecerilor de compilare este modificarea arborelui sintactic abstract. Acest lucru permite transformări puternice, optimizări sau impunerea regulilor direct asupra structurii șablonului înainte de generarea codului PHP. `NodeTraverser` oferă mai multe moduri de a realiza acest lucru în cadrul vizitatorilor `enter` și `leave`.
+
+**Notă importantă:** Modificarea AST-ului necesită prudență. Modificările incorecte – cum ar fi eliminarea nodurilor esențiale sau înlocuirea unui nod cu un tip incompatibil – pot duce la erori în timpul generării codului sau pot cauza un comportament neașteptat în timpul rulării programului. Testați întotdeauna temeinic trecerile dvs. de modificare.
+
+
+Modificarea atributelor nodurilor .[#toc-changing-node-properties]
+------------------------------------------------------------------
+
+Cel mai simplu mod de a modifica arborele este schimbarea directă a **proprietăților publice** ale nodurilor vizitate în timpul parcurgerii. Toate nodurile stochează argumentele, conținutul sau atributele parsate în proprietăți publice.
+
+**Exemplu:** Să creăm o trecere care găsește toate nodurile de text static (`TextNode`, reprezentând HTML obișnuit sau text în afara tag-urilor Latte) și convertește conținutul lor în majuscule *direct în AST*.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\TextNode;
+
+function uppercaseStaticText(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Putem folosi 'enter', deoarece TextNode nu are copii de procesat
+		enter: function (Node $node) {
+			// Este acest nod un bloc de text static?
+			if ($node instanceof TextNode) {
+				// Da! Modificăm direct proprietatea sa publică 'content'.
+				$node->content = mb_strtoupper(html_entity_decode($node->content));
+			}
+			// Nu este nevoie să returnăm nimic; modificarea este aplicată direct.
+		},
+	);
+}
+```
+
+În acest exemplu, visitor-ul `enter` verifică dacă `$node`-ul curent este de tip `TextNode`. Dacă da, actualizăm direct proprietatea sa publică `$content` folosind `mb_strtoupper()`. Acest lucru modifică direct conținutul textului static stocat în AST *înainte* de generarea codului PHP. Deoarece modificăm obiectul direct, nu trebuie să returnăm nimic din visitor.
+
+Efect: Dacă șablonul conținea `<p>Hello</p>{= $var }<span>World</span>`, după această trecere, AST-ul va reprezenta ceva de genul: `<p>HELLO</p>{= $var }<span>WORLD</span>`. Acest lucru NU VA AFECTA conținutul $var.
+
+
+Înlocuirea nodurilor .[#toc-replacing-nodes]
+--------------------------------------------
+
+O tehnică de modificare mai puternică este înlocuirea completă a unui nod cu altul. Acest lucru se realizează prin **returnarea unei noi instanțe `Node`** din visitor-ul `enter` sau `leave`. `NodeTraverser` înlocuiește apoi nodul original cu cel returnat în structura nodului părinte.
+
+**Exemplu:** Să creăm o trecere care găsește toate utilizările constantei `PHP_VERSION` (reprezentate de `ConstantFetchNode`) și le înlocuiește direct cu un literal de șir (`StringNode`) conținând versiunea PHP *reală* detectată *în timpul compilării*. Aceasta este o formă de optimizare în timpul compilării.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\Php\Expression\ConstantFetchNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+
+function inlinePhpVersion(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// 'leave' este adesea folosit pentru înlocuire, asigurând că copiii (dacă există)
+		// sunt procesați mai întâi, deși și 'enter' ar funcționa aici.
+		leave: function (Node $node) {
+			// Este acest nod un acces la constantă și numele constantei este 'PHP_VERSION'?
+			if ($node instanceof ConstantFetchNode && (string) $node->name === 'PHP_VERSION') {
+				// Creăm un nou StringNode conținând versiunea PHP curentă
+				$newNode = new StringNode(PHP_VERSION);
+
+				// Opțional, dar bună practică: copiem informațiile despre poziție
+				$newNode->position = $node->position;
+
+				// Returnăm noul StringNode. Traverser-ul va înlocui
+				// ConstantFetchNode original cu acest $newNode.
+				return $newNode;
+			}
+			// Dacă nu returnăm Node, $node-ul original este păstrat.
+		},
+	);
+}
+```
+
+Aici, visitor-ul `leave` identifică `ConstantFetchNode` specific pentru `PHP_VERSION`. Apoi creează un `StringNode` complet nou conținând valoarea constantei `PHP_VERSION` *în timpul compilării*. Returnând acest `$newNode`, îi spune traverser-ului să înlocuiască `ConstantFetchNode` original în AST.
+
+Efect: Dacă șablonul conținea `{= PHP_VERSION }` și compilarea rulează pe PHP 8.2.1, AST-ul după această trecere va reprezenta efectiv `{= '8.2.1' }`.
+
+**Alegerea `enter` vs. `leave` pentru înlocuire:**
+
+- Utilizați `leave` dacă crearea noului nod depinde de rezultatele procesării copiilor nodului vechi, sau dacă doriți pur și simplu să vă asigurați că copiii sunt vizitați înainte de înlocuire (practică comună).
+- Utilizați `enter` dacă doriți să înlocuiți un nod *înainte* ca copiii săi să fie vizitați.
+
+
+Eliminarea nodurilor .[#toc-removing-nodes]
+-------------------------------------------
+
+Puteți elimina complet un nod din AST returnând constanta specială `NodeTraverser::RemoveNode` din visitor.
+
+**Exemplu:** Să eliminăm toate comentariile șablonului (`{* ... *}`), care sunt reprezentate de `CommentNode` în AST-ul generat de nucleul Latte (deși de obicei procesate mai devreme, acest lucru servește ca exemplu).
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\CommentNode;
+
+function removeCommentNodes(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// 'enter' este în regulă aici, deoarece nu avem nevoie de informații despre copii pentru a elimina comentariul
+		enter: function (Node $node) {
+			if ($node instanceof CommentNode) {
+				// Semnalăm traverser-ului să elimine acest nod din AST
+				return NodeTraverser::RemoveNode;
+			}
+		},
+	);
+}
+```
+
+**Atenție:** Utilizați `RemoveNode` cu prudență. Eliminarea unui nod care conține conținut esențial sau afectează structura (cum ar fi eliminarea nodului de conținut al unui ciclu) poate duce la șabloane corupte sau cod generat invalid. Este cel mai sigur pentru nodurile care sunt cu adevărat opționale sau autonome (cum ar fi comentariile sau tag-urile de depanare) sau pentru nodurile structurale goale (de exemplu, un `FragmentNode` gol poate fi eliminat în siguranță în unele contexte printr-o trecere de curățare).
+
+Aceste trei metode - modificarea proprietăților, înlocuirea nodurilor și eliminarea nodurilor - oferă instrumentele de bază pentru manipularea AST-ului în cadrul trecerilor dvs. de compilare.
+
+
+Optimizarea parcurgerii .[#toc-optimizing-traversal]
+====================================================
+
+AST-ul șabloanelor poate fi destul de mare, conținând potențial mii de noduri. Parcurgerea fiecărui nod individual poate fi inutilă și poate afecta performanța compilării dacă trecerea dvs. este interesată doar de părți specifice ale arborelui. `NodeTraverser` oferă modalități de optimizare a parcurgerii:
+
+
+Sărirea peste copii .[#toc-skipping-children]
+---------------------------------------------
+
+Dacă știți că, odată ce întâlniți un anumit tip de nod, niciunul dintre descendenții săi nu poate conține nodurile pe care le căutați, puteți spune traverser-ului să sară peste vizitarea copiilor săi. Acest lucru se realizează returnând constanta `NodeTraverser::DontTraverseChildren` din visitor-ul **`enter`**. Astfel, veți omite ramuri întregi în timpul parcurgerii, economisind potențial timp considerabil, în special în șabloanele cu expresii PHP complexe în interiorul tag-urilor.
+
+
+Oprirea parcurgerii .[#toc-stopping-traversal]
+----------------------------------------------
+
+Dacă trecerea dvs. trebuie să găsească doar *prima* apariție a ceva (un tip specific de nod, îndeplinirea unei condiții), puteți opri complet întregul proces de parcurgere odată ce ați găsit-o. Acest lucru se realizează returnând constanta `NodeTraverser::StopTraversal` din visitor-ul `enter` sau `leave`. Metoda `traverse()` va înceta să viziteze orice alte noduri. Acest lucru este extrem de eficient dacă aveți nevoie doar de prima potrivire într-un arbore potențial foarte mare.
+
+
+Ajutor util `NodeTraverser` .[#toc-useful-helper-nodetraverser]
+===============================================================
+
+În timp ce `NodeTraverser` oferă un control fin, Latte oferă, de asemenea, o clasă ajutătoare practică, [api:Latte\Compiler\NodeHelpers], care încapsulează `NodeTraverser` pentru mai multe sarcini comune de căutare și analiză, necesitând adesea mai puțin cod de pregătire.
+
+
+find(Node $startNode, callable $filter): array .[method]
+--------------------------------------------------------
+
+Această metodă statică găsește **toate** nodurile din subarborele care începe la `$startNode` (inclusiv), care îndeplinesc callback-ul `$filter`. Returnează un array de noduri potrivite.
+
+**Exemplu:** Găsiți toate nodurile de variabile (`VariableNode`) din întregul șablon.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\Expression\VariableNode;
+use Latte\Compiler\Nodes\TemplateNode;
+
+function findAllVariables(TemplateNode $templateNode): array
+{
+	return NodeHelpers::find(
+		$templateNode,
+		fn($node) => $node instanceof VariableNode,
+	);
+}
+```
+
+
+findFirst(Node $startNode, callable $filter): ?Node  .[method]
+--------------------------------------------------------------
+
+Similar cu `find`, dar oprește parcurgerea imediat după găsirea **primului** nod care îndeplinește callback-ul `$filter`. Returnează obiectul `Node` găsit sau `null` dacă nu este găsit niciun nod potrivit. Acesta este în esență un wrapper practic în jurul `NodeTraverser::StopTraversal`.
+
+**Exemplu:** Găsiți nodul `{parameters}` (la fel ca exemplul manual anterior, dar mai scurt).
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\ParametersNode;
+
+function findParametersNodeHelper(TemplateNode $templateNode): ?ParametersNode
+{
+	return NodeHelpers::findFirst(
+		$templateNode->head, // Căutați doar în secțiunea principală pentru eficiență
+		fn($node) => $node instanceof ParametersNode,
+	);
+}
+```
+
+
+toValue(ExpressionNode $node, bool $constants = false): mixed .[method]
+-----------------------------------------------------------------------
+
+Această metodă statică încearcă să evalueze `ExpressionNode` **în timpul compilării** și să returneze valoarea sa PHP corespunzătoare. Funcționează fiabil doar pentru noduri literale simple (`StringNode`, `IntegerNode`, `FloatNode`, `BooleanNode`, `NullNode`) și instanțe `ArrayNode` care conțin doar astfel de elemente evaluabile.
+
+Dacă `$constants` este setat la `true`, va încerca, de asemenea, să rezolve `ConstantFetchNode` și `ClassConstantFetchNode` verificând `defined()` și folosind `constant()`.
+
+Dacă nodul conține variabile, apeluri de funcții sau alte elemente dinamice, nu poate fi evaluat în timpul compilării și metoda va arunca `InvalidArgumentException`.
+
+**Caz de utilizare:** Obținerea valorii statice a unui argument de tag în timpul compilării pentru luarea deciziilor în timpul compilării.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+
+function getStaticStringArgument(ExpressionNode $argumentNode): ?string
+{
+	try {
+		$value = NodeHelpers::toValue($argumentNode);
+		return is_string($value) ? $value : null;
+	} catch (\InvalidArgumentException $e) {
+		// Argumentul nu a fost un șir literal static
+		return null;
+	}
+}
+```
+
+
+toText(?Node $node): ?string .[method]
+--------------------------------------
+
+Această metodă statică este utilă pentru extragerea conținutului text simplu din noduri simple. Funcționează în principal cu:
+- `TextNode`: Returnează `$content`-ul său.
+- `FragmentNode`: Concatenează rezultatul `toText()` pentru toți copiii săi. Dacă un copil nu este convertibil în text (de exemplu, conține `PrintNode`), returnează `null`.
+- `NopNode`: Returnează un șir gol.
+- Alte tipuri de noduri: Returnează `null`.
+
+**Caz de utilizare:** Obținerea conținutului text static al valorii unui atribut HTML sau al unui element HTML simplu pentru analiză în timpul unei treceri de compilare.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Html\AttributeNode;
+
+function getStaticAttributeValue(AttributeNode $attr): ?string
+{
+	// $attr->value este de obicei AreaNode (cum ar fi FragmentNode sau TextNode)
+	return NodeHelpers::toText($attr->value);
+}
+
+// Exemplu de utilizare într-o trecere:
+// if ($node instanceof Html\ElementNode && $node->name === 'meta') {
+//     $nameAttrValue = getStaticAttributeValue($node->getAttributeNode('name'));
+//     if ($nameAttrValue === 'description') { ... }
+// }
+```
+
+`NodeHelpers` poate simplifica trecerile dvs. de compilare oferind soluții gata făcute pentru sarcini comune de parcurgere și analiză AST.
+
+
+Exemple practice .[#toc-practical-examples]
+===========================================
+
+Să aplicăm conceptele de parcurgere și modificare AST pentru a rezolva câteva probleme practice. Aceste exemple demonstrează pattern-uri comune utilizate în trecerile de compilare.
+
+
+Adăugarea automată a `loading="lazy"` la `<img>` .[#toc-auto-adding-loading-lazy-to-img]
+----------------------------------------------------------------------------------------
+
+Browserele moderne suportă încărcarea leneșă nativă pentru imagini folosind atributul `loading="lazy"`. Să creăm o trecere care adaugă automat acest atribut la toate tag-urile `<img>` care nu au încă atributul `loading`.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Html;
+
+function addLazyLoading(Nodes\TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Putem folosi 'enter', deoarece modificăm nodul direct
+		// și nu depindem de copii pentru această decizie.
+		enter: function (Node $node) {
+			// Este un element HTML cu numele 'img'?
+			if ($node instanceof Html\ElementNode && $node->name === 'img') {
+				// Asigurăm că nodul de atribute există
+				$node->attributes ??= new Nodes\FragmentNode;
+
+				// Verificăm dacă există deja un atribut 'loading' (indiferent de majuscule/minuscule)
+				foreach ($node->attributes->children as $attrNode) {
+					if ($attrNode instanceof Html\AttributeNode
+						&& $attrNode->name instanceof Nodes\TextNode // Nume static de atribut
+						&& strtolower($attrNode->name->content) === 'loading'
+					) {
+						return;
+					}
+				}
+
+				// Adăugăm un spațiu dacă atributele nu sunt goale
+				if ($node->attributes->children) {
+					$node->attributes->children[] = new Nodes\TextNode(' ');
+				}
+
+				// Creăm un nou nod de atribut: loading="lazy"
+				$node->attributes->children[] = new Html\AttributeNode(
+					name: new Nodes\TextNode('loading'),
+					value: new Nodes\TextNode('lazy'),
+					quote: '"',
+				);
+				// Modificarea este aplicată direct în obiect, nu este nevoie să returnăm nimic.
+			}
+		},
+	);
+}
+```
+
+Explicație:
+- Visitor-ul `enter` caută noduri `Html\ElementNode` cu numele `img`.
+- Iterează peste atributele existente (`$node->attributes->children`) și verifică dacă atributul `loading` este deja prezent.
+- Dacă nu este găsit, creează un nou `Html\AttributeNode` reprezentând `loading="lazy"`.
+
+
+Verificarea apelurilor de funcții .[#toc-checking-function-calls]
+-----------------------------------------------------------------
+
+Trecerea de compilare stă la baza Latte Sandbox. Deși Sandbox-ul real este sofisticat, putem demonstra principiul de bază al verificării apelurilor de funcții interzise.
+
+**Scop:** Prevenirea utilizării funcției potențial periculoase `shell_exec` în cadrul expresiilor șablonului.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Php;
+use Latte\SecurityViolationException;
+
+function checkForbiddenFunctions(Nodes\TemplateNode $templateNode): void
+{
+	$forbiddenFunctions = ['shell_exec' => true, 'exec' => true]; // Listă simplă
+
+	$traverser = new NodeTraverser;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use ($forbiddenFunctions) {
+			// Este un nod de apel direct de funcție?
+			if ($node instanceof Php\Expression\FunctionCallNode
+				&& $node->name instanceof Php\NameNode
+				&& isset($forbiddenFunctions[strtolower((string) $node->name)])
+			) {
+				throw new SecurityViolationException(
+					"Funcția {$node->name}() nu este permisă.",
+					$node->position,
+				);
+			}
+		},
+	);
+}
+```
+
+Explicație:
+- Definim o listă de nume de funcții interzise.
+- Visitor-ul `enter` verifică `FunctionCallNode`.
+- Dacă numele funcției (`$node->name`) este un `NameNode` static, verificăm reprezentarea sa de șir în minuscule față de lista noastră interzisă.
+- Dacă este găsită o funcție interzisă, aruncăm `Latte\SecurityViolationException`, care indică clar încălcarea regulii de securitate și oprește compilarea.
+
+Aceste exemple arată cum trecerile de compilare, folosind `NodeTraverser`, pot fi utilizate pentru analiză, modificări automate și impunerea restricțiilor de securitate prin interacțiunea directă cu structura AST a șablonului.
+
+
+Cele mai bune practici .[#toc-best-practices]
+=============================================
+
+La scrierea trecerilor de compilare, țineți cont de aceste linii directoare pentru a crea extensii robuste, mentenabile și eficiente:
+
+- **Ordinea contează:** Fiți conștienți de ordinea în care rulează trecerile. Dacă trecerea dvs. depinde de structura AST creată de o altă trecere (de exemplu, trecerile de bază Latte sau o altă trecere personalizată), sau dacă alte treceri pot depinde de modificările dvs., utilizați mecanismul de sortare furnizat de `Extension::getPasses()` pentru a defini dependențele (`before`/`after`). Consultați documentația pentru [`Extension::getPasses()` |extending-latte#getPasses()] pentru detalii.
+- **O singură responsabilitate:** Încercați să aveți treceri care efectuează o singură sarcină bine definită. Pentru transformări complexe, luați în considerare împărțirea logicii în mai multe treceri – poate una pentru analiză și alta pentru modificare bazată pe rezultatele analizei. Acest lucru îmbunătățește claritatea și testabilitatea.
+- **Performanță:** Amintiți-vă că trecerile de compilare adaugă timp la compilarea șablonului (deși acest lucru se întâmplă de obicei o singură dată, până când șablonul se schimbă). Evitați operațiunile costisitoare din punct de vedere computațional în trecerile dvs., dacă este posibil. Utilizați optimizări de parcurgere precum `NodeTraverser::DontTraverseChildren` și `NodeTraverser::StopTraversal` ori de câte ori știți că nu trebuie să vizitați anumite părți ale AST-ului.
+- **Utilizați `NodeHelpers`:** Pentru sarcini comune precum găsirea unor noduri specifice sau evaluarea statică a expresiilor simple, verificați dacă `Latte\Compiler\NodeHelpers` nu oferă o metodă potrivită înainte de a scrie propria logică `NodeTraverser`. Acest lucru poate economisi timp și reduce cantitatea de cod de pregătire.
+- **Gestionarea erorilor:** Dacă trecerea dvs. detectează o eroare sau o stare invalidă în AST-ul șablonului, aruncați `Latte\CompileException` (sau `Latte\SecurityViolationException` pentru probleme de securitate) cu un mesaj clar și obiectul `Position` relevant (de obicei `$node->position`). Acest lucru oferă feedback util dezvoltatorului șablonului.
+- **Idempotență (dacă este posibil):** Ideal, rularea trecerii dvs. de mai multe ori pe același AST ar trebui să producă același rezultat ca și rularea sa o singură dată. Acest lucru nu este întotdeauna fezabil, dar simplifică depanarea și raționamentul despre interacțiunile trecerilor, dacă este realizat. De exemplu, asigurați-vă că trecerea dvs. de modificare verifică dacă modificarea a fost deja aplicată înainte de a o aplica din nou.
+
+Urmând aceste practici, puteți utiliza eficient trecerile de compilare pentru a extinde capacitățile Latte într-un mod puternic și fiabil, contribuind la o procesare a șabloanelor mai sigură, optimizată sau mai bogată funcțional.

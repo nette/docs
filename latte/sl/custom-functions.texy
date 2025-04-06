@@ -1,0 +1,144 @@
+Ustvarjanje lastnih funkcij
+***************************
+
+.[perex]
+Enostavno dodajte v predloge Latte lastne pomožne funkcije. Kličite PHP logiko neposredno v izrazih za izračune, dostop do storitev ali generiranje dinamične vsebine, kar ohranja vaše predloge čiste in zmogljive.
+
+
+Kaj so funkcije? .[#toc-what-are-functions]
+===========================================
+
+Funkcije v Latte vam omogočajo razširitev nabora funkcij, ki jih je mogoče klicati znotraj izrazov v predlogah (`{...}`). Lahko si jih predstavljate kot **lastne PHP funkcije, dostopne samo znotraj vaših Latte predlog**. To prinaša več prednosti:
+
+**Priročnost:** Lahko definirate pomožno logiko (kot izračune, formatiranje ali dostop do podatkov aplikacije) in jo kličete s preprosto, znano sintakso funkcij neposredno v predlogi, enako kot bi klicali `strlen()` ali `date()` v PHP.
+
+```latte
+{var $userInitials = initials($userName)} {* npr. 'J. D.' *}
+
+{if hasPermission('article', 'edit')}
+    <a href="...">Uredi</a>
+{/if}
+```
+
+**Brez onesnaževanja globalnega prostora:** Za razliko od definiranja dejanske globalne funkcije v PHP obstajajo funkcije Latte samo v kontekstu izrisovanja predloge. Ni vam treba obremenjevati globalnega imenskega prostora PHP s pomočniki, ki so specifični samo za predloge.
+
+**Integracija z logiko aplikacije:** PHP klicni objekt, ki stoji za funkcijo Latte, je lahko karkoli – anonimna funkcija, statična metoda ali instančna metoda. To pomeni, da lahko vaše funkcije v predlogah enostavno dostopajo do aplikacijskih storitev, podatkovnih baz, konfiguracije ali katerekoli druge potrebne logike z zajemanjem spremenljivk (v primeru anonimnih funkcij) ali s pomočjo dependency injection (v primeru objektov). Zgornji primer `hasPermission` to jasno prikazuje, ko verjetno v ozadju kliče avtorizacijsko storitev.
+
+**Prepisovanje nativnih funkcij (neobvezno):** Lahko celo definirate funkcijo Latte z enakim imenom kot nativna PHP funkcija. V predlogi bo namesto prvotne funkcije klicana vaša lastna različica. To je lahko uporabno za zagotavljanje vedenja, specifičnega za predlogo, ali zagotavljanje dosledne obdelave (npr. zagotavljanje, da bo `strlen` vedno večbajtno varen). To funkcijo uporabljajte previdno, da preprečite nesporazume.
+
+Privzeto Latte omogoča klicanje *vseh* nativnih PHP funkcij (če niso omejene s [Sandboxom |sandbox]). Lastne funkcije razširjajo to vgrajeno knjižnico s specifičnimi potrebami vašega projekta.
+
+Če samo transformirate eno samo vrednost, je morda primernejše uporabiti [lasten filter |custom-filters].
+
+
+Ustvarjanje in registracija funkcij .[#toc-creating-and-registering-functions]
+==============================================================================
+
+Podobno kot pri filtrih obstaja več načinov, kako definirati in registrirati lastne funkcije.
+
+
+Neposredna registracija s pomočjo `addFunction()` .[#toc-direct-registration-via-addfunction]
+---------------------------------------------------------------------------------------------
+
+Najenostavnejša metoda je uporaba `addFunction()` na objektu `Latte\Engine`. Določite ime funkcije (kot se bo prikazovalo v predlogi) in ustrezen PHP klicni objekt.
+
+```php
+$latte = new Latte\Engine;
+
+// Preprosta pomožna funkcija
+$latte->addFunction('initials', function (string $name): string {
+	preg_match_all('#\b\w#u', $name, $m);
+	return implode('. ', $m[0]) . '.';
+});
+```
+
+**Uporaba v predlogi:**
+
+```latte
+{var $userInitials = initials($userName)}
+```
+
+Argumenti funkcije v predlogi so posredovani neposredno PHP klicnemu objektu v istem vrstnem redu. PHP funkcionalnosti kot so tipski namigi, privzete vrednosti in variabilni parametri (`...`) delujejo po pričakovanjih.
+
+
+Registracija s pomočjo razširitve .[#toc-registration-via-extension]
+--------------------------------------------------------------------
+
+Za boljšo organizacijo in ponovno uporabnost registrirajte funkcije znotraj [Latte razširitve |extending-latte#latte-extension]. Ta pristop je priporočen za bolj zapletene aplikacije ali deljene knjižnice.
+
+```php
+namespace App\Latte;
+
+use Latte\Extension;
+use Nette\Security\Authorizator;
+
+class MyLatteExtension extends Extension
+{
+	public function __construct(
+		// Predpostavljamo, da storitev Authorizator obstaja
+		private Authorizator $authorizator,
+	) {
+	}
+
+	public function getFunctions(): array
+	{
+		// Registracija metod kot Latte funkcij
+		return [
+			'hasPermission' => $this->hasPermission(...),
+		];
+	}
+
+	public function hasPermission(string $resource, string $action): bool
+	{
+		return $this->authorizator->isAllowed($resource, $action);
+	}
+}
+
+// Registracija (predpostavljamo, da $container vsebuje DIC)
+$extension = $container->getByType(App\Latte\MyLatteExtension::class);
+$latte = new Latte\Engine;
+$latte->addExtension($extension);
+```
+
+Ta pristop nazorno prikazuje, kako so lahko funkcije, definirane v Latte, podprte z metodami objektov, ki imajo lahko svoje lastne odvisnosti, upravljane s strani vsebnika za dependency injection vaše aplikacije ali tovarne. To ohranja logiko vaših predlog povezano z jedrom aplikacije in hkrati ohranja pregledno organizacijo.
+
+
+Funkcije, ki uporabljajo razred z atributi .[#toc-functions-using-the-class]
+----------------------------------------------------------------------------
+
+Enako kot filtri, funkcije lahko definiramo kot metode v vašem [razredu parametrov predloge |develop#Parameters as a class] s pomočjo atributa `#[Latte\Attributes\TemplateFunction]`.
+
+```php
+use Latte\Attributes\TemplateFunction;
+
+class TemplateParameters
+{
+	public function __construct(
+		public string $userName,
+		// nadaljnji parametri...
+	) {}
+
+	// Ta metoda bo dostopna kot {initials(...)} v predlogi
+	#[TemplateFunction]
+	public function initials(string $name): string
+	{
+		preg_match_all('#\b\w#u', $name, $m);
+		return implode('. ', $m[0]) . '.';
+	}
+}
+
+// Posredovanje objekta v predlogo
+$params = new TemplateParameters(userName: 'John Doe', /* ... */);
+$latte->render('template.latte', $params);
+```
+
+Latte samodejno odkrije in registrira metode, označene s tem atributom, ko je objekt parametrov posredovan v predlogo. Ime funkcije v predlogi ustreza imenu metode.
+
+```latte
+{* Uporaba funkcije, definirane v razredu parametrov *}
+{var $inits = initials($userName)}
+```
+
+**Kontekstne funkcije?**
+
+Za razliko od filtrov ne obstaja neposreden koncept "kontekstnih funkcij", ki bi prejele objekt, podoben `FilterInfo`. Funkcije delujejo znotraj izrazov in tipično ne potrebujejo neposrednega dostopa do konteksta izrisovanja ali informacij o tipu vsebine na enak način kot filtri, uporabljeni na blokih.

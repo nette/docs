@@ -1,0 +1,232 @@
+Tworzenie własnych filtrów
+**************************
+
+.[perex]
+Filtry są potężnymi narzędziami do formatowania i modyfikacji danych bezpośrednio w szablonach Latte. Oferują czystą składnię za pomocą symbolu potoku (`|`) do transformacji zmiennych lub wyników wyrażeń do pożądanego formatu wyjściowego.
+
+
+Co to są filtry? .[#toc-what-are-filters]
+=========================================
+
+Filtry w Latte to w zasadzie **funkcje PHP zaprojektowane specjalnie do transformacji wartości wejściowej na wartość wyjściową**. Stosuje się je za pomocą zapisu z potokiem (`|`) wewnątrz wyrażeń szablonu (`{...}`).
+
+**Wygoda:** Filtry pozwalają zamknąć typowe zadania formatowania (jak formatowanie dat, zmiana wielkości liter, skracanie) lub manipulacji danymi w reużywalnych jednostkach. Zamiast powtarzać złożony kod PHP w szablonach, możesz po prostu zastosować filtr:
+```latte
+{* Zamiast złożonego PHP do skrócenia: *}
+{$article->text|truncate:100}
+
+{* Zamiast kodu do formatowania daty: *}
+{$event->startTime|date:'Y-m-d H:i'}
+
+{* Zastosowanie wielu transformacji: *}
+{$product->name|lower|capitalize}
+```
+
+**Czytelność:** Używanie filtrów sprawia, że szablony są bardziej przejrzyste i skoncentrowane na prezentacji, ponieważ logika transformacji jest przeniesiona do definicji filtra.
+
+**Wrażliwość kontekstowa:** Kluczową zaletą filtrów w Latte jest ich zdolność do bycia [wrażliwymi kontekstowo |#Contextual Filters]. Oznacza to, że filtr może rozpoznać typ zawartości, z którą pracuje (HTML, JavaScript, zwykły tekst itp.) i zastosować odpowiednią logikę lub escapowanie, co jest kluczowe dla bezpieczeństwa i poprawności, zwłaszcza przy generowaniu HTML.
+
+**Integracja z logiką aplikacji:** Podobnie jak własne funkcje, PHP callable za filtrem może być domknięciem (closure), metodą statyczną lub metodą instancji. Pozwala to filtrom na dostęp do usług aplikacji lub danych, jeśli jest to potrzebne, chociaż ich głównym celem pozostaje *transformacja wartości wejściowej*.
+
+Latte domyślnie dostarcza bogaty zestaw [standardowych filtrów |filters]. Własne filtry pozwalają rozszerzyć ten zestaw o formatowanie i transformacje specyficzne dla Twojego projektu.
+
+Jeśli potrzebujesz wykonywać logikę opartą na *wielu* wejściach lub nie masz pierwotnej wartości do transformacji, prawdopodobnie bardziej odpowiednie jest użycie [własnej funkcji |custom-functions]. Jeśli potrzebujesz generować złożony markup lub sterować przepływem szablonu, rozważ [własny tag |custom-tags].
+
+
+Tworzenie i rejestracja filtrów .[#toc-creating-and-registering-filters]
+========================================================================
+
+Istnieje kilka sposobów definiowania i rejestrowania własnych filtrów w Latte.
+
+
+Bezpośrednia rejestracja za pomocą `addFilter()` .[#toc-direct-registration-via-addfilter]
+------------------------------------------------------------------------------------------
+
+Najprostszym sposobem dodania filtra jest użycie metody `addFilter()` bezpośrednio na obiekcie `Latte\Engine`. Podajesz nazwę filtra (jak będzie używany w szablonie) i odpowiadający PHP callable.
+
+```php
+$latte = new Latte\Engine;
+
+// Prosty filtr bez argumentów
+$latte->addFilter('initial', fn(string $s): string => mb_substr($s, 0, 1) . '.');
+
+// Filtr z opcjonalnym argumentem
+$latte->addFilter('shortify', function (string $s, int $len = 10): string {
+	return mb_substr($s, 0, $len);
+});
+
+// Filtr przetwarzający tablicę
+$latte->addFilter('sum', fn(array $numbers): int|float => array_sum($numbers));
+```
+
+**Użycie w szablonie:**
+
+```latte
+{$name|initial}                 {* Wypisze 'J.' jeśli $name to 'John' *}
+{$description|shortify}         {* Użyje domyślnej długości 10 *}
+{$description|shortify:50}      {* Użyje długości 50 *}
+{$prices|sum}                   {* Wypisze sumę elementów w tablicy $prices *}
+```
+
+**Przekazywanie argumentów:**
+
+Wartość na lewo od potoku (`|`) jest zawsze przekazywana jako *pierwszy* argument funkcji filtra. Wszelkie parametry podane za dwukropkiem (`:`) w szablonie są przekazywane jako kolejne argumenty.
+
+```latte
+{$text|shortify:30}
+// Wywołuje funkcję PHP shortify($text, 30)
+```
+
+
+Rejestracja za pomocą rozszerzenia .[#toc-registration-via-extension]
+---------------------------------------------------------------------
+
+Dla lepszej organizacji, zwłaszcza przy tworzeniu reużywalnych zestawów filtrów lub udostępnianiu ich jako pakiety, zalecanym sposobem jest rejestrowanie ich w ramach [rozszerzenia Latte |extending-latte#latte-extension]:
+
+```php
+namespace App\Latte;
+
+use Latte\Extension;
+use Nette\Security\Authorizator;
+
+class MyLatteExtension extends Extension
+{
+	public function getFilters(): array
+	{
+		return [
+			'initial' => $this->initial(...),
+			'shortify' => $this->shortify(...),
+		];
+	}
+
+	public function initial(string $s): string
+	{
+		return mb_substr($s, 0, 1) . '.';
+	}
+
+	public function shortify(string $s, int $len = 10): string
+	{
+		return mb_substr($s, 0, $len);
+	}
+}
+
+// Rejestracja
+$latte = new Latte\Engine;
+$latte->addExtension(new App\Latte\MyLatteExtension);
+```
+
+To podejście utrzymuje logikę Twojego filtra w kapsułce, a rejestrację prostą.
+
+
+Użycie loadera filtrów .[#toc-filters-using-the-class]
+------------------------------------------------------
+
+Latte umożliwia rejestrowanie loadera filtrów za pomocą `addFilterLoader()`. Jest to pojedynczy callable, o który Latte zapyta podczas kompilacji dla każdej nieznanej nazwy filtra. Loader zwraca PHP callable filtra lub `null`.
+
+```php
+$latte = new Latte\Engine;
+
+// Loader może dynamicznie tworzyć/pobierać callable filtrów
+$latte->addFilterLoader(function (string $name): ?callable {
+	if ($name === 'myLazyFilter') {
+		// Wyobraź sobie tutaj kosztowną inicjalizację...
+		$service = get_some_expensive_service();
+		return fn($value) => $service->process($value);
+	}
+	return null;
+});
+```
+
+Ta metoda była pierwotnie przeznaczona do leniwego ładowania filtrów z bardzo **kosztowną inicjalizacją**. Jednak nowoczesne praktyki wstrzykiwania zależności (dependency injection) zazwyczaj radzą sobie z leniwymi usługami efektywniej.
+
+Loadery filtrów dodają złożoność i generalnie nie są zalecane na rzecz bezpośredniej rejestracji za pomocą `addFilter()` lub w ramach rozszerzenia za pomocą `getFilters()`. Używaj loaderów tylko wtedy, gdy masz poważny, specyficzny powód związany z problemami wydajnościowymi przy inicjalizacji filtrów, których nie można rozwiązać inaczej.
+
+
+Filtry używające klasy z atrybutami .[#toc-filters-using-a-class-with-attributes]
+---------------------------------------------------------------------------------
+
+Kolejny elegancki sposób definiowania filtrów to użycie metod w Twojej [klasie parametrów szablonu |develop#Parameters as a class]. Wystarczy dodać atrybut `#[Latte\Attributes\TemplateFilter]` do metody.
+
+```php
+use Latte\Attributes\TemplateFilter;
+
+class TemplateParameters
+{
+	public function __construct(
+		public string $description,
+		// inne parametry...
+	) {}
+
+	#[TemplateFilter]
+	public function shortify(string $s, int $len = 10): string
+	{
+		return mb_substr($s, 0, $len);
+	}
+}
+
+// Przekazanie obiektu do szablonu
+$params = new TemplateParameters(description: '...');
+$latte->render('template.latte', $params);
+```
+
+Latte automatycznie rozpozna i zarejestruje metody oznaczone tym atrybutem, gdy obiekt `TemplateParameters` zostanie przekazany do szablonu. Nazwa filtra w szablonie będzie taka sama jak nazwa metody (`shortify` w tym przypadku).
+
+```latte
+{* Użycie filtra zdefiniowanego w klasie parametrów *}
+{$description|shortify:50}
+```
+
+
+Filtry kontekstowe .[#toc-contextual-filters]
+=============================================
+
+Czasami filtr potrzebuje więcej informacji niż tylko wartość wejściowa. Może potrzebować znać **typ zawartości** ciągu znaków, z którym pracuje (np. HTML, JavaScript, zwykły tekst) lub nawet go zmodyfikować. To jest sytuacja dla filtrów kontekstowych.
+
+Filtr kontekstowy jest definiowany tak samo jak zwykły filtr, ale jego **pierwszy parametr musi być** oznaczony typem `Latte\Runtime\FilterInfo`. Latte automatycznie rozpoznaje ten podpis i przy wywołaniu filtra przekazuje obiekt `FilterInfo`. Kolejne parametry otrzymają argumenty filtra jak zwykle.
+
+```php
+use Latte\Runtime\FilterInfo;
+use Latte\ContentType;
+
+$latte->addFilter('money', function (FilterInfo $info, float $amount): string {
+	// 1. Sprawdź typ zawartości wejściowej (opcjonalne, ale zalecane)
+	//    Zezwól na null (zmienne wejście) lub zwykły tekst. Odrzuć, jeśli jest stosowany do HTML itp.
+	if (!in_array($info->contentType, [null, ContentType::Text], true)) {
+		$actualType = $info->contentType ?? 'mixed';
+		throw new \RuntimeException(
+			"Filtr |money użyty w niekompatybilnym typie zawartości $actualType. Oczekiwano tekstu lub null."
+		);
+	}
+
+	// 2. Wykonaj transformację
+	$formatted = number_format($amount, 2, '.', ',') . ' EUR';
+	$htmlOutput = '<i>' . htmlspecialchars($formatted) . '</i>'; // Zapewnij poprawne escapowanie!
+
+	// 3. Zadeklaruj typ zawartości wyjściowej
+	$info->contentType = ContentType::Html;
+
+	// 4. Zwróć wynik
+	return $htmlOutput;
+});
+```
+
+`$info->contentType` jest stałą tekstową z `Latte\ContentType` (np. `ContentType::Html`, `ContentType::Text`, `ContentType::JavaScript`, itd.) lub `null`, jeśli filtr jest stosowany do zmiennej (`{$var|filter}`). Możesz tę wartość **odczytać**, aby sprawdzić kontekst wejściowy, i **zapisać** do niej, aby zadeklarować typ kontekstu wyjściowego.
+
+Ustawiając typ zawartości na HTML, informujesz Latte, że ciąg znaków zwrócony przez Twój filtr jest bezpiecznym HTML. Latte następnie **nie będzie** stosować swojego domyślnego automatycznego escapowania do tego wyniku. Jest to kluczowe, jeśli Twój filtr generuje markup HTML.
+
+.[warning]
+Jeśli Twój filtr generuje HTML, **jesteś odpowiedzialny za poprawne escapowanie wszelkich danych wejściowych** użytych w tym HTML (jak w przypadku wywołania `htmlspecialchars($formatted)` powyżej). Pominięcie tego może stworzyć luki XSS. Jeśli Twój filtr zwraca tylko zwykły tekst, nie musisz ustawiać `$info->contentType`.
+
+
+Filtry na blokach .[#toc-filters-on-blocks]
+-------------------------------------------
+
+Wszystkie filtry stosowane do [bloków |tags#block] *muszą* być kontekstowe. Dzieje się tak, ponieważ zawartość bloku ma zdefiniowany typ zawartości (zazwyczaj HTML), którego filtr musi być świadomy.
+
+```latte
+{block heading|money}1000{/block}
+{* Filtr 'money' otrzyma '1000' jako drugi argument
+   a $info->contentType będzie ContentType::Html *}
+```
+
+Filtry kontekstowe zapewniają silną kontrolę nad tym, jak dane są przetwarzane na podstawie ich kontekstu, umożliwiają zaawansowane funkcje i zapewniają poprawne zachowanie escapowania, zwłaszcza przy generowaniu zawartości HTML.

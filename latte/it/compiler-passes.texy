@@ -1,0 +1,555 @@
+Passaggi di compilazione
+************************
+
+.[perex]
+I passaggi di compilazione forniscono un potente meccanismo per analizzare e modificare i template Latte *dopo* il loro parsing in un albero sintattico astratto (AST) e *prima* della generazione del codice PHP finale. Ciò consente la manipolazione avanzata dei template, ottimizzazioni, controlli di sicurezza (come la Sandbox) e la raccolta di informazioni sui template. Questa guida vi accompagnerà nella creazione dei vostri passaggi di compilazione personalizzati.
+
+
+Cos'è un passaggio di compilazione? .[#toc-what-is-a-compiler-pass]
+===================================================================
+
+Per comprendere il ruolo dei passaggi di compilazione, dai un'occhiata al [processo di compilazione di Latte |custom-tags#Understanding the Compilation Process]. Come puoi vedere, i passaggi di compilazione operano in una fase chiave, consentendo un intervento profondo tra il parsing iniziale e l'output finale del codice.
+
+Nel suo nucleo, un passaggio di compilazione è semplicemente un oggetto PHP callable (come una funzione, un metodo statico o un metodo di istanza) che accetta un singolo argomento: il nodo radice dell'AST del template, che è sempre un'istanza di `Latte\Compiler\Nodes\TemplateNode`.
+
+L'obiettivo primario di un passaggio di compilazione è di solito uno o entrambi i seguenti:
+
+- Analisi: Attraversare l'AST e raccogliere informazioni sul template (ad esempio, trovare tutti i blocchi definiti, controllare l'uso di tag specifici, garantire il rispetto di determinati vincoli di sicurezza).
+- Modifica: Cambiare la struttura dell'AST o gli attributi dei nodi (ad esempio, aggiungere automaticamente attributi HTML, ottimizzare determinate combinazioni di tag, sostituire tag obsoleti con nuovi, implementare regole di sandbox).
+
+
+Registrazione .[#toc-registration]
+==================================
+
+I passaggi di compilazione vengono registrati tramite il metodo [dell'estensione |extending-latte#getPasses()] `getPasses()`. Questo metodo restituisce un array associativo, dove le chiavi sono nomi univoci dei passaggi (utilizzati internamente e per l'ordinamento) e i valori sono oggetti PHP callable che implementano la logica del passaggio.
+
+```php
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Extension;
+
+class MyExtension extends Extension
+{
+	public function getPasses(): array
+	{
+		return [
+			'modificationPass' => $this->modifyTemplateAst(...),
+			// ... altri passaggi ...
+		];
+	}
+
+	public function modifyTemplateAst(TemplateNode $templateNode): void
+	{
+		// Implementazione...
+	}
+}
+```
+
+I passaggi registrati dalle estensioni di base di Latte e dalle tue estensioni personalizzate vengono eseguiti in sequenza. L'ordine può essere importante, specialmente se un passaggio dipende dai risultati o dalle modifiche di un altro. Latte fornisce un meccanismo di aiuto per controllare questo ordine, se necessario; vedi la documentazione per [`Extension::getPasses()` |extending-latte#getPasses()] per i dettagli.
+
+
+Esempio di AST .[#toc-example-of-ast]
+=====================================
+
+Per avere un'idea migliore dell'AST, aggiungiamo un esempio. Questo è il template sorgente:
+
+```latte
+{foreach $category->getItems() as $item}
+	<li>{$item->name|upper}</li>
+	{else}
+	nessun elemento trovato
+{/foreach}
+```
+
+E questa è la sua rappresentazione sotto forma di AST:
+
+/--pre
+Latte\Compiler\Nodes\<b>TemplateNode</b>(
+   Latte\Compiler\Nodes\<b>FragmentNode</b>(
+      - Latte\Essential\Nodes\<b>ForeachNode</b>(
+           expression: Latte\Compiler\Nodes\Php\Expression\<b>MethodCallNode</b>(
+              object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$category')
+              name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('getItems')
+           )
+           value: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+           content: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+              - Latte\Compiler\Nodes\<b>TextNode</b>('  ')
+              - Latte\Compiler\Nodes\<b>Html\ElementNode</b>('li')(
+                   content: Latte\Essential\Nodes\<b>PrintNode</b>(
+                      expression: Latte\Compiler\Nodes\Php\Expression\<b>PropertyFetchNode</b>(
+                         object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+                         name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('name')
+                      )
+                      modifier: Latte\Compiler\Nodes\Php\<b>ModifierNode</b>(
+                         filters:
+                            - Latte\Compiler\Nodes\Php\<b>FilterNode</b>('upper')
+                      )
+                   )
+                )
+            )
+            else: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+               - Latte\Compiler\Nodes\<b>TextNode</b>('nessun elemento trovato')
+            )
+        )
+   )
+)
+\--
+
+
+Attraversamento dell'AST con `NodeTraverser` .[#toc-traversing-the-ast-with-nodetraverser]
+==========================================================================================
+
+Scrivere manualmente funzioni ricorsive per attraversare la complessa struttura dell'AST è noioso e soggetto a errori. Latte fornisce uno strumento speciale per questo scopo: [api:Latte\Compiler\NodeTraverser]. Questa classe implementa il [design pattern Visitor |https://en.wikipedia.org/wiki/Visitor_pattern], grazie al quale l'attraversamento dell'AST diventa sistematico e facilmente gestibile.
+
+L'uso di base prevede la creazione di un'istanza di `NodeTraverser` e la chiamata del suo metodo `traverse()`, passando il nodo radice dell'AST e uno o due "visitor" callable:
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+
+(new NodeTraverser)->traverse(
+	$templateNode,
+
+	// visitor 'enter': Chiamato all'ingresso nel nodo (prima dei suoi figli)
+	enter: function (Node $node) {
+		echo "Ingresso nel nodo di tipo: " . $node::class . "\n";
+		// Qui puoi esaminare il nodo
+		if ($node instanceof Nodes\TextNode) {
+			// echo "Trovato testo: " . $node->content . "\n";
+		}
+	},
+
+	// visitor 'leave': Chiamato all'uscita dal nodo (dopo i suoi figli)
+	leave: function (Node $node) {
+		echo "Uscita dal nodo di tipo: " . $node::class . "\n";
+		// Qui puoi eseguire azioni dopo l'elaborazione dei figli
+	},
+);
+```
+
+Puoi fornire solo il visitor `enter`, solo il visitor `leave`, o entrambi, a seconda delle tue esigenze.
+
+**`enter(Node $node)`:** Questa funzione viene eseguita per ogni nodo **prima** che l'attraversatore visiti qualsiasi figlio di questo nodo. È utile per:
+
+- Raccogliere informazioni durante l'attraversamento dell'albero verso il basso.
+- Prendere decisioni *prima* dell'elaborazione dei figli (come decidere di saltarli, vedi [Ottimizzazione dell'attraversamento |#Optimizing Traversal]).
+- Potenziali modifiche al nodo prima della visita dei figli (meno comune).
+
+**`leave(Node $node)`:** Questa funzione viene eseguita per ogni nodo **dopo** che tutti i suoi figli (e i loro interi sottoalberi) sono stati completamente visitati (sia l'ingresso che l'uscita). È il luogo più comune per:
+
+Entrambi i visitor `enter` e `leave` possono opzionalmente restituire un valore per influenzare il processo di attraversamento. Restituire `null` (o niente) continua l'attraversamento normalmente, restituire un'istanza di `Node` sostituisce il nodo corrente, e restituire costanti speciali come `NodeTraverser::RemoveNode` o `NodeTraverser::StopTraversal` modifica il flusso, come spiegato nelle sezioni seguenti.
+
+
+Come funziona l'attraversamento .[#toc-how-traversal-works]
+-----------------------------------------------------------
+
+`NodeTraverser` utilizza internamente il metodo `getIterator()`, che deve essere implementato da ogni classe `Node` (come discusso in [Creazione di tag personalizzati |custom-tags#Implementing getIterator() for Subnodes]). Itera sui figli ottenuti tramite `getIterator()`, chiama ricorsivamente `traverse()` su di essi e assicura che i visitor `enter` e `leave` siano chiamati nel corretto ordine depth-first per ogni nodo nell'albero accessibile tramite gli iteratori. Questo sottolinea ancora una volta perché un `getIterator()` implementato correttamente nei tuoi nodi di tag personalizzati è assolutamente necessario per il corretto funzionamento dei passaggi di compilazione.
+
+Scriviamo un semplice passaggio che conta quante volte viene utilizzato il tag `{do}` nel template (rappresentato da `Latte\Essential\Nodes\DoNode`).
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\DoNode;
+
+function countDoTags(TemplateNode $templateNode): void
+{
+	$count = 0;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use (&$count): void {
+			if ($node instanceof DoNode) {
+				$count++;
+			}
+		},
+		// Il visitor 'leave' non è necessario per questo compito
+	);
+
+	echo "Trovato il tag {do} $count volte.\n";
+}
+
+$latte = new Latte\Engine;
+$ast = $latte->parse($templateSource);
+countDoTags($ast);
+```
+
+In questo esempio, avevamo bisogno solo del visitor `enter` per controllare il tipo di ogni nodo visitato.
+
+Successivamente, esploreremo come questi visitor modificano effettivamente l'AST.
+
+
+Modifica dell'AST .[#toc-modifying-the-ast]
+===========================================
+
+Uno degli scopi principali dei passaggi di compilazione è la modifica dell'albero sintattico astratto. Ciò consente potenti trasformazioni, ottimizzazioni o l'applicazione di regole direttamente sulla struttura del template prima della generazione del codice PHP. `NodeTraverser` fornisce diversi modi per ottenere ciò all'interno dei visitor `enter` e `leave`.
+
+**Nota importante:** La modifica dell'AST richiede cautela. Cambiamenti errati – come la rimozione di nodi essenziali o la sostituzione di un nodo con un tipo incompatibile – possono portare a errori durante la generazione del codice o causare comportamenti inaspettati durante l'esecuzione del programma. Testa sempre a fondo i tuoi passaggi di modifica.
+
+
+Modifica degli attributi dei nodi .[#toc-changing-node-properties]
+------------------------------------------------------------------
+
+Il modo più semplice per modificare l'albero è cambiare direttamente le **proprietà pubbliche** dei nodi visitati durante l'attraversamento. Tutti i nodi memorizzano i loro argomenti parsati, contenuto o attributi in proprietà pubbliche.
+
+**Esempio:** Creiamo un passaggio che trova tutti i nodi di testo statico (`TextNode`, che rappresentano HTML comune o testo al di fuori dei tag Latte) e converte il loro contenuto in maiuscolo *direttamente nell'AST*.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\TextNode;
+
+function uppercaseStaticText(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Possiamo usare 'enter', poiché TextNode non ha figli da elaborare
+		enter: function (Node $node) {
+			// Questo nodo è un blocco di testo statico?
+			if ($node instanceof TextNode) {
+				// Sì! Modifichiamo direttamente la sua proprietà pubblica 'content'.
+				$node->content = mb_strtoupper(html_entity_decode($node->content));
+			}
+			// Non c'è bisogno di restituire nulla; la modifica viene applicata direttamente.
+		},
+	);
+}
+```
+
+In questo esempio, il visitor `enter` controlla se `$node` corrente è di tipo `TextNode`. Se sì, aggiorniamo direttamente la sua proprietà pubblica `$content` usando `mb_strtoupper()`. Questo cambia direttamente il contenuto del testo statico memorizzato nell'AST *prima* della generazione del codice PHP. Poiché modifichiamo l'oggetto direttamente, non dobbiamo restituire nulla dal visitor.
+
+Effetto: Se il template conteneva `<p>Hello</p>{= $var }<span>World</span>`, dopo questo passaggio l'AST rappresenterà qualcosa come: `<p>HELLO</p>{= $var }<span>WORLD</span>`. Questo NON INFLUENZERÀ il contenuto di $var.
+
+
+Sostituzione dei nodi .[#toc-replacing-nodes]
+---------------------------------------------
+
+Una tecnica di modifica più potente è la sostituzione completa di un nodo con un altro. Questo si fa **restituendo una nuova istanza di `Node`** dal visitor `enter` o `leave`. `NodeTraverser` sostituisce quindi il nodo originale con quello restituito nella struttura del nodo genitore.
+
+**Esempio:** Creiamo un passaggio che trova tutti gli usi della costante `PHP_VERSION` (rappresentata da `ConstantFetchNode`) e li sostituisce direttamente con un letterale stringa (`StringNode`) contenente la versione PHP *effettiva* rilevata *durante la compilazione*. Questa è una forma di ottimizzazione al momento della compilazione.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\Php\Expression\ConstantFetchNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+
+function inlinePhpVersion(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// 'leave' è spesso usato per la sostituzione, assicurando che i figli (se presenti)
+		// siano elaborati prima, anche se qui funzionerebbe anche 'enter'.
+		leave: function (Node $node) {
+			// Questo nodo è un accesso a una costante e il nome della costante è 'PHP_VERSION'?
+			if ($node instanceof ConstantFetchNode && (string) $node->name === 'PHP_VERSION') {
+				// Creiamo un nuovo StringNode contenente la versione PHP corrente
+				$newNode = new StringNode(PHP_VERSION);
+
+				// Opzionale, ma buona pratica: copiamo le informazioni sulla posizione
+				$newNode->position = $node->position;
+
+				// Restituiamo il nuovo StringNode. Traverser sostituirà
+				// l'originale ConstantFetchNode con questo $newNode.
+				return $newNode;
+			}
+			// Se non restituiamo un Node, l'originale $node viene mantenuto.
+		},
+	);
+}
+```
+
+Qui il visitor `leave` identifica lo specifico `ConstantFetchNode` per `PHP_VERSION`. Quindi crea un `StringNode` completamente nuovo contenente il valore della costante `PHP_VERSION` *al momento della compilazione*. Restituendo questo `$newNode`, dice al traverser di sostituire l'originale `ConstantFetchNode` nell'AST.
+
+Effetto: Se il template conteneva `{= PHP_VERSION }` e la compilazione viene eseguita su PHP 8.2.1, l'AST dopo questo passaggio rappresenterà efficacemente `{= '8.2.1' }`.
+
+**Scelta tra `enter` e `leave` per la sostituzione:**
+
+- Usa `leave` se la creazione del nuovo nodo dipende dai risultati dell'elaborazione dei figli del vecchio nodo, o se vuoi semplicemente assicurarti che i figli siano visitati prima della sostituzione (pratica comune).
+- Usa `enter` se vuoi sostituire un nodo *prima* che i suoi figli vengano visitati.
+
+
+Rimozione dei nodi .[#toc-removing-nodes]
+-----------------------------------------
+
+Puoi rimuovere completamente un nodo dall'AST restituendo la costante speciale `NodeTraverser::RemoveNode` dal visitor.
+
+**Esempio:** Rimuoviamo tutti i commenti del template (`{* ... *}`), che sono rappresentati da `CommentNode` nell'AST generato dal core di Latte (anche se tipicamente elaborati prima, questo serve come esempio).
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\CommentNode;
+
+function removeCommentNodes(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// 'enter' va bene qui, poiché non abbiamo bisogno di informazioni sui figli per rimuovere il commento
+		enter: function (Node $node) {
+			if ($node instanceof CommentNode) {
+				// Segnaliamo al traverser di rimuovere questo nodo dall'AST
+				return NodeTraverser::RemoveNode;
+			}
+		},
+	);
+}
+```
+
+**Attenzione:** Usa `RemoveNode` con cautela. La rimozione di un nodo che contiene contenuto essenziale o influisce sulla struttura (come la rimozione del nodo di contenuto di un ciclo) può portare a template danneggiati o codice generato non valido. È più sicuro per nodi che sono veramente opzionali o autonomi (come commenti o tag di debug) o per nodi strutturali vuoti (ad esempio, un `FragmentNode` vuoto può essere rimosso in sicurezza in alcuni contesti da un passaggio di pulizia).
+
+Questi tre metodi - modifica delle proprietà, sostituzione dei nodi e rimozione dei nodi - forniscono gli strumenti essenziali per manipolare l'AST all'interno dei tuoi passaggi di compilazione.
+
+
+Ottimizzazione dell'attraversamento .[#toc-optimizing-traversal]
+================================================================
+
+L'AST dei template può essere piuttosto grande, contenendo potenzialmente migliaia di nodi. Attraversare ogni singolo nodo può essere superfluo e influire sulle prestazioni di compilazione se il tuo passaggio è interessato solo a parti specifiche dell'albero. `NodeTraverser` offre modi per ottimizzare l'attraversamento:
+
+
+Saltare i figli .[#toc-skipping-children]
+-----------------------------------------
+
+Se sai che una volta incontrato un certo tipo di nodo, nessuno dei suoi discendenti può contenere i nodi che stai cercando, puoi dire al traverser di saltare la visita dei suoi figli. Questo si fa restituendo la costante `NodeTraverser::DontTraverseChildren` dal visitor **`enter`**. Ciò omette interi rami durante l'attraversamento, risparmiando potenzialmente tempo considerevole, specialmente nei template con espressioni PHP complesse all'interno dei tag.
+
+
+Fermare l'attraversamento .[#toc-stopping-traversal]
+----------------------------------------------------
+
+Se il tuo passaggio deve trovare solo la *prima* occorrenza di qualcosa (un tipo specifico di nodo, il soddisfacimento di una condizione), puoi fermare completamente l'intero processo di attraversamento una volta trovato. Ciò si ottiene restituendo la costante `NodeTraverser::StopTraversal` dal visitor `enter` o `leave`. Il metodo `traverse()` smetterà di visitare qualsiasi altro nodo. Questo è altamente efficiente se hai bisogno solo della prima corrispondenza in un albero potenzialmente molto grande.
+
+
+Utile helper `NodeTraverser` .[#toc-useful-helper-nodetraverser]
+================================================================
+
+Mentre `NodeTraverser` offre un controllo finemente graduato, Latte fornisce anche una pratica classe helper, [api:Latte\Compiler\NodeHelpers], che incapsula `NodeTraverser` per diverse comuni attività di ricerca e analisi, richiedendo spesso meno codice boilerplate.
+
+
+find(Node $startNode, callable $filter): array .[method]
+--------------------------------------------------------
+
+Questo metodo statico trova **tutti** i nodi nel sottoalbero che inizia da `$startNode` (incluso) che soddisfano il callback `$filter`. Restituisce un array dei nodi corrispondenti.
+
+**Esempio:** Trovare tutti i nodi di variabile (`VariableNode`) nell'intero template.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\Expression\VariableNode;
+use Latte\Compiler\Nodes\TemplateNode;
+
+function findAllVariables(TemplateNode $templateNode): array
+{
+	return NodeHelpers::find(
+		$templateNode,
+		fn($node) => $node instanceof VariableNode,
+	);
+}
+```
+
+
+findFirst(Node $startNode, callable $filter): ?Node  .[method]
+--------------------------------------------------------------
+
+Simile a `find`, ma interrompe l'attraversamento immediatamente dopo aver trovato il **primo** nodo che soddisfa il callback `$filter`. Restituisce l'oggetto `Node` trovato o `null` se non viene trovato alcun nodo corrispondente. Questo è essenzialmente un comodo wrapper attorno a `NodeTraverser::StopTraversal`.
+
+**Esempio:** Trovare il nodo `{parameters}` (uguale all'esempio manuale precedente, ma più corto).
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\ParametersNode;
+
+function findParametersNodeHelper(TemplateNode $templateNode): ?ParametersNode
+{
+	return NodeHelpers::findFirst(
+		$templateNode->head, // Cerca solo nella sezione principale per efficienza
+		fn($node) => $node instanceof ParametersNode,
+	);
+}
+```
+
+
+toValue(ExpressionNode $node, bool $constants = false): mixed .[method]
+-----------------------------------------------------------------------
+
+Questo metodo statico tenta di valutare un `ExpressionNode` **al momento della compilazione** e restituire il suo valore PHP corrispondente. Funziona in modo affidabile solo per nodi letterali semplici (`StringNode`, `IntegerNode`, `FloatNode`, `BooleanNode`, `NullNode`) e istanze di `ArrayNode` contenenti solo tali elementi valutabili.
+
+Se `$constants` è impostato su `true`, tenterà anche di risolvere `ConstantFetchNode` e `ClassConstantFetchNode` controllando `defined()` e usando `constant()`.
+
+Se il nodo contiene variabili, chiamate a funzioni o altri elementi dinamici, non può essere valutato al momento della compilazione e il metodo lancerà `InvalidArgumentException`.
+
+**Caso d'uso:** Ottenere il valore statico di un argomento di tag durante la compilazione per prendere decisioni al momento della compilazione.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+
+function getStaticStringArgument(ExpressionNode $argumentNode): ?string
+{
+	try {
+		$value = NodeHelpers::toValue($argumentNode);
+		return is_string($value) ? $value : null;
+	} catch (\InvalidArgumentException $e) {
+		// L'argomento non era una stringa letterale statica
+		return null;
+	}
+}
+```
+
+
+toText(?Node $node): ?string .[method]
+--------------------------------------
+
+Questo metodo statico è utile per estrarre il contenuto testuale semplice da nodi semplici. Funziona principalmente con:
+- `TextNode`: Restituisce il suo `$content`.
+- `FragmentNode`: Concatena il risultato di `toText()` per tutti i suoi figli. Se un figlio non è convertibile in testo (ad esempio, contiene un `PrintNode`), restituisce `null`.
+- `NopNode`: Restituisce una stringa vuota.
+- Altri tipi di nodi: Restituisce `null`.
+
+**Caso d'uso:** Ottenere il contenuto testuale statico del valore di un attributo HTML o di un semplice elemento HTML per l'analisi durante un passaggio di compilazione.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Html\AttributeNode;
+
+function getStaticAttributeValue(AttributeNode $attr): ?string
+{
+	// $attr->value è tipicamente un AreaNode (come FragmentNode o TextNode)
+	return NodeHelpers::toText($attr->value);
+}
+
+// Esempio di utilizzo in un passaggio:
+// if ($node instanceof Html\ElementNode && $node->name === 'meta') {
+//     $nameAttrValue = getStaticAttributeValue($node->getAttributeNode('name'));
+//     if ($nameAttrValue === 'description') { ... }
+// }
+```
+
+`NodeHelpers` può semplificare i tuoi passaggi di compilazione fornendo soluzioni pronte all'uso per comuni attività di attraversamento e analisi dell'AST.
+
+
+Esempi pratici .[#toc-practical-examples]
+=========================================
+
+Applichiamo i concetti di attraversamento e modifica dell'AST per risolvere alcuni problemi pratici. Questi esempi dimostrano pattern comuni utilizzati nei passaggi di compilazione.
+
+
+Aggiunta automatica di `loading="lazy"` a `<img>` .[#toc-auto-adding-loading-lazy-to-img]
+-----------------------------------------------------------------------------------------
+
+I browser moderni supportano il lazy loading nativo per le immagini tramite l'attributo `loading="lazy"`. Creiamo un passaggio che aggiunge automaticamente questo attributo a tutti i tag `<img>` che non hanno ancora un attributo `loading`.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Html;
+
+function addLazyLoading(Nodes\TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Possiamo usare 'enter', poiché modifichiamo il nodo direttamente
+		// e non dipendiamo dai figli per questa decisione.
+		enter: function (Node $node) {
+			// È un elemento HTML con nome 'img'?
+			if ($node instanceof Html\ElementNode && $node->name === 'img') {
+				// Assicuriamoci che il nodo degli attributi esista
+				$node->attributes ??= new Nodes\FragmentNode;
+
+				// Controlliamo se esiste già un attributo 'loading' (indipendentemente dal case)
+				foreach ($node->attributes->children as $attrNode) {
+					if ($attrNode instanceof Html\AttributeNode
+						&& $attrNode->name instanceof Nodes\TextNode // Nome attributo statico
+						&& strtolower($attrNode->name->content) === 'loading'
+					) {
+						return;
+					}
+				}
+
+				// Aggiungiamo uno spazio se gli attributi non sono vuoti
+				if ($node->attributes->children) {
+					$node->attributes->children[] = new Nodes\TextNode(' ');
+				}
+
+				// Creiamo un nuovo nodo attributo: loading="lazy"
+				$node->attributes->children[] = new Html\AttributeNode(
+					name: new Nodes\TextNode('loading'),
+					value: new Nodes\TextNode('lazy'),
+					quote: '"',
+				);
+				// La modifica viene applicata direttamente nell'oggetto, non c'è bisogno di restituire nulla.
+			}
+		},
+	);
+}
+```
+
+Spiegazione:
+- Il visitor `enter` cerca nodi `Html\ElementNode` con nome `img`.
+- Itera sugli attributi esistenti (`$node->attributes->children`) e controlla se l'attributo `loading` è già presente.
+- Se non trovato, crea un nuovo `Html\AttributeNode` che rappresenta `loading="lazy"`.
+
+
+Controllo delle chiamate a funzioni .[#toc-checking-function-calls]
+-------------------------------------------------------------------
+
+I passaggi di compilazione sono alla base della Sandbox di Latte. Anche se la Sandbox reale è sofisticata, possiamo dimostrare il principio di base del controllo delle chiamate a funzioni vietate.
+
+**Obiettivo:** Impedire l'uso della funzione potenzialmente pericolosa `shell_exec` all'interno delle espressioni del template.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Php;
+use Latte\SecurityViolationException;
+
+function checkForbiddenFunctions(Nodes\TemplateNode $templateNode): void
+{
+	$forbiddenFunctions = ['shell_exec' => true, 'exec' => true]; // Semplice lista
+
+	$traverser = new NodeTraverser;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use ($forbiddenFunctions) {
+			// È un nodo di chiamata diretta a funzione?
+			if ($node instanceof Php\Expression\FunctionCallNode
+				&& $node->name instanceof Php\NameNode
+				&& isset($forbiddenFunctions[strtolower((string) $node->name)])
+			) {
+				throw new SecurityViolationException(
+					"La funzione {$node->name}() non è consentita.",
+					$node->position,
+				);
+			}
+		},
+	);
+}
+```
+
+Spiegazione:
+- Definiamo un elenco di nomi di funzioni vietate.
+- Il visitor `enter` controlla `FunctionCallNode`.
+- Se il nome della funzione (`$node->name`) è un `NameNode` statico, controlliamo la sua rappresentazione stringa in minuscolo rispetto al nostro elenco vietato.
+- Se viene trovata una funzione vietata, lanciamo `Latte\SecurityViolationException`, che indica chiaramente la violazione della regola di sicurezza e interrompe la compilazione.
+
+Questi esempi mostrano come i passaggi di compilazione, utilizzando `NodeTraverser`, possono essere sfruttati per l'analisi, le modifiche automatiche e l'applicazione di vincoli di sicurezza interagendo direttamente con la struttura AST del template.
+
+
+Best practices .[#toc-best-practices]
+=====================================
+
+Quando scrivi passaggi di compilazione, tieni presenti queste linee guida per creare estensioni robuste, manutenibili ed efficienti:
+
+- **L'ordine è importante:** Sii consapevole dell'ordine in cui vengono eseguiti i passaggi. Se il tuo passaggio dipende dalla struttura AST creata da un altro passaggio (ad esempio, passaggi di base di Latte o un altro passaggio personalizzato), o se altri passaggi possono dipendere dalle tue modifiche, usa il meccanismo di ordinamento fornito da `Extension::getPasses()` per definire le dipendenze (`before`/`after`). Vedi la documentazione per [`Extension::getPasses()` |extending-latte#getPasses()] per i dettagli.
+- **Singola responsabilità:** Cerca di creare passaggi che eseguano un singolo compito ben definito. Per trasformazioni complesse, considera la suddivisione della logica in più passaggi – magari uno per l'analisi e un altro per la modifica basata sui risultati dell'analisi. Ciò migliora la leggibilità e la testabilità.
+- **Prestazioni:** Ricorda che i passaggi di compilazione aggiungono tempo alla compilazione del template (anche se questo di solito avviene solo una volta, finché il template non cambia). Evita operazioni computazionalmente costose nei tuoi passaggi, se possibile. Utilizza ottimizzazioni dell'attraversamento come `NodeTraverser::DontTraverseChildren` e `NodeTraverser::StopTraversal` ogni volta che sai di non aver bisogno di visitare determinate parti dell'AST.
+- **Usa `NodeHelpers`:** Per compiti comuni come la ricerca di nodi specifici o la valutazione statica di espressioni semplici, controlla se `Latte\Compiler\NodeHelpers` offre un metodo appropriato prima di scrivere la tua logica `NodeTraverser`. Può risparmiare tempo e ridurre la quantità di codice boilerplate.
+- **Gestione degli errori:** Se il tuo passaggio rileva un errore o uno stato non valido nell'AST del template, lancia `Latte\CompileException` (o `Latte\SecurityViolationException` per problemi di sicurezza) con un messaggio chiaro e l'oggetto `Position` pertinente (di solito `$node->position`). Questo fornisce un feedback utile allo sviluppatore del template.
+- **Idempotenza (se possibile):** Idealmente, l'esecuzione del tuo passaggio più volte sullo stesso AST dovrebbe produrre lo stesso risultato della sua esecuzione una sola volta. Questo non è sempre fattibile, ma semplifica il debug e la riflessione sulle interazioni dei passaggi, se raggiunto. Ad esempio, assicurati che il tuo passaggio di modifica controlli se la modifica è già stata applicata prima di applicarla di nuovo.
+
+Seguendo queste pratiche, puoi utilizzare efficacemente i passaggi di compilazione per estendere le capacità di Latte in modo potente e affidabile, contribuendo a un'elaborazione dei template più sicura, ottimizzata o funzionalmente più ricca.

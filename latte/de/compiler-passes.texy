@@ -1,0 +1,555 @@
+Kompilierungsdurchläufe
+***********************
+
+.[perex]
+Kompilierungsdurchläufe bieten einen leistungsstarken Mechanismus zur Analyse und Modifikation von Latte-Templates *nach* deren Parsen in einen abstrakten Syntaxbaum (AST) und *vor* der Generierung des finalen PHP-Codes. Dies ermöglicht fortgeschrittene Template-Manipulation, Optimierungen, Sicherheitsprüfungen (wie die Sandbox) und das Sammeln von Informationen über Templates. Diese Anleitung führt Sie durch die Erstellung Ihrer eigenen Kompilierungsdurchläufe.
+
+
+Was ist ein Kompilierungsdurchlauf? .[#toc-what-is-a-compiler-pass]
+===================================================================
+
+Um die Rolle der Kompilierungsdurchläufe zu verstehen, sehen Sie sich den [Latte-Kompilierungsprozess |custom-tags#Understanding the Compilation Process] an. Wie Sie sehen können, operieren Kompilierungsdurchläufe in einer entscheidenden Phase und ermöglichen einen tiefen Eingriff zwischen dem anfänglichen Parsen und der finalen Code-Ausgabe.
+
+Im Kern ist ein Kompilierungsdurchlauf einfach ein aufrufbares PHP-Objekt (wie eine Funktion, statische Methode oder Instanzmethode), das ein Argument akzeptiert: den Wurzelknoten des AST des Templates, der immer eine Instanz von `Latte\Compiler\Nodes\TemplateNode` ist.
+
+Das primäre Ziel eines Kompilierungsdurchlaufs ist normalerweise eines oder beide der folgenden:
+
+- Analyse: Den AST durchlaufen und Informationen über das Template sammeln (z. B. alle definierten Blöcke finden, die Verwendung spezifischer Tags prüfen, sicherstellen, dass bestimmte Sicherheitsbeschränkungen erfüllt sind).
+- Modifikation: Die Struktur des AST oder die Attribute der Knoten ändern (z. B. automatisch HTML-Attribute hinzufügen, bestimmte Tag-Kombinationen optimieren, veraltete Tags durch neue ersetzen, Sandbox-Regeln implementieren).
+
+
+Registrierung .[#toc-registration]
+==================================
+
+Kompilierungsdurchläufe werden mit der Methode [Erweiterung |extending-latte#getPasses()] `getPasses()` registriert. Diese Methode gibt ein assoziatives Array zurück, bei dem die Schlüssel eindeutige Namen der Durchläufe sind (intern und zur Sortierung verwendet) und die Werte aufrufbare PHP-Objekte sind, die die Logik des Durchlaufs implementieren.
+
+```php
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Extension;
+
+class MyExtension extends Extension
+{
+	public function getPasses(): array
+	{
+		return [
+			'modificationPass' => $this->modifyTemplateAst(...),
+			// ... weitere Durchläufe ...
+		];
+	}
+
+	public function modifyTemplateAst(TemplateNode $templateNode): void
+	{
+		// Implementierung...
+	}
+}
+```
+
+Die von den Basis-Latte-Erweiterungen und Ihren eigenen Erweiterungen registrierten Durchläufe laufen sequentiell ab. Die Reihenfolge kann wichtig sein, insbesondere wenn ein Durchlauf von den Ergebnissen oder Modifikationen eines anderen abhängt. Latte bietet einen Hilfsmechanismus zur Steuerung dieser Reihenfolge, falls erforderlich; siehe Dokumentation zu [`Extension::getPasses()` |extending-latte#getPasses()] für Details.
+
+
+AST-Beispiel .[#toc-example-of-ast]
+===================================
+
+Um eine bessere Vorstellung vom AST zu bekommen, fügen wir ein Beispiel hinzu. Dies ist das Quell-Template:
+
+```latte
+{foreach $category->getItems() as $item}
+	<li>{$item->name|upper}</li>
+	{else}
+	no items found
+{/foreach}
+```
+
+Und dies ist seine Repräsentation in Form eines AST:
+
+/--pre
+Latte\Compiler\Nodes\<b>TemplateNode</b>(
+   Latte\Compiler\Nodes\<b>FragmentNode</b>(
+      - Latte\Essential\Nodes\<b>ForeachNode</b>(
+           expression: Latte\Compiler\Nodes\Php\Expression\<b>MethodCallNode</b>(
+              object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$category')
+              name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('getItems')
+           )
+           value: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+           content: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+              - Latte\Compiler\Nodes\<b>TextNode</b>('  ')
+              - Latte\Compiler\Nodes\<b>Html\ElementNode</b>('li')(
+                   content: Latte\Essential\Nodes\<b>PrintNode</b>(
+                      expression: Latte\Compiler\Nodes\Php\Expression\<b>PropertyFetchNode</b>(
+                         object: Latte\Compiler\Nodes\Php\Expression\<b>VariableNode</b>('$item')
+                         name: Latte\Compiler\Nodes\Php\<b>IdentifierNode</b>('name')
+                      )
+                      modifier: Latte\Compiler\Nodes\Php\<b>ModifierNode</b>(
+                         filters:
+                            - Latte\Compiler\Nodes\Php\<b>FilterNode</b>('upper')
+                      )
+                   )
+                )
+            )
+            else: Latte\Compiler\Nodes\<b>FragmentNode</b>(
+               - Latte\Compiler\Nodes\<b>TextNode</b>('no items found')
+            )
+        )
+   )
+)
+\--
+
+
+Durchlaufen des AST mit `NodeTraverser` .[#toc-traversing-the-ast-with-nodetraverser]
+=====================================================================================
+
+Das manuelle Schreiben rekursiver Funktionen zum Durchlaufen der komplexen AST-Struktur ist mühsam und fehleranfällig. Latte bietet ein spezielles Werkzeug für diesen Zweck: [api:Latte\Compiler\NodeTraverser]. Diese Klasse implementiert das [Visitor Design Pattern |https://en.wikipedia.org/wiki/Visitor_pattern], dank dem das Durchlaufen des AST systematisch und einfach zu handhaben ist.
+
+Die grundlegende Verwendung umfasst die Erstellung einer Instanz von `NodeTraverser` und den Aufruf ihrer Methode `traverse()`, wobei der Wurzelknoten des AST und ein oder zwei "Visitor"-aufrufbare Objekte übergeben werden:
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+
+(new NodeTraverser)->traverse(
+	$templateNode,
+
+	// 'enter' Visitor: Wird beim Betreten des Knotens aufgerufen (vor seinen Kindern)
+	enter: function (Node $node) {
+		echo "Betrete Knoten vom Typ: " . $node::class . "\n";
+		// Hier können Sie den Knoten untersuchen
+		if ($node instanceof Nodes\TextNode) {
+			// echo "Gefundener Text: " . $node->content . "\n";
+		}
+	},
+
+	// 'leave' Visitor: Wird beim Verlassen des Knotens aufgerufen (nach seinen Kindern)
+	leave: function (Node $node) {
+		echo "Verlasse Knoten vom Typ: " . $node::class . "\n";
+		// Hier können Sie Aktionen nach der Verarbeitung der Kinder durchführen
+	},
+);
+```
+
+Sie können nur den `enter`-Visitor, nur den `leave`-Visitor oder beide bereitstellen, je nach Ihren Bedürfnissen.
+
+**`enter(Node $node)`:** Diese Funktion wird für jeden Knoten ausgeführt, **bevor** der Traverser eines der Kinder dieses Knotens besucht. Sie ist nützlich für:
+
+- Das Sammeln von Informationen beim Durchlaufen des Baumes nach unten.
+- Das Treffen von Entscheidungen *vor* der Verarbeitung der Kinder (wie die Entscheidung, sie zu überspringen, siehe [Traversal-Optimierung |#Optimizing Traversal]).
+- Potenzielle Änderungen am Knoten vor dem Besuch der Kinder (seltener).
+
+**`leave(Node $node)`:** Diese Funktion wird für jeden Knoten ausgeführt, **nachdem** alle seine Kinder (und ihre gesamten Unterbäume) vollständig besucht wurden (sowohl Eintritt als auch Austritt). Sie ist der häufigste Ort für:
+
+Beide Visitor `enter` und `leave` können optional einen Wert zurückgeben, um den Traversierungsprozess zu beeinflussen. Die Rückgabe von `null` (oder nichts) setzt die Traversierung normal fort, die Rückgabe einer `Node`-Instanz ersetzt den aktuellen Knoten, und die Rückgabe spezieller Konstanten wie `NodeTraverser::RemoveNode` oder `NodeTraverser::StopTraversal` modifiziert den Fluss, wie in den folgenden Abschnitten erläutert.
+
+
+Wie die Traversierung funktioniert .[#toc-how-traversal-works]
+--------------------------------------------------------------
+
+`NodeTraverser` verwendet intern die Methode `getIterator()`, die jede `Node`-Klasse implementieren muss (wie in [Erstellung eigener Tags |custom-tags#Implementing getIterator() for Subnodes] diskutiert). Sie iteriert über die mit `getIterator()` erhaltenen Kinder, ruft rekursiv `traverse()` auf ihnen auf und stellt sicher, dass die `enter`- und `leave`-Visitor in der korrekten Tiefensuche-Reihenfolge für jeden über Iteratoren erreichbaren Knoten im Baum aufgerufen werden. Dies unterstreicht erneut, warum ein korrekt implementierter `getIterator()` in Ihren eigenen Tag-Knoten absolut notwendig für das korrekte Funktionieren von Kompilierungsdurchläufen ist.
+
+Schreiben wir einen einfachen Durchlauf, der zählt, wie oft der Tag `{do}` (repräsentiert durch `Latte\Essential\Nodes\DoNode`) im Template verwendet wird.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\DoNode;
+
+function countDoTags(TemplateNode $templateNode): void
+{
+	$count = 0;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use (&$count): void {
+			if ($node instanceof DoNode) {
+				$count++;
+			}
+		},
+		// 'leave' Visitor ist für diese Aufgabe nicht erforderlich
+	);
+
+	echo "Tag {do} wurde $count Mal gefunden.\n";
+}
+
+$latte = new Latte\Engine;
+$ast = $latte->parse($templateSource);
+countDoTags($ast);
+```
+
+In diesem Beispiel benötigten wir nur den `enter`-Visitor, um den Typ jedes besuchten Knotens zu überprüfen.
+
+Als Nächstes untersuchen wir, wie diese Visitor den AST tatsächlich modifizieren.
+
+
+Modifikation des AST .[#toc-modifying-the-ast]
+==============================================
+
+Einer der Hauptzwecke von Kompilierungsdurchläufen ist die Modifikation des abstrakten Syntaxbaums. Dies ermöglicht leistungsstarke Transformationen, Optimierungen oder die Durchsetzung von Regeln direkt an der Struktur des Templates, bevor PHP-Code generiert wird. `NodeTraverser` bietet mehrere Möglichkeiten, dies innerhalb der `enter`- und `leave`-Visitor zu erreichen.
+
+**Wichtiger Hinweis:** Die Modifikation des AST erfordert Vorsicht. Falsche Änderungen – wie das Entfernen wesentlicher Knoten oder das Ersetzen eines Knotens durch einen inkompatiblen Typ – können zu Fehlern während der Codegenerierung führen oder unerwartetes Verhalten zur Laufzeit verursachen. Testen Sie Ihre Modifikationsdurchläufe immer gründlich.
+
+
+Ändern von Knoteneigenschaften .[#toc-changing-node-properties]
+---------------------------------------------------------------
+
+Die einfachste Möglichkeit, den Baum zu modifizieren, ist die direkte Änderung der **öffentlichen Eigenschaften** der Knoten, die während der Traversierung besucht werden. Alle Knoten speichern ihre geparsten Argumente, Inhalte oder Attribute in öffentlichen Eigenschaften.
+
+**Beispiel:** Erstellen wir einen Durchlauf, der alle statischen Textknoten (`TextNode`, die normalen HTML- oder Text außerhalb von Latte-Tags repräsentieren) findet und ihren Inhalt *direkt im AST* in Großbuchstaben umwandelt.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\TextNode;
+
+function uppercaseStaticText(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Wir können 'enter' verwenden, da TextNode keine zu verarbeitenden Kinder hat
+		enter: function (Node $node) {
+			// Ist dieser Knoten ein statischer Textblock?
+			if ($node instanceof TextNode) {
+				// Ja! Wir ändern direkt seine öffentliche Eigenschaft 'content'.
+				$node->content = mb_strtoupper(html_entity_decode($node->content));
+			}
+			// Es muss nichts zurückgegeben werden; die Änderung wird direkt angewendet.
+		},
+	);
+}
+```
+
+In diesem Beispiel prüft der `enter`-Visitor, ob der aktuelle `$node` vom Typ `TextNode` ist. Wenn ja, aktualisieren wir direkt seine öffentliche Eigenschaft `$content` mit `mb_strtoupper()`. Dies ändert direkt den Inhalt des statischen Textes, der im AST gespeichert ist, *bevor* PHP-Code generiert wird. Da wir das Objekt direkt modifizieren, müssen wir nichts vom Visitor zurückgeben.
+
+Effekt: Wenn das Template `<p>Hello</p>{= $var }<span>World</span>` enthielt, repräsentiert der AST nach diesem Durchlauf etwas wie: `<p>HELLO</p>{= $var }<span>WORLD</span>`. Dies beeinflusst NICHT den Inhalt von $var.
+
+
+Ersetzen von Knoten .[#toc-replacing-nodes]
+-------------------------------------------
+
+Eine leistungsfähigere Modifikationstechnik ist das vollständige Ersetzen eines Knotens durch einen anderen. Dies geschieht durch die **Rückgabe einer neuen `Node`-Instanz** vom `enter`- oder `leave`-Visitor. `NodeTraverser` ersetzt dann den ursprünglichen Knoten durch den zurückgegebenen in der Struktur des übergeordneten Knotens.
+
+**Beispiel:** Erstellen wir einen Durchlauf, der alle Verwendungen der Konstante `PHP_VERSION` (repräsentiert durch `ConstantFetchNode`) findet und sie direkt durch ein String-Literal (`StringNode`) ersetzt, das die *tatsächliche* PHP-Version enthält, die *während der Kompilierung* erkannt wurde. Dies ist eine Form der Optimierung zur Kompilierzeit.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\Php\Expression\ConstantFetchNode;
+use Latte\Compiler\Nodes\Php\Scalar\StringNode;
+
+function inlinePhpVersion(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// 'leave' wird oft zum Ersetzen verwendet, stellt sicher, dass Kinder (falls vorhanden)
+		// zuerst verarbeitet werden, obwohl hier auch 'enter' funktionieren würde.
+		leave: function (Node $node) {
+			// Ist dieser Knoten ein Zugriff auf eine Konstante und der Name der Konstante 'PHP_VERSION'?
+			if ($node instanceof ConstantFetchNode && (string) $node->name === 'PHP_VERSION') {
+				// Wir erstellen einen neuen StringNode, der die aktuelle PHP-Version enthält
+				$newNode = new StringNode(PHP_VERSION);
+
+				// Optional, aber gute Praxis: Kopieren der Positionsinformationen
+				$newNode->position = $node->position;
+
+				// Wir geben den neuen StringNode zurück. Der Traverser ersetzt
+				// den ursprünglichen ConstantFetchNode durch diesen $newNode.
+				return $newNode;
+			}
+			// Wenn wir keinen Node zurückgeben, wird der ursprüngliche $node beibehalten.
+		},
+	);
+}
+```
+
+Hier identifiziert der `leave`-Visitor den spezifischen `ConstantFetchNode` für `PHP_VERSION`. Anschließend erstellt er einen völlig neuen `StringNode`, der den Wert der Konstante `PHP_VERSION` *zur Kompilierzeit* enthält. Durch die Rückgabe dieses `$newNode` weist er den Traverser an, den ursprünglichen `ConstantFetchNode` im AST zu ersetzen.
+
+Effekt: Wenn das Template `{= PHP_VERSION }` enthielt und die Kompilierung auf PHP 8.2.1 läuft, repräsentiert der AST nach diesem Durchlauf effektiv `{= '8.2.1' }`.
+
+**Wahl zwischen `enter` und `leave` zum Ersetzen:**
+
+- Verwenden Sie `leave`, wenn die Erstellung des neuen Knotens von den Ergebnissen der Verarbeitung der Kinder des alten Knotens abhängt oder wenn Sie einfach sicherstellen möchten, dass die Kinder vor dem Ersetzen besucht werden (übliche Praxis).
+- Verwenden Sie `enter`, wenn Sie einen Knoten ersetzen möchten, *bevor* seine Kinder überhaupt besucht werden.
+
+
+Entfernen von Knoten .[#toc-removing-nodes]
+-------------------------------------------
+
+Sie können einen Knoten vollständig aus dem AST entfernen, indem Sie die spezielle Konstante `NodeTraverser::RemoveNode` vom Visitor zurückgeben.
+
+**Beispiel:** Entfernen wir alle Template-Kommentare (`{* ... *}`), die durch `CommentNode` im vom Latte-Kern generierten AST repräsentiert werden (obwohl sie typischerweise früher verarbeitet werden, dient dies als Beispiel).
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Compiler\Nodes\CommentNode;
+
+function removeCommentNodes(TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// 'enter' ist hier in Ordnung, da wir keine Informationen über Kinder benötigen, um den Kommentar zu entfernen
+		enter: function (Node $node) {
+			if ($node instanceof CommentNode) {
+				// Wir signalisieren dem Traverser, diesen Knoten aus dem AST zu entfernen
+				return NodeTraverser::RemoveNode;
+			}
+		},
+	);
+}
+```
+
+**Warnung:** Verwenden Sie `RemoveNode` mit Vorsicht. Das Entfernen eines Knotens, der wesentlichen Inhalt enthält oder die Struktur beeinflusst (wie das Entfernen des Inhaltsknotens einer Schleife), kann zu beschädigten Templates oder ungültigem generiertem Code führen. Am sichersten ist es für Knoten, die tatsächlich optional oder eigenständig sind (wie Kommentare oder Debugging-Tags) oder für leere strukturelle Knoten (z. B. kann ein leerer `FragmentNode` in einigen Kontexten sicher durch einen Bereinigungsdurchlauf entfernt werden).
+
+Diese drei Methoden - Änderung von Eigenschaften, Ersetzen von Knoten und Entfernen von Knoten - bieten die grundlegenden Werkzeuge zur Manipulation des AST im Rahmen Ihrer Kompilierungsdurchläufe.
+
+
+Optimierung der Traversierung .[#toc-optimizing-traversal]
+==========================================================
+
+Der AST eines Templates kann ziemlich groß sein und potenziell Tausende von Knoten enthalten. Das Durchlaufen jedes einzelnen Knotens kann unnötig sein und die Kompilierungsleistung beeinträchtigen, wenn Ihr Durchlauf nur an spezifischen Teilen des Baumes interessiert ist. `NodeTraverser` bietet Möglichkeiten zur Optimierung der Traversierung:
+
+
+Überspringen von Kindern .[#toc-skipping-children]
+--------------------------------------------------
+
+Wenn Sie wissen, dass, sobald Sie auf einen bestimmten Knotentyp stoßen, keiner seiner Nachkommen die Knoten enthalten kann, nach denen Sie suchen, können Sie dem Traverser sagen, dass er den Besuch seiner Kinder überspringen soll. Dies geschieht durch die Rückgabe der Konstante `NodeTraverser::DontTraverseChildren` vom **`enter`**-Visitor. Dadurch werden ganze Zweige bei der Traversierung ausgelassen, was potenziell erheblich Zeit sparen kann, insbesondere in Templates mit komplexen PHP-Ausdrücken innerhalb von Tags.
+
+
+Anhalten der Traversierung .[#toc-stopping-traversal]
+-----------------------------------------------------
+
+Wenn Ihr Durchlauf nur das *erste* Vorkommen von etwas finden muss (ein spezifischer Knotentyp, die Erfüllung einer Bedingung), können Sie den gesamten Traversierungsprozess vollständig anhalten, sobald Sie es gefunden haben. Dies wird erreicht, indem die Konstante `NodeTraverser::StopTraversal` vom `enter`- oder `leave`-Visitor zurückgegeben wird. Die Methode `traverse()` hört auf, weitere Knoten zu besuchen. Dies ist äußerst effizient, wenn Sie nur die erste Übereinstimmung in einem potenziell sehr großen Baum benötigen.
+
+
+Nützlicher Helfer `NodeTraverser` .[#toc-useful-helper-nodetraverser]
+=====================================================================
+
+Während `NodeTraverser` eine feingranulare Kontrolle bietet, stellt Latte auch eine praktische Hilfsklasse zur Verfügung, [api:Latte\Compiler\NodeHelpers], die `NodeTraverser` für mehrere gängige Such- und Analyseaufgaben kapselt und oft weniger Boilerplate-Code erfordert.
+
+
+find(Node $startNode, callable $filter): array .[method]
+--------------------------------------------------------
+
+Diese statische Methode findet **alle** Knoten im Unterbaum, der bei `$startNode` beginnt (einschließlich), die dem Callback `$filter` entsprechen. Sie gibt ein Array der übereinstimmenden Knoten zurück.
+
+**Beispiel:** Finde alle Variablenknoten (`VariableNode`) im gesamten Template.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\Expression\VariableNode;
+use Latte\Compiler\Nodes\TemplateNode;
+
+function findAllVariables(TemplateNode $templateNode): array
+{
+	return NodeHelpers::find(
+		$templateNode,
+		fn($node) => $node instanceof VariableNode,
+	);
+}
+```
+
+
+findFirst(Node $startNode, callable $filter): ?Node  .[method]
+--------------------------------------------------------------
+
+Ähnlich wie `find`, aber stoppt die Traversierung sofort nach dem Finden des **ersten** Knotens, der dem Callback `$filter` entspricht. Gibt das gefundene `Node`-Objekt oder `null` zurück, wenn kein übereinstimmender Knoten gefunden wird. Dies ist im Wesentlichen eine praktische Hülle um `NodeTraverser::StopTraversal`.
+
+**Beispiel:** Finde den `{parameters}`-Knoten (wie das manuelle Beispiel zuvor, aber kürzer).
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\TemplateNode;
+use Latte\Essential\Nodes\ParametersNode;
+
+function findParametersNodeHelper(TemplateNode $templateNode): ?ParametersNode
+{
+	return NodeHelpers::findFirst(
+		$templateNode->head, // Suche nur im Hauptabschnitt zur Effizienz
+		fn($node) => $node instanceof ParametersNode,
+	);
+}
+```
+
+
+toValue(ExpressionNode $node, bool $constants = false): mixed .[method]
+-----------------------------------------------------------------------
+
+Diese statische Methode versucht, einen `ExpressionNode` **zur Kompilierzeit** auszuwerten und seinen entsprechenden PHP-Wert zurückzugeben. Sie funktioniert zuverlässig nur für einfache Literal-Knoten (`StringNode`, `IntegerNode`, `FloatNode`, `BooleanNode`, `NullNode`) und Instanzen von `ArrayNode`, die nur solche auswertbaren Elemente enthalten.
+
+Wenn `$constants` auf `true` gesetzt ist, versucht sie auch, `ConstantFetchNode` und `ClassConstantFetchNode` durch Überprüfung von `defined()` und Verwendung von `constant()` aufzulösen.
+
+Wenn der Knoten Variablen, Funktionsaufrufe oder andere dynamische Elemente enthält, kann er zur Kompilierzeit nicht ausgewertet werden, und die Methode löst eine `InvalidArgumentException` aus.
+
+**Anwendungsfall:** Erhalten des statischen Werts eines Tag-Arguments während der Kompilierung für Entscheidungen zur Kompilierzeit.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+
+function getStaticStringArgument(ExpressionNode $argumentNode): ?string
+{
+	try {
+		$value = NodeHelpers::toValue($argumentNode);
+		return is_string($value) ? $value : null;
+	} catch (\InvalidArgumentException $e) {
+		// Argument war kein statisches String-Literal
+		return null;
+	}
+}
+```
+
+
+toText(?Node $node): ?string .[method]
+--------------------------------------
+
+Diese statische Methode ist nützlich zum Extrahieren von einfachem Textinhalt aus einfachen Knoten. Sie funktioniert hauptsächlich mit:
+- `TextNode`: Gibt seinen `$content` zurück.
+- `FragmentNode`: Verkettet das Ergebnis von `toText()` für alle seine Kinder. Wenn ein Kind nicht in Text konvertierbar ist (z. B. einen `PrintNode` enthält), gibt sie `null` zurück.
+- `NopNode`: Gibt einen leeren String zurück.
+- Andere Knotentypen: Gibt `null` zurück.
+
+**Anwendungsfall:** Erhalten des statischen Textinhalts des Werts eines HTML-Attributs oder eines einfachen HTML-Elements zur Analyse während eines Kompilierungsdurchlaufs.
+
+```php
+use Latte\Compiler\NodeHelpers;
+use Latte\Compiler\Nodes\Html\AttributeNode;
+
+function getStaticAttributeValue(AttributeNode $attr): ?string
+{
+	// $attr->value ist typischerweise ein AreaNode (wie FragmentNode oder TextNode)
+	return NodeHelpers::toText($attr->value);
+}
+
+// Beispielverwendung in einem Durchlauf:
+// if ($node instanceof Html\ElementNode && $node->name === 'meta') {
+//     $nameAttrValue = getStaticAttributeValue($node->getAttributeNode('name'));
+//     if ($nameAttrValue === 'description') { ... }
+// }
+```
+
+`NodeHelpers` kann Ihre Kompilierungsdurchläufe vereinfachen, indem es fertige Lösungen für gängige Aufgaben der AST-Traversierung und -Analyse bietet.
+
+
+Praktische Beispiele .[#toc-practical-examples]
+===============================================
+
+Wenden wir die Konzepte der AST-Traversierung und -Modifikation an, um einige praktische Probleme zu lösen. Diese Beispiele demonstrieren gängige Muster, die in Kompilierungsdurchläufen verwendet werden.
+
+
+Automatisches Hinzufügen von `loading="lazy"` zu `<img>` .[#toc-auto-adding-loading-lazy-to-img]
+------------------------------------------------------------------------------------------------
+
+Moderne Browser unterstützen natives Lazy Loading für Bilder mit dem Attribut `loading="lazy"`. Erstellen wir einen Durchlauf, der dieses Attribut automatisch zu allen `<img>`-Tags hinzufügt, die noch kein `loading`-Attribut haben.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Html;
+
+function addLazyLoading(Nodes\TemplateNode $templateNode): void
+{
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		// Wir können 'enter' verwenden, da wir den Knoten direkt modifizieren
+		// und für diese Entscheidung nicht von Kindern abhängen.
+		enter: function (Node $node) {
+			// Ist es ein HTML-Element mit dem Namen 'img'?
+			if ($node instanceof Html\ElementNode && $node->name === 'img') {
+				// Sicherstellen, dass der Attributknoten existiert
+				$node->attributes ??= new Nodes\FragmentNode;
+
+				// Überprüfen, ob bereits ein 'loading'-Attribut existiert (Groß-/Kleinschreibung egal)
+				foreach ($node->attributes->children as $attrNode) {
+					if ($attrNode instanceof Html\AttributeNode
+						&& $attrNode->name instanceof Nodes\TextNode // Statischer Attributname
+						&& strtolower($attrNode->name->content) === 'loading'
+					) {
+						return;
+					}
+				}
+
+				// Leerzeichen hinzufügen, wenn Attribute nicht leer sind
+				if ($node->attributes->children) {
+					$node->attributes->children[] = new Nodes\TextNode(' ');
+				}
+
+				// Neuen Attributknoten erstellen: loading="lazy"
+				$node->attributes->children[] = new Html\AttributeNode(
+					name: new Nodes\TextNode('loading'),
+					value: new Nodes\TextNode('lazy'),
+					quote: '"',
+				);
+				// Die Änderung wird direkt im Objekt angewendet, es muss nichts zurückgegeben werden.
+			}
+		},
+	);
+}
+```
+
+Erklärung:
+- Der `enter`-Visitor sucht nach `Html\ElementNode`-Knoten mit dem Namen `img`.
+- Er iteriert durch die vorhandenen Attribute (`$node->attributes->children`) und prüft, ob das `loading`-Attribut bereits vorhanden ist.
+- Wenn es nicht gefunden wird, erstellt er einen neuen `Html\AttributeNode`, der `loading="lazy"` repräsentiert.
+
+
+Überprüfung von Funktionsaufrufen .[#toc-checking-function-calls]
+-----------------------------------------------------------------
+
+Kompilierungsdurchläufe sind die Grundlage der Latte Sandbox. Obwohl die tatsächliche Sandbox ausgefeilt ist, können wir das Grundprinzip der Überprüfung verbotener Funktionsaufrufe demonstrieren.
+
+**Ziel:** Die Verwendung der potenziell gefährlichen Funktion `shell_exec` innerhalb von Template-Ausdrücken verhindern.
+
+```php
+use Latte\Compiler\Node;
+use Latte\Compiler\NodeTraverser;
+use Latte\Compiler\Nodes;
+use Latte\Compiler\Nodes\Php;
+use Latte\SecurityViolationException;
+
+function checkForbiddenFunctions(Nodes\TemplateNode $templateNode): void
+{
+	$forbiddenFunctions = ['shell_exec' => true, 'exec' => true]; // Einfache Liste
+
+	$traverser = new NodeTraverser;
+	(new NodeTraverser)->traverse(
+		$templateNode,
+		enter: function (Node $node) use ($forbiddenFunctions) {
+			// Ist es ein direkter Funktionsaufrufknoten?
+			if ($node instanceof Php\Expression\FunctionCallNode
+				&& $node->name instanceof Php\NameNode
+				&& isset($forbiddenFunctions[strtolower((string) $node->name)])
+			) {
+				throw new SecurityViolationException(
+					"Die Funktion {$node->name}() ist nicht erlaubt.",
+					$node->position,
+				);
+			}
+		},
+	);
+}
+```
+
+Erklärung:
+- Wir definieren eine Liste verbotener Funktionsnamen.
+- Der `enter`-Visitor prüft auf `FunctionCallNode`.
+- Wenn der Funktionsname (`$node->name`) ein statischer `NameNode` ist, prüfen wir seine kleingeschriebene String-Repräsentation gegen unsere verbotene Liste.
+- Wenn eine verbotene Funktion gefunden wird, werfen wir eine `Latte\SecurityViolationException`, die klar die Verletzung der Sicherheitsregel anzeigt und die Kompilierung stoppt.
+
+Diese Beispiele zeigen, wie Kompilierungsdurchläufe mit `NodeTraverser` genutzt werden können, um Analyse, automatische Modifikationen und die Durchsetzung von Sicherheitsbeschränkungen durch direkte Interaktion mit der AST-Struktur des Templates zu erreichen.
+
+
+Best Practices .[#toc-best-practices]
+=====================================
+
+Beachten Sie beim Schreiben von Kompilierungsdurchläufen diese Richtlinien, um robuste, wartbare und effiziente Erweiterungen zu erstellen:
+
+- **Reihenfolge ist wichtig:** Seien Sie sich der Reihenfolge bewusst, in der Durchläufe ausgeführt werden. Wenn Ihr Durchlauf von der AST-Struktur abhängt, die von einem anderen Durchlauf erstellt wurde (z. B. Latte-Kerndurchläufe oder ein anderer benutzerdefinierter Durchlauf), oder wenn andere Durchläufe von Ihren Modifikationen abhängen könnten, verwenden Sie den von `Extension::getPasses()` bereitgestellten Sortiermechanismus, um Abhängigkeiten zu definieren (`before`/`after`). Siehe Dokumentation zu [`Extension::getPasses()` |extending-latte#getPasses()] für Details.
+- **Einzelverantwortung:** Streben Sie nach Durchläufen, die eine gut definierte Aufgabe erfüllen. Für komplexe Transformationen erwägen Sie, die Logik in mehrere Durchläufe aufzuteilen – vielleicht einen für die Analyse und einen weiteren für die Modifikation basierend auf den Analyseergebnissen. Dies verbessert die Übersichtlichkeit und Testbarkeit.
+- **Leistung:** Denken Sie daran, dass Kompilierungsdurchläufe die Kompilierungszeit des Templates erhöhen (obwohl dies normalerweise nur einmal geschieht, bis das Template geändert wird). Vermeiden Sie rechenintensive Operationen in Ihren Durchläufen, wenn möglich. Nutzen Sie Traversierungsoptimierungen wie `NodeTraverser::DontTraverseChildren` und `NodeTraverser::StopTraversal`, wann immer Sie wissen, dass Sie bestimmte Teile des AST nicht besuchen müssen.
+- **Verwenden Sie `NodeHelpers`:** Für gängige Aufgaben wie das Finden spezifischer Knoten oder die statische Auswertung einfacher Ausdrücke prüfen Sie, ob `Latte\Compiler\NodeHelpers` eine geeignete Methode bietet, bevor Sie Ihre eigene `NodeTraverser`-Logik schreiben. Dies kann Zeit sparen und die Menge an Boilerplate-Code reduzieren.
+- **Fehlerbehandlung:** Wenn Ihr Durchlauf einen Fehler oder einen ungültigen Zustand im AST des Templates erkennt, werfen Sie eine `Latte\CompileException` (oder `Latte\SecurityViolationException` für Sicherheitsprobleme) mit einer klaren Meldung und dem relevanten `Position`-Objekt (normalerweise `$node->position`). Dies gibt dem Template-Entwickler nützliches Feedback.
+- **Idempotenz (wenn möglich):** Idealerweise sollte das mehrmalige Ausführen Ihres Durchlaufs auf demselben AST dasselbe Ergebnis liefern wie das einmalige Ausführen. Dies ist nicht immer machbar, vereinfacht aber das Debugging und das Nachdenken über Interaktionen zwischen Durchläufen, wenn es erreicht wird. Stellen Sie beispielsweise sicher, dass Ihr Modifikationsdurchlauf prüft, ob die Modifikation bereits angewendet wurde, bevor Sie sie erneut anwenden.
+
+Durch Befolgen dieser Praktiken können Sie Kompilierungsdurchläufe effektiv nutzen, um die Fähigkeiten von Latte auf leistungsstarke und zuverlässige Weise zu erweitern, was zu sichereren, optimierteren oder funktionsreicheren Template-Verarbeitungen beiträgt.

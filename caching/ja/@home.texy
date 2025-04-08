@@ -1,0 +1,490 @@
+キャッシュ
+*****
+
+<div class=perex>
+
+キャッシュ `[keš]` は、一度取得に時間のかかったデータを次回の使用のために保存することで、アプリケーションを高速化します。以下を示します：
+
+- キャッシュの使用方法
+- ストレージの変更方法
+- キャッシュを正しく無効化する方法
+
+</div>
+
+Netteでのキャッシュの使用は非常に簡単ですが、非常に高度なニーズにも対応しています。パフォーマンスと100%の耐障害性を考慮して設計されています。基本的には、最も一般的なバックエンドストレージ用のアダプタが含まれています。タグベースの無効化、時間ベースの有効期限、キャッシュスタンピードからの保護などをサポートしています。
+
+
+インストール
+======
+
+[Composer|best-practices:composer]を使用してライブラリをダウンロードし、インストールします：
+
+```shell
+composer require nette/caching
+```
+
+
+基本的な使用法
+=======
+
+キャッシュ（またはメモリキャッシュ）の操作の中心は[api:Nette\Caching\Cache]オブジェクトです。そのインスタンスを作成し、コンストラクタにいわゆるストレージをパラメータとして渡します。これは、データが物理的に保存される場所（データベース、Memcached、ディスク上のファイルなど）を表すオブジェクトです。ストレージには、`Nette\Caching\Storage` 型で[dependency injection |dependency-injection:passing-dependencies]を使用して渡してもらうことでアクセスできます。必要なことはすべて[ストレージのセクション|#Úložiště]で説明します。
+
+.[warning]
+バージョン3.0では、インターフェースにはまだ接頭辞 `I` が付いていたため、名前は `Nette\Caching\IStorage` でした。また、`Cache` クラスの定数は大文字で書かれていたため、例えば `Cache::Expire` の代わりに `Cache::EXPIRE` でした。
+
+以下の例では、エイリアス `Cache` が作成され、変数 `$storage` にストレージが含まれていると仮定します。
+
+```php
+use Nette\Caching\Cache;
+
+$storage = /* ... */; // Nette\Caching\Storage のインスタンス
+```
+
+キャッシュは実際には *key-valueストア* であり、連想配列のようにキーを使用してデータを読み書きします。アプリケーションは多数の独立した部分で構成されており、すべてが1つのストレージ（ディスク上の1つのディレクトリを想像してください）を使用すると、遅かれ早かれキーの衝突が発生します。Nette Frameworkはこの問題を、スペース全体を名前空間（サブディレクトリ）に分割することで解決します。プログラムの各部分は、一意の名前を持つ独自のスペースを使用するため、衝突は発生しません。
+
+スペース名はCacheクラスのコンストラクタの2番目のパラメータとして指定します：
+
+```php
+$cache = new Cache($storage, 'Full Html Pages');
+```
+
+これで、`$cache` オブジェクトを使用してキャッシュから読み書きできます。両方の操作には `load()` メソッドを使用します。最初の引数はキーで、2番目の引数はキーがキャッシュに見つからない場合に呼び出されるPHPコールバックです。コールバックは値を生成して返し、キャッシュに保存されます：
+
+```php
+$value = $cache->load($key, function () use ($key) {
+	$computedValue = /* ... */; // 時間のかかる計算
+	return $computedValue;
+});
+```
+
+2番目のパラメータを指定しない場合 `$value = $cache->load($key)`、キャッシュにアイテムがない場合は `null` が返されます。
+
+.[tip]
+素晴らしいことに、キャッシュにはシリアライズ可能な任意の構造を保存でき、文字列だけである必要はありません。そして、これはキーにも当てはまります。
+
+キャッシュからアイテムを削除するには `remove()` メソッドを使用します：
+
+```php
+$cache->remove($key);
+```
+
+キャッシュにアイテムを保存するには `$cache->save($key, $value, array $dependencies = [])` メソッドも使用できます。ただし、上記で説明した `load()` を使用する方法が推奨されます。
+
+
+メモ化
+===
+
+メモ化とは、関数やメソッドの呼び出し結果をキャッシュして、同じことを何度も計算することなく次回使用できるようにすることです。
+
+メソッドや関数は `call(callable $callback, ...$args)` を使用してメモ化して呼び出すことができます：
+
+```php
+$result = $cache->call('gethostbyaddr', $ip);
+```
+
+`gethostbyaddr()` 関数は、各 `$ip` パラメータに対して一度だけ呼び出され、次回はキャッシュから値が返されます。
+
+後で呼び出すことができるメソッドや関数のメモ化されたラッパーを作成することも可能です：
+
+```php
+function factorial($num)
+{
+	return /* ... */;
+}
+
+$memoizedFactorial = $cache->wrap('factorial');
+
+$result = $memoizedFactorial(5); // 初回計算
+$result = $memoizedFactorial(5); // 2回目はキャッシュから
+```
+
+
+有効期限と無効化
+========
+
+キャッシュに保存する際には、以前に保存されたデータがいつ無効になるかという問題を解決する必要があります。Nette Frameworkは、データの有効期間を制限したり、制御された方法で削除（フレームワークの用語では「無効化」）したりするメカニズムを提供します。
+
+データの有効期間は、保存時に `save()` メソッドの3番目のパラメータを使用して設定します。例：
+
+```php
+$cache->save($key, $value, [
+	$cache::Expire => '20 minutes',
+]);
+```
+
+または、`load()` メソッドのコールバックに参照渡しされる `$dependencies` パラメータを使用します。例：
+
+```php
+$value = $cache->load($key, function (&$dependencies) {
+	$dependencies[Cache::Expire] = '20 minutes';
+	return /* ... */;
+});
+```
+
+または、`load()` メソッドの3番目のパラメータを使用します。例：
+
+```php
+$value = $cache->load($key, function () {
+	return ...;
+}, [Cache::Expire => '20 minutes']);
+```
+
+以下の例では、2番目のバリアントを想定し、したがって変数 `$dependencies` が存在すると仮定します。
+
+
+有効期限
+----
+
+最も単純な有効期限は時間制限です。このようにして、20分間有効なデータをキャッシュに保存します：
+
+```php
+// 秒数またはUNIXタイムスタンプも受け付けます
+$dependencies[Cache::Expire] = '20 minutes';
+```
+
+読み取りごとに有効期間を延長したい場合は、次のように実現できますが、注意してください。これによりキャッシュのオーバーヘッドが増加します：
+
+```php
+$dependencies[Cache::Sliding] = true;
+```
+
+ファイルまたは複数のファイルのいずれかが変更されたときにデータを期限切れにするオプションは便利です。これは、たとえば、これらのファイルを処理して生成されたデータをキャッシュに保存する場合に使用できます。絶対パスを使用してください。
+
+```php
+$dependencies[Cache::Files] = '/path/to/data.yaml';
+// または
+$dependencies[Cache::Files] = ['/path/to/data1.yaml', '/path/to/data2.yaml'];
+```
+
+別のアイテム（または複数の他のアイテムのいずれか）が期限切れになったときに、キャッシュ内のアイテムを期限切れにすることができます。これは、たとえば、HTMLページ全体をキャッシュし、そのフラグメントを他のキーの下に保存する場合に使用できます。フラグメントが変更されると、ページ全体が無効になります。フラグメントがキー `frag1` と `frag2` の下に保存されている場合、次のように使用します：
+
+```php
+$dependencies[Cache::Items] = ['frag1', 'frag2'];
+```
+
+有効期限は、独自の関数または静的メソッドを使用して制御することもできます。これらの関数またはメソッドは、読み取り時にアイテムがまだ有効かどうかを常に決定します。このようにして、たとえば、PHPのバージョンが変更されたときに常にアイテムを期限切れにすることができます。現在のバージョンをパラメータと比較する関数を作成し、保存時に依存関係の間に `[関数名, ...引数]` の形式の配列を追加します：
+
+```php
+function checkPhpVersion($ver): bool
+{
+	return $ver === PHP_VERSION_ID;
+}
+
+$dependencies[Cache::Callbacks] = [
+	['checkPhpVersion', PHP_VERSION_ID] // checkPhpVersion(...) === false の場合に期限切れにする
+];
+```
+
+もちろん、すべての基準を組み合わせることができます。キャッシュは、少なくとも1つの基準が満たされない場合に期限切れになります。
+
+```php
+$dependencies[Cache::Expire] = '20 minutes';
+$dependencies[Cache::Files] = '/path/to/data.yaml';
+```
+
+
+タグによる無効化
+--------
+
+非常に便利な無効化ツールは、いわゆるタグです。キャッシュ内の各アイテムに、任意の文字列であるタグのリストを割り当てることができます。たとえば、記事とコメントを含むHTMLページがあり、それをキャッシュするとします。保存時にタグを指定します：
+
+```php
+$dependencies[Cache::Tags] = ["article/$articleId", "comments/$articleId"];
+```
+
+管理画面に移動しましょう。ここに記事を編集するためのフォームがあります。記事をデータベースに保存すると同時に、タグに従ってキャッシュからアイテムを削除する `clean()` コマンドを呼び出します：
+
+```php
+$cache->clean([
+	$cache::Tags => ["article/$articleId"],
+]);
+```
+
+同様に、新しいコメントを追加する場所（またはコメントを編集する場所）で、適切なタグを無効化することを忘れないでください：
+
+```php
+$cache->clean([
+	$cache::Tags => ["comments/$articleId"],
+]);
+```
+
+これで何が達成されたのでしょうか？記事やコメントが変更されるたびにHTMLキャッシュが無効化（削除）されるようになります。ID = 10の記事が編集されると、タグ `article/10` が強制的に無効化され、指定されたタグを持つHTMLページがキャッシュから削除されます。同じことが、対応する記事の下に新しいコメントが挿入された場合にも発生します。
+
+.[note]
+タグにはいわゆる[#Journal]が必要です。
+
+
+優先度による無効化
+---------
+
+キャッシュ内の個々のアイテムに優先度を設定できます。これを使用して、たとえばキャッシュが特定のサイズを超えた場合にアイテムを削除できます：
+
+```php
+$dependencies[Cache::Priority] = 50;
+```
+
+優先度が100以下のすべてのアイテムを削除します：
+
+```php
+$cache->clean([
+	$cache::Priority => 100,
+]);
+```
+
+.[note]
+優先度にはいわゆる[#Journal]が必要です。
+
+
+キャッシュの削除
+--------
+
+パラメータ `Cache::All` はすべてを削除します：
+
+```php
+$cache->clean([
+	$cache::All => true,
+]);
+```
+
+
+一括読み取り
+======
+
+キャッシュへの一括読み取りおよび書き込みには `bulkLoad()` メソッドを使用します。これにキーの配列を渡し、値の配列を取得します：
+
+```php
+$values = $cache->bulkLoad($keys);
+```
+
+`bulkLoad()` メソッドは `load()` と同様に、生成されるアイテムのキーを渡される2番目のパラメータコールバックでも機能します：
+
+```php
+$values = $cache->bulkLoad($keys, function ($key, &$dependencies) {
+	$computedValue = /* ... */; // 時間のかかる計算
+	return $computedValue;
+});
+```
+
+
+PSR-16との使用 .{data-version:3.3.1}
+================================
+
+PSR-16インターフェースでNette Cacheを使用するには、`PsrCacheAdapter` アダプタを使用できます。これにより、Nette CacheとPSR-16互換キャッシュを期待する任意のコードまたはライブラリとの間でシームレスな統合が可能になります。
+
+```php
+$psrCache = new Nette\Bridges\Psr\PsrCacheAdapter($storage);
+```
+
+これで `$psrCache` をPSR-16キャッシュとして使用できます：
+
+```php
+$psrCache->set('key', 'value', 3600); // 値を1時間保存します
+$value = $psrCache->get('key', 'default');
+```
+
+アダプタは、`getMultiple()`、`setMultiple()`、`deleteMultiple()` を含む、PSR-16で定義されているすべてのメソッドをサポートしています。
+
+
+出力のキャッシュ
+========
+
+出力をキャプチャしてキャッシュすることは非常にエレガントに行えます：
+
+```php
+if ($capture = $cache->capture($key)) {
+
+	echo ... // データを出力します
+
+	$capture->end(); // 出力をキャッシュに保存します
+}
+```
+
+出力がすでにキャッシュに保存されている場合、`capture()` メソッドはそれを表示して `null` を返し、したがって条件は実行されません。それ以外の場合、出力のキャプチャを開始し、最終的に表示されたデータをキャッシュに保存するために使用される `$capture` オブジェクトを返します。
+
+.[note]
+バージョン3.0では、メソッド名は `$cache->start()` でした。
+
+
+Latteでのキャッシュ
+============
+
+[Latte|latte:]テンプレートでのキャッシュは非常に簡単です。テンプレートの一部を `{cache}...{/cache}` タグで囲むだけです。ソーステンプレート（キャッシュブロック内のインクルードされたテンプレートを含む）が変更されると、キャッシュは自動的に無効化されます。`{cache}` タグはネストでき、ネストされたブロックが無効化されると（たとえばタグによって）、親ブロックも無効化されます。
+
+タグ内では、キャッシュがバインドされるキー（ここでは変数 `$id`）を指定し、有効期限と[無効化タグ |#Invalidace pomocí tagů]を設定できます。
+
+```latte
+{cache $id, expire: '20 minutes', tags: [tag1, tag2]}
+	...
+{/cache}
+```
+
+すべてのアイテムはオプションなので、有効期限もタグも、最終的にはキーも指定する必要はありません。
+
+キャッシュの使用は `if` を使用して条件付きにすることもできます - コンテンツは条件が満たされた場合にのみキャッシュされます：
+
+```latte
+{cache $id, if: !$form->isSubmitted()}
+	{$form}
+{/cache}
+```
+
+
+ストレージ
+=====
+
+ストレージは、データが物理的に保存される場所を表すオブジェクトです。データベース、Memcachedサーバー、または最も利用しやすいストレージであるディスク上のファイルを使用できます。
+
+|-----------------
+| ストレージ | 説明
+|-----------------
+| [#FileStorage] | ディスク上のファイルに保存するデフォルトのストレージ
+| [#MemcachedStorage] | `Memcached` サーバーを使用します
+| [#MemoryStorage] | データは一時的にメモリに保存されます
+| [#SQLiteStorage] | データはSQLiteデータベースに保存されます
+| [#DevNullStorage] | データは保存されません、テストに適しています
+
+ストレージオブジェクトには、`Nette\Caching\Storage` 型で[dependency injection |dependency-injection:passing-dependencies]を使用して渡してもらうことでアクセスできます。デフォルトのストレージとして、Netteは[一時ファイル|application:bootstrap#dočasné soubory]用のディレクトリの `cache` サブディレクトリにデータを保存するFileStorageオブジェクトを提供します。
+
+ストレージは設定で変更できます：
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\DevNullStorage
+```
+
+
+FileStorage
+-----------
+
+キャッシュをディスク上のファイルに書き込みます。`Nette\Caching\Storages\FileStorage` ストレージはパフォーマンスに非常に最適化されており、特に操作の完全な原子性を保証します。これはどういう意味でしょうか？キャッシュを使用する場合、別のスレッドによってまだ完全に書き込まれていないファイルを読み取ったり、誰かが「手元で」削除したりすることはできません。したがって、キャッシュの使用は完全に安全です。
+
+このストレージには、キャッシュが削除されたり、まだウォームアップされていない（つまり作成されていない）ときにCPU使用率が極端に増加するのを防ぐ重要な機能も組み込まれています。これは「キャッシュスタンピード」:https://en.wikipedia.org/wiki/Cache_stampede に対する予防策です。
+同時に多数の同時リクエストが発生し、それらがすべてキャッシュから同じもの（たとえば、高価なSQLクエリの結果）を要求し、キャッシュにないため、すべてのプロセスが同じSQLクエリを実行し始めることがあります。
+これにより負荷が倍増し、どのスレッドも時間制限内に応答できず、キャッシュが作成されず、アプリケーションがクラッシュすることさえあります。
+幸いなことに、Netteのキャッシュは、1つのアイテムに対して複数の同時リクエストがある場合、最初のスレッドのみがそれを生成し、他のスレッドは待機し、その後生成された結果を使用するように機能します。
+
+FileStorageの作成例：
+
+```php
+// ストレージはディスク上の '/path/to/temp' ディレクトリになります
+$storage = new Nette\Caching\Storages\FileStorage('/path/to/temp');
+```
+
+
+MemcachedStorage
+----------------
+
+[Memcached|https://memcached.org]サーバーは、高性能な分散メモリキャッシュシステムであり、そのアダプタは `Nette\Caching\Storages\MemcachedStorage` です。設定では、標準の11211と異なる場合はIPアドレスとポートを指定します。
+
+.[caution]
+PHP拡張機能 `memcached` が必要です。
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\MemcachedStorage('10.0.0.5')
+```
+
+
+MemoryStorage
+-------------
+
+`Nette\Caching\Storages\MemoryStorage` は、データをPHP配列に保存するストレージであり、したがってリクエストの終了とともに失われます。
+
+
+SQLiteStorage
+-------------
+
+SQLiteデータベースと `Nette\Caching\Storages\SQLiteStorage` アダプタは、キャッシュをディスク上の単一ファイルに保存する方法を提供します。設定では、このファイルへのパスを指定します。
+
+.[caution]
+PHP拡張機能 `pdo` および `pdo_sqlite` が必要です。
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\SQLiteStorage('%tempDir%/cache.db')
+```
+
+
+DevNullStorage
+--------------
+
+ストレージの特別な実装は `Nette\Caching\Storages\DevNullStorage` であり、実際にはデータをまったく保存しません。したがって、キャッシュの影響を排除したいテストに適しています。
+
+
+コードでのキャッシュの使用
+=============
+
+コードでキャッシュを使用する場合、2つの方法があります。1つ目は、[dependency injection |dependency-injection:passing-dependencies]を使用してストレージを渡し、`Cache` オブジェクトを作成する方法です：
+
+```php
+use Nette;
+
+class ClassOne
+{
+	private Nette\Caching\Cache $cache;
+
+	public function __construct(Nette\Caching\Storage $storage)
+	{
+		$this->cache = new Nette\Caching\Cache($storage, 'my-namespace');
+	}
+}
+```
+
+2番目のオプションは、`Cache` オブジェクトを直接渡してもらうことです：
+
+```php
+class ClassTwo
+{
+	public function __construct(
+		private Nette\Caching\Cache $cache,
+	) {
+	}
+}
+```
+
+`Cache` オブジェクトは、次のように設定で直接作成されます：
+
+```neon
+services:
+	- ClassTwo( Nette\Caching\Cache(namespace: 'my-namespace') )
+```
+
+
+ジャーナル
+=====
+
+Netteはタグと優先度をいわゆるジャーナルに保存します。標準では、SQLiteとファイル `journal.s3db` が使用され、**PHP拡張機能 `pdo` と `pdo_sqlite` が必要です。**
+
+ジャーナルは設定で変更できます：
+
+```neon
+services:
+	cache.journal: MyJournal
+```
+
+
+DIサービス
+======
+
+これらのサービスはDIコンテナに追加されます：
+
+| 名前           | 型                        | 説明
+|----------------------------------------------------------
+| `cache.journal`  |  [api:Nette\Caching\Storages\Journal]  |  ジャーナル
+| `cache.storage`  |  [api:Nette\Caching\Storage]           |  ストレージ
+
+
+キャッシュの無効化
+=========
+
+アプリケーションでキャッシュを無効にする1つの方法は、ストレージとして[DevNullStorage|#DevNullStorage]を設定することです：
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\DevNullStorage
+```
+
+この設定は、LatteのテンプレートやDIコンテナのキャッシュには影響しません。これらのライブラリはnette/cachingサービスを使用せず、独自のキャッシュを管理するためです。また、開発モードでは[これらのキャッシュを無効にする必要はありません|nette:troubleshooting#jak-vypnout-cache-behem-vyvoje]。
+
+
+{{leftbar: nette:@menu-topics}}

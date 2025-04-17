@@ -1,0 +1,292 @@
+権限の検証（認可）
+*********
+
+.[perex]
+認可は、ユーザーが特定のリソースへのアクセスや特定のアクションの実行など、十分な権限を持っているかどうかを確認します。認可は、事前の正常な認証、つまりユーザーがログインしていることを前提としています。
+
+→ [インストールと要件 |@home#インストール]
+
+例では、現在のユーザーを表す [api:Nette\Security\User] クラスのオブジェクトを使用します。これには、[dependency injection |dependency-injection:passing-dependencies] を使用して渡してもらうことでアクセスできます。Presenter では、単に `$user = $this->getUser()` を呼び出すだけです。
+
+ユーザー権限が区別されない管理機能を持つ非常に単純な Web サイトの場合、すでに知られている `isLoggedIn()` メソッドを認可基準として使用できます。言い換えれば、ユーザーがログインするとすぐに、すべての権限を持ち、逆もまた同様です。
+
+```php
+if ($user->isLoggedIn()) { // ユーザーはログインしていますか？
+	deleteItem(); // その場合、操作を実行する権限があります
+}
+```
+
+
+ロール
+---
+
+ロールの目的は、より正確な権限管理を提供し、ユーザー名から独立した状態を維持することです。各ユーザーには、ログイン時に 1 つ以上のロールが割り当てられ、そのロールで行動します。ロールは、`admin`、`member`、`guest` などの単純な文字列にすることができます。これらは `SimpleIdentity` コンストラクタの 2 番目のパラメータとして、文字列または文字列の配列（ロール）として指定されます。
+
+認可基準として、今回は `isInRole()` メソッドを使用します。これは、ユーザーが特定のロールで行動しているかどうかを示します。
+
+```php
+if ($user->isInRole('admin')) { // ユーザーは admin ロールですか？
+	deleteItem(); // その場合、操作を実行する権限があります
+}
+```
+
+すでに知っているように、ユーザーがログアウトした後、そのアイデンティティを削除する必要はありません。したがって、`getIdentity()` メソッドは、付与されたすべてのロールを含む `SimpleIdentity` オブジェクトを引き続き返します。Nette Framework は「より少ないコード、より多くのセキュリティ」の原則に従います。これは、記述量が少ないほど、より安全なコードにつながることを意味します。したがって、ロールを確認するときに、ユーザーがログインしているかどうかを確認する必要はありません。`isInRole()` メソッドは **有効なロール** で動作します。つまり、ユーザーがログインしている場合、アイデンティティにリストされているロールに基づいており、ログインしていない場合は、自動的に特別なロール `guest` を持ちます。
+
+
+認可者
+---
+
+ロールに加えて、リソースと操作の概念も導入します。
+
+- **ロール** はユーザーのプロパティです - 例：モデレーター、編集者、訪問者、登録ユーザー、管理者...
+- **リソース** (*resource*) は、Web サイトの論理的な要素です - 記事、ページ、ユーザー、メニュー項目、投票、Presenter、...
+- **操作** (*operation*) は、ユーザーがリソースに対して実行できる、またはできない特定の活動です - 例：削除、編集、作成、投票、...
+
+認可者は、特定の *ロール* が特定のリソースに対して特定の *操作* を実行する権限を持っているかどうかを決定するオブジェクトです。これは、単一のメソッド `isAllowed()` を持つ [api:Nette\Security\Authorizator] インターフェースを実装するオブジェクトです。
+
+```php
+class MyAuthorizator implements Nette\Security\Authorizator
+{
+	public function isAllowed($role, $resource, $operation): bool
+	{
+		if ($role === 'admin') {
+			return true;
+		}
+		if ($role === 'user' && $resource === 'article') {
+			return true;
+		}
+
+		// ...
+
+		return false;
+	}
+}
+```
+
+認可者を DI コンテナの [サービスとして|dependency-injection:services] 設定に追加します。
+
+```neon
+services:
+	- MyAuthorizator
+```
+
+そして、使用例が続きます。注意してください、今回は認可者ではなく `Nette\Security\User::isAllowed()` メソッドを呼び出しているため、最初のパラメータ `$role` はありません。このメソッドは、ユーザーのすべてのロールに対して `MyAuthorizator::isAllowed()` を順番に呼び出し、少なくとも 1 つのロールに権限がある場合は true を返します。
+
+```php
+if ($user->isAllowed('file')) { // ユーザーはリソース 'file' に対して何でもできますか？
+	useFile();
+}
+
+if ($user->isAllowed('file', 'delete')) { // ユーザーはリソース 'file' に対して 'delete' を実行できますか？
+	deleteFile();
+}
+```
+
+両方のパラメータはオプションであり、デフォルト値 `null` は *何でも* を意味します。
+
+
+Permission ACL
+--------------
+
+Nette には、権限とアクセスを管理するための軽量で柔軟な ACL（Access Control List）レイヤーをプログラマに提供する、組み込みの認可者実装、クラス [api:Nette\Security\Permission] が付属しています。これを使用するには、ロール、リソース、および個々の権限を定義します。ロールとリソースは階層を作成できます。説明のために、Web アプリケーションの例を示します。
+
+- `guest`: ログインしていない訪問者。Web サイトの公開部分を読み取り、閲覧できます。つまり、記事、コメントを読み、投票で投票できます。
+- `registered`: ログインしている登録ユーザー。さらにコメントすることもできます。
+- `admin`: 記事、コメント、投票を管理できます。
+
+したがって、特定のロール（`guest`、`registered`、`admin`）を定義し、ユーザーが特定のロールでアクセスしたり、特定の操作（`view`、`vote`、`add`、`edit`）を実行したりできるリソース（`article`、`comment`、`poll`）について言及しました。
+
+Permission クラスのインスタンスを作成し、**ロール** を定義します。ロールの継承を使用できます。これにより、たとえば管理者ロール（`admin`）を持つユーザーは、通常の Web サイト訪問者ができること（そしてもちろんそれ以上）も実行できます。
+
+```php
+$acl = new Nette\Security\Permission;
+
+$acl->addRole('guest');
+$acl->addRole('registered', 'guest'); // 'registered' は 'guest' から継承します
+$acl->addRole('admin', 'registered'); // そして 'admin' はそれから継承します
+```
+
+次に、ユーザーがアクセスできる **リソース** のリストも定義します。
+
+```php
+$acl->addResource('article');
+$acl->addResource('comment');
+$acl->addResource('poll');
+```
+
+リソースも継承を使用できます。たとえば、`$acl->addResource('perex', 'article')` を指定できます。
+
+そして今、最も重要なこと。誰が何に対して何ができるかを決定するルールを定義します。
+
+```php
+// 最初は誰も何もできません
+
+// guest が記事、コメント、投票を閲覧できるようにします
+$acl->allow('guest', ['article', 'comment', 'poll'], 'view');
+// そして投票では、さらに投票もできます
+$acl->allow('guest', 'poll', 'vote');
+
+// 登録ユーザーは guest から権限を継承し、コメントする権限を追加します
+$acl->allow('registered', 'comment', 'add');
+
+// 管理者は何でも閲覧および編集できます
+$acl->allow('admin', $acl::All, ['view', 'edit', 'add']);
+```
+
+誰かが特定のリソースへのアクセスを **拒否** したい場合はどうすればよいでしょうか？
+
+```php
+// 管理者は投票を編集できません。それは非民主的です
+$acl->deny('admin', 'poll', 'edit');
+```
+
+ルールのリストを作成したので、認可クエリを簡単に実行できます。
+
+```php
+// guest は記事を閲覧できますか？
+$acl->isAllowed('guest', 'article', 'view'); // true
+
+// guest は記事を編集できますか？
+$acl->isAllowed('guest', 'article', 'edit'); // false
+
+// guest は投票で投票できますか？
+$acl->isAllowed('guest', 'poll', 'vote'); // true
+
+// guest はコメントできますか？
+$acl->isAllowed('guest', 'comment', 'add'); // false
+```
+
+登録ユーザーについても同様ですが、コメントすることもできます。
+
+```php
+$acl->isAllowed('registered', 'article', 'view'); // true
+$acl->isAllowed('registered', 'comment', 'add'); // true
+$acl->isAllowed('registered', 'comment', 'edit'); // false
+```
+
+管理者は、投票を除いてすべてを編集できます。
+
+```php
+$acl->isAllowed('admin', 'poll', 'vote'); // true
+$acl->isAllowed('admin', 'poll', 'edit'); // false
+$acl->isAllowed('admin', 'comment', 'edit'); // true
+```
+
+権限は動的に評価することもでき、決定を独自のコールバックに任せることができます。このコールバックにはすべてのパラメータが渡されます。
+
+```php
+$assertion = function (Permission $acl, string $role, string $resource, string $privilege): bool {
+	return /* ... */;
+};
+
+$acl->allow('registered', 'comment', null, $assertion);
+```
+
+しかし、たとえばロールとリソースの名前だけでは不十分で、たとえばロール `registered` は、自分が作成者である場合にのみリソース `article` を編集できると定義したい場合はどうすればよいでしょうか？文字列の代わりにオブジェクトを使用します。ロールは [api:Nette\Security\Role] オブジェクト、リソースは [api:Nette\Security\Resource] オブジェクトになります。それらのメソッド `getRoleId()` と `getResourceId()` は、元の文字列を返します。
+
+```php
+class Registered implements Nette\Security\Role
+{
+	public $id;
+
+	public function getRoleId(): string
+	{
+		return 'registered';
+	}
+}
+
+
+class Article implements Nette\Security\Resource
+{
+	public $authorId;
+
+	public function getResourceId(): string
+	{
+		return 'article';
+	}
+}
+```
+
+そして今、ルールを作成します。
+
+```php
+$assertion = function (Permission $acl, string $role, string $resource, string $privilege): bool {
+	$role = $acl->getQueriedRole(); // Registered オブジェクト
+	$resource = $acl->getQueriedResource(); // Article オブジェクト
+	return $role->id === $resource->authorId;
+};
+
+$acl->allow('registered', 'article', 'edit', $assertion);
+```
+
+そして、ACL へのクエリはオブジェクトを渡すことによって実行されます。
+
+```php
+$user = new Registered(/* ... */);
+$article = new Article(/* ... */);
+$acl->isAllowed($user, $article, 'edit');
+```
+
+ロールは、別のロールまたは複数のロールから継承できます。しかし、一方の祖先がアクションを禁止され、もう一方の祖先が許可されている場合はどうなるでしょうか？子孫の権限はどうなりますか？これはロールの重みによって決定されます - 祖先のリストで最後にリストされたロールが最も重みが高く、最初にリストされたロールが最も重みが低くなります。例からより明確になります。
+
+```php
+$acl = new Nette\Security\Permission;
+$acl->addRole('admin');
+$acl->addRole('guest');
+
+$acl->addResource('backend');
+
+$acl->allow('admin', 'backend');
+$acl->deny('guest', 'backend');
+
+// ケース A: admin ロールは guest ロールよりも重みが低い
+$acl->addRole('john', ['admin', 'guest']);
+$acl->isAllowed('john', 'backend'); // false
+
+// ケース B: admin ロールは guest よりも重みが大きい
+$acl->addRole('mary', ['guest', 'admin']);
+$acl->isAllowed('mary', 'backend'); // true
+```
+
+ロールとリソースは削除することもできます（`removeRole()`、`removeResource()`）。ルールを元に戻すこともできます（`removeAllow()`、`removeDeny()`）。すべての直接の親ロールの配列は `getRoleParents()` によって返され、2 つのエンティティが互いに継承するかどうかは `roleInheritsFrom()` と `resourceInheritsFrom()` によって返されます。
+
+
+サービスとしての追加
+----------
+
+作成した ACL をサービスとして設定に渡す必要があります。これにより、`$user` オブジェクトがそれを使用し始め、たとえばコードで `$user->isAllowed('article', 'view')` を使用できるようになります。この目的のために、ファクトリを作成します。
+
+```php
+namespace App\Model;
+
+class AuthorizatorFactory
+{
+	public static function create(): Nette\Security\Permission
+	{
+		$acl = new Nette\Security\Permission;
+		$acl->addRole(/* ... */);
+		$acl->addResource(/* ... */);
+		$acl->allow(/* ... */);
+		return $acl;
+	}
+}
+```
+
+そして、それを設定に追加します。
+
+```neon
+services:
+	- App\Model\AuthorizatorFactory::create
+```
+
+Presenter では、たとえば `startup()` メソッドで権限を確認できます。
+
+```php
+protected function startup()
+{
+	parent::startup();
+	if (!$this->getUser()->isAllowed('backend')) {
+		$this->error('Forbidden', 403);
+	}
+}
+```

@@ -1,0 +1,291 @@
+ユーザーログイン（認証）
+************
+
+<div class=perex>
+
+ほとんどの Web アプリケーションは、ユーザーログインメカニズムとユーザー権限の検証なしでは成り立ちません。この章では、以下について説明します。
+
+- ユーザーのログインとログアウト
+- カスタム認証器
+
+</div>
+
+→ [インストールと要件 |@home#インストール]
+
+例では、現在のユーザーを表す [api:Nette\Security\User] クラスのオブジェクトを使用します。これには、[dependency injection |dependency-injection:passing-dependencies] を使用して渡してもらうことでアクセスできます。Presenter では、単に `$user = $this->getUser()` を呼び出すだけです。
+
+
+認証
+===========
+
+認証とは、**ユーザーログイン**、つまりユーザーが本当に名乗っている人物であるかどうかを確認するプロセスを意味します。通常、ユーザー名とパスワードで証明されます。検証は、いわゆる [#認証器] によって行われます。ログインに失敗した場合、`Nette\Security\AuthenticationException` がスローされます。
+
+```php
+try {
+	$user->login($username, $password);
+} catch (Nette\Security\AuthenticationException $e) {
+	$this->flashMessage('ユーザー名またはパスワードが正しくありません');
+}
+```
+
+このようにしてユーザーをログアウトさせます。
+
+```php
+$user->logout();
+```
+
+そして、ログインしているかどうかを確認します。
+
+```php
+echo $user->isLoggedIn() ? 'はい' : 'いいえ';
+```
+
+非常に簡単ですね？そして、すべてのセキュリティ側面は Nette が処理します。
+
+Presenter では、`startup()` メソッドでログインを確認し、ログインしていないユーザーをログインページにリダイレクトできます。
+
+```php
+protected function startup()
+{
+	parent::startup();
+	if (!$this->getUser()->isLoggedIn()) {
+		$this->redirect('Sign:in');
+	}
+}
+```
+
+
+有効期限
+====
+
+ユーザーのログインは、通常はセッションである [ストレージの有効期限 |#ログインユーザーのストレージ] とともに期限切れになります（[セッションの有効期限 |http:configuration#セッション] の設定を参照）。 ただし、ユーザーがログアウトされるまでのより短い時間間隔を設定することも可能です。これには `setExpiration()` メソッドを使用し、`login()` の前に呼び出します。パラメータとして相対時間の文字列を指定します。
+
+```php
+// ログインは 30 分間の非アクティブ後に期限切れになります
+$user->setExpiration('30 minutes');
+
+// 設定された有効期限のキャンセル
+$user->setExpiration(null);
+```
+
+ユーザーが時間間隔の期限切れのためにログアウトされたかどうかは、メソッド `$user->getLogoutReason()` が示します。これは定数 `Nette\Security\UserStorage::LogoutInactivity`（時間制限切れ）または `UserStorage::LogoutManual`（`logout()` メソッドによるログアウト）のいずれかを返します。
+
+
+認証器
+===
+
+これは、ログイン資格情報、つまり通常は名前とパスワードを検証するオブジェクトです。[設定|configuration] で定義できる簡単な形式は、[api:Nette\Security\SimpleAuthenticator] クラスです。
+
+```neon
+security:
+	users:
+		# 名前: パスワード
+		frantisek: tajneheslo
+		katka: jestetajnejsiheslo
+```
+
+このソリューションは、テスト目的には適しています。データベーステーブルに対してログイン資格情報を検証する認証器を作成する方法を示します。
+
+認証器は、メソッド `authenticate()` を持つ [api:Nette\Security\Authenticator] インターフェースを実装するオブジェクトです。そのタスクは、いわゆる [#アイデンティティ] を返すか、例外 `Nette\Security\AuthenticationException` をスローすることです。発生した状況をより細かく区別するために、エラーコードを指定することも可能です：`Authenticator::IdentityNotFound` および `Authenticator::InvalidCredential`。
+
+```php
+use Nette;
+use Nette\Security\SimpleIdentity;
+
+class MyAuthenticator implements Nette\Security\Authenticator
+{
+	public function __construct(
+		private Nette\Database\Explorer $database,
+		private Nette\Security\Passwords $passwords,
+	) {
+	}
+
+	public function authenticate(string $username, string $password): SimpleIdentity
+	{
+		$row = $this->database->table('users')
+			->where('username', $username)
+			->fetch();
+
+		if (!$row) {
+			throw new Nette\Security\AuthenticationException('ユーザーが見つかりません。');
+		}
+
+		if (!$this->passwords->verify($password, $row->password)) {
+			throw new Nette\Security\AuthenticationException('パスワードが無効です。');
+		}
+
+		return new SimpleIdentity(
+			$row->id,
+			$row->role, // または複数のロールの配列
+			['name' => $row->username],
+		);
+	}
+}
+```
+
+MyAuthenticator クラスは、[Nette Database Explorer|database:explorer] を介してデータベースと通信し、テーブル `users` を操作します。このテーブルには、カラム `username` にユーザーのログイン名、カラム `password` に [パスワードハッシュ|passwords] が含まれています。名前とパスワードを確認した後、ユーザー ID、そのロール（テーブルのカラム `role`、これについては [後で |authorization#ロール] 詳しく説明します）、およびその他のデータ（この場合はユーザー名）を含むアイデンティティを返します。
+
+認証器を DI コンテナの [サービスとして|dependency-injection:services] 設定に追加します。
+
+```neon
+services:
+	- MyAuthenticator
+```
+
+
+イベント $onLoggedIn, $onLoggedOut
+------------------------------
+
+`Nette\Security\User` オブジェクトには [イベント |nette:glossary#イベント] `$onLoggedIn` と `$onLoggedOut` があります。したがって、正常なログイン後またはユーザーのログアウト後にそれぞれ呼び出されるコールバックを追加できます。
+
+
+```php
+$user->onLoggedIn[] = function () {
+	// ユーザーはちょうどログインしました
+};
+```
+
+
+アイデンティティ
+========
+
+アイデンティティは、認証器によって返され、その後セッションに保存され、`$user->getIdentity()` を使用して取得されるユーザーに関する情報のセットを表します。したがって、認証器で渡したように、ID、ロール、およびその他のユーザーデータを取得できます。
+
+```php
+$user->getIdentity()->getId();
+// ショートカット $user->getId() も機能します
+
+$user->getIdentity()->getRoles();
+
+// ユーザーデータはプロパティとして利用可能です
+// MyAuthenticator で渡した名前
+$user->getIdentity()->name;
+```
+
+重要なことは、`$user->logout()` を使用してログアウトしても、**アイデンティティは削除されず**、引き続き利用可能であることです。したがって、ユーザーがアイデンティティを持っていても、ログインしている必要はありません。アイデンティティを明示的に削除したい場合は、`logout(true)` を呼び出してユーザーをログアウトさせます。
+
+これにより、どのユーザーがコンピューターの前にいるかを引き続き想定し、たとえば e ショップでパーソナライズされたオファーを表示できますが、ログイン後にのみ個人データを表示できます。
+
+アイデンティティは [api:Nette\Security\IIdentity] インターフェースを実装するオブジェクトであり、デフォルトの実装は [api:Nette\Security\SimpleIdentity] です。そして、前述のように、セッションで維持されるため、たとえばログインしているユーザーのいずれかのロールを変更した場合、古いデータはそのユーザーが再度ログインするまでアイデンティティに残ります。
+
+
+ログインユーザーのストレージ
+==============
+
+ユーザーに関する 2 つの基本情報、つまりログインしているかどうかとその [#アイデンティティ] は、通常セッションで転送されます。これは変更できます。これらの情報の保存を担当するのは、`Nette\Security\UserStorage` インターフェースを実装するオブジェクトです。2 つの標準的な実装が利用可能で、1 つ目はセッションでデータを転送し、2 つ目は cookie で転送します。これらはクラス `Nette\Bridges\SecurityHttp\SessionStorage` と `CookieStorage` です。[security › authentication |configuration#ストレージ] 設定でストレージを選択し、非常に便利に設定できます。
+
+さらに、アイデンティティの保存（*sleep*）と復元（*wakeup*）がどのように行われるかを正確に制御できます。認証器が `Nette\Security\IdentityHandler` インターフェースを実装するだけで十分です。これには 2 つのメソッドがあります：`sleepIdentity()` はアイデンティティをストレージに書き込む前に呼び出され、`wakeupIdentity()` は読み取った後に呼び出されます。メソッドはアイデンティティの内容を変更したり、返す新しいオブジェクトに置き換えたりすることができます。`wakeupIdentity()` メソッドは `null` を返すことさえでき、それによってユーザーをログアウトさせます。
+
+例として、セッションから読み込んだ直後にアイデンティティのロールを更新する方法というよくある質問の解決策を示します。`wakeupIdentity()` メソッドで、たとえばデータベースから現在のロールをアイデンティティに渡します。
+
+```php
+final class Authenticator implements
+	Nette\Security\Authenticator, Nette\Security\IdentityHandler
+{
+	public function sleepIdentity(IIdentity $identity): IIdentity
+	{
+		// ここでログイン後にストレージに書き込む前にアイデンティティを変更できますが、
+		// 今は必要ありません
+		return $identity;
+	}
+
+	public function wakeupIdentity(IIdentity $identity): ?IIdentity
+	{
+		// アイデンティティのロールの更新
+		$userId = $identity->getId();
+		$identity->setRoles($this->facade->getUserRoles($userId));
+		return $identity;
+	}
+```
+
+そして今、cookie ベースのストレージに戻ります。これにより、ユーザーがログインでき、セッションを必要としない Web サイトを作成できます。つまり、ディスクに書き込む必要はありません。結局のところ、フォーラムを含め、現在読んでいる Web サイトもこのように機能します。この場合、`IdentityHandler` の実装は必須です。cookie には、ログインしたユーザーを表すランダムなトークンのみを保存します。
+
+したがって、まず設定で `security › authentication › storage: cookie` を使用して目的のストレージを設定します。
+
+データベースに `authtoken` カラムを作成します。このカラムには、各ユーザーが十分な長さ（少なくとも 13 文字）の [完全にランダムで、一意で、推測不可能な|utils:random] 文字列を持ちます。`CookieStorage` ストレージは cookie で `$identity->getId()` の値のみを転送するため、`sleepIdentity()` で元のアイデンティティを ID に `authtoken` を持つプレースホルダーアイデンティティに置き換え、逆に `wakeupIdentity()` メソッドで authtoken に基づいてデータベースから完全なアイデンティティを読み取ります。
+
+```php
+final class Authenticator implements
+	Nette\Security\Authenticator, Nette\Security\IdentityHandler
+{
+	public function authenticate(string $username, string $password): SimpleIdentity
+	{
+		$row = $this->db->fetch('SELECT * FROM user WHERE username = ?', $username);
+		// パスワードを確認します
+		...
+		// データベースからのすべてのデータを含むアイデンティティを返します
+		return new SimpleIdentity($row->id, null, (array) $row);
+	}
+
+	public function sleepIdentity(IIdentity $identity): SimpleIdentity
+	{
+		// ID に authtoken を持つプレースホルダーアイデンティティを返します
+		return new SimpleIdentity($identity->authtoken);
+	}
+
+	public function wakeupIdentity(IIdentity $identity): ?SimpleIdentity
+	{
+		// authenticate() と同様に、プレースホルダーアイデンティティを完全なアイデンティティに置き換えます
+		$row = $this->db->fetch('SELECT * FROM user WHERE authtoken = ?', $identity->getId());
+		return $row
+			? new SimpleIdentity($row->id, null, (array) $row)
+			: null;
+	}
+}
+```
+
+
+複数の独立したログイン
+===========
+
+1 つの Web サイトと 1 つのセッション内で、複数の独立したログインユーザーを同時に持つことが可能です。たとえば、Web サイトの管理部分と公開部分で別々の認証を行いたい場合は、それぞれに独自の名前を設定するだけで十分です。
+
+```php
+$user->getStorage()->setNamespace('backend');
+```
+
+特定のセクションに属するすべての場所で常に名前空間を設定することを覚えておくことが重要です。Presenter を使用している場合は、特定のセクションの共通の祖先（通常は BasePresenter）で名前空間を設定します。これは、[checkRequirements() |api:Nette\Application\UI\Presenter::checkRequirements()] メソッドを拡張することによって行います。
+
+```php
+public function checkRequirements($element): void
+{
+	$this->getUser()->getStorage()->setNamespace('backend');
+	parent::checkRequirements($element);
+}
+```
+
+
+複数の認証器
+------
+
+独立したログインを持つセクションにアプリケーションを分割するには、通常、異なる認証器も必要になります。ただし、サービス設定で Authenticator を実装する 2 つのクラスを登録すると、Nette はどちらを `Nette\Security\User` オブジェクトに自動的に割り当てるかわからなくなり、エラーが表示されます。したがって、認証器の [autowiring |dependency-injection:autowiring] を制限して、誰かが特定のクラス、たとえば FrontAuthenticator を要求した場合にのみ機能するようにする必要があります。これは、`autowired: self` オプションを選択することで実現できます。
+
+```neon
+services:
+	-
+		create: FrontAuthenticator
+		autowired: self
+```
+
+認証器は、`Nette\Security\User` オブジェクトに直接設定する必要があります。これは、[login() |api:Nette\Security\User::login()] メソッドを呼び出す前に行います。通常、ログインフォームの処理コードで行います。
+
+```php
+class SignPresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private FrontAuthenticator $authenticator,
+	) {
+	}
+}
+```
+
+User オブジェクトの認証器は、[login() |api:Nette\Security\User::login()] メソッドを呼び出す前に設定します。したがって、通常はログインさせるフォームのコードで設定します。
+
+```php
+$form->onSuccess[] = function (Form $form, \stdClass $data) {
+	$user = $this->getUser();
+	$user->setAuthenticator($this->authenticator);
+	$user->login($data->username, $data->password);
+	// ...
+};
+```

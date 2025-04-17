@@ -1,0 +1,172 @@
+コメント
+****
+
+ブログをウェブサーバーにアップロードし、Adminer を使って非常に興味深い記事をいくつか公開しました。人々は私たちのブログを読み、非常に熱心です。毎日、賞賛のメールをたくさん受け取っています。しかし、この賞賛がメールの中にしかなく、誰も読むことができなければ、何の意味があるのでしょうか？読者が記事に直接コメントできれば、誰もが私たちがどれほど素晴らしいかを読むことができるので、より良いでしょう。
+
+それでは、コメントをプログラムしましょう。
+
+
+新しいテーブルの作成
+==========
+
+Adminer を起動し、次のカラムを持つ `comments` テーブルを作成します。
+
+- `id` int、オートインクリメント (AI) にチェック
+- `post_id`、`posts` テーブルを参照する外部キー
+- `name` varchar、長さ 255
+- `email` varchar、長さ 255
+- `content` text
+- `created_at` timestamp
+
+したがって、テーブルはこのようになります。
+
+[* adminer-comments.webp *]
+
+再度、InnoDB ストレージを使用することを忘れないでください。
+
+```sql
+CREATE TABLE `comments` (
+	`id` int NOT NULL AUTO_INCREMENT PRIMARY KEY,
+	`post_id` int(11) NOT NULL,
+	`name` varchar(250) NOT NULL,
+	`email` varchar(250) NOT NULL,
+	`content` text NOT NULL,
+	`created_at` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
+	FOREIGN KEY (`post_id`) REFERENCES `posts` (`id`)
+) ENGINE=InnoDB CHARSET=utf8;
+```
+
+
+コメントフォーム
+========
+
+まず、ユーザーが記事にコメントできるようにするフォームを作成する必要があります。Nette Framework はフォームに対する素晴らしいサポートを提供しています。Presenter で設定し、テンプレートでレンダリングできます。
+
+Nette Framework は *コンポーネント* の概念を利用しています。**コンポーネント** は、別のコンポーネントに添付できる再利用可能なクラスまたはコードの一部です。Presenter でさえコンポーネントです。各コンポーネントはファクトリを通じて作成されます。そこで、`PostPresenter` にコメントフォームのファクトリを作成します。
+
+```php .{file:app/Presentation/Post/PostPresenter.php}
+protected function createComponentCommentForm(): Form
+{
+	$form = new Form; // Nette\Application\UI\Form を意味します
+
+	$form->addText('name', '名前:')
+		->setRequired();
+
+	$form->addEmail('email', 'E-mail:');
+
+	$form->addTextArea('content', 'コメント:')
+		->setRequired();
+
+	$form->addSubmit('send', 'コメントを公開');
+
+	return $form;
+}
+```
+
+これを少し説明しましょう。最初の行は `Form` コンポーネントの新しいインスタンスを作成します。続くメソッドは、このフォーム定義に HTML 入力要素を追加します。`->addText` は `<label>名前:</label>` 付きの `<input type="text" name="name">` としてレンダリングされます。すでにお察しの通り、`->addTextArea` は `<textarea>` として、`->addSubmit` は `<input type="submit">` としてレンダリングされます。同様のメソッドは他にもたくさんありますが、このフォームにはこれで十分です。[ドキュメントで詳細を読むことができます|forms:]。
+
+フォームが Presenter で定義されたら、テンプレートでレンダリング（表示）できます。これを行うには、特定の記事を表示するテンプレート `Post/show.latte` の最後に `{control}` タグを配置します。コンポーネント名は `commentForm`（メソッド名 `createComponentCommentForm` から派生）なので、タグは次のようになります。
+
+```latte .{file:app/Presentation/Post/show.latte}
+...
+<h2>新しいコメントを投稿</h2>
+
+{control commentForm}
+```
+
+これで記事詳細ページを表示すると、その最後に新しいコメントフォームが表示されます。
+
+
+データベースへの保存
+==========
+
+フォームに入力して送信してみましたか？おそらく、フォームが実際には何もしていないことに気づいたでしょう。送信されたデータを保存するコールバックメソッドを接続する必要があります。
+
+`commentForm` コンポーネントのファクトリの `return` の前の行に、次の行を配置します。
+
+```php
+$form->onSuccess[] = $this->commentFormSucceeded(...);
+```
+
+上記の記述は、「フォームが正常に送信された後、現在の Presenter の `commentFormSucceeded` メソッドを呼び出す」ことを意味します。しかし、このメソッドはまだ存在しません。それでは作成しましょう。
+
+```php .{file:app/Presentation/Post/PostPresenter.php}
+private function commentFormSucceeded(\stdClass $data): void
+{
+	$id = $this->getParameter('id');
+
+	$this->database->table('comments')->insert([
+		'post_id' => $id,
+		'name' => $data->name,
+		'email' => $data->email,
+		'content' => $data->content,
+	]);
+
+	$this->flashMessage('コメントありがとうございます', 'success');
+	$this->redirect('this');
+}
+```
+
+このメソッドを `commentForm` フォームファクトリの直後に配置します。
+
+この新しいメソッドには 1 つの引数があり、これは送信されたフォームのインスタンスです - ファクトリによって作成されました。送信された値は `$data` で取得します。そして、データをデータベーステーブル `comments` に保存します。
+
+説明が必要なメソッドが他に 2 つあります。`redirect` メソッドは文字通り現在のページにリダイレクトします。これは、フォームが有効なデータを含み、コールバックが操作を正しく実行した場合、フォーム送信後に毎回行うのが適切です。また、フォーム送信後にページをリダイレクトすると、ブラウザで時々見かける「フォームデータを再送信しますか？」というよく知られたメッセージが表示されなくなります。（一般的に、`POST` メソッドでフォームを送信した後は、常に `GET` アクションへのリダイレクトが続くべきです。）
+
+`flashMessage` メソッドは、何らかの操作の結果をユーザーに通知するためのものです。リダイレクトしているため、メッセージを単純にテンプレートに渡してレンダリングすることはできません。そのため、このメソッドがあり、このメッセージを保存し、次のページ読み込み時に利用可能にします。フラッシュメッセージはメインテンプレート `app/Presentation/@layout.latte` でレンダリングされ、次のようになります。
+
+```latte
+<div n:foreach="$flashes as $flash" n:class="flash, $flash->type">
+	{$flash->message}
+</div>
+```
+
+すでに知っているように、フラッシュメッセージは自動的にテンプレートに渡されるため、あまり考える必要はありません。単に機能します。詳細については、[ドキュメントをご覧ください |application:presenters#フラッシュメッセージ]。
+
+
+コメントのレンダリング
+===========
+
+これは、あなたがきっと気に入るものの 1 つです。Nette Database には [Explorer |database:explorer] と呼ばれる素晴らしい機能があります。データベースのテーブルを意図的に InnoDB ストレージを使用して作成したことをまだ覚えていますか？Adminer は、[外部キー |https://dev.mysql.com/doc/refman/8.0/en/create-table-foreign-keys.html] と呼ばれるものを作成しました。これにより、多くの作業が節約されます。
+
+Nette Database Explorer は外部キーを使用してテーブル間の相互関係を解決し、これらの関係の知識から自動的にデータベースクエリを作成できます。
+
+覚えているように、`PostPresenter::renderShow()` メソッドを使用して変数 `$post` をテンプレートに渡しました。そして今、カラム `post_id` の値が `$post->id` と一致するすべてのコメントを反復処理したいと考えています。これは `$post->related('comments')` を呼び出すことで実現できます。はい、これほど簡単です。結果のコードを見てみましょう。
+
+```php .{file:app/Presentation/Post/PostPresenter.php}
+public function renderShow(int $id): void
+{
+	...
+	$this->template->post = $post;
+	$this->template->comments = $post->related('comments')->order('created_at');
+}
+```
+
+そしてテンプレート：
+
+```latte .{file:app/Presentation/Post/show.latte}
+...
+<h2>コメント</h2>
+
+<div class="comments">
+	{foreach $comments as $comment}
+		<p><b><a href="mailto:{$comment->email}" n:tag-if="$comment->email">
+			{$comment->name}
+		</a></b> が書きました:</p>
+
+		<div>{$comment->content}</div>
+	{/foreach}
+</div>
+...
+```
+
+特別な属性 `n:tag-if` に注目してください。`n:属性` がどのように機能するかはすでに知っています。属性に接頭辞 `tag-` を付けると、機能はその内容ではなく HTML タグにのみ適用されます。これにより、コメンターがメールアドレスを提供した場合にのみ、その名前をリンクにすることができます。次の 2 行は同じです。
+
+```latte
+<strong n:tag-if="$important"> こんにちは！ </strong>
+
+{if $important}<strong>{/if} こんにちは！ {if $important}</strong>{/if}
+```
+
+{{priority: -1}}
+{{sitename: Nette Quickstart}}

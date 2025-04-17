@@ -1,0 +1,274 @@
+データベース結果のページネーション
+*****************
+
+.[perex]
+Webアプリケーションを作成する際、ページに表示される項目数を制限するという要件に非常に頻繁に遭遇します。
+
+ページネーションなしですべてのデータを表示する状態から始めます。データベースからデータを選択するために、コンストラクタに加えて、公開されたすべての記事を公開日の降順で返す `findPublishedArticles` メソッドを含む `ArticleRepository` クラスがあります。
+
+```php
+namespace App\Model;
+
+use Nette;
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+
+	public function findPublishedArticles(): Nette\Database\ResultSet
+	{
+		return $this->database->query('
+			SELECT * FROM articles
+			WHERE created_at < ?
+			ORDER BY created_at DESC',
+			new \DateTime,
+		);
+	}
+}
+```
+
+Presenterでは、モデルクラスをインジェクトし、renderメソッドで公開された記事を要求し、それをテンプレートに渡します。
+
+```php
+namespace App\Presentation\Home;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+class HomePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(): void
+	{
+		$this->template->articles = $this->articleRepository->findPublishedArticles();
+	}
+}
+```
+
+`default.latte` テンプレートでは、記事の表示を担当します。
+
+```latte
+{block content}
+<h1>記事</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+```
+
+
+この方法で、すべての記事を表示できますが、記事の数が増えると問題が発生し始めます。その時点で、ページネーションメカニズムの実装が役立ちます。
+
+これにより、すべての記事がいくつかのページに分割され、現在の1ページの記​​事のみが表示されます。合計ページ数と記事の分割は、[Paginator |utils:Paginator] が、合計でいくつの記事があり、ページごとに表示したい記事の数に基づいて自動的に計算します。
+
+最初のステップでは、リポジトリクラスの記事取得メソッドを変更して、1ページの記事のみを返すようにします。また、Paginatorを設定するために必要なデータベース内の記事の総数を取得するメソッドを追加します。
+
+```php
+namespace App\Model;
+
+use Nette;
+
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Connection $database,
+	) {
+	}
+
+	public function findPublishedArticles(int $limit, int $offset): Nette\Database\ResultSet
+	{
+		return $this->database->query('
+			SELECT * FROM articles
+			WHERE created_at < ?
+			ORDER BY created_at DESC
+			LIMIT ?
+			OFFSET ?',
+			new \DateTime, $limit, $offset,
+		);
+	}
+
+	/**
+	 * 公開された記事の総数を返します
+	 */
+	public function getPublishedArticlesCount(): int
+	{
+		return $this->database->fetchField('SELECT COUNT(*) FROM articles WHERE created_at < ?', new \DateTime);
+	}
+}
+```
+
+次に、Presenterの変更に取り掛かります。renderメソッドに現在表示されているページの番号を渡します。この番号がURLの一部でない場合、最初のページのデフォルト値を設定します。
+
+また、renderメソッドを拡張して、Paginatorインスタンスの取得、その設定、およびテンプレートで表示するための正しい記事の選択を行います。変更後のHomePresenterは次のようになります（Paginatorを使用する場合）：
+
+```php
+namespace App\Presentation\Home;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+class HomePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(int $page = 1): void
+	{
+		// 公開された記事の総数を取得します
+		$articlesCount = $this->articleRepository->getPublishedArticlesCount();
+
+		// Paginatorのインスタンスを作成し、設定します
+		$paginator = new Nette\Utils\Paginator;
+		$paginator->setItemCount($articlesCount); // 記事の総数
+		$paginator->setItemsPerPage(10); // ページあたりの項目数
+		$paginator->setPage($page); // 現在のページ番号
+
+		// Paginatorの計算に基づいてデータベースから記事の限定されたセットを取得します
+		$articles = $this->articleRepository->findPublishedArticles($paginator->getLength(), $paginator->getOffset());
+
+		// それをテンプレートに渡します
+		$this->template->articles = $articles;
+		// そして、ページネーションオプションを表示するためのPaginator自体も
+		$this->template->paginator = $paginator;
+	}
+}
+```
+
+テンプレートはすでに1ページの記​​事のみを反復処理しているため、ページネーションリンクを追加するだけで済みます。
+
+```latte
+{block content}
+<h1>記事</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+
+<div class="pagination">
+	{if !$paginator->isFirst()}
+		<a n:href="default, 1">最初</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->page-1">前へ</a>
+		&nbsp;|&nbsp;
+	{/if}
+
+	ページ {$paginator->getPage()} / {$paginator->getPageCount()}
+
+	{if !$paginator->isLast()}
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->getPage() + 1">次へ</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $paginator->getPageCount()">最後</a>
+	{/if}
+</div>
+```
+
+
+このようにして、Paginatorを使用してページネーションオプションをページに追加しました。データベース層として [Nette Database Core |database:core] の代わりに [Nette Database Explorer |database:explorer] を使用する場合、Paginatorを使用せずにページネーションを実装することもできます。`Nette\Database\Table\Selection` クラスには、Paginatorから継承されたページネーションロジックを持つ [page() |api:Nette\Database\Table\Selection::page()] メソッドが含まれています。
+
+この実装方法では、リポジトリは次のようになります。
+
+```php
+namespace App\Model;
+
+use Nette;
+
+class ArticleRepository
+{
+	public function __construct(
+		private Nette\Database\Explorer $database,
+	) {
+	}
+
+	public function findPublishedArticles(): Nette\Database\Table\Selection
+	{
+		return $this->database->table('articles')
+			->where('created_at < ', new \DateTime)
+			->order('created_at DESC');
+	}
+}
+```
+
+Presenterでは、Paginatorを作成する必要はありません。代わりに、リポジトリが返す `Selection` クラスのメソッドを使用します。
+
+```php
+namespace App\Presentation\Home;
+
+use Nette;
+use App\Model\ArticleRepository;
+
+class HomePresenter extends Nette\Application\UI\Presenter
+{
+	public function __construct(
+		private ArticleRepository $articleRepository,
+	) {
+	}
+
+	public function renderDefault(int $page = 1): void
+	{
+		// 公開された記事を取得します
+		$articles = $this->articleRepository->findPublishedArticles();
+
+		// そして、pageメソッドの計算に基づいて制限された部分のみをテンプレートに送信します
+		$lastPage = 0;
+		$this->template->articles = $articles->page($page, 10, $lastPage);
+
+		// そして、ページネーションオプションを表示するために必要なデータも
+		$this->template->page = $page;
+		$this->template->lastPage = $lastPage;
+	}
+}
+```
+
+テンプレートにPaginatorを送信しなくなったため、ページネーションリンクを表示する部分を変更します。
+
+```latte
+{block content}
+<h1>記事</h1>
+
+<div class="articles">
+	{foreach $articles as $article}
+		<h2>{$article->title}</h2>
+		<p>{$article->content}</p>
+	{/foreach}
+</div>
+
+<div class="pagination">
+	{if $page > 1}
+		<a n:href="default, 1">最初</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $page - 1">前へ</a>
+		&nbsp;|&nbsp;
+	{/if}
+
+	ページ {$page} / {$lastPage}
+
+	{if $page < $lastPage}
+		&nbsp;|&nbsp;
+		<a n:href="default, $page + 1">次へ</a>
+		&nbsp;|&nbsp;
+		<a n:href="default, $lastPage">最後</a>
+	{/if}
+</div>
+```
+
+この方法で、Paginatorを使用せずにページネーションメカニズムを実装しました。
+
+{{priority: -1}}
+{{sitename: ベストプラクティス}}

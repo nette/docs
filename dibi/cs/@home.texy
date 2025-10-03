@@ -1,0 +1,658 @@
+Dibi: Šikovná Database Abstraction Library pro PHP
+**************************************************
+
+Nejnovější stabilní verzi Dibi instalujte pomocí [Composer|best-practices:composer] příkazem:
+
+```
+composer require dibi/dibi
+```
+
+Přehled verzí najdete na stánce [Releases | https://github.com/dg/dibi/releases].
+
+Vyžaduje PHP 8.0 nebo vyšší.
+
+
+Připojení k databázi
+====================
+
+Databázové spojení je reprezentováno objektem [Dibi\Connection|api:]:
+
+```php
+$database = new Dibi\Connection([
+	'driver'   => 'mysqli',
+	'host'     => 'localhost',
+	'username' => 'root',
+	'password' => '***',
+	'database' => 'table',
+]);
+
+$result = $database->query('SELECT * FROM users');
+```
+
+Alternativně můžete používat statický registr `dibi`, který udržuje v globálně dostupném úložišti objekt spojení a nad ním volá všechny funkce:
+
+```php
+dibi::connect([
+	'driver'   => 'mysqli',
+	'host'     => 'localhost',
+	'username' => 'root',
+	'password' => '***',
+	'database' => 'test',
+	'charset'  => 'utf8',
+]);
+
+$result = dibi::query('SELECT * FROM users');
+```
+
+V případě chyby připojení se vyhodí `Dibi\Exception`.
+
+
+Dotazy
+======
+
+Databázové dotazy pokládáme metodou `query()`, která vrací [Dibi\Result |api:Dibi\Result]. Řádky jako objekty [Dibi\Row |api:Dibi\Row].
+
+Všechny příklady si můžete zkoušet [online na hřišti |https://repl.it/@DavidGrudl/dibi-playground].
+
+```php
+$result = $database->query('SELECT * FROM users');
+
+foreach ($result as $row) {
+	echo $row->id;
+	echo $row->name;
+}
+
+// pole všech řádků
+$all = $result->fetchAll();
+
+// pole všech řádků, klíčem je 'id'
+$all = $result->fetchAssoc('id');
+
+// asociativní pole id => name
+$pairs = $result->fetchPairs('id', 'name');
+
+// počet řádků výsledku, pokud je znám, nebo počet ovlivněných řádků
+$count = $result->getRowCount();
+```
+
+Metoda fetchAssoc() umí vracet i [složitější asociativní pole |#Výsledek jako asociativní pole].
+
+Do dotazu lze velmi snadno přidávat i parametry, všimněte si otazníku:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE name = ? AND active = ?', $name, $active);
+
+// nebo
+$result = $database->query('SELECT * FROM users WHERE name = ?', $name, 'AND active = ?', $active););
+
+$ids = [10, 20, 30];
+$result = $database->query('SELECT * FROM users WHERE id IN (?)', $ids);
+```
+
+<div class=warning>
+**POZOR, nikdy dotazy neskládejte jako řetězce, vznikla by zranitelnost [SQL injection |https://cs.wikipedia.org/wiki/SQL_injection]**
+/--
+$database->query('SELECT * FROM users WHERE id = ' . $id); // ŠPATNĚ!!!
+\--
+</div>
+
+Místo otazníku lze používat i tzv. [#modifikátory].
+
+```php
+$result = $database->query('SELECT * FROM users WHERE name = %s', $name);
+```
+
+V případě selhání `query()` vyhodí buď `Dibi\Exception`, nebo některého z potomků:
+
+- [ConstraintViolationException |api:Dibi\ConstraintViolationException] - porušení nějakého omezení pro tabulku
+- [ForeignKeyConstraintViolationException |api:Dibi\ForeignKeyConstraintViolationException] - neplatný cizí klíč
+- [NotNullConstraintViolationException |api:Dibi\NotNullConstraintViolationException] - porušení podmínky NOT NULL
+- [UniqueConstraintViolationException |api:Dibi\UniqueConstraintViolationException] - koliduje unikátní index
+
+Dotazy lze pokládat také pomocí zkratek:
+
+```php
+// vrátí asociativní pole id => name, zkratka pro query(...)->fetchPairs()
+$pairs = $database->fetchPairs('SELECT id, name FROM users');
+
+// vrátí pole všech řádků, zkratka pro query(...)->fetchAll()
+$rows = $database->fetchAll('SELECT * FROM users');
+
+// vrátí řádek, zkratka pro query(...)->fetch()
+$row = $database->fetch('SELECT * FROM users WHERE id = ?', $id);
+
+// vrátí buňku, zkratka pro query(...)->fetchSingle()
+$name = $database->fetchSingle('SELECT name FROM users WHERE id = ?', $id);
+```
+
+
+Modifikátory
+============
+
+Kromě zástupného symbolu `?` můžeme používat i modifikátory:
+
+| %s | string
+| %sN | string, ale '' se přeloží jako NULL
+| %bin | binární data
+| %b | boolean
+| %i | integer
+| %iN | integer, ale 0 se přeloží jako NULL
+| %f | float
+| %d | datum (očekává DateTime, string nebo UNIX timestamp)
+| %dt | datum & čas (očekává DateTime, string nebo UNIX timestamp)
+| %n | identifikátor, tedy název tabulky či sloupce
+| %N | identifikátor, považuje tečku za běžný znak
+| %SQL | SQL - přímo vloží do SQL (alternativou je Dibi\Literal)
+| %ex | expanduje pole
+| %lmt | speciální - doplní do dotazu LIMIT
+| %ofs | speciální - doplní do dotazu OFFSET
+
+Příklad:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE name = %s', $name);
+```
+
+Pokud `$name` je `null`, vloží se do SQL příkazu `NULL`.
+
+Pokud proměnná je pole, tak se modifikátor aplikuje na všechny jeho prvky a ty se vloží do SQL oddělené čárkami:
+
+```php
+$ids = [10, '20', 30];
+$result = $database->query('SELECT * FROM users WHERE id IN (%i)', $ids);
+// SELECT * FROM users WHERE id IN (10, 20, 30)
+```
+
+Modifikátor `%n` využijete v případě, že název tabulky nebo sloupce je proměnnou. (Pozor, nedovolte uživateli manipulovat s obsahem takové proměnné):
+
+```php
+$table = 'blog.users';
+$column = 'name';
+$result = $database->query('SELECT * FROM %n WHERE %n = ?', $table, $column, $value);
+// SELECT * FROM `blog`.`users` WHERE `name` = 'Jim'
+```
+
+Pro operátor LIKE jsou k dispozici čtyři speciální modifikátory:
+
+| %like~ | výraz začíná řetězcem
+| %~like | výraz končí řetězcem
+| %~like~ | výraz obsahuje řetězec
+| `%like` | výraz je řetězec
+
+Hledej jména začínající na určitý řetězec:
+
+```php
+$result = $database->query('SELECT * FROM table WHERE name LIKE %like~', $query);
+```
+
+
+Modifikátory polí
+=================
+
+Parameterem vkládaným do SQL dotazu může být i pole. Tyto modifikátory určují, jak z něj sestavit SQL příkaz:
+
+| %and   |        | `key1 = value1 AND key2 = value2 AND ...`
+| %or    |        | `key1 = value1 OR key2 = value2 OR ...`
+| %a     | assoc  | `key1 = value1, key2 = value2, ...`
+| %l %in | list   | `(val1, val2, ...)`
+| %v     | values | `(key1, key2, ...) VALUES (value1, value2, ...)`
+| %m     | multi  | `(key1, key2, ...) VALUES (value1, value2, ...), (value1, value2, ...), ...`
+| %by    | řazení | `key1 ASC, key2 DESC ...`
+| %n     | názvy  | `key1, key2 AS alias, ...`
+
+Příklad:
+
+```php
+$arr = [
+	'a' => 'hello',
+	'b'  => true,
+];
+
+$database->query('INSERT INTO table %v', $arr);
+// INSERT INTO `table` (`a`, `b`) VALUES ('hello', 1)
+
+$database->query('UPDATE `table` SET %a', $arr);
+// UPDATE `table` SET `a`='hello', `b`=1
+```
+
+V klauzuli WHERE lze použít modifikátory `%and` nebo `%or`:
+
+```php
+$result = $database->query('SELECT * FROM users WHERE %and', [
+	'name' => $name,
+	'year' => $year,
+]);
+// SELECT * FROM users WHERE `name` = 'Jim' AND `year` = 1978
+```
+
+Viz také [#Složitější dotazy].
+
+Modifikátor `%by` slouží k řazení, v klíčích uvedeme sloupce a hodnotou bude boolean určující, zda řadit vzestupně:
+
+```php
+$result = $database->query('SELECT id FROM author ORDER BY %by', [
+	'id' => true, // vzestupně
+	'name' => false, // sestupně
+]);
+// SELECT id FROM author ORDER BY `id`, `name` DESC
+```
+
+
+Insert, Update & Delete
+=======================
+
+Data vkládáme do SQL dotazu jako asociativní pole. Modifikátory ani zástupný znak `?` není nutné v těchto případech uvádět.
+
+```php
+$database->query('INSERT INTO users', [
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978)
+
+$id = $database->getInsertId(); // vrátí auto-increment vloženého záznamu
+
+$id = $database->getInsertId($sequence); // nebo hodnotu sekvence
+```
+
+Vícenásobný INSERT:
+
+```php
+$database->query(
+	'INSERT INTO users',
+	[
+		'name' => 'Jim',
+		'year' => 1978,
+	],
+	[
+		'name' => 'Jack',
+		'year' => 1987,
+	]
+);
+// INSERT INTO users (`name`, `year`) VALUES ('Jim', 1978), ('Jack', 1987)
+```
+
+Mazání:
+
+```php
+$database->query('DELETE FROM users WHERE id = ?', $id);
+
+// vrací počet smazaných řádků
+$affectedRows = $database->getAffectedRows();
+```
+
+Úprava záznamů:
+
+```php
+$database->query('UPDATE users SET', [
+	'name' => $name,
+	'year' => $year,
+], 'WHERE id = ?', $id);
+// UPDATE users SET `name` = 'Jim', `year` = 1978 WHERE id = 123
+
+// vrací počet změněných řádků
+$affectedRows = $database->getAffectedRows();
+```
+
+Vložení záznamu, nebo úprava, pokud již existuje:
+
+```php
+$database->query('INSERT INTO users', [
+	'id' => $id,
+	'name' => $name,
+	'year' => $year,
+], 'ON DUPLICATE KEY UPDATE %a', [ // tady už modifikátor %a uvést musíme
+	'name' => $name,
+	'year' => $year,
+]);
+// INSERT INTO users (`id`, `name`, `year`) VALUES (123, 'Jim', 1978)
+//   ON DUPLICATE KEY UPDATE `name` = 'Jim', `year` = 1978
+```
+
+
+Transakce
+=========
+
+Pro práci s transakcemi slouží čtveřice metod:
+
+```php
+$database->beginTransaction(); // zahájení transakce
+
+$database->commit(); // potvrzení
+
+$database->rollback(); // vrácení zpět
+
+$database->transaction(function () {
+	// nejaka akce
+});
+```
+
+
+Testování
+=========
+
+Abyste si mohli trošku s Dibi hrát, je tu připravena metoda `test()`, které předáte parametry stejně jako `query()`, ovšem místo provedení SQL příkazu se tento barevně vypíše na obrazovku.
+
+Výsledky dotazu je možné vypsat jako tabulku pomocí `$result->dump()`.
+
+K dispozici jsou dále proměnné:
+
+```php
+dibi::$sql; // poslední SQL příklaz
+dibi::$elapsedTime; // jeho doba trvání v sec
+dibi::$numOfQueries; // celkem SQL příkazů
+dibi::$totalTime; // celkový čas v sec
+```
+
+
+Složitější dotazy
+=================
+
+Parametrem může být také objekt `DateTime`.
+
+```php
+$result = $database->query('SELECT * FROM users WHERE created < ?', new DateTime);
+
+$database->query('INSERT INTO users', [
+	'created' => new DateTime,
+]);
+```
+
+Nebo SQL literál:
+
+```php
+$database->query('UPDATE table SET', [
+	'date' => $database->literal('NOW()'),
+]);
+// UPDATE table SET `date` = NOW()
+```
+
+Nebo výraz, ve kterém lze používat zástupné znaky `?` nebo modifikátory:
+
+```php
+$database->query('UPDATE `table` SET', [
+	'title' => $database::expression('SHA1(?)', 'tajne'),
+]);
+// UPDATE `table` SET `title` = SHA1('tajne')
+```
+
+Při update lze modifikátory uvádět přímo v klíčích:
+
+```php
+$database->query('UPDATE table SET', [
+	'date%SQL' => 'NOW()', // %SQL znamená SQL ;)
+]);
+// UPDATE table SET `date` = NOW()
+```
+
+V podmínkách (tj. u modifikátorů `%and` a `%or`) není nutné uvádět klíče:
+
+```php
+$result = $database->query('SELECT * FROM `table` WHERE %and', [
+	'number > 10',
+	'number < 100',
+]);
+// SELECT * FROM `table` WHERE (number > 10) AND (number < 100)
+```
+
+V položkách lze používat i modifikátory nebo zástupné znaky:
+
+```php
+$result = $database->query('SELECT * FROM `table` WHERE %and', [
+	['number > ?', 10],  // nebo $database::expression('number > ?', 10)
+	['number < ?', 100],
+	['%or', [
+		'left' => 1,
+		'top' => 2,
+	]],
+]);
+// SELECT * FROM `table` WHERE (number > 10) AND (number < 100) AND (`left` = 1 OR `top` = 2)
+```
+
+Modifikátor `%ex` vloží do SQL všechny prvky pole:
+
+```php
+$result = $database->query('SELECT * FROM `table` WHERE %ex', [
+	$database::expression('left = ?', 1),
+	'AND',
+	'top IS NULL',
+]);
+// SELECT * FROM `table` WHERE left = 1 AND top IS NULL
+```
+
+
+Podmínky v SQL příkazu
+======================
+
+Podmíněné SQL příkazy se ovládají pomocí tří modifikátorů `%if`, `%else` a `%end`. První z nich `%if` se musí nacházet zcela na konci řetězce představujícího SQL a za ním následuje proměnná:
+
+```php
+$user = ???
+
+$result = $database->query('
+	SELECT *
+	FROM table
+	%if', isset($user), 'WHERE user=%s', $user, '%end
+	ORDER BY name
+');
+```
+
+Podmínku lze doplnit o část `%else`:
+
+```php
+$result = $database->query('
+	SELECT *
+	FROM %if', $cond, 'one_table %else second_table
+');
+```
+
+Podmínky můžete zanořovat do sebe.
+
+
+Identifikátory a řetězce v SQL
+==============================
+
+Samotné SQL prochází zpracováním, aby vyhovovalo konvencím dané databáze. Identifikátory (jména tabulek a sloupců) lze uvozovat do hranatých závorek nebo zpětných uvozovek, dále řetězce jednoduchými či dvojitými uvozovkami, nicméně na server se pošle vždy to, co databáze žádá. Příklad
+
+```php
+$database->query("UPDATE `table` SET [status]='I''m fine'");
+// MySQL: UPDATE `table` SET `status`='I\'m fine'
+// ODBC:  UPDATE [table] SET [status]='I''m fine'
+```
+
+Uvozovka se uvnitř řetězce v SQL zapisuje zdvojením.
+
+
+Výsledek jako asociativní pole
+==============================
+
+Příklad: vrátí výsledky jako asociativního pole, kde klíčem bude hodnota políčka `id`:
+
+```php
+$assoc = $result->fetchAssoc('id');
+```
+
+Největší síla funkce `fetchAssoc()` se projeví u SQL dotazu spojujícího několik tabulek s různými typy vazeb. Databáze z toho udělá plochou tabulku, fetchAssoc jí vrátí tvar.
+
+Příklad: Mějme tabulku zákazníků a objednávek (vazba N:M) a položíme dotaz:
+
+```php
+$result = $database->query('
+  SELECT customer_id, customers.name, order_id, orders.number, ...
+  FROM customers
+  INNER JOIN orders USING (customer_id)
+  WHERE ...
+');
+```
+
+A rádi bychom získali vnořené asociativní pole podle ID zákazníka a poté podle ID objednávky:
+
+```php
+$all = $result->fetchAssoc('customer_id|order_id');
+
+// budeme jej procházet takto:
+foreach ($all as $customerId => $orders) {
+   foreach ($orders as $orderId => $order) {
+	   ...
+   }
+}
+```
+
+Asociativní deskriptor má obdobnou syntax, jako když pole píšete pomocí přiřazení v PHP. Tedy `'customer_id|order_id'` představuje sérii přiřazení `$all[$customerId][$orderId] = $row;`, postupně pro všechny řádky.
+
+Někdy by se hodilo, aby se asociovalo podle jména zákazníka namísto jeho ID:
+
+```php
+$all = $result->fetchAssoc('name|order_id');
+
+// k prvkům pak přistupujeme třeba takto:
+$order = $all['Arnold Rimmer'][$orderId];
+```
+
+Co když ale existuje více zákazníků se stejným jménem? Tabulka by měla mít spíš tvar:
+
+```php
+$row = $all['Arnold Rimmer'][0][$orderId];
+$row = $all['Arnold Rimmer'][1][$orderId];
+...
+```
+
+Rozlišujeme tedy více možných Rimmerů pomocí klasického pole. Asociativní deskriptor má opět formát podobný přiřazování, s tím, že sekvenční pole představuje `[]`:
+
+```php
+$all = $result->fetchAssoc('name[]order_id');
+
+// iterujeme všechny Arnoldy ve výsledcích
+foreach ($all['Arnold Rimmer'] as $arnoldOrders) {
+   foreach ($arnoldOrders as $orderId => $order) {
+	   ...
+   }
+}
+```
+
+Vrátíme se k příkladu s deskriptorem `'customer_id|order_id'` a zkusíme vypsat objednávky jednotlivých zákazníků:
+
+```php
+$all = $result->fetchAssoc('customer_id|order_id');
+
+foreach ($all as $customerId => $orders) {
+   echo "Objednávky zákazníka $customerId":
+
+   foreach ($orders as $orderId => $order) {
+	   echo "Číslo dokladu: $order->number";
+	   // jméno zákazníka je v $order->name
+   }
+}
+```
+
+Bylo by hezké místo ID zákazníka vypsat jeho jméno. Jenže to bychom museli dohledávat v poli `$orders`. Výsledky si proto necháme upravit do takovéhoto tvaru:
+
+```php
+$all[$customerId]->name = 'John Doe';
+$all[$customerId]->order_id[$orderId] = $row;
+$all[$customerId]->order_id[$orderId2] = $row2;
+```
+
+Tedy mezi `$customerId` a `$orderId` vložíme ještě mezičlánek. Tentokrát ne číslované indexy, jaké jsme použili pro odlišení jednotlivých Rimmerů, ale rovnou databázový záznam. Řešení je velmi podobné, jen si stačí zapamatovat, že záznam symbolizuje šipka:
+
+```php
+$all = $result->fetchAssoc('customer_id->order_id');
+
+foreach ($all as $customerId => $row) {
+   echo "Objednávky zákazníka $row->name":
+
+   foreach ($row->order_id as $orderId => $order) {
+	   echo "Číslo dokladu: $order->number";
+   }
+}
+```
+
+
+Prefixy & substituce
+====================
+
+Názvy tabulek a sloupců mohou obsahovat proměnné části. Ty si nejprve nadefinujeme:
+
+```php
+// vytvoří novou substituci :blog:  ==>  wp_
+$database->substitute('blog', 'wp_');
+```
+
+a poté použijeme v SQL. Všimněte si, že v SQL jsou uvozeny dvojtečkama:
+
+```php
+$database->query("UPDATE [:blog:items] SET [text]='Hello World'");
+// UPDATE `wp_items` SET `text`='Hello World'
+```
+
+
+Datové typy buňek
+=================
+
+Dibi automaticky detekuje typy jednotlivých sloupců dotazu a převádí buňky na nativní typy PHP. Typ můžeme určit i manuálně. Možné typy najdete ve třídě [Dibi\Type |api:Dibi\Type].
+
+```php
+$result->setType('id', Dibi\Type::INTEGER); // id bude integer
+$row = $result->fetch();
+
+is_int($row->id) // true
+```
+
+
+Logování
+========
+
+Dibi má v sobě zabudovaný logger, kterým můžete sledovat všechny vykonané SQL příkazy a měřit délku jejich trvání. Aktivace:
+
+```php
+$database->connect([
+	'driver'   => 'sqlite',
+	'database' => 'sample.sdb',
+	'profiler' => [
+		'file' => 'file.log',
+	],
+]);
+```
+
+Šikovnější profiler je panel pro Tracy, který se aktivuje při propojení s Nette.
+
+
+Připojení do [Nette |https://nette.org]
+=======================================
+
+V konfiguračním souboru zaregistrujeme DI rozšíření a přidáme sekci `dibi` - tím se vytvoří potřebné objekty a také databázový panel v [Tracy |https://tracy.nette.org] debugger baru.
+
+```neon
+extensions:
+	dibi: Dibi\Bridges\Nette\DibiExtension22
+
+dibi:
+	host: localhost
+	username: root
+	password: ***
+	database: foo
+	lazy: true
+```
+
+Poté objekt spojení [získáme jako službu z DI kontejneru |https://doc.nette.org/di-usage], např.:
+
+```php
+class Model
+{
+	private $database;
+
+	public function __construct(Dibi\Connection $database)
+	{
+		$this->database = $database;
+	}
+}
+```
+
+
+Komunitní rozšíření
+===================
+
+Nad Dibi staví nejrůznější knihovny, ORM a rozšíření. Celý jejich seznam najdete na "Packagistu":https://packagist.org/packages/dibi/dibi/dependents?order_by=downloads&requires=require.
+
+
+{{maintitle: Dibi – Šikovná Database Abstraction Library pro PHP}}

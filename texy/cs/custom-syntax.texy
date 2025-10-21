@@ -1,0 +1,519 @@
+Přidání vlastní syntaxe
+***********************
+
+.[perex]
+Tato kapitola popisuje, jak přidat do Texy **zcela nové markup konstrukce**, které standardně neexistují. Pokud chcete pouze změnit chování existujících prvků (například upravit zpracování obrázků nebo odkazů), přečtěte si kapitolu [Úprava chování prvků |custom-handlers].
+
+Představte si, že chcete v dokumentaci automaticky vytvářet odkazy na uživatelské profily zápisem `@@username`. Nebo potřebujete speciální bloky pro upozornění typu `:::warning`. Texy tyto konstrukce nezná a nemůžete je vytvořit úpravou existujících prvků.
+
+Vlastní syntaxe vám umožní definovat nové markup konstrukce. Zadáte, jak má konstrukce vypadat (pomocí regulárního výrazu), a napíšete funkci, která ji zpracuje. Texy pak vaši syntaxi rozpozná stejně jako své standardní konstrukce.
+
+
+Registrace syntaxe
+==================
+
+Texy poskytuje dvě metody pro registraci vlastní syntaxe podle toho, zda jde o inline nebo blokový prvek.
+
+
+Line syntaxe
+------------
+
+Line syntaxe slouží pro inline konstrukce uvnitř řádků textu. Registrujete ji metodou `registerLinePattern()`:
+
+```php
+$texy->registerLinePattern(
+	callable $handler,
+	string $pattern,
+	string $name,
+	?string $againTest = null,
+);
+```
+
+**Parametr `$handler`** je callback funkce, která se zavolá při nálezu syntaxe. Může to být název funkce, anonymní funkce nebo pole `[$object, 'method']`.
+
+**Parametr `$pattern`** je regulární výraz (PCRE), který definuje, jak vaše syntaxe vypadá v textu. Pattern by **neměl být kotvený** na začátek řádku (`^`), protože se hledá kdekoliv v textu. Použijte capturing groups pro zachycení dat, která potřebujete zpracovat.
+
+**Parametr `$name`** je unikátní název syntaxe. Používá se v poli `$texy->allowed` pro zapnutí/vypnutí a předává se do handleru pro identifikaci. Doporučujeme používat prefixový styl jako `custom/username` nebo `myapp/profile`.
+
+**Parametr `$againTest`** je volitelný regex pro optimalizaci. Pokud je zadán, Texy nejprve zkontroluje, zda text vůbec obsahuje něco, co by mohlo matchnout váš pattern. Teprve pokud `$againTest` uspěje, spustí se komplexnější pattern. To výrazně zrychlí zpracování, pokud máte složitý pattern a používá se jen zřídka.
+
+Příklad registrace:
+
+```php
+$texy->registerLinePattern(
+	'usernameHandler',
+	'#@@([a-z0-9_]+)#i',
+	'custom/username',
+);
+```
+
+
+Block syntaxe
+-------------
+
+Block syntaxe slouží pro víceřádkové blokové konstrukce. Registrujete ji metodou `registerBlockPattern()`:
+
+```php
+$texy->registerBlockPattern(
+	callable $handler,
+	string $pattern,
+	string $name,
+);
+```
+
+Parametry `$handler` a `$name` mají stejný význam jako u line syntaxí.
+
+**Parametr `$pattern`** je regulární výraz, který **musí být kotvený** na začátek řádku (`^`) a často i na konec (`$`). BlockParser automaticky přidá modifikátory `Am` (anchored, multiline), takže je do patternu nepřidávejte. Pattern by měl matchnout celý blok nebo alespoň jeho začátek.
+
+Příklad registrace:
+
+```php
+$texy->registerBlockPattern(
+	'alertHandler',
+	'#^:::(warning|info|danger)\n(.+)$#s',
+	'custom/alert',
+);
+```
+
+
+Syntax handler
+==============
+
+Syntax handler je funkce volaná parserem, když najde výskyt vaší syntaxe v textu. Jeho úkolem je zpracovat nalezená data a vrátit HTML element nebo řetězec.
+
+Podrobné vysvětlení role syntax handleru v architektuře Texy najdete v kapitole [Architektura a principy |architecture#syntax-handler].
+
+
+Pro line syntaxe
+----------------
+
+Signatura syntax handleru pro line syntaxe:
+
+```php
+function(
+	Texy\LineParser $parser,
+	array $matches,
+	string $name,
+): Texy\HtmlElement|string|null
+```
+
+**Parametr `$parser`** poskytuje přístup k parseru a Texy objektu. Nejčastěji použijete `$parser->getTexy()` pro získání Texy instance.
+
+**Parametr `$matches`** obsahuje výsledky regex matche. `$matches[0]` je celý matchnutý řetězec, `$matches[1]`, `$matches[2]` atd. jsou capturing groups z vašeho patternu.
+
+**Parametr `$name`** je název syntaxe, který jste zadali při registraci. Užitečné, pokud jeden handler zpracovává více syntaxí.
+
+**Návratová hodnota** může být `Texy\HtmlElement` pro strukturovaný HTML výstup, `string` pro přímý HTML kód (který musíte protectovat), nebo `null` pro odmítnutí zpracování.
+
+Handler může nastavit `$parser->again = true`, pokud chce, aby se obsah vytvořeného elementu znovu parsoval pro nalezení vnořených syntaxí.
+
+
+Pro block syntaxe
+-----------------
+
+Signatura syntax handleru pro block syntaxe:
+
+```php
+function(
+	Texy\BlockParser $parser,
+	array $matches,
+	string $name,
+): Texy\HtmlElement|string|null
+```
+
+Parametry mají stejný význam jako u line syntaxí, jen dostáváte `Texy\BlockParser` místo `LineParser`.
+
+BlockParser poskytuje metody pro práci s víceřádkovými strukturami:
+
+- **`$parser->next($pattern, &$matches)`** - matchne další řádek proti patternu a vrátí true/false
+- **`$parser->moveBackward($lines)`** - vrátí se o zadaný počet řádků zpět
+- **`$parser->isIndented()`** - vrací true, pokud je aktuální blok odsazený
+
+
+LineParser API
+==============
+
+Při práci s line syntaxemi máte k dispozici několik užitečných vlastností a metod.
+
+**Property `$again`** řídí, zda se má právě zpracovaná syntaxe hledat znovu na stejné pozici po zpracování. Výchozí hodnota je `false`. Nastavte na `true`, pokud vytváříte element s obsahem, který může obsahovat další syntaxe:
+
+```php
+function(
+	Texy\LineParser $parser,
+	array $matches,
+	string $name,
+): Texy\HtmlElement
+{
+	$el = new Texy\HtmlElement('span');
+	$el->setText($matches[1]);
+
+	// obsah může obsahovat další formátování
+	$parser->again = true;
+
+	return $el;
+}
+```
+
+**Metoda `getTexy()`** vrací instanci Texy objektu, což potřebujete pro práci s `protect()` nebo přístup ke konfiguraci.
+
+
+BlockParser API
+===============
+
+Při práci s block syntaxemi máte k dispozici metody pro práce s víceřádkovými strukturami.
+
+**Metoda `next($pattern, &$matches)`** zkusí matchnout další řádek v textu proti zadanému patternu. Pokud uspěje, naplní `$matches` výsledkem a posune interní pozici za tento řádek. Vrací `true` při úspěchu, `false` při neúspěchu:
+
+```php
+while ($parser->next('#^\-\s+(.+)$#', $matches)) {
+	// zpracuj další položku seznamu
+	$item = $matches[1];
+}
+```
+
+**Metoda `moveBackward($lines = 1)`** vrátí interní pozici o zadaný počet řádků zpět. Užitečné, když váš pattern matchnul víc než začátek bloku a chcete se vrátit na začátek:
+
+```php
+// pattern matchnul 3 řádky, ale chceme číst od prvního
+$parser->moveBackward(2);
+```
+
+**Metoda `isIndented()`** vrací `true`, pokud je aktuální blok odsazený (začíná mezerou nebo tabulátorem). To naznačuje, že jde o vnořený obsah.
+
+
+Praktické příklady
+==================
+
+Následující příklady ukazují reálné use-case pro vlastní syntaxe.
+
+
+Uživatelské profily
+-------------------
+
+Automatické vytváření odkazů na profily zápisem `@@username`:
+
+```php
+$texy->registerLinePattern(
+	function(
+		Texy\LineParser $parser,
+		array $matches,
+		string $name,
+	): Texy\HtmlElement
+	{
+		$username = $matches[1];
+
+		$el = new Texy\HtmlElement('a');
+		$el->attrs['href'] = '/user/' . urlencode($username);
+		$el->attrs['class'][] = 'user-profile';
+		$el->setText('@' . $username);
+
+		return $el;
+	},
+	'#@@([a-z0-9_]+)#i',
+	'custom/username'
+);
+```
+
+Použití v textu:
+
+```texy
+Podívejte se na profil @@johndoe nebo @@jane_smith.
+```
+
+
+Alert boxy
+----------
+
+Speciální bloky pro upozornění s různými typy:
+
+```php
+$texy->registerBlockPattern(
+	function(
+		Texy\BlockParser $parser,
+		array $matches,
+		string $name,
+	): Texy\HtmlElement
+	{
+		$type = $matches[1];  // warning, info, danger
+		$content = $matches[2];
+
+		$el = new Texy\HtmlElement('div');
+		$el->attrs['class'][] = 'alert';
+		$el->attrs['class'][] = 'alert-' . $type;
+
+		$texy = $parser->getTexy();
+		$el->parseBlock($texy, trim($content));
+
+		return $el;
+	},
+	'#^:::(warning|info|danger)\n(.+?)(?=\n:::|$)#s',
+	'custom/alert'
+);
+```
+
+Použití v textu:
+
+```texy
+:::warning
+Toto je důležité upozornění!
+:::
+
+:::info
+Pro informaci: aktualizace proběhne zítra.
+:::
+```
+
+
+Hashtagy
+--------
+
+Automatické vytváření odkazů z hashtagů:
+
+```php
+$texy->registerLinePattern(
+	function(
+		Texy\LineParser $parser,
+		array $matches,
+		string $name,
+	): Texy\HtmlElement
+	{
+		$tag = $matches[1];
+
+		$el = new Texy\HtmlElement('a');
+		$el->attrs['href'] = '/tag/' . urlencode($tag);
+		$el->attrs['class'][] = 'hashtag';
+		$el->setText('#' . $tag);
+
+		return $el;
+	},
+	'#\#([a-z0-9_]+)#i',
+	'custom/hashtag',
+	'#\##'  // optimalizace - hledej jen pokud je # v textu
+);
+```
+
+Použití:
+
+```texy
+Článek o #php a #webdesign.
+```
+
+
+Zkratky
+-------
+
+Automatické rozbalení zkratek s vysvětlením:
+
+```php
+$abbreviations = [
+	'HTML' => 'HyperText Markup Language',
+	'CSS' => 'Cascading Style Sheets',
+	'PHP' => 'PHP: Hypertext Preprocessor',
+];
+
+$texy->registerLinePattern(
+	function(
+		Texy\LineParser $parser,
+		array $matches,
+		string $name
+	) use ($abbreviations): ?Texy\HtmlElement
+	{
+		$abbr = $matches[1];
+
+		if (!isset($abbreviations[$abbr])) {
+			return null;  // neznámá zkratka
+		}
+
+		$el = new Texy\HtmlElement('abbr');
+		$el->attrs['title'] = $abbreviations[$abbr];
+		$el->setText($abbr);
+
+		return $el;
+	},
+	'#\b([A-Z]{2,})\b#',
+	'custom/abbreviation'
+);
+```
+
+
+Inline ikony
+------------
+
+Vkládání ikon pomocí speciální syntaxe:
+
+```php
+$texy->registerLinePattern(
+	function(
+		Texy\LineParser $parser,
+		array $matches,
+		string $name,
+	): Texy\HtmlElement
+	{
+		$icon = $matches[1];
+
+		$el = new Texy\HtmlElement('i');
+		$el->attrs['class'][] = 'icon';
+		$el->attrs['class'][] = 'icon-' . $icon;
+		$el->attrs['aria-hidden'] = 'true';
+
+		return $el;
+	},
+	'#:icon-([a-z-]+):#',
+	'custom/icon'
+);
+```
+
+Použití:
+
+```texy
+Klikněte na tlačítko :icon-download: pro stažení.
+```
+
+
+Poznámkový blok
+---------------
+
+Blok pro poznámky pod čarou:
+
+```php
+$texy->registerBlockPattern(
+	function(
+		Texy\BlockParser $parser,
+		array $matches,
+		string $name
+	): Texy\HtmlElement
+	{
+		$parser->moveBackward();
+
+		$content = '';
+		while ($parser->next('#^NOTE:\s*(.+)$#', $matches)) {
+			$content .= $matches[1] . "\n";
+		}
+
+		$el = new Texy\HtmlElement('aside');
+		$el->attrs['class'][] = 'note';
+
+		$texy = $parser->getTexy();
+		$el->parseBlock($texy, trim($content));
+
+		return $el;
+	},
+	'#^NOTE:\s*(.+)$#m',
+	'custom/note'
+);
+```
+
+Použití:
+
+```texy
+NOTE: Toto je důležitá poznámka.
+NOTE: Může být víceřádková.
+```
+
+
+Vlastní citace s autorem
+------------------------
+
+Rozšířená syntaxe pro citace s uvedením autora:
+
+```php
+$texy->registerBlockPattern(
+	function(
+		Texy\BlockParser $parser,
+		array $matches,
+		string $name,
+	): Texy\HtmlElement
+	{
+		$author = $matches[1];
+		$quote = $matches[2];
+
+		$blockquote = new Texy\HtmlElement('blockquote');
+
+		$texy = $parser->getTexy();
+		$blockquote->parseBlock($texy, trim($quote));
+
+		$cite = new Texy\HtmlElement('cite');
+		$cite->setText($author);
+		$blockquote->add($cite);
+
+		return $blockquote;
+	},
+	'#^QUOTE\[([^\]]+)\]:\n(.+?)(?=\n\n|$)#s',
+	'custom/quote'
+);
+```
+
+Použití:
+
+```texy
+QUOTE[Albert Einstein]:
+Fantazie je důležitější než vědění,
+protože vědění je omezené.
+```
+
+
+Galerie obrázků
+---------------
+
+Speciální blok pro vytvoření galerie z více obrázků:
+
+```php
+$texy->registerBlockPattern(
+	function(
+		Texy\BlockParser $parser,
+		array $matches,
+		string $name,
+	): Texy\HtmlElement
+	{
+		$parser->moveBackward();
+
+		$gallery = new Texy\HtmlElement('div');
+		$gallery->attrs['class'][] = 'gallery';
+
+		while ($parser->next('#^\[G\]\s*(.+)$#', $matches)) {
+			$img = new Texy\HtmlElement('img');
+			$img->attrs['src'] = trim($matches[1]);
+			$img->attrs['loading'] = 'lazy';
+			$gallery->add($img);
+		}
+
+		return $gallery;
+	},
+	'#^\[G\]\s*(.+)$#m',
+	'custom/gallery'
+);
+```
+
+Použití:
+
+```texy
+[G] image1.jpg
+[G] image2.jpg
+[G] image3.jpg
+```
+
+
+Kolize syntaxí
+==============
+
+Když registrujete vlastní syntaxi, musíte dávat pozor, aby nekolidovala s existujícími syntaxemi Texy nebo s jinými vlastními syntaxemi.
+
+**Pořadí registrace záleží.** Line syntaxe se hledají v pořadí, jak byly registrovány. Pokud více syntaxí může matchnout na stejné pozici, vyhrává ta, která byla registrována dříve. Proto registrujte specifičtější syntaxe před obecnějšími.
+
+**Buďte specifičtí v patterns.** Čím konkrétnější je váš pattern, tím menší je riziko kolize. Pattern `#\#\w+#` matchne i `#hashtag`, což by mohlo kolidovat s nadpisy. Lepší je `#(?<=\s)\#[a-z0-9_]+#i`, který vyžaduje mezeru před hashtagem.
+
+**Testujte kombinace.** Vyzkoušejte, jak vaše syntaxe funguje v kombinaci s existujícími konstrukcemi. Co se stane, když je váš markup uvnitř odkazu? Co když je uvnitř code bloku?
+
+**Používejte prefixované názvy.** Místo `username` použijte `custom/username` nebo `myapp/username`. To zabrání konfliktům, pokud by Texy v budoucnu přidalo syntaxi stejného názvu.
+
+
+Best practices
+==============
+
+**Vracejte `null` při neúspěchu.** Pokud handler zjistí, že nemůže nebo nechce zpracovat daný match (například neznámá zkratka), vraťte `null`. Parser pak zkusí další syntaxe.
+
+**Používejte `protect()` pro HTML.** Pokud vracíte raw HTML string místo `HtmlElement`, musíte ho protectovat pomocí `$texy->protect($html, Texy::CONTENT_...)`. Jinak bude escapován.
+
+**Nastavte `$parser->again` správně.** Pro line syntaxe, které vytváří element s textovým obsahem, který může obsahovat další syntaxe (formátování, odkazy), nastavte `$parser->again = true`.
+
+**Respektujte `$texy->allowed`.** Pokud vytváříte modul s více syntaxemi, kontrolujte `$texy->allowed[$name]` před registrací patternu nebo v handleru před zpracováním.

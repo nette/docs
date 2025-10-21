@@ -1,0 +1,850 @@
+Úprava chování prvků
+********************
+
+.[perex]
+Tato kapitola popisuje, jak můžete změnit chování **existujících prvků** v Texy - například upravit, jak se zpracovávají obrázky, odkazy nebo formátování. Pokud chcete přidat **zcela novou syntaxi**, kterou Texy standardně nezná, přečtěte si kapitolu [Přidání vlastní syntaxe |custom-syntax].
+
+Představte si, že chcete, aby standardní syntaxe pro obrázky `[* URL *]` rozpoznávala speciální adresu `[* youtube:dQw4w9WgXcQ *]` a místo běžného obrázku vytvořila embedded přehrávač.
+
+Nebo chcete obarvovat výpisy zdrojového kódu pomocí syntax highlighteru. A tak dále. Přesně k tomu slouží **element handlery** - funkce, které Texy volá při zpracování konkrétních prvků. Například zaregistrujete handler pro element `image`, který zkontroluje URL, a pokud začíná `youtube:`, vrátí iframe místo standardního obrázku. Neměníte syntaxi, jen upravujete, co se s nalezenou konstrukcí stane.
+
+
+Elementy a jejich handlery
+==========================
+
+V terminologii Texy je **element** název pro typ prvku, který může být v dokumentu zpracován. Například `image` je element pro obrázky, `linkURL` pro odkazy, viz [#výchozí elementy]. Každý element má svůj **výchozí handler**, který je implementován v příslušném modulu a stará se o standardní zpracování.
+
+Když napíšete v textu `[* image.jpg *]`, parser najde tuto syntaxi, vytvoří objekt `Texy\Image` s daty o obrázku a zavolá všechny handlery zaregistrované pro element `image`. Pokud žádný vlastní handler není, zavolá se pouze výchozí handler z `ImageModule`, který vytvoří HTML tag `<img>`.
+
+Handler zaregistrujete voláním metody `addHandler()`:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	// zde bude vaše logika
+});
+```
+
+První parametr je název elementu, druhý je callback funkce. Callback dostává jako první parametr vždy objekt `Texy\HandlerInvocation`, následují parametry jsou specifické pro daný element.
+
+.[note]
+Podrobné vysvětlení všech typů handlerů najdete v kapitole [Architektura a principy |architecture].
+
+
+Jak funguje zpracování
+======================
+
+Když Texy potřebuje zpracovat element, vytvoří objekt `HandlerInvocation` obsahující všechny zaregistrované handlery pro tento typ prvku. **Váš handler se zavolá jako první** a může:
+
+- **Delegovat** na další handler voláním `$invocation->proceed()`
+- **Upravit vstup** voláním `proceed()` s modifikovanými parametry
+- **Upravit výstup** zpracováním výsledku z `proceed()`
+- **Přerušit řetěz** vrácením vlastního výsledku bez volání `proceed()`
+
+Metoda `proceed()` posune zpracování na další handler v řetězu. Pokud už žádný vlastní handler není, zavolá se výchozí implementace z modulu. To znamená, že váš handler má absolutní kontrolu - může rozhodnout, zda se vůbec zavolá výchozí logika.
+
+Tento mechanismus se nazývá **chain of responsibility** (řetěz zodpovědnosti):
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	// 1. Upravíme vstupní data před zpracováním
+	$image->modifier->title = 'Modified title';
+
+	// 2. Zavoláme další handler nebo výchozí zpracování
+	$element = $invocation->proceed($image, $link);
+
+	// 3. Upravíme výsledný HTML element
+	$element->attrs['loading'] = 'lazy';
+
+	return $element;
+});
+```
+
+Pořadí vykonávání je od **posledně registrovaného k prvnímu**. Pokud modul zaregistruje svůj výchozí handler při konstrukci a vy pak zaregistrujete vlastní handler, váš handler se zavolá první. To vám umožňuje přepsat nebo obalit výchozí chování.
+
+
+Výchozí elementy
+================
+
+Texy poskytuje několik předpřipravených elementů, pro které můžete registrovat vlastní handlery. Zde je jejich kompletní seznam s parametry, které dostává handler.
+
+
+image
+-----
+
+Zpracovává obrázky.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+): Texy\HtmlElement|string|null
+```
+
+Parametr `$image` obsahuje URL, rozměry a modifikátory. Parametr `$link` je zadán, pokud je obrázek odkazem (syntaxe `[* img *]:url`).
+
+
+linkReference
+-------------
+
+Zpracovává referenční odkazy typu `[ref]`.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Link $link,
+	string $content,
+): Texy\HtmlElement|string|null
+```
+
+Parametr `$link` obsahuje URL a modifikátory načtené z definice reference. Parametr `$content` je HTML obsah odkazu (již zpracovaný parsováním inline syntaxí).
+
+
+linkEmail
+---------
+
+Zpracovává automaticky rozpoznané emailové adresy v textu.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Link $link,
+): Texy\HtmlElement|string|null
+```
+
+Parametr `$link` obsahuje emailovou adresu v property `URL`.
+
+
+linkURL
+-------
+
+Zpracovává automaticky rozpoznané URL v textu.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Link $link,
+): Texy\HtmlElement|string|null
+```
+
+Parametr `$link` obsahuje nalezenou URL.
+
+
+phrase
+------
+
+Zpracovává inline formátování.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	string $phrase,
+	string $content,
+	Texy\Modifier $modifier,
+	?Texy\Link $link,
+): Texy\HtmlElement|string|null
+```
+
+Parametr `$phrase` je název syntaxe jako `phrase/strong` nebo `phrase/em`. Parametr `$content` je text uvnitř formátování. Parametr `$modifier` obsahuje CSS třídy, styly a další modifikátory. Parametr `$link` je zadán, pokud má formátování připojený odkaz.
+
+
+newReference
+------------
+
+Volá se, když parser najde referenci, která není definovaná.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	string $name,
+): Texy\HtmlElement|string|null
+```
+
+Parametr `$name` je název reference. Handler může vytvořit odkaz dynamicky nebo vrátit `null` pro odmítnutí.
+
+
+htmlComment
+-----------
+
+Zpracovává HTML komentáře.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	string $content,
+): string
+```
+
+Parametr `$content` je text mezi `<!--` a `-->`.
+
+
+htmlTag
+-------
+
+Zpracovává HTML tagy v textu.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	Texy\HtmlElement $el,
+	bool $isStart,
+	?bool $forceEmpty,
+): Texy\HtmlElement|string|null
+```
+
+Parametr `$el` je element s názvem a atributy. Parametr `$isStart` určuje, zda jde o otevírací tag. Parametr `$forceEmpty` vynutí prázdný element.
+
+
+script
+------
+
+Zpracovává skripty `{{command: args}}`.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	string $command,
+	array $args,
+	?string $raw,
+): Texy\HtmlElement|string|null
+```
+
+Parametr `$command` je název příkazu. Parametr `$args` je pole argumentů. Parametr `$raw` je původní neparsovaný řetězec argumentů.
+
+
+figure
+------
+
+Zpracovává obrázky s popiskou.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+	string $content,
+	Texy\Modifier $modifier,
+): Texy\HtmlElement|null
+```
+
+Parametr `$content` je text popisky pod obrázkem.
+
+
+heading
+-------
+
+Zpracovává nadpisy.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	int $level,
+	string $content,
+	Texy\Modifier $modifier,
+	bool $isSurrounded,
+): Texy\HtmlElement
+```
+
+Parametr `$level` je úroveň nadpisu (0-6). Parametr `$content` je text nadpisu. Parametr `$isSurrounded` určuje, zda jde o ohraničený nadpis (`###`) nebo podtržený.
+
+
+horizline
+---------
+
+Zpracovává horizontální čáry.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	string $type,
+	Texy\Modifier $modifier,
+): Texy\HtmlElement
+```
+
+Parametr `$type` je řetězec znaků použitých pro čáru (`---` nebo `***`).
+
+
+block
+-----
+
+Zpracovává speciální bloky `/--type` až `\--`.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	string $blocktype,
+	string $content,
+	?string $param,
+	Texy\Modifier $modifier,
+): Texy\HtmlElement|string
+```
+
+Parametr `$blocktype` je typ bloku s prefixem `block/`, např. `block/code` nebo `block/html`. Parametr `$content` je obsah bloku. Parametr `$param` je volitelný parametr za typem (např. jazyk u kódu).
+
+
+emoticon
+--------
+
+Zpracovává emotikony (smajlíky).
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	string $emoticon,
+	string $raw,
+): Texy\HtmlElement|string
+```
+
+Parametr `$emoticon` je rozpoznaný emotikon (např. `:-)` nebo `:-(` ). Parametr `$raw` je původní text včetně případných opakujících se znaků (např. `:-)))))` ).
+
+.[note]
+Emotikony jsou ve výchozím nastavení **vypnuté**. Zapnete je pomocí `$texy->allowed['emoticon'] = true;`
+
+
+Výchozí eventy
+==============
+
+Texy poskytuje několik předpřipravených eventů, pro které můžete registrovat handlery. Říká se jim **notification handlery**. Na rozdíl od element handlerů tyto handlery **nic nevrací**. Používají se pro vedlejší efekty jako logování, sběr statistik nebo úpravy již vytvořeného DOM stromu.
+
+
+beforeParse
+-----------
+
+Volá se před začátkem parsování textu. Umožňuje provést předzpracování nebo načíst definice.
+
+```php
+function(
+	Texy\Texy $texy,
+	string &$text,
+	bool $isSingleLine,
+): void
+```
+
+Parametr `$text` je předán referencí, takže ho můžete upravit. Parametr `$isSingleLine` určuje, zda se parsuje jeden řádek nebo celý dokument.
+
+
+afterParse
+----------
+
+Volá se po dokončení parsování, před konverzí DOM stromu na HTML. Umožňuje upravit vytvořený DOM.
+
+```php
+function(
+	Texy\Texy $texy,
+	Texy\HtmlElement $DOM,
+	bool $isSingleLine,
+): void
+```
+
+Parametr `$DOM` je kořenový element dokumentu, který můžete procházet a upravovat.
+
+
+afterList
+---------
+
+Volá se po vytvoření seznamu (číslovaného nebo nečíslovaného).
+
+```php
+function(
+	Texy\BlockParser $parser,
+	Texy\HtmlElement $element,
+	Texy\Modifier $modifier,
+): void
+```
+
+Parametr `$element` je vytvořený element `<ul>` nebo `<ol>`. Parametr `$modifier` obsahuje modifikátory aplikované na celý seznam.
+
+
+afterDefinitionList
+-------------------
+
+Volá se po vytvoření definičního seznamu.
+
+```php
+function(
+	Texy\BlockParser $parser,
+	Texy\HtmlElement $element,
+	Texy\Modifier $modifier,
+): void
+```
+
+Parametr `$element` je vytvořený element `<dl>`.
+
+
+afterTable
+----------
+
+Volá se po vytvoření tabulky.
+
+```php
+function(
+	Texy\BlockParser $parser,
+	Texy\HtmlElement $element,
+	Texy\Modifier $modifier,
+): void
+```
+
+Parametr `$element` je vytvořený element `<table>`.
+
+
+afterBlockquote
+---------------
+
+Volá se po vytvoření citace.
+
+```php
+function(
+	Texy\BlockParser $parser,
+	Texy\HtmlElement $element,
+	Texy\Modifier $modifier,
+): void
+```
+
+Parametr `$element` je vytvořený element `<blockquote>`.
+
+
+Základní použití
+================
+
+Nejjednodušší element handler jen deleguje na výchozí zpracování:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	return $invocation->proceed();
+});
+```
+
+Tento handler nic nemění, ale ukazuje základní kostru. Všechny parametry předá dál a vrátí výsledek.
+
+
+Úprava vstupních dat
+--------------------
+
+Handler může upravit data před jejich zpracováním:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	// přidáme default rozměry, pokud nejsou zadané
+	$image->width ??= 800;
+	$image->height ??= 600;
+	return $invocation->proceed();
+});
+```
+
+Změny provedené na objektech `$image` nebo `$link` se projeví v dalším zpracování, včetně výchozího handleru.
+
+
+Úprava výstupního elementu
+--------------------------
+
+Handler může upravit HTML element vrácený z `proceed()`:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	$element = $invocation->proceed();
+
+	if ($element) {
+		// přidáme lazy loading
+		$element->attrs['loading'] = 'lazy';
+
+		// přidáme CSS třídu
+		$element->attrs['class'][] = 'responsive';
+	}
+
+	return $element;
+});
+```
+
+
+Podmíněné zpracování
+--------------------
+
+Handler může zpracovat pouze určité případy a ostatní delegovat:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	// speciální zpracování pro YouTube videa
+	if (str_starts_with($image->URL, 'youtube:')) {
+		$id = substr($image->URL, 8);
+		$iframe = sprintf(
+			'<iframe src="https://youtube.com/embed/%s"></iframe>',
+			htmlspecialchars($id)
+		);
+		return $invocation->getTexy()
+			->protect($iframe, Texy\Texy::CONTENT_BLOCK);
+	}
+
+	// ostatní obrázky zpracujeme standardně
+	return $invocation->proceed();
+});
+```
+
+
+Přerušení zpracování
+--------------------
+
+Handler může odmítnout zpracování vrácením `null`:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	// zakážeme externí obrázky
+	if (str_contains($image->URL, '://')) {
+		return null;
+	}
+
+	return $invocation->proceed();
+});
+```
+
+
+Praktické příklady
+==================
+
+Následující příklady ukazují reálné use-case pro element handlery.
+
+
+YouTube embed
+-------------
+
+Převod speciální syntaxe na embedded video:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	if (str_starts_with($image->URL, 'youtube:')) {
+		$id = substr($image->URL, 8);
+		$width = $image->width ?: 560;
+		$height = $image->height ?: 315;
+
+		$iframe = sprintf(
+			'<iframe width="%d" height="%d" '
+			. 'src="https://youtube.com/embed/%s" '
+			. 'frameborder="0" allowfullscreen></iframe>',
+			$width, $height, htmlspecialchars($id)
+		);
+
+		$texy = $invocation->getTexy();
+		return $texy->protect($iframe, $texy::CONTENT_BLOCK);
+	}
+
+	return $invocation->proceed();
+});
+```
+
+Použití v textu:
+
+```texy
+[* youtube:dQw4w9WgXcQ 640x360 *]
+```
+
+
+Galerie obrázků
+---------------
+
+Obalení obrázků do speciálního divu pro lightbox:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	$element = $invocation->proceed();
+
+	// pokud má obrázek třídu 'gallery'
+	if (isset($image->modifier->classes['gallery'])) {
+		// obalíme do divu s lightbox atributy
+		$wrapper = new Texy\HtmlElement('div');
+		$wrapper->attrs['class'][] = 'lightbox-item';
+		$wrapper->attrs['data-src'] = $image->URL;
+		$wrapper->add($element);
+
+		return $wrapper;
+	}
+
+	return $element;
+});
+```
+
+Použití:
+
+```texy
+[* image.jpg .[gallery] *]
+```
+
+
+Validace odkazů
+---------------
+
+Kontrola, zda odkazy nalezené v textu vedou na povolené domény:
+
+```php
+$allowedDomains = ['example.com', 'trusted.org'];
+
+$texy->addHandler('linkURL', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Link $link,
+) use ($allowedDomains) {
+	$host = parse_url($link->URL, PHP_URL_HOST);
+
+	// pokud doména není v whitelistu, nepovolíme odkaz
+	if ($host && !in_array($host, $allowedDomains, true)) {
+		return null;
+	}
+
+	return $invocation->proceed();
+});
+```
+
+
+Automatické rel="nofollow"
+--------------------------
+
+Přidání `nofollow` všem externím odkazům nalezeným v textu:
+
+```php
+$texy->addHandler('linkURL', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Link $link,
+) {
+	$element = $invocation->proceed();
+
+	// pokud odkaz obsahuje // (tedy je externí)
+	if (str_contains($link->URL, '://')) {
+		$element->attrs['rel'] = 'nofollow';
+	}
+
+	return $element;
+});
+```
+
+
+Syntax highlighting
+-------------------
+
+Integrace knihovny pro zvýraznění syntaxe:
+
+```php
+$texy->addHandler('block', function(
+	Texy\HandlerInvocation $invocation,
+	string $blocktype,
+	string $content,
+	?string $param,
+	Texy\Modifier $modifier,
+) {
+	// zpracujeme pouze bloky typu 'code'
+	if ($blocktype !== 'block/code') {
+		return $invocation->proceed();
+	}
+
+	// aplikujeme syntax highlighting
+	$highlighter = new MyHighlighter();
+	$highlighted = $highlighter->highlight($content, $param);
+
+	$el = new Texy\HtmlElement('pre');
+	$modifier->decorate($invocation->getTexy(), $el);
+	$el->attrs['class'][] = 'language-' . $param;
+
+	$code = new Texy\HtmlElement('code');
+	$code->add($highlighted);
+	$el->add($code);
+
+	return $el;
+});
+```
+
+
+Lazy loading
+------------
+
+Projdeme všechny obrázky a přidáme lazy loading:
+
+```php
+$texy->addHandler('afterParse', function(
+	Texy\Texy $texy,
+	Texy\HtmlElement $DOM,
+	bool $isSingleLine,
+) {
+	foreach ($DOM->getIterator() as $child) {
+		if ($child instanceof Texy\HtmlElement
+			&& $child->getName() === 'img'
+		) {
+			$child->attrs['loading'] = 'lazy';
+		}
+	}
+});
+```
+
+
+Logování použitých prvků
+------------------------
+
+Sběr statistik o použitých prvcích v dokumentu:
+
+```php
+$stats = [];
+
+$texy->addHandler('beforeParse', function(
+	Texy\Texy $texy,
+	string &$text,
+	bool $isSingleLine,
+) use (&$stats) {
+	$stats = ['images' => 0, 'links' => 0, 'headings' => 0];
+});
+
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) use (&$stats) {
+	$stats['images']++;
+	return $invocation->proceed();
+});
+
+$texy->addHandler('linkURL', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Link $link,
+) use (&$stats) {
+	$stats['links']++;
+	return $invocation->proceed();
+});
+
+$texy->addHandler('heading', function(
+	Texy\HandlerInvocation $invocation,
+	int $level,
+	string $content,
+	Texy\Modifier $modifier,
+	bool $isSurrounded,
+) use (&$stats) {
+	$stats['headings']++;
+	return $invocation->proceed();
+});
+```
+
+
+Pomocné třídy
+=============
+
+Při práci s handlery budete pracovat s několika důležitými třídami. Zde je jejich přehled s nejdůležitějšími vlastnostmi.
+
+
+Texy\Image
+----------
+
+Reprezentuje obrázek s jeho parametry:
+
+```php
+$image->URL;           // string - cesta k obrázku
+$image->linkedURL;     // ?string - URL odkazu (pokud je obrázek odkazem)
+$image->width;         // ?int - šířka v pixelech
+$image->height;        // ?int - výška v pixelech
+$image->asMax;         // bool - zda jsou rozměry maximální
+$image->modifier;      // Modifier - CSS třídy, styly, atributy
+$image->name;          // ?string - název reference
+```
+
+
+Texy\Link
+---------
+
+Reprezentuje odkaz s jeho parametry:
+
+```php
+$link->URL;        // string - cílová URL
+$link->raw;        // string - původní URL (před normalizací)
+$link->modifier;   // Modifier - CSS třídy, styly, atributy
+$link->type;       // string - typ odkazu (COMMON, BRACKET, IMAGE)
+$link->label;      // ?string - text odkazu (u referencí)
+$link->name;       // ?string - název reference
+```
+
+Konstanty pro typ odkazu:
+
+```php
+Texy\Link::COMMON;   // běžný odkaz
+Texy\Link::BRACKET;  // referenční odkaz [ref]
+Texy\Link::IMAGE;    // odkaz z obrázku [* img *]
+```
+
+
+Texy\HtmlElement
+----------------
+
+Reprezentuje HTML element s jeho atributy a obsahem:
+
+```php
+$el = new Texy\HtmlElement('div');
+
+// práce s názvem elementu
+$el->getName();          // vrací 'div'
+$el->setName('section'); // změní na 'section'
+
+// práce s atributy
+$el->attrs['id'] = 'main';
+$el->attrs['class'][] = 'container';
+$el->attrs['style']['color'] = 'red';
+
+// práce s obsahem
+$el->setText('text');              // nastaví textový obsah
+$el->getText();                    // vrací textový obsah
+$el->add($child);                  // přidá potomka
+$el->insert(0, $child);            // vloží potomka na pozici
+
+// parsování obsahu
+$el->parseLine($texy, $text);      // parsuje inline text
+$el->parseBlock($texy, $text);     // parsuje blokový text
+
+// konverze na HTML
+$el->toString($texy);              // internal reprezentace
+$el->toHtml($texy);                // finální HTML
+```
+
+
+Texy\Modifier
+-------------
+
+Reprezentuje modifikátory CSS tříd, stylů a atributů:
+
+```php
+$mod->id;          // ?string - HTML id
+$mod->classes;     // array - pole CSS tříd
+$mod->styles;      // array - pole CSS stylů
+$mod->attrs;       // array - HTML atributy
+$mod->hAlign;      // ?string - horizontální zarovnání (left, right, center, justify)
+$mod->vAlign;      // ?string - vertikální zarovnání (top, middle, bottom)
+$mod->title;       // ?string - title atribut nebo alt pro obrázky
+
+// aplikace modifikátoru na element
+$mod->decorate($texy, $element);
+```

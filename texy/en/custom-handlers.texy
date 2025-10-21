@@ -1,0 +1,850 @@
+Modifying Element Behavior
+**************************
+
+.[perex]
+This chapter describes how you can change the behavior of **existing elements** in Texy - for example, modify how images, links or formatting are processed. If you want to add **completely new syntax** that Texy doesn't know by default, read the chapter [Adding Custom Syntax |custom-syntax].
+
+Imagine you want the standard image syntax `[* URL *]` to recognize a special address `[* youtube:dQw4w9WgXcQ *]` and create an embedded player instead of a regular image.
+
+Or you want to colorize source code listings using a syntax highlighter. And so on. This is exactly what **element handlers** are for - functions that Texy calls when processing specific elements. For example, you register a handler for the `image` element that checks the URL, and if it starts with `youtube:`, returns an iframe instead of a standard image. You don't change the syntax, you just modify what happens with the found construct.
+
+
+Elements and Their Handlers
+===========================
+
+In Texy terminology, an **element** is the name for a type of item that can be processed in a document. For example, `image` is an element for images, `linkURL` for links, see [default elements |#Default Elements]. Each element has its **default handler**, which is implemented in the corresponding module and handles standard processing.
+
+When you write `[* image.jpg *]` in text, the parser finds this syntax, creates a `Texy\Image` object with data about the image and calls all handlers registered for the `image` element. If there is no custom handler, only the default handler from `ImageModule` is called, which creates an HTML `<img>` tag.
+
+You register a handler by calling the `addHandler()` method:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	// your logic here
+});
+```
+
+The first parameter is the element name, the second is a callback function. The callback always receives a `Texy\HandlerInvocation` object as the first parameter, followed by parameters specific to the given element.
+
+.[note]
+A detailed explanation of all handler types can be found in the chapter [Architecture and Principles |architecture].
+
+
+How Processing Works
+====================
+
+When Texy needs to process an element, it creates a `HandlerInvocation` object containing all registered handlers for this type of element. **Your handler is called first** and can:
+
+- **Delegate** to the next handler by calling `$invocation->proceed()`
+- **Modify input** by calling `proceed()` with modified parameters
+- **Modify output** by processing the result from `proceed()`
+- **Break the chain** by returning its own result without calling `proceed()`
+
+The `proceed()` method moves processing to the next handler in the chain. If there are no more custom handlers, the default implementation from the module is called. This means your handler has absolute control - it can decide whether the default logic is called at all.
+
+This mechanism is called **chain of responsibility**:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	// 1. Modify input data before processing
+	$image->modifier->title = 'Modified title';
+
+	// 2. Call next handler or default processing
+	$element = $invocation->proceed($image, $link);
+
+	// 3. Modify resulting HTML element
+	$element->attrs['loading'] = 'lazy';
+
+	return $element;
+});
+```
+
+The execution order is from **last registered to first**. If a module registers its default handler during construction and you then register a custom handler, your handler is called first. This allows you to override or wrap the default behavior.
+
+
+Default Elements
+================
+
+Texy provides several predefined elements for which you can register custom handlers. Here is their complete list with parameters that the handler receives.
+
+
+image
+-----
+
+Processes images.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+): Texy\HtmlElement|string|null
+```
+
+The `$image` parameter contains URL, dimensions and modifiers. The `$link` parameter is provided if the image is a link (syntax `[* img *]:url`).
+
+
+linkReference
+-------------
+
+Processes reference links of type `[ref]`.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Link $link,
+	string $content,
+): Texy\HtmlElement|string|null
+```
+
+The `$link` parameter contains the URL and modifiers loaded from the reference definition. The `$content` parameter is the HTML content of the link (already processed by parsing inline syntax).
+
+
+linkEmail
+---------
+
+Processes automatically recognized email addresses in text.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Link $link,
+): Texy\HtmlElement|string|null
+```
+
+The `$link` parameter contains the email address in the `URL` property.
+
+
+linkURL
+-------
+
+Processes automatically recognized URLs in text.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Link $link,
+): Texy\HtmlElement|string|null
+```
+
+The `$link` parameter contains the found URL.
+
+
+phrase
+------
+
+Processes inline formatting.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	string $phrase,
+	string $content,
+	Texy\Modifier $modifier,
+	?Texy\Link $link,
+): Texy\HtmlElement|string|null
+```
+
+The `$phrase` parameter is the syntax name like `phrase/strong` or `phrase/em`. The `$content` parameter is the text inside the formatting. The `$modifier` parameter contains CSS classes, styles and other modifiers. The `$link` parameter is provided if the formatting has an attached link.
+
+
+newReference
+------------
+
+Called when the parser finds a reference that is not defined.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	string $name,
+): Texy\HtmlElement|string|null
+```
+
+The `$name` parameter is the reference name. The handler can create a link dynamically or return `null` to reject.
+
+
+htmlComment
+-----------
+
+Processes HTML comments.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	string $content,
+): string
+```
+
+The `$content` parameter is the text between `<!--` and `-->`.
+
+
+htmlTag
+-------
+
+Processes HTML tags in text.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	Texy\HtmlElement $el,
+	bool $isStart,
+	?bool $forceEmpty,
+): Texy\HtmlElement|string|null
+```
+
+The `$el` parameter is an element with name and attributes. The `$isStart` parameter determines whether it is an opening tag. The `$forceEmpty` parameter forces an empty element.
+
+
+script
+------
+
+Processes scripts `{{command: args}}`.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	string $command,
+	array $args,
+	?string $raw,
+): Texy\HtmlElement|string|null
+```
+
+The `$command` parameter is the command name. The `$args` parameter is an array of arguments. The `$raw` parameter is the original unparsed argument string.
+
+
+figure
+------
+
+Processes images with captions.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+	string $content,
+	Texy\Modifier $modifier,
+): Texy\HtmlElement|null
+```
+
+The `$content` parameter is the caption text below the image.
+
+
+heading
+-------
+
+Processes headings.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	int $level,
+	string $content,
+	Texy\Modifier $modifier,
+	bool $isSurrounded,
+): Texy\HtmlElement
+```
+
+The `$level` parameter is the heading level (0-6). The `$content` parameter is the heading text. The `$isSurrounded` parameter determines whether it is a delimited heading (`###`) or underlined.
+
+
+horizline
+---------
+
+Processes horizontal lines.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	string $type,
+	Texy\Modifier $modifier,
+): Texy\HtmlElement
+```
+
+The `$type` parameter is the string of characters used for the line (`---` or `***`).
+
+
+block
+-----
+
+Processes special blocks `/--type` to `\--`.
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	string $blocktype,
+	string $content,
+	?string $param,
+	Texy\Modifier $modifier,
+): Texy\HtmlElement|string
+```
+
+The `$blocktype` parameter is the block type with the `block/` prefix, e.g. `block/code` or `block/html`. The `$content` parameter is the block content. The `$param` parameter is an optional parameter after the type (e.g. language for code).
+
+
+emoticon
+--------
+
+Processes emoticons (smileys).
+
+```php
+function(
+	Texy\HandlerInvocation $invocation,
+	string $emoticon,
+	string $raw,
+): Texy\HtmlElement|string
+```
+
+The `$emoticon` parameter is the recognized emoticon (e.g. `:-)` or `:-(` ). The `$raw` parameter is the original text including any repeating characters (e.g. `:-)))))` ).
+
+.[note]
+Emoticons are **disabled** by default. You can enable them using `$texy->allowed['emoticon'] = true;`
+
+
+Default Events
+==============
+
+Texy provides several predefined events for which you can register handlers. These are called **notification handlers**. Unlike element handlers, these handlers **don't return anything**. They are used for side effects such as logging, collecting statistics, or modifying the already created DOM tree.
+
+
+beforeParse
+-----------
+
+Called before text parsing begins. Allows you to perform preprocessing or load definitions.
+
+```php
+function(
+	Texy\Texy $texy,
+	string &$text,
+	bool $isSingleLine,
+): void
+```
+
+The `$text` parameter is passed by reference, so you can modify it. The `$isSingleLine` parameter determines whether a single line or the entire document is being parsed.
+
+
+afterParse
+----------
+
+Called after parsing is complete, before converting the DOM tree to HTML. Allows you to modify the created DOM.
+
+```php
+function(
+	Texy\Texy $texy,
+	Texy\HtmlElement $DOM,
+	bool $isSingleLine,
+): void
+```
+
+The `$DOM` parameter is the root element of the document, which you can traverse and modify.
+
+
+afterList
+---------
+
+Called after a list (numbered or unnumbered) is created.
+
+```php
+function(
+	Texy\BlockParser $parser,
+	Texy\HtmlElement $element,
+	Texy\Modifier $modifier,
+): void
+```
+
+The `$element` parameter is the created `<ul>` or `<ol>` element. The `$modifier` parameter contains modifiers applied to the entire list.
+
+
+afterDefinitionList
+-------------------
+
+Called after a definition list is created.
+
+```php
+function(
+	Texy\BlockParser $parser,
+	Texy\HtmlElement $element,
+	Texy\Modifier $modifier,
+): void
+```
+
+The `$element` parameter is the created `<dl>` element.
+
+
+afterTable
+----------
+
+Called after a table is created.
+
+```php
+function(
+	Texy\BlockParser $parser,
+	Texy\HtmlElement $element,
+	Texy\Modifier $modifier,
+): void
+```
+
+The `$element` parameter is the created `<table>` element.
+
+
+afterBlockquote
+---------------
+
+Called after a blockquote is created.
+
+```php
+function(
+	Texy\BlockParser $parser,
+	Texy\HtmlElement $element,
+	Texy\Modifier $modifier,
+): void
+```
+
+The `$element` parameter is the created `<blockquote>` element.
+
+
+Basic Usage
+===========
+
+The simplest element handler just delegates to the default processing:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	return $invocation->proceed();
+});
+```
+
+This handler doesn't change anything, but shows the basic skeleton. It passes all parameters forward and returns the result.
+
+
+Modifying Input Data
+--------------------
+
+A handler can modify data before processing:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	// add default dimensions if not specified
+	$image->width ??= 800;
+	$image->height ??= 600;
+	return $invocation->proceed();
+});
+```
+
+Changes made to `$image` or `$link` objects will be reflected in further processing, including the default handler.
+
+
+Modifying Output Element
+------------------------
+
+A handler can modify the HTML element returned from `proceed()`:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	$element = $invocation->proceed();
+
+	if ($element) {
+		// add lazy loading
+		$element->attrs['loading'] = 'lazy';
+
+		// add CSS class
+		$element->attrs['class'][] = 'responsive';
+	}
+
+	return $element;
+});
+```
+
+
+Conditional Processing
+----------------------
+
+A handler can process only certain cases and delegate others:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	// special processing for YouTube videos
+	if (str_starts_with($image->URL, 'youtube:')) {
+		$id = substr($image->URL, 8);
+		$iframe = sprintf(
+			'<iframe src="https://youtube.com/embed/%s"></iframe>',
+			htmlspecialchars($id)
+		);
+		return $invocation->getTexy()
+			->protect($iframe, Texy\Texy::CONTENT_BLOCK);
+	}
+
+	// process other images normally
+	return $invocation->proceed();
+});
+```
+
+
+Interrupting Processing
+-----------------------
+
+A handler can refuse processing by returning `null`:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	// disallow external images
+	if (str_contains($image->URL, '://')) {
+		return null;
+	}
+
+	return $invocation->proceed();
+});
+```
+
+
+Practical Examples
+==================
+
+The following examples show real use cases for element handlers.
+
+
+YouTube Embed
+-------------
+
+Converting special syntax to embedded video:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	if (str_starts_with($image->URL, 'youtube:')) {
+		$id = substr($image->URL, 8);
+		$width = $image->width ?: 560;
+		$height = $image->height ?: 315;
+
+		$iframe = sprintf(
+			'<iframe width="%d" height="%d" '
+			. 'src="https://youtube.com/embed/%s" '
+			. 'frameborder="0" allowfullscreen></iframe>',
+			$width, $height, htmlspecialchars($id)
+		);
+
+		$texy = $invocation->getTexy();
+		return $texy->protect($iframe, $texy::CONTENT_BLOCK);
+	}
+
+	return $invocation->proceed();
+});
+```
+
+Usage in text:
+
+```texy
+[* youtube:dQw4w9WgXcQ 640x360 *]
+```
+
+
+Image Gallery
+-------------
+
+Wrapping images in a special div for lightbox:
+
+```php
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) {
+	$element = $invocation->proceed();
+
+	// if image has 'gallery' class
+	if (isset($image->modifier->classes['gallery'])) {
+		// wrap in div with lightbox attributes
+		$wrapper = new Texy\HtmlElement('div');
+		$wrapper->attrs['class'][] = 'lightbox-item';
+		$wrapper->attrs['data-src'] = $image->URL;
+		$wrapper->add($element);
+
+		return $wrapper;
+	}
+
+	return $element;
+});
+```
+
+Usage:
+
+```texy
+[* image.jpg .[gallery] *]
+```
+
+
+Link Validation
+---------------
+
+Checking whether links found in text lead to allowed domains:
+
+```php
+$allowedDomains = ['example.com', 'trusted.org'];
+
+$texy->addHandler('linkURL', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Link $link,
+) use ($allowedDomains) {
+	$host = parse_url($link->URL, PHP_URL_HOST);
+
+	// if domain is not in whitelist, disallow link
+	if ($host && !in_array($host, $allowedDomains, true)) {
+		return null;
+	}
+
+	return $invocation->proceed();
+});
+```
+
+
+Automatic rel="nofollow"
+------------------------
+
+Adding `nofollow` to all external links found in text:
+
+```php
+$texy->addHandler('linkURL', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Link $link,
+) {
+	$element = $invocation->proceed();
+
+	// if link contains :// (i.e. is external)
+	if (str_contains($link->URL, '://')) {
+		$element->attrs['rel'] = 'nofollow';
+	}
+
+	return $element;
+});
+```
+
+
+Syntax Highlighting
+-------------------
+
+Integrating a syntax highlighting library:
+
+```php
+$texy->addHandler('block', function(
+	Texy\HandlerInvocation $invocation,
+	string $blocktype,
+	string $content,
+	?string $param,
+	Texy\Modifier $modifier,
+) {
+	// process only 'code' type blocks
+	if ($blocktype !== 'block/code') {
+		return $invocation->proceed();
+	}
+
+	// apply syntax highlighting
+	$highlighter = new MyHighlighter();
+	$highlighted = $highlighter->highlight($content, $param);
+
+	$el = new Texy\HtmlElement('pre');
+	$modifier->decorate($invocation->getTexy(), $el);
+	$el->attrs['class'][] = 'language-' . $param;
+
+	$code = new Texy\HtmlElement('code');
+	$code->add($highlighted);
+	$el->add($code);
+
+	return $el;
+});
+```
+
+
+Lazy Loading
+------------
+
+Iterating through all images and adding lazy loading:
+
+```php
+$texy->addHandler('afterParse', function(
+	Texy\Texy $texy,
+	Texy\HtmlElement $DOM,
+	bool $isSingleLine,
+) {
+	foreach ($DOM->getIterator() as $child) {
+		if ($child instanceof Texy\HtmlElement
+			&& $child->getName() === 'img'
+		) {
+			$child->attrs['loading'] = 'lazy';
+		}
+	}
+});
+```
+
+
+Logging Used Elements
+---------------------
+
+Collecting statistics about used elements in the document:
+
+```php
+$stats = [];
+
+$texy->addHandler('beforeParse', function(
+	Texy\Texy $texy,
+	string &$text,
+	bool $isSingleLine,
+) use (&$stats) {
+	$stats = ['images' => 0, 'links' => 0, 'headings' => 0];
+});
+
+$texy->addHandler('image', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Image $image,
+	?Texy\Link $link,
+) use (&$stats) {
+	$stats['images']++;
+	return $invocation->proceed();
+});
+
+$texy->addHandler('linkURL', function(
+	Texy\HandlerInvocation $invocation,
+	Texy\Link $link,
+) use (&$stats) {
+	$stats['links']++;
+	return $invocation->proceed();
+});
+
+$texy->addHandler('heading', function(
+	Texy\HandlerInvocation $invocation,
+	int $level,
+	string $content,
+	Texy\Modifier $modifier,
+	bool $isSurrounded,
+) use (&$stats) {
+	$stats['headings']++;
+	return $invocation->proceed();
+});
+```
+
+
+Helper Classes
+==============
+
+When working with handlers, you will work with several important classes. Here is an overview with their most important properties.
+
+
+Texy\Image
+----------
+
+Represents an image with its parameters:
+
+```php
+$image->URL;           // string - path to image
+$image->linkedURL;     // ?string - link URL (if image is a link)
+$image->width;         // ?int - width in pixels
+$image->height;        // ?int - height in pixels
+$image->asMax;         // bool - whether dimensions are maximum
+$image->modifier;      // Modifier - CSS classes, styles, attributes
+$image->name;          // ?string - reference name
+```
+
+
+Texy\Link
+---------
+
+Represents a link with its parameters:
+
+```php
+$link->URL;        // string - target URL
+$link->raw;        // string - original URL (before normalization)
+$link->modifier;   // Modifier - CSS classes, styles, attributes
+$link->type;       // string - link type (COMMON, BRACKET, IMAGE)
+$link->label;      // ?string - link text (for references)
+$link->name;       // ?string - reference name
+```
+
+Constants for link type:
+
+```php
+Texy\Link::COMMON;   // common link
+Texy\Link::BRACKET;  // reference link [ref]
+Texy\Link::IMAGE;    // link from image [* img *]
+```
+
+
+Texy\HtmlElement
+----------------
+
+Represents an HTML element with its attributes and content:
+
+```php
+$el = new Texy\HtmlElement('div');
+
+// working with element name
+$el->getName();          // returns 'div'
+$el->setName('section'); // changes to 'section'
+
+// working with attributes
+$el->attrs['id'] = 'main';
+$el->attrs['class'][] = 'container';
+$el->attrs['style']['color'] = 'red';
+
+// working with content
+$el->setText('text');              // sets text content
+$el->getText();                    // returns text content
+$el->add($child);                  // adds child
+$el->insert(0, $child);            // inserts child at position
+
+// parsing content
+$el->parseLine($texy, $text);      // parses inline text
+$el->parseBlock($texy, $text);     // parses block text
+
+// conversion to HTML
+$el->toString($texy);              // internal representation
+$el->toHtml($texy);                // final HTML
+```
+
+
+Texy\Modifier
+-------------
+
+Represents modifiers for CSS classes, styles and attributes:
+
+```php
+$mod->id;          // ?string - HTML id
+$mod->classes;     // array - array of CSS classes
+$mod->styles;      // array - array of CSS styles
+$mod->attrs;       // array - HTML attributes
+$mod->hAlign;      // ?string - horizontal alignment (left, right, center, justify)
+$mod->vAlign;      // ?string - vertical alignment (top, middle, bottom)
+$mod->title;       // ?string - title attribute or alt for images
+
+// applying modifier to element
+$mod->decorate($texy, $element);
+```

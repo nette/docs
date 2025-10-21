@@ -1,0 +1,425 @@
+Architecture and Principles
+###########################
+
+.[perex]
+Texy is a tool for converting text written in its own markup language into HTML. Unlike simple converters that process text linearly through a series of replacements, Texy uses a sophisticated system based on parsing, a modular architecture, and the gradual construction of a DOM tree.
+
+The basic processing flow consists of four main phases:
+
+1.  Text preprocessing - normalization, adjustment of spaces and tabs, calling notification handlers for preparation
+2.  Parsing - recognizing syntaxes using regular expressions and gradually building the DOM tree
+3.  Post-processing - typographic adjustments, handling long words, well-forming HTML
+4.  Final assembly - converting the DOM tree into an HTML string
+
+The key difference from naive approaches is the separation of the syntax recognition phase from the processing phase. The parser first identifies where each syntactic construct is located in the text, and only then passes the found parts to individual modules for processing. This allows for nesting syntaxes and their gradual expansion.
+
+*Note: all classes are in the `Texy` namespace, so if the document mentions a class like `HtmlElement`, its full name is `Texy\HtmlElement`. Modules are in the `Texy\Modules` namespace*
+
+
+Key Components
+==============
+
+The Texy architecture consists of several main components, each with a clearly defined responsibility:
+
+The Texy class acts as the central orchestrator of the entire system. It contains references to all modules, manages registered syntaxes and handlers, maintains the processing state, and coordinates the individual conversion phases. It is the only place where the individual components are interconnected.
+
+**[Modules|#Moduly]** represent functional units responsible for specific areas of the markup language. Each module, upon its construction, registers the syntaxes it recognizes and the element handlers that process them. For example, PhraseModule handles inline formatting like bold or italic text, while TableModule processes tables. Modules are designed as separate, reusable units with their own configuration accessible through public properties.
+
+**[Parsers|#Parsery]** exist in two variants depending on the type of content being processed. BlockParser processes block structures like paragraphs, headings, lists, or tables. It goes through the text line by line, looking for the beginnings of block constructs and passing them to *syntax handlers*. LineParser handles inline syntaxes within lines - links, images, text formatting. Unlike BlockParser, it allows for nesting syntaxes and their gradual expansion.
+
+
+Basic Terminology
+=================
+
+To correctly understand how Texy works, it is necessary to distinguish between several key concepts that frequently appear in the documentation.
+
+**Syntax** refers to a named syntactic construct of the markup language. Each syntax has a unique name, for example, `phrase/strong` for bold text or `image` for images. The syntax name is used to enable or disable it in the `Texy::$allowed` array and is passed as a parameter to syntax handlers to distinguish which specific syntax was found.
+
+**Pattern** is a regular expression that defines what the syntax looks like in the text. The pattern is an implementation detail of the syntax - the author of the syntax must write a regex that recognizes it, but from the perspective of a Texy user, the syntax name and its meaning are more important. One module typically registers multiple syntaxes with different patterns.
+
+**Syntax handler** is a function called by the parser when it finds an occurrence of a syntax in the text. It receives the found text and returns an `HtmlElement` or a string, which is inserted in the original place. The syntax handler is where the decision is made about what to do with the found syntax - it typically invokes an element handler for the actual processing.
+
+**Element** is an item for which an HTML representation is generated. For example, `image` is an element for images, `linkURL` for links, `phrase` for inline formatting. Each element has its default element handler that takes care of standard processing.
+
+**Element handler** is a function registered for a certain type of element and called through the HandlerInvocation system. A characteristic feature is the use of the `proceed()` method, which allows delegating processing to the next handler in the chain or to the module's default handler. Element handlers are used to modify or replace the default behavior.
+
+**Notification handler** is a function called to notify about a certain event. Unlike element handlers, it does not return any value and cannot influence the processing result. It is used for data preparation, logging, or modifying the already created DOM tree.
+
+The difference between the various handlers is key to understanding the architecture. A syntax handler is tightly coupled with the parser and a specific pattern - it addresses the question of *what to do when the parser finds this pattern*. Element handlers are at a higher level of abstraction - they address the question of *how to process this type of element*, regardless of which specific syntax created it.
+
+
+Overall Processing Flow
+=======================
+
+When Texy receives input text, it goes through the following processing procedure.
+
+During preprocessing, the text is normalized. Line endings are unified to the Unix format, spaces are standardized, and tabs are optionally replaced with spaces. Subsequently, *notification handlers* registered for the `beforeParse` event are invoked. These handlers can perform data preparation, such as loading reference definitions or adjusting the configuration based on the text content.
+
+The parsing itself begins with the creation of a root `HtmlElement`, which represents the document. Texy then decides whether to process the text as a single line or as a complete document with block structures. In the case of block processing, a BlockParser is created, which sequentially goes through the text and looks for individual block constructs.
+
+LineParser works differently than BlockParser. It does not traverse the text linearly but progressively searches for the nearest occurrence of any registered syntax. When it finds one, it calls the corresponding syntax handler, which creates the appropriate HTML element. This element is inserted back into the text using special masking, and the parser continues. This allows it to find and process syntaxes nested inside already processed constructs.
+
+After parsing is complete, a full DOM tree representing the document's structure is created. Texy invokes notification handlers for the `afterParse` event, which can perform final modifications to the tree, such as adding identifiers to headings or building a table of contents.
+
+Post-processing occurs during the conversion of the DOM tree to an HTML string. Each element is recursively converted to HTML code, during which typographic adjustments like replacing quotes, dashes, or inserting non-breaking spaces are applied. Furthermore, HTML well-forming is performed - automatic closing of tags, correction of improperly nested elements, and formatting and indentation of the code.
+
+The final phase is decoding all masked parts back to HTML tags, removing helper markers, and assembling the resulting HTML string.
+
+
+Syntax System
+*************
+
+In Texy terminology, a syntax represents a named syntactic construct of the markup language. It is an abstract concept connecting several elements: a unique name, a regular expression for recognition, and a method of processing. The syntax name serves as an identifier throughout the system - it is used in the `Texy::$allowed` array for enabling or disabling, passed to handlers to distinguish the type of construct, and appears in documentation and configuration files.
+
+Syntax naming conventions follow two main patterns. Simpler syntaxes have a single-word name corresponding to their purpose, for example, `image`, `table`, or `script`. More complex areas use hierarchical naming with a slash, for example, `phrase/strong`, `phrase/em`, or `link/reference`. The slash serves to logically group related syntaxes and facilitates bulk operations with them.
+
+
+Line Syntax
+===========
+
+Line syntaxes are used to recognize inline elements within lines of text. Typically, this includes formatting like bold or italic text, links, images, or inline code. A characteristic of line syntaxes is that they can be nested within each other, and the parser expands them sequentially.
+
+A line syntax is registered by calling `Texy::registerLinePattern()` with several parameters. The first is the syntax handler, i.e., the callback called upon finding a match. The second parameter is the regular expression defining the syntax's appearance in the text. The third parameter is the syntax name used throughout the system. An optional fourth parameter is another regex to test if it's even worth searching for the pattern - it's used for optimization to avoid running a complex pattern on text that definitely cannot match.
+
+The pattern as a regular expression must adhere to certain rules. It must not be anchored to the beginning of the text because it is searched for anywhere in the line. It should be as specific as possible to avoid false matches.
+
+Inline syntaxes within lines of text are processed by the [LineParser|#LineParser]. When it finds a match, it calls the appropriate syntax handler. This handler receives three parameters. The first is the LineParser instance, which provides access to the Texy object and other contextual information. The second parameter is an array with the results of the regex match, including sub-expressions. The third parameter is the syntax name, which is useful when the same callback handles multiple syntaxes. The handler must return either an `HtmlElement`, a string, or null if it refuses to process.
+
+
+Block Syntax
+============
+
+Block syntaxes recognize multi-line block constructs such as headings, lists, tables, quotes, or special blocks. Unlike line syntaxes, block syntaxes never overlap - each line of text belongs to at most one block construct.
+
+Registering a block syntax uses `Texy::registerBlockPattern()` with three parameters: a syntax handler, a regular expression, and the syntax name. The pattern as a regular expression must adhere to certain rules. It must match from the beginning of the line and often contains an anchor for the end of the line. BlockParser automatically adds the `Am` modifiers, so the pattern should not contain them.
+
+Block syntaxes within a document are processed by the [BlockParser|#BlockParser]. When it finds a match, it calls the appropriate syntax handler. This handler receives similar parameters as with line syntaxes - a BlockParser instance, an array with the match, and the syntax name. It returns an `HtmlElement` representing the entire processed block, or null if it refuses processing.
+
+
+Enabling and Disabling Syntax
+=============================
+
+The `Texy::$allowed` array provides fine-grained control over which syntaxes are active in Texy. It is a simple yet powerful mechanism for configuring behavior without needing to change the modules' code. When you disable the `phrase/strong` syntax with this setting, the parser stops looking for the bold text construct:
+
+```php
+$texy->allowed['phrase/strong'] = false;
+```
+
+The check is performed once at the beginning of parsing, so dynamically changing `$allowed` during processing has no effect.
+
+When constructing modules, a default value is set in `$allowed` for most syntaxes. Some syntaxes are enabled by default because they form the basis of the markup language. Others are disabled because they are advanced or potentially dangerous. For example, emoticons are disabled because not every document needs them, while basic formatting is enabled.
+
+Safe mode is a situation where you are processing untrusted input, such as user comments. You want to allow basic formatting but disable images, scripts, or HTML tags. `Texy\Configurator::safeMode()` sets `$allowed` for a safe combination of syntaxes. It typically disables image, figure, script, and HTML tags, but leaves links and formatting enabled.
+
+
+Parsers
+*******
+
+
+Syntax Handler
+==============
+
+As we mentioned in the previous section, LineParser or BlockParser goes through the text and looks for all registered patterns. When it finds a match, it calls the appropriate syntax handler and passes it information about the find - particularly an array with the results of the regex match.
+
+The syntax handler analyzes the found text and prepares the data for processing. It can extract parts of the text from regex groups, create helper objects like `Link` or `Image`, and parse modifiers. It also decides which element handler to invoke. It calls `Texy::invokeAroundHandlers()` with the element name and the prepared parameters. This begins their execution. The returned result is passed back to the syntax handler, which returns it to the parser.
+
+
+Element Handler
+===============
+
+Element handlers implement the chain of responsibility pattern, which allows the final behavior to be composed from multiple layers.
+
+An element handler is registered by calling `Texy::addHandler()` with two parameters - the element name and the handler function. A single element name can have multiple handlers registered, which are then executed in order from the last registered to the first.
+
+The element name identifies the type of processing, for example, `phrase` for formatting, `image` for images, or `link` for links (note: this is different from syntax names). Sometimes, composite names like `linkReference` or `linkEmail` are used to distinguish different kinds of links. The names are more general than syntax names - while the `phrase/strong` syntax is a specific construct, the `phrase` element covers all kinds of inline formatting.
+
+Invoking an element handler uses the `Texy::invokeAroundHandlers()` method. This method receives the element name, the parser instance, and an array of parameters. It creates a HandlerInvocation object that encapsulates the entire chain of registered handlers. The first handler in the chain gets control and decides whether to call `HandlerInvocation::proceed()` to continue to the next handler or to return its own result.
+
+The HandlerInvocation object is key to understanding how the chaining works. It contains a stack of all handlers for the given element and the current position in this stack. When a handler calls `proceed()`, HandlerInvocation moves the position back one place in the stack and calls the next handler. If a handler calls `proceed()` with modified parameters, these new parameters are passed to all subsequent handlers. If a handler does not call `proceed()` at all, the chain is interrupted, and its return value becomes the result of the entire processing.
+
+The order of handler execution is from the last registered to the first. This means that a user-defined handler registered additionally gets control first and can decide whether to call the module's default handler at all. This order allows users to override the default behavior without needing to change the module's code.
+
+A typical use of an element handler looks like this. The handler checks the input parameters and decides if it wants to intervene in the processing. If so, it modifies the data, calls `proceed()` with the new parameters, and possibly modifies the returned result further. If the handler wants to completely replace the default processing, it creates its own result and returns it without calling `proceed()`.
+
+
+Notification Handler
+====================
+
+Notification handlers represent a simpler, one-way communication mechanism. Unlike element handlers, they are not used for data transformation but for performing side actions.
+
+Registering a notification handler uses the same `Texy::addHandler()` method as element handlers. The difference is in how the handler is used - a notification handler returns no value and does not have access to HandlerInvocation. The first parameter is the event name. Descriptive names like `beforeParse` and `afterParse` are used for global events around parsing, or more specific ones like `afterTable`, `afterList`, `afterBlockquote` for events after a specific structure is created. The before/after prefix clearly indicates the timing of the event.
+
+Invoking notification handlers uses the `Texy::invokeHandlers()` method. This method simply calls all registered handlers in order and ignores their return values. Notification handlers receive the parameters passed during invocation but cannot change them for other handlers in the chain.
+
+Typical uses for notification handlers include several scenarios. A handler for the `beforeParse` event can load reference definitions from the text before parsing begins. A handler for `afterParse` can traverse the created DOM tree and add missing attributes or build a table of contents. Handlers like `afterTable` or `afterList` allow modules to perform final adjustments to the created structures.
+
+An important difference from element handlers is that notification handlers cannot prevent further processing. All registered handlers are always executed; none can break the chain. This is intended behavior - notification handlers are about side effects, not flow control.
+
+
+LineParser
+==========
+
+LineParser processes inline syntaxes within lines of text in a sequential manner that allows for nesting and complex interactions between syntaxes.
+
+The basic principle lies in finding the first occurrence of any syntax. In each iteration, it goes through all syntaxes and determines which one matches closest to the current position in the text. This syntax *wins* and is processed. If multiple syntaxes match at the same position, the one that was registered earlier wins - this is a priority based on registration order.
+
+When the parser finds the nearest match, it calls the corresponding syntax handler. This handler returns a result, which can be an `HtmlElement` or a string. This result then overwrites the found match in the text.
+
+Then, it searches again from the current position. This system ensures that the parser always sees the current state of the text. When we replace a match with new text that may contain other syntaxes, these syntaxes will be found in the next iteration.
+
+The `$again` property on the LineParser object is used for fine-grained control over whether the just-matched syntax should be searched for again at the same position after processing the current match. The default value is false, which says: *It no longer makes sense to look for this same syntax at this position. Move on.*
+
+The traversal ends when the parser reaches the end of the text or when no syntax has any more matches. The result is text where all recognizable syntaxes have been processed and replaced with their results, ready for final conversion.
+
+
+Nesting
+-------
+
+The ability to process nested syntaxes is one of the key features of LineParser and presents a fundamental challenge - how to prevent already processed HTML tags from being mistakenly interpreted as another syntax to be processed.
+
+When the parser processes text containing nested syntaxes, it first finds the outer construct. For example, in the text `"link **bold** text":URL`, the parser first finds the syntax for a link with quotes. The pattern for this syntax matches the entire string from the first quote to the colon and URL. The syntax handler creates an `HtmlElement` for the `<a>` tag, and the content `link **bold** text` is added as a child of the element. This string is inserted back into the text, and the parser continues searching for other syntaxes (`**bold**`, which represents bold text).
+
+But now it has a problem - there are also HTML tags in the text, which could match as the beginning of another syntax. The parser would start processing the already finished HTML tags as if they were part of the original text.
+
+We don't want the parser to see HTML tags. We need some way to distinguish already processed parts from parts waiting to be processed. The `Texy::protect()` method solves these problems in an elegant way - it replaces HTML tags with a unique placeholder composed of control characters - special bytes outside of printable ASCII.
+
+So, when an `HtmlElement` is converted to a string (using `toString()`), the result doesn't look like `<a href="...">link **bold** text</a>`, but for example, like `\x17\x18\x19\x17link **bold** text\x17\x18\x1A\x17`.
+
+Thus, during parsing, there are never actual HTML tags present in the text. Instead, there are only placeholders. But the inner text remains, and the parser sees it normally and can search for other syntaxes within it. This allows for gradual nesting - the outer syntax is masked, but its content is still accessible for inner syntaxes.
+
+At the end of processing, the `Texy::unProtect()` method goes through the resulting HTML string and replaces all placeholders with their actual values. Only at this moment do the actual HTML tags get into the output.
+
+
+Masking Levels
+--------------
+
+Different types of content use different control characters for their placeholders, which allows syntaxes to selectively decide what they can contain.
+
+- `Patterns::CONTENT_MARKUP` denotes regular HTML markup like tags for formatting or links. It is the most common type and is used by most inline elements. The placeholder begins and ends with `\x17`.
+- `Patterns::CONTENT_REPLACED` denotes content that has been replaced by something else, typically images or other replaced elements. It uses `\x16` as a marker.
+- `Patterns::CONTENT_TEXTUAL` denotes text that has been escaped or otherwise treated to prevent processing. It is used for constructs like code or notexy, where we want to display the original text including markup symbols, not their interpretation.
+- `Patterns::CONTENT_BLOCK` denotes block elements. It is the lowest level in the hierarchy. It uses `\x14` as a marker.
+
+The hierarchy of these types is not just a convention but has a practical consequence. The constant Patterns::MARK is defined as `\x14-\x1F`, i.e., a range covering all these types plus a reserve. Syntaxes use this constant in their patterns to exclude masked parts.
+
+Different syntaxes may have different requirements for what placeholders they can contain. A pattern that wants to see only plain text without any masked parts will use the exclusion `[^\x14-\x1F]`. This will reject all placeholders of all types. An example is the pattern for images - an image URL should not contain any HTML tags or blocks.
+
+A pattern that accepts lower levels but rejects higher ones will use a narrower range. For example, `[^\x17-\x1F]` will only reject `CONTENT_MARKUP` and above, but will accept `CONTENT_BLOCK`, `CONTENT_TEXTUAL`, and `CONTENT_REPLACED`. This is useful if we want to allow blocks but not inline markup. A practical example is TypographyModule, which performs typographic adjustments like replacing quotes or inserting non-breaking spaces. These adjustments should be applied to regular text, but not inside code blocks or preformatted text.
+
+
+Syntax Collisions
+-----------------
+
+A collision occurs when multiple syntaxes can match at the same position, and the system must choose one of them.
+
+A typical example is different lengths of the same symbol. The `phrase/strong+em` syntax uses three asterisks for a combination of bold and italics. The `phrase/strong` syntax uses two asterisks for bold text alone. The `phrase/em-alt` syntax uses one asterisk for italics. When the parser finds text starting with three asterisks, all three syntaxes can technically match.
+
+PhraseModule resolves this collision by registering syntaxes in order from longest to shortest. First, it registers `phrase/strong+em` with a pattern for three asterisks. Then `phrase/strong` with a pattern for two asterisks. Finally, `phrase/em-alt` with a pattern for one asterisk. Thanks to this order, when three asterisks are found, `phrase/strong+em` is processed first, and the shorter syntaxes don't get a chance.
+
+Another example is links in different formats. The `phrase/wikilink` syntax uses a pattern for `[text|url]`. The `link/reference` syntax uses a pattern for `[ref]`. Both start with an opening square bracket. If the text contains `[text|url]`, both patterns can technically start to match.
+
+The solution, again, is the specificity of the patterns. The pattern for `phrase/wikilink` is more specific - it requires a vertical bar inside the brackets. If the text contains a vertical bar, `phrase/wikilink` will match. If not, the pattern will fail, and `link/reference` gets a chance. The order of registration also plays a role here - `phrase/wikilink` should be registered before `link/reference`.
+
+
+BlockParser
+===========
+
+BlockParser uses a fundamentally different approach to processing that reflects the nature of block constructs. The basic difference is the absence of intertwining. While LineParser allows syntaxes to be nested within each other and gradually expanded, BlockParser works with the assumption that each block is a separate unit. A single line or a group of lines belongs to at most one block. Blocks do not overlap, cross, or nest at the BlockParser level.
+
+BlockParser starts by finding all blocks, or rather their beginnings. The parser goes through all registered block syntaxes and finds all their occurrences. If multiple syntaxes match at the same position, the registration order is used - the earlier registered syntax takes precedence.
+
+
+API for Syntax Handler
+----------------------
+
+BlockParser provides syntax handlers with an API for working with multi-line structures.
+
+The `BlockParser::moveBackward()` method is used to return to previous lines. It accepts the number of lines to go back. The parser moves its internal position towards the beginning of the text until it passes the specified number of line endings. This allows the callback to start reading from the beginning of the structure, even if the pattern matched in the middle or at the end.
+
+The `BlockParser::next()` method is used to read the next line matching a certain pattern. It accepts a regex pattern (it automatically adds the `Am` modifiers) and a reference to a variable for the match result. If the next line in the text matches the provided pattern, the method fills the result, moves the internal position past this line, and returns true. If the next line does not match, the method returns false, and the position does not change.
+
+
+Modules
+*******
+
+Modules are the basic organizational unit in the Texy architecture. Each module encapsulates the complete functionality for a specific area of the markup language.
+
+The primary responsibility of a module is to register syntaxes. In its constructor, the module calls `Texy::registerLinePattern()` or `registerBlockPattern()` for all the syntaxes it wants to process. This tells the parser: *When you find these patterns, call me.* The module thus defines which constructs in the text it recognizes.
+
+The second responsibility is the implementation of element handlers. The module registers handlers for the elements that its syntaxes invoke. These handlers contain the logic for converting the found constructs into HTML elements. The element handler decides what element to create, what attributes to set, and how to process the content.
+
+The third responsibility is to provide configuration. Modules have public properties that allow Texy users to modify the module's behavior without needing to change its code. For example, ImageModule has properties for setting the root path to images or the default alt text.
+
+The fourth responsibility is managing module-specific state. For example, HeadingModule keeps track of all found headings in the TOC array for building a table of contents. LinkModule manages a dictionary of references for links. This state is private to the module, and other parts of the system do not access it directly.
+
+Modules are designed as independent units. Each module can function on its own and should not depend on the implementation details of other modules. Communication between modules occurs through shared objects like `Link` or `Image`, not through direct method calls.
+
+
+Structure of a Typical Module
+=============================
+
+Most modules in Texy follow a similar structure that reflects their role in the system.
+
+The module inherits from the base class Module, which provides access to the Texy object via the protected property `$texy`. The module's constructor accepts a Texy instance and stores it. This allows the module to access the configuration and call methods on the Texy object.
+
+All initialization takes place in the constructor. The module sets the default values of its configuration properties, and possibly sets default values in the `Texy::$allowed` array for its syntaxes. Then it registers its syntaxes by calling `registerLinePattern()` or `registerBlockPattern()`. Each registration associates a pattern, a syntax handler, and a syntax name. Finally, the module registers its element handlers by calling `addHandler()`.
+
+Syntax handlers are methods of the module that the parser calls when it finds a syntax. These methods typically extract parts from the regex match, create helper objects, and invoke element handlers. The syntax handler decides which element handler to invoke and what parameters to pass.
+
+Element handlers are methods that implement the actual processing. They receive a HandlerInvocation object as the first parameter, followed by parameters specific to the given element. The element handler creates an `HtmlElement`, applies modifiers, processes the content, and returns the result. This is where the final form of the HTML is decided.
+
+Public properties serve as the interface for configuration. A Texy user can set these properties to customize the module's behavior. The properties are typically primitive types or arrays, not complex objects, to keep configuration simple.
+
+
+Overview of Key Modules
+=======================
+
+The standard distribution of Texy includes several modules covering various aspects of the markup language.
+
+- **PhraseModule** processes inline text formatting. It registers syntaxes for bold text, italics, underline, superscript, subscript, code, and more. All these syntaxes invoke a common handler for the `phrase` element, and the handler distinguishes which tag to create based on the syntax name. The module allows configuring which tags are used for each type of formatting.
+
+- **LinkModule** manages links in the document. It registers syntaxes for various link formats - explicit URLs, email addresses, references to defined links. It provides factory methods for creating `Link` objects and manages a dictionary of references. The module allows configuring the root for relative links, automatic `rel="nofollow"` for external links, and shortening of long URLs.
+
+- **ImageModule** processes images in a similar way to how LinkModule handles links. It registers syntax for inline images and manages a dictionary of references to defined images. It provides factory methods for creating `Image` objects and automatic detection of image dimensions. Configurable options include paths to images, default alt text, and CSS classes for alignment.
+
+- **HeadingModule** recognizes headings in various formats - underlined with dashes or equal signs, surrounded by hash marks. It collects all headings into a TOC array for a possible table of contents. It allows configuring the generation of IDs, the top level of headings, and the level balancing mode.
+
+- **ListModule** processes lists - unordered, ordered, and definition lists. It recognizes different types of bullets and automatically detects nesting based on indentation. It allows configuring which characters serve as bullets and what HTML lists to generate.
+
+- **TableModule** is one of the most complex modules. It recognizes tables with headers, bodies, captions, and supports colspan and rowspan. It processes modifiers for both rows and cells.
+
+- **BlockModule** processes special blocks delimited by `/--` and `\--`. It supports various block types - code for code, html for direct HTML, div for a generic container. It allows users to define custom handlers for their own block types.
+
+- **TypographyModule** performs post-processing for typographic adjustments. It replaces three dots with an ellipsis, double dashes with an en-dash, straight quotes with typographic ones, and inserts non-breaking spaces. It operates at the level of the final string between block elements.
+
+- **HtmlOutputModule** formats the final HTML output. It ensures well-formed HTML by automatically closing tags, correcting incorrect nesting, indenting the code, and wrapping long lines. It allows configuring the indentation level and line width.
+
+
+Interaction Between Modules
+===========================
+
+Although modules are designed to be independent, in some cases they need to cooperate.
+
+Shared objects are the main communication mechanism. A `Link` object created by LinkModule can be passed to ImageModule to create an image link. An `Image` object created by ImageModule can be passed to FigureModule to create an image with a caption. These objects encapsulate all necessary information and provide a common interface.
+
+The reference system allows separating definition from use. LinkModule provides `addReference()` and `getReference()` methods for managing a dictionary of named links. A user can define a reference in one part of the document and use it in another. ImageModule has an analogous system for image references. Modules using references call factory methods that themselves check whether it is a reference or a direct value.
+
+Element handlers can call other element handlers. When PhraseModule processes a `phrase/span` with a link, it creates a `Link` object and calls the LinkModule's element handler to create the link. This delegates the responsibility for creating and configuring the link to the specialized module.
+
+Relationships between modules are typically one-sided. PhraseModule knows about LinkModule and ImageModule because it creates links and images. But LinkModule and ImageModule do not know about PhraseModule. This keeps dependencies simple and allows for easy replacement or extension of modules.
+
+
+DOM Representation
+******************
+
+`HtmlElement` represents a single node in the DOM tree and provides an interface for its manipulation and processing.
+
+The basic structure of an element includes a tag name, an associative array of attributes, and an array of children. The children can be other `HtmlElement` instances or simply text strings. This combination allows for representing any HTML structure.
+
+The element name is set and retrieved via the `setName()` and `getName()` methods. A special value of null as the name means a transparent element, which has no tags, only its content.
+
+Attributes are publicly accessible via the `$attrs` property as an associative array. Values can be strings, numbers, booleans, or arrays. A boolean `true` means an attribute without a value (like `checked`), while `false` or `null` means the attribute will not be rendered at all. If the value is an array, the different elements are joined according to the attribute type - for `class` with spaces, for `style` with semicolons. The `setAttribute()` method sets the value of an attribute. The `getAttribute()` method returns the value of an attribute or null.
+
+Children are managed through several methods. The `add()` method adds a child to the end. The `insert()` method inserts a child at a specified position, optionally replacing an existing child. The `create()` method creates a new `HtmlElement` as a child and returns it for further manipulation. The `removeChildren()` method removes all children.
+
+The element implements the ArrayAccess interface, so children can be worked with like an array. The notation `$el[0]` returns the first child, `$el[0] = $child` sets the first child. This approach is convenient for quick manipulation of specific children.
+
+The `toString()` method recursively traverses the element and its children and builds a string representation. HTML tags are immediately masked using `Texy::protect()`, so a placeholder is inserted into the result instead of actual HTML characters.
+
+The `toHtml()` and `toText()` methods return the unmasked result including post-processing.
+
+
+Parsing Content
+===============
+
+`HtmlElement` can recursively parse its content, allowing for the gradual building of the DOM tree.
+
+The `parseLine()` method is used to parse inline syntaxes in a string. It creates a new instance of LineParser with the current element as the container. It calls `parse()` on the parser with the provided text. LineParser sequentially finds and processes all inline syntaxes, and the resulting elements or strings are added as children of the current element. The method returns the used LineParser for possible further use.
+
+The `parseBlock()` method parses text as block content. It creates a BlockParser and calls `parse()` on it. BlockParser finds all block constructs in the text, processes them, and adds them as children of the element. Text between blocks is processed as paragraphs, which internally use LineParser. The method accepts a boolean parameter indicating whether the text comes from an indented block, which affects the processing of paragraphs.
+
+These parsing methods allow for recursive processing. A syntax handler can create an element, set its basic properties, and then call `parseLine()` or `parseBlock()` to process the content. The result is that the element's content goes through the same parsing process as the main document, including syntax recognition and handler invocation.
+
+
+Validation
+==========
+
+`HtmlElement` provides mechanisms for validating attributes and content according to the HTML DTD (Document Type Definition).
+
+The DTD is a static array defining for each HTML tag which attributes are allowed and what content it can contain. Texy loads the DTD from a file upon initialization and stores it in a static array. The DTD structure maps a tag name to a pair - an array of allowed attributes and an array of allowed content.
+
+The `validateAttrs()` method checks the element's attributes against the DTD. For a given tag, it gets the list of allowed attributes. It goes through all the element's attributes and removes those that are not on the list. Special cases are attributes starting with `data-` or `aria-`, which are allowed if a placeholder entry `data-*` or `aria-*` is in the DTD.
+
+This validation is typically called when applying modifiers with the `decorate()` method. It ensures that even if a user specifies a modifier with an invalid attribute for a given tag, the attribute does not get into the final HTML. This is important for security and HTML correctness.
+
+The `validateChild()` method checks whether a given child can be the content of the element. It accepts a child (`HtmlElement` or a tag name) and the DTD. If the element is defined in the DTD, the method checks if the child is in the list of allowed content. If so, it returns true. If not, it returns false.
+
+This validation can be used when dynamically building a DOM tree to ensure a correct structure. For example, a paragraph element must not contain block elements, so `validateChild()` would refuse to add a `div` into a `p`. In practice, Texy uses this validation to a limited extent, as the structure generated by the modules is typically correct by design.
+
+The combination of `validateAttrs()` and `validateChild()` provides a mechanism for ensuring valid HTML, even if the input contains untrusted data or poorly formed constructs. Texy can be configured for strict validation or can disable validation for maximum flexibility.
+
+
+Modifiers
+*********
+
+Modifiers provide a way to add additional attributes, classes, styles, and alignment to elements without having to write direct HTML.
+
+The basic format of a modifier is a dot followed by a combination of different parts in round, square, and curly brackets: `.(title)[class1 class2 #id]{style:value}<align>^valign`. The entire modifier is written before or at the end of the construct to which it applies. For example, `"**text** .(Important)[highlight]{color:red}"` creates bold text with the class `highlight`, red color, and a title attribute "Important".
+
+Round brackets contain the title attribute or alt text. The text inside is used as the value of the title attribute on the resulting element. If the element is an image, it can be used as alt text. Inside the round brackets, it is possible to escape a bracket with a backslash.
+
+Square brackets contain CSS classes and optionally an ID. Classes are written as words separated by spaces. An ID is written with a hash prefix. For example, `[main-content selected #article-5]` sets two classes and one ID. If an ID is specified multiple times, the last one is used.
+
+Curly brackets contain CSS styles or HTML attributes. Styles are written in the standard CSS format `property:value`. Multiple styles are separated by semicolons. Some properties are recognized as HTML attributes - for example, `{href:url}` is converted to an `href` attribute, not a CSS style. This allows setting attributes that cannot be expressed otherwise.
+
+Alignment is specified using special characters. `<` means left, `>` right, `=` for justify, `<>` for center. Vertical alignment uses `^` for top, `-` for middle, and `_` for bottom. These shortcuts are converted to either CSS classes or inline styles depending on the configuration.
+
+The parts of the modifier can be in any order, and some can be omitted. A modifier containing only classes `.[highlight]`, only a title `.(Note)`, or only a style `.{color:blue}` is valid. The parser recognizes the individual parts by their delimiting characters.
+
+
+Modifier Class
+==============
+
+The `Modifier` class is used to parse and store information from a modifier.
+
+An instance of `Modifier` is typically created by a syntax handler, which passes the modifier text extracted from a regex match to the constructor. The constructor calls the `setProperties()` method, which parses the text and populates the object's properties.
+
+Public properties contain the individual parts of the modifier. The `$id` property contains the element's ID as a string or null. The `$classes` property is an associative array where keys are class names and values are true. The `$styles` property is an associative array mapping CSS properties to values. The `$attrs` property is an associative array with HTML attributes that are not styles or classes.
+
+Two special properties, `$hAlign` and `$vAlign`, contain the horizontal and vertical alignment as strings `left`, `right`, `center`, `justify` or `top`, `middle`, `bottom`. These values are later converted to CSS classes or styles according to the Texy configuration.
+
+The `$title` property contains the text from the round brackets, which is used as the title attribute or alt text for images. The text is automatically unescaped from HTML entities and stripped of escaped brackets.
+
+
+Application to Elements
+=======================
+
+A `Modifier` object is applied to an `HtmlElement` using the `Modifier::decorate()` method.
+
+The `decorate()` method accepts a Texy instance and an `HtmlElement` as parameters. It sequentially applies the individual parts of the modifier to the element, taking into account the Texy configuration, which may prohibit or restrict some parts.
+
+The application of attributes checks which attributes are allowed for the given tag according to the `Texy::$allowedTags` configuration. If all attributes are allowed, all attributes from the `Modifier` are copied to the element. If only a list of specific attributes is allowed, only those that are on the list are copied.
+
+The title attribute is always applied if it is set, but the text undergoes typographic post-processing to replace quotes and other adjustments.
+
+The application of classes and ID checks the `Texy::$allowedClasses` configuration. If all classes are allowed, all classes from the `Modifier` are added to the element, and the ID is set. If only a list of specific classes is allowed, only those that are on the list are added. The ID is added only if a string starting with a hash is on the allowed list.
+
+The application of styles proceeds similarly, with a check of `Texy::$allowedStyles`. Allowed CSS properties are added to the element's style attribute. If the element already had some styles, the modifier's styles are added or overwrite existing ones.
+
+Alignment is applied either as a CSS class or an inline style. If a mapping is configured in Texy's `Texy::$alignClasses` for the given alignment type, the corresponding CSS class is added. If not, an inline style with the `text-align` or `vertical-align` property is added.
+
+The result is that the element has all the attributes, classes, styles, and other properties from the modifier, but only those that are allowed by the current Texy configuration. This ensures safety when processing untrusted input.
+
+
+Propagation of Modifiers
+========================
+
+Modifiers pass through the system in several phases, maintaining flexibility and allowing for modifications at different levels.
+
+The syntax handler extracts the modifier text from the regex match and creates a new `Modifier` instance, populating its properties.
+
+The `Modifier` object is passed as a parameter to element handlers. The handler receives the already parsed object, not the raw text. This allows the handler to easily access the individual parts of the modifier - classes, styles, alignment. The handler can modify the modifier before application, for example, by adding more classes or changing styles.
+
+The element handler creates an `HtmlElement` and passes it to the `Modifier::decorate()` method. At this point, the modifier is applied to the element. The `decorate()` method checks the Texy configurations and ensures that only allowed parts are applied.
+
+In some cases, a module combines multiple modifiers. For example, TableModule parses modifiers at the table, row, and cell levels. A cell's modifier is actually a clone of the column's modifier, to which additional modifications from the specific cell's modifier are then applied. This allows for default styles for an entire column with the possibility of overriding them in individual cells.

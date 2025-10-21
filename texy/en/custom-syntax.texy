@@ -1,0 +1,519 @@
+Adding Custom Syntax
+********************
+
+.[perex]
+This chapter describes how to add **completely new markup constructs** to Texy that don't exist by default. If you only want to modify the behavior of existing elements (for example, adjust image or link processing), read the chapter [Custom Element Behavior |custom-handlers].
+
+Imagine you want to automatically create links to user profiles in documentation by writing `@@username`. Or you need special alert blocks like `:::warning`. Texy doesn't recognize these constructs, and you can't create them by modifying existing elements.
+
+Custom syntax allows you to define new markup constructs. You specify what the construct should look like (using a regular expression) and write a function to process it. Texy will then recognize your syntax just like its standard constructs.
+
+
+Syntax Registration
+===================
+
+Texy provides two methods for registering custom syntax, depending on whether it's an inline or block element.
+
+
+Line Syntax
+-----------
+
+Line syntax is used for inline constructs within text lines. You register it using the `registerLinePattern()` method:
+
+```php
+$texy->registerLinePattern(
+	callable $handler,
+	string $pattern,
+	string $name,
+	?string $againTest = null,
+);
+```
+
+**The `$handler` parameter** is a callback function that gets called when the syntax is found. It can be a function name, anonymous function, or array `[$object, 'method']`.
+
+**The `$pattern` parameter** is a regular expression (PCRE) that defines what your syntax looks like in the text. The pattern **should not be anchored** to the start of a line (`^`), since it's searched for anywhere in the text. Use capturing groups to capture the data you need to process.
+
+**The `$name` parameter** is a unique syntax name. It's used in the `$texy->allowed` array for enabling/disabling and passed to the handler for identification. We recommend using a prefix style like `custom/username` or `myapp/profile`.
+
+**The `$againTest` parameter** is an optional regex for optimization. If specified, Texy first checks whether the text contains anything that could match your pattern. Only if `$againTest` succeeds does it run the more complex pattern. This significantly speeds up processing if you have a complex pattern that's rarely used.
+
+Registration example:
+
+```php
+$texy->registerLinePattern(
+	'usernameHandler',
+	'#@@([a-z0-9_]+)#i',
+	'custom/username',
+);
+```
+
+
+Block Syntax
+------------
+
+Block syntax is used for multi-line block constructs. You register it using the `registerBlockPattern()` method:
+
+```php
+$texy->registerBlockPattern(
+	callable $handler,
+	string $pattern,
+	string $name,
+);
+```
+
+The `$handler` and `$name` parameters have the same meaning as for line syntax.
+
+**The `$pattern` parameter** is a regular expression that **must be anchored** to the start of a line (`^`) and often to the end (`$`) as well. BlockParser automatically adds the `Am` modifiers (anchored, multiline), so don't add them to the pattern. The pattern should match the entire block or at least its beginning.
+
+Registration example:
+
+```php
+$texy->registerBlockPattern(
+	'alertHandler',
+	'#^:::(warning|info|danger)\n(.+)$#s',
+	'custom/alert',
+);
+```
+
+
+Syntax Handler
+==============
+
+A syntax handler is a function called by the parser when it finds an occurrence of your syntax in the text. Its job is to process the found data and return an HTML element or string.
+
+A detailed explanation of the syntax handler's role in Texy's architecture can be found in the chapter [Architecture and Principles |architecture#syntax-handler].
+
+
+For Line Syntax
+---------------
+
+Syntax handler signature for line syntax:
+
+```php
+function(
+	Texy\LineParser $parser,
+	array $matches,
+	string $name,
+): Texy\HtmlElement|string|null
+```
+
+**The `$parser` parameter** provides access to the parser and Texy object. You'll most often use `$parser->getTexy()` to get the Texy instance.
+
+**The `$matches` parameter** contains the regex match results. `$matches[0]` is the entire matched string, `$matches[1]`, `$matches[2]` etc. are the capturing groups from your pattern.
+
+**The `$name` parameter** is the syntax name you specified during registration. Useful if one handler processes multiple syntaxes.
+
+**The return value** can be `Texy\HtmlElement` for structured HTML output, `string` for direct HTML code (which you must protect), or `null` to refuse processing.
+
+The handler can set `$parser->again = true` if it wants the content of the created element to be parsed again to find nested syntaxes.
+
+
+For Block Syntax
+----------------
+
+Syntax handler signature for block syntax:
+
+```php
+function(
+	Texy\BlockParser $parser,
+	array $matches,
+	string $name,
+): Texy\HtmlElement|string|null
+```
+
+The parameters have the same meaning as for line syntax, except you receive `Texy\BlockParser` instead of `LineParser`.
+
+BlockParser provides methods for working with multi-line structures:
+
+- **`$parser->next($pattern, &$matches)`** - matches the next line against the pattern and returns true/false
+- **`$parser->moveBackward($lines)`** - moves back the specified number of lines
+- **`$parser->isIndented()`** - returns true if the current block is indented
+
+
+LineParser API
+==============
+
+When working with line syntax, you have several useful properties and methods available.
+
+**The `$again` property** controls whether the currently processed syntax should be searched for again at the same position after processing. The default value is `false`. Set to `true` if you're creating an element with content that may contain other syntaxes:
+
+```php
+function(
+	Texy\LineParser $parser,
+	array $matches,
+	string $name,
+): Texy\HtmlElement
+{
+	$el = new Texy\HtmlElement('span');
+	$el->setText($matches[1]);
+
+	// content may contain additional formatting
+	$parser->again = true;
+
+	return $el;
+}
+```
+
+**The `getTexy()` method** returns the Texy object instance, which you need for working with `protect()` or accessing configuration.
+
+
+BlockParser API
+===============
+
+When working with block syntax, you have methods available for working with multi-line structures.
+
+**The `next($pattern, &$matches)` method** tries to match the next line in the text against the specified pattern. If successful, it fills `$matches` with the result and moves the internal position past this line. Returns `true` on success, `false` on failure:
+
+```php
+while ($parser->next('#^\-\s+(.+)$#', $matches)) {
+	// process next list item
+	$item = $matches[1];
+}
+```
+
+**The `moveBackward($lines = 1)` method** moves the internal position back the specified number of lines. Useful when your pattern matched more than the block's start and you want to return to the beginning:
+
+```php
+// pattern matched 3 lines, but we want to read from the first
+$parser->moveBackward(2);
+```
+
+**The `isIndented()` method** returns `true` if the current block is indented (starts with a space or tab). This indicates that it's nested content.
+
+
+Practical Examples
+==================
+
+The following examples demonstrate real use cases for custom syntax.
+
+
+User Profiles
+-------------
+
+Automatic creation of profile links by writing `@@username`:
+
+```php
+$texy->registerLinePattern(
+	function(
+		Texy\LineParser $parser,
+		array $matches,
+		string $name,
+	): Texy\HtmlElement
+	{
+		$username = $matches[1];
+
+		$el = new Texy\HtmlElement('a');
+		$el->attrs['href'] = '/user/' . urlencode($username);
+		$el->attrs['class'][] = 'user-profile';
+		$el->setText('@' . $username);
+
+		return $el;
+	},
+	'#@@([a-z0-9_]+)#i',
+	'custom/username'
+);
+```
+
+Usage in text:
+
+```texy
+Check out the profile of @@johndoe or @@jane_smith.
+```
+
+
+Alert Boxes
+-----------
+
+Special alert blocks with different types:
+
+```php
+$texy->registerBlockPattern(
+	function(
+		Texy\BlockParser $parser,
+		array $matches,
+		string $name,
+	): Texy\HtmlElement
+	{
+		$type = $matches[1];  // warning, info, danger
+		$content = $matches[2];
+
+		$el = new Texy\HtmlElement('div');
+		$el->attrs['class'][] = 'alert';
+		$el->attrs['class'][] = 'alert-' . $type;
+
+		$texy = $parser->getTexy();
+		$el->parseBlock($texy, trim($content));
+
+		return $el;
+	},
+	'#^:::(warning|info|danger)\n(.+?)(?=\n:::|$)#s',
+	'custom/alert'
+);
+```
+
+Usage in text:
+
+```texy
+:::warning
+This is an important warning!
+:::
+
+:::info
+For your information: the update will take place tomorrow.
+:::
+```
+
+
+Hashtags
+--------
+
+Automatic creation of links from hashtags:
+
+```php
+$texy->registerLinePattern(
+	function(
+		Texy\LineParser $parser,
+		array $matches,
+		string $name,
+	): Texy\HtmlElement
+	{
+		$tag = $matches[1];
+
+		$el = new Texy\HtmlElement('a');
+		$el->attrs['href'] = '/tag/' . urlencode($tag);
+		$el->attrs['class'][] = 'hashtag';
+		$el->setText('#' . $tag);
+
+		return $el;
+	},
+	'#\#([a-z0-9_]+)#i',
+	'custom/hashtag',
+	'#\##'  // optimization - search only if # is in text
+);
+```
+
+Usage:
+
+```texy
+Article about #php and #webdesign.
+```
+
+
+Abbreviations
+-------------
+
+Automatic expansion of abbreviations with explanation:
+
+```php
+$abbreviations = [
+	'HTML' => 'HyperText Markup Language',
+	'CSS' => 'Cascading Style Sheets',
+	'PHP' => 'PHP: Hypertext Preprocessor',
+];
+
+$texy->registerLinePattern(
+	function(
+		Texy\LineParser $parser,
+		array $matches,
+		string $name
+	) use ($abbreviations): ?Texy\HtmlElement
+	{
+		$abbr = $matches[1];
+
+		if (!isset($abbreviations[$abbr])) {
+			return null;  // unknown abbreviation
+		}
+
+		$el = new Texy\HtmlElement('abbr');
+		$el->attrs['title'] = $abbreviations[$abbr];
+		$el->setText($abbr);
+
+		return $el;
+	},
+	'#\b([A-Z]{2,})\b#',
+	'custom/abbreviation'
+);
+```
+
+
+Inline Icons
+------------
+
+Inserting icons using special syntax:
+
+```php
+$texy->registerLinePattern(
+	function(
+		Texy\LineParser $parser,
+		array $matches,
+		string $name,
+	): Texy\HtmlElement
+	{
+		$icon = $matches[1];
+
+		$el = new Texy\HtmlElement('i');
+		$el->attrs['class'][] = 'icon';
+		$el->attrs['class'][] = 'icon-' . $icon;
+		$el->attrs['aria-hidden'] = 'true';
+
+		return $el;
+	},
+	'#:icon-([a-z-]+):#',
+	'custom/icon'
+);
+```
+
+Usage:
+
+```texy
+Click the button :icon-download: to download.
+```
+
+
+Note Block
+----------
+
+Block for footnotes:
+
+```php
+$texy->registerBlockPattern(
+	function(
+		Texy\BlockParser $parser,
+		array $matches,
+		string $name
+	): Texy\HtmlElement
+	{
+		$parser->moveBackward();
+
+		$content = '';
+		while ($parser->next('#^NOTE:\s*(.+)$#', $matches)) {
+			$content .= $matches[1] . "\n";
+		}
+
+		$el = new Texy\HtmlElement('aside');
+		$el->attrs['class'][] = 'note';
+
+		$texy = $parser->getTexy();
+		$el->parseBlock($texy, trim($content));
+
+		return $el;
+	},
+	'#^NOTE:\s*(.+)$#m',
+	'custom/note'
+);
+```
+
+Usage:
+
+```texy
+NOTE: This is an important note.
+NOTE: It can be multi-line.
+```
+
+
+Custom Quotations with Author
+-----------------------------
+
+Extended syntax for quotations with author attribution:
+
+```php
+$texy->registerBlockPattern(
+	function(
+		Texy\BlockParser $parser,
+		array $matches,
+		string $name,
+	): Texy\HtmlElement
+	{
+		$author = $matches[1];
+		$quote = $matches[2];
+
+		$blockquote = new Texy\HtmlElement('blockquote');
+
+		$texy = $parser->getTexy();
+		$blockquote->parseBlock($texy, trim($quote));
+
+		$cite = new Texy\HtmlElement('cite');
+		$cite->setText($author);
+		$blockquote->add($cite);
+
+		return $blockquote;
+	},
+	'#^QUOTE\[([^\]]+)\]:\n(.+?)(?=\n\n|$)#s',
+	'custom/quote'
+);
+```
+
+Usage:
+
+```texy
+QUOTE[Albert Einstein]:
+Imagination is more important than knowledge,
+because knowledge is limited.
+```
+
+
+Image Gallery
+-------------
+
+Special block for creating a gallery from multiple images:
+
+```php
+$texy->registerBlockPattern(
+	function(
+		Texy\BlockParser $parser,
+		array $matches,
+		string $name,
+	): Texy\HtmlElement
+	{
+		$parser->moveBackward();
+
+		$gallery = new Texy\HtmlElement('div');
+		$gallery->attrs['class'][] = 'gallery';
+
+		while ($parser->next('#^\[G\]\s*(.+)$#', $matches)) {
+			$img = new Texy\HtmlElement('img');
+			$img->attrs['src'] = trim($matches[1]);
+			$img->attrs['loading'] = 'lazy';
+			$gallery->add($img);
+		}
+
+		return $gallery;
+	},
+	'#^\[G\]\s*(.+)$#m',
+	'custom/gallery'
+);
+```
+
+Usage:
+
+```texy
+[G] image1.jpg
+[G] image2.jpg
+[G] image3.jpg
+```
+
+
+Syntax Collisions
+=================
+
+When registering custom syntax, you must be careful that it doesn't collide with existing Texy syntaxes or other custom syntaxes.
+
+**Registration order matters.** Line syntaxes are searched in the order they were registered. If multiple syntaxes can match at the same position, the one registered earlier wins. Therefore, register more specific syntaxes before more general ones.
+
+**Be specific in patterns.** The more concrete your pattern is, the lower the risk of collision. The pattern `#\#\w+#` also matches `#heading`, which could collide with headings. Better is `#(?<=\s)\#[a-z0-9_]+#i`, which requires a space before the hashtag.
+
+**Test combinations.** Try how your syntax works in combination with existing constructs. What happens when your markup is inside a link? What if it's inside a code block?
+
+**Use prefixed names.** Instead of `username`, use `custom/username` or `myapp/username`. This prevents conflicts if Texy adds syntax with the same name in the future.
+
+
+Best Practices
+==============
+
+**Return `null` on failure.** If the handler determines it can't or doesn't want to process the given match (for example, an unknown abbreviation), return `null`. The parser will then try other syntaxes.
+
+**Use `protect()` for HTML.** If you're returning a raw HTML string instead of `HtmlElement`, you must protect it using `$texy->protect($html, Texy::CONTENT_...)`. Otherwise it will be escaped.
+
+**Set `$parser->again` correctly.** For line syntaxes that create an element with text content that may contain other syntaxes (formatting, links), set `$parser->again = true`.
+
+**Respect `$texy->allowed`.** If you're creating a module with multiple syntaxes, check `$texy->allowed[$name]` before registering the pattern or in the handler before processing.

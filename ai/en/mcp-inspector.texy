@@ -1,0 +1,325 @@
+MCP Inspector
+*************
+
+<div class=perex>
+
+"MCP Inspector":https://github.com/nette/mcp-inspector lets an AI assistant look directly into your Nette application: it sees which services are registered in the DI container, what your database tables look like, which route leads where and what Tracy logged last night. You will learn:
+
+- how the inspector works and what it can see
+- how to install it in two commands
+- what each tool does and how to try it from the terminal
+- how to keep the AI on a short leash: read-only queries, masked secrets, a kill switch
+
+</div>
+
+Without the inspector, the AI guesses your application from patterns it picked up during training. With it, the AI asks your application and gets the truth: the real columns, the real service names, the real error.
+
+.[caution]
+MCP Inspector is still in **early development and has no stable release yet**. Until the first release, install it with `composer require --dev nette/mcp-inspector:@dev` and expect tool names and configuration to keep changing.
+
+
+How It Works
+============
+
+MCP Inspector is a server speaking the **Model Context Protocol (MCP)**, the standard through which AI tools such as Claude Code, Cursor or VS Code call external tools. Your editor starts the inspector as a background process, and whenever the AI needs something from your application, it calls one of the inspector's tools and gets the answer back.
+
+To answer, the inspector builds your application's DI container. It does that through a small script `mcp-bootstrap.php` in your project root, which returns your application's `Configurator` with all configs added; the inspector creates the container itself, in debug mode, in its own temp directory, so it never touches your web's cache.
+
+The container stays alive between calls, but every call checks whether your configuration changed. When you edit `services.neon`, the next tool call already sees the new services; no restart of the editor is needed. If a rebuild fails, say because of a typo in your config, the inspector keeps serving the last working container and adds a `_warning` field to the result so the AI tells you about the failure right away.
+
+Everything is **read-only by default**: the inspector reads your services, schema, routes and logs, but it cannot change your data or configuration and it never executes code from the AI. The single exception, running modifying SQL, is switched off unless you explicitly [enable it |#database-configuration].
+
+
+Installation
+============
+
+Two commands. The first adds the package as a development dependency, the second generates the files the inspector needs:
+
+```shell
+composer require --dev nette/mcp-inspector:@dev
+vendor/bin/mcp-inspector init
+```
+
+`init` creates three files and never overwrites an existing one:
+
+| File | Purpose
+|------|------
+| `mcp-bootstrap.php` | returns your application's `Nette\Bootstrap\Configurator` (see below)
+| `config/mcp-inspector.neon` | the inspector's configuration: what the AI may do
+| `.mcp.json` | registers the `nette-inspector` server for Claude Code; `.cursor/mcp.json` and `.vscode/mcp.json` get the same entry when those directories exist
+
+Then restart your AI tool (in Claude Code type `/exit` and run `claude` again): MCP servers connect when the tool starts.
+
+Two options come in handy. When PHP does not run directly on your machine, pass the command the AI tool should use: `--php="ddev exec php"`. When the project is not the current directory, add `--project=PATH`.
+
+Is it working? Ask the AI:
+
+```
+What services do I have registered in the DI container?
+```
+
+If the answer lists the real services of your application, you are done.
+
+
+The mcp-bootstrap.php File
+==========================
+
+The inspector needs a `Configurator` with all configs added but *before* `createContainer()` is called, because it builds the container itself. `init` looks at your `App\Bootstrap` class and generates the file accordingly:
+
+- **Static `App\Bootstrap::boot(): Configurator`** (the classic Web Project): the file is simply `return App\Bootstrap::boot();`
+- **Object `Bootstrap` with `bootWebApplication(): Container`** (Web Project since 2024): add a method that stops before creating the container and use it from both places:
+
+```php
+public function bootWebApplication(): Nette\DI\Container
+{
+	return $this->bootConfigurator()->createContainer();
+}
+
+public function bootConfigurator(): Configurator
+{
+	$this->initializeEnvironment();
+	$this->setupContainer();
+	return $this->configurator;
+}
+```
+
+`mcp-bootstrap.php` then reads `return (new App\Bootstrap)->bootConfigurator();`.
+
+- **Custom bootstrap** (a constructor with arguments, multi-tenant applications and similar): `init` writes a template with a `TODO` comment for you to complete. Keep the `new Configurator` call inside your `Bootstrap` class so Nette's `%appDir%` autodetection, which looks at the file creating the Configurator, keeps working. Environment variables set in `.mcp.json` are a handy way to pass parameters:
+
+```php
+$blog = getenv('BLOG') === 'phpfashion' ? App\Blog::PhpFashion : App\Blog::LaTrine;
+return (new App\Bootstrap($blog))->bootConsoleConfigurator();
+```
+
+You do not need to switch on debug mode; the inspector does that itself, because the CLI never autodetects it and debug mode is what makes the live reload of configuration possible.
+
+
+Tools
+=====
+
+The tools are grouped by what they look at. Each group appears only when your application has the corresponding part: without `nette/database` there are no `db_*` tools, and the AI is not confused by tools that cannot work.
+
+
+Application
+-----------
+
+| Tool | What it does
+|------|------
+| `app_get_info` | PHP and Nette versions, installed Nette packages, directories and the database driver
+
+The AI is told to call this first, so the code it writes matches the versions you actually use, PHP 8.3 attributes for example, or the Nette 3.3 way of doing things.
+
+
+DI Container
+------------
+
+| Tool | What it does
+|------|------
+| `di_get_services` | lists services with their types, tags, aliases and autowiring, optionally filtered by a substring of the name or type
+| `di_get_service` | details of one service, including whether it has already been created
+| `di_find_by_type` | services implementing a class or interface, and which of them autowiring picks
+| `di_find_by_tag` | services carrying a tag, with the tag values
+| `di_get_parameter_names` | parameter names, nested ones in dotted notation (`database.default.dsn`)
+| `di_get_parameter` | the value of one parameter; secrets (`password`, `token`, `dsn`, …) are masked
+
+When you ask "what mailers do I have?", the AI calls `di_find_by_type("Nette\Mail\Mailer")` and sees exactly what your container holds. Only runtime data is available: the inspector knows the type, tags and aliases of a service, not the factory expression or the `setup` calls from your config. These tools require `nette/di` 3.2.7 or newer; parameters additionally need to be exported, and if your config has `di: export: parameters: no`, the tools tell you so.
+
+
+Router
+------
+
+| Tool | What it does
+|------|------
+| `router_get_routes` | all registered routes with masks, defaults and module prefixes
+| `router_match_url` | which presenter and action handle a URL, with the parameters (e.g. `/article/123`)
+| `router_generate_url` | the URL for a presenter and action, the way `{link}` does it (e.g. `Article:show` with `{"id": 5}`)
+
+The inspector runs without an HTTP request, so your application cannot tell its own address the way it does on the web. Tell it in the application's configuration (`nette/http` 3.4):
+
+```neon
+http:
+	baseUrl: https://example.com/
+```
+
+Without it, `router_generate_url` reports an error saying what to set, and relative URLs passed to `router_match_url` are matched against `http://localhost/`.
+
+
+Database
+--------
+
+| Tool | What it does
+|------|------
+| `db_get_tables` | tables and views
+| `db_get_columns` | columns of a table: types, nullability, defaults, primary and foreign keys
+| `db_get_relationships` | foreign key relationships between all tables (belongsTo, hasMany)
+| `db_get_indexes` | indexes of a table
+| `db_query` | runs one SQL statement with values bound to `?` placeholders; read-only by default
+| `db_explain_query` | runs `EXPLAIN` on a `SELECT` query
+
+This is the group that ends the guessing about your schema. "Generate an entity for the product table" becomes a call to `db_get_columns("product")` and an entity with the columns you really have.
+
+`db_query` lets the AI look at the data as well, for example to see what values a status column really holds. By default it accepts only `SELECT`-like statements (`SELECT`, `SHOW`, `EXPLAIN`, `DESCRIBE`, `WITH`, `VALUES`, `TABLE`, a single statement, no `INTO OUTFILE`) and runs them inside a read-only transaction on MySQL, PostgreSQL and SQLite, so the database itself rejects anything the validator would miss. Values of columns whose names suggest secrets are masked, and the number of rows is limited.
+
+
+Tracy
+-----
+
+| Tool | What it does
+|------|------
+| `tracy_get_log` | the newest entries of a log by level (`exception` by default, `error`, `warning`, …), each with the name of its report
+| `tracy_get_report` | an exception report as Tracy writes it for agents: the code around the exception, the stack trace with arguments and the environment
+
+Debugging changes shape with these two. Instead of copying a stack trace into the chat, you say "check the log and tell me what broke", and the AI reads the exception itself. The log directory is the one your application's Tracy logger writes to, nothing to configure. The markdown reports require Tracy 2.12 or newer; older HTML-only reports cannot be read.
+
+
+Trying Tools From the Terminal
+==============================
+
+You do not need an AI tool to see what a tool returns. The `call` command runs a tool exactly as the client would and prints the result as JSON:
+
+```shell
+vendor/bin/mcp-inspector call app_get_info
+vendor/bin/mcp-inspector call router_match_url '{"url": "/article/123"}'
+vendor/bin/mcp-inspector call db_query '{"query": "SELECT * FROM product WHERE id = ?", "params": [1]}'
+```
+
+This is the fastest way to check your bootstrap and configuration, and to see what the AI will see. The options `--project`, `--bootstrap` and `--config` work here too.
+
+
+Configuration
+=============
+
+The inspector is itself a small Nette application, and `config/mcp-inspector.neon` is the configuration of its own DI container, with the usual `parameters:`, `services:` and one section per group of tools. Every section is optional; a missing file means the defaults. This is the file `init` generates:
+
+```neon
+# Configuration of nette/mcp-inspector: a Nette DI config for the inspector's own container.
+# The inspector reads it itself, do not add it to the application's configs.
+# Every section is optional; missing keys use the defaults shown here.
+
+inspector:
+	# false keeps the inspector from starting at all
+	enabled: true
+	# tool names or patterns hidden from the agent, e.g. [db_*, tracy_get_log]
+	disableTools: []
+
+database:
+	# true: only SELECT-like statements, run in a read-only transaction
+	# false: any statement, the agent can modify data
+	readOnly: true
+	# maximum number of rows returned by db_query
+	rowLimit: 100
+```
+
+The inspector reads this file itself; do not add it to your application's configs. Changes take effect after the MCP server restarts, which the AI tool does together with its session.
+
+
+Hiding Tools
+------------
+
+`disableTools` takes tool names or patterns with `*`. Do you not want the AI to read your data at all? Hide the whole database group:
+
+```neon
+inspector:
+	disableTools: [db_*]
+```
+
+
+Database Configuration
+----------------------
+
+The only real security question is whether the AI may modify data, and by default it may not. When you do want it to, say on a throwaway development database, switch the protection off:
+
+```neon
+database:
+	readOnly: false
+	rowLimit: 500
+```
+
+With `readOnly: false` any statement runs, `UPDATE`, `DELETE` and DDL included. AI tools such as Claude Code then ask you for confirmation before each `db_query`, because the tool no longer declares itself read-only.
+
+
+Other AI Tools
+==============
+
+MCP Inspector works with any tool that speaks MCP. `init` registers it for Claude Code in `.mcp.json`, and for Cursor and VS Code when it finds their `.cursor` or `.vscode` directories in your project. For any other tool, register a command that starts the server over standard input and output:
+
+```json
+{
+	"mcpServers": {
+		"nette-inspector": {
+			"type": "stdio",
+			"command": "php",
+			"args": ["vendor/bin/mcp-inspector"]
+		}
+	}
+}
+```
+
+The command runs in your project root. Where it does not (some editors start servers elsewhere), add `"--project=/path/to/project"` to the arguments. Consult your AI tool's documentation for where the configuration file lives.
+
+
+Security
+========
+
+The inspector exposes the DI graph, configuration and data of whatever application it is pointed at, so point it at development environments and development data only. There is no reliable way for a CLI process to tell that it runs on a production server, so the protection is layered instead:
+
+1. **Development dependency**: install it with `--dev`, and `composer install --no-dev` on the server never installs it.
+2. **Safe defaults**: nothing modifies data, secrets are masked, no tool executes PHP code or writes files.
+3. **A kill switch**: `inspector: enabled: false` in `config/mcp-inspector.neon` or the `MCP_INSPECTOR_DISABLED=1` environment variable makes the server refuse to start.
+
+Two more things happen quietly. Values under keys that look like secrets (`password`, `secret`, `token`, `apiKey`, `dsn`, …) come out as `***`, both in parameters and in query results. And results carrying data from your application, database rows and log entries, are marked as untrusted, so the AI knows not to follow instructions it might find in them; a user comment saying "ignore your previous instructions" stays a comment.
+
+
+Custom Toolkits
+===============
+
+Your application has facts of its own that the AI would like to know: the pending orders, the feature flags, the tenants. Add a toolkit: a class implementing `Nette\McpInspector\Toolkit` whose public methods marked with `#[McpTool]` become tools. The docblock is the tool's description, so write it for the AI: what the tool returns and when to call it.
+
+```php
+namespace App\Mcp;
+
+use Mcp\Capability\Attribute\McpTool;
+use Mcp\Schema\ToolAnnotations;
+use Nette\McpInspector\AppContainer;
+use Nette\McpInspector\Toolkit;
+use Nette\McpInspector\UntrustedData;
+
+class BlogToolkit implements Toolkit
+{
+	public function __construct(
+		private AppContainer $app,
+	) {}
+
+	public function isAvailable(): bool
+	{
+		return true;
+	}
+
+	/**
+	 * Get a blog post by ID.
+	 * @param int $id Post ID
+	 */
+	#[UntrustedData]
+	#[McpTool(name: 'blog_get_post', title: 'Blog post', annotations: new ToolAnnotations(readOnlyHint: true))]
+	public function getPost(int $id): array
+	{
+		$post = $this->app->get()->getByType(BlogFacade::class)->getPost($id);
+		return $post ? ['id' => $post->id, 'title' => $post->title] : ['error' => 'not found'];
+	}
+}
+```
+
+A few things to notice. The toolkit depends on `AppContainer`, whose `get()` returns the current container of your application, so config reloads are honoured; through it you reach any service. `isAvailable()` lets a toolkit step aside when the application lacks what it needs. The `#[UntrustedData]` attribute marks a tool whose result carries data from the application (posts, comments, user input), and the inspector then tells the AI not to follow instructions found in it. And `readOnlyHint: true` tells the AI tool that the call is safe to run without asking you each time.
+
+Register the toolkit as a service in the inspector's configuration, not in your application's:
+
+```neon
+# config/mcp-inspector.neon
+services:
+	- App\Mcp\BlogToolkit
+```
+
+The AI can now call `blog_get_post` like any built-in tool. Try it first from the terminal: `vendor/bin/mcp-inspector call blog_get_post '{"id": 1}'`.
+
+{{composer: nette/mcp-inspector}}

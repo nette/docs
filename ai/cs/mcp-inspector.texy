@@ -1,0 +1,326 @@
+MCP Inspector
+*************
+
+<div class=perex>
+
+"MCP Inspector":https://github.com/nette/mcp-inspector umožní AI asistentovi podívat se přímo do vaší Nette aplikace: vidí, jaké služby máte registrované v DI kontejneru, jak vypadají tabulky v databázi, která routa vede kam a co Tracy zalogovala v noci. Dozvíte se:
+
+- jak inspektor funguje a co všechno vidí
+- jak ho nainstalovat dvěma příkazy
+- co dělá který nástroj a jak si ho vyzkoušet z terminálu
+- jak držet AI na krátkém vodítku: dotazy jen pro čtení, maskovaná hesla, vypínač
+
+</div>
+
+Bez inspektoru AI vaši aplikaci odhaduje podle vzorů, které pochytila při tréninku. S ním se AI zeptá vaší aplikace a dostane pravdu: skutečné sloupce, skutečné názvy služeb, skutečnou chybu.
+
+.[caution]
+MCP Inspector je stále v **rané fázi vývoje a nemá zatím stabilní vydání**. Do prvního vydání ho instalujte příkazem `composer require --dev nette/mcp-inspector:@dev` a počítejte s tím, že se názvy nástrojů i konfigurace budou ještě měnit.
+
+
+Jak to funguje
+==============
+
+MCP Inspector je server mluvící **Model Context Protocolem (MCP)**, standardem, kterým AI nástroje jako Claude Code, Cursor nebo VS Code volají externí nástroje. Editor spustí inspektor jako proces na pozadí, a kdykoli AI potřebuje něco z vaší aplikace, zavolá některý z nástrojů inspektoru a dostane odpověď.
+
+Aby mohl odpovědět, sestaví inspektor DI kontejner vaší aplikace. Dělá to pomocí malého skriptu `mcp-bootstrap.php` v kořeni projektu, který vrací `Configurator` vaší aplikace se všemi přidanými konfigy; kontejner si inspektor vytvoří sám, v debug režimu a ve vlastním temp adresáři, takže se nikdy nedotkne cache vašeho webu.
+
+Kontejner zůstává mezi voláními živý, ale každé volání zkontroluje, zda se nezměnila konfigurace. Když upravíte `services.neon`, hned další volání nástroje vidí nové služby; restart editoru není potřeba. Pokud se přestavba nepovede, třeba kvůli překlepu v konfiguraci, inspektor dál obsluhuje poslední funkční kontejner a do výsledku přidá pole `_warning`, takže vám AI o selhání hned řekne.
+
+Vše je **ve výchozím stavu jen pro čtení**: inspektor čte vaše služby, schéma, routy a logy, ale nemůže měnit data ani konfiguraci a nikdy nespouští kód od AI. Jediná výjimka, spouštění modifikujícího SQL, je vypnutá, dokud ji výslovně [nepovolíte |#konfigurace-databaze].
+
+
+Instalace
+=========
+
+Dva příkazy. První přidá balíček jako vývojovou závislost, druhý vygeneruje soubory, které inspektor potřebuje:
+
+```shell
+composer require --dev nette/mcp-inspector:@dev
+vendor/bin/mcp-inspector init
+```
+
+`init` vytvoří tři soubory a existující nikdy nepřepíše:
+
+| Soubor | Účel
+|------|------
+| `mcp-bootstrap.php` | vrací `Nette\Bootstrap\Configurator` vaší aplikace (viz níže)
+| `config/mcp-inspector.neon` | konfigurace inspektoru: co AI smí
+| `.mcp.json` | registruje server `nette-inspector` pro Claude Code; stejný záznam dostanou `.cursor/mcp.json` a `.vscode/mcp.json`, pokud tyto adresáře existují
+
+Pak restartujte svůj AI nástroj (v Claude Code napište `/exit` a spusťte znovu `claude`): MCP servery se připojují při startu nástroje.
+
+Hodí se dvě volby. Když PHP neběží přímo na vašem počítači, předejte příkaz, který má AI nástroj použít: `--php="ddev exec php"`. Když projekt není aktuálním adresářem, přidejte `--project=CESTA`.
+
+Funguje to? Zeptejte se AI:
+
+```
+Jaké služby mám registrované v DI kontejneru?
+```
+
+Pokud odpověď vypíše skutečné služby vaší aplikace, máte hotovo.
+
+
+Soubor mcp-bootstrap.php
+========================
+
+Inspektor potřebuje `Configurator` se všemi přidanými konfigy, ale *před* zavoláním `createContainer()`, protože kontejner si sestavuje sám. `init` se podívá na vaši třídu `App\Bootstrap` a soubor vygeneruje podle ní:
+
+- **Statická `App\Bootstrap::boot(): Configurator`** (klasický Web Project): soubor je prostě `return App\Bootstrap::boot();`
+- **Objektový `Bootstrap` s `bootWebApplication(): Container`** (Web Project od roku 2024): přidejte metodu, která se zastaví před vytvořením kontejneru, a použijte ji na obou místech:
+
+```php
+public function bootWebApplication(): Nette\DI\Container
+{
+	return $this->bootConfigurator()->createContainer();
+}
+
+public function bootConfigurator(): Configurator
+{
+	$this->initializeEnvironment();
+	$this->setupContainer();
+	return $this->configurator;
+}
+```
+
+V `mcp-bootstrap.php` pak bude `return (new App\Bootstrap)->bootConfigurator();`.
+
+- **Vlastní bootstrap** (konstruktor s argumenty, multi-tenant aplikace a podobně): `init` zapíše šablonu s komentářem `TODO`, kterou doplníte. Volání `new Configurator` nechte uvnitř třídy `Bootstrap`, aby dál fungovala autodetekce `%appDir%` v Nette, která se dívá na soubor, jenž Configurator vytváří. Parametry se pohodlně předávají proměnnými prostředí nastavenými v `.mcp.json`:
+
+```php
+$blog = getenv('BLOG') === 'phpfashion' ? App\Blog::PhpFashion : App\Blog::LaTrine;
+return (new App\Bootstrap($blog))->bootConsoleConfigurator();
+```
+
+Debug režim zapínat nemusíte; inspektor to udělá sám, protože v CLI se nikdy neautodetekuje a právě debug režim umožňuje živé načítání změn konfigurace.
+
+
+Nástroje
+========
+
+Nástroje jsou seskupené podle toho, na co se dívají. Každá skupina se objeví jen tehdy, když má vaše aplikace odpovídající část: bez `nette/database` nejsou žádné nástroje `db_*` a AI nematou nástroje, které nemohou fungovat.
+
+
+Aplikace
+--------
+
+| Nástroj | Co dělá
+|------|------
+| `app_get_info` | verze PHP a Nette, nainstalované balíčky Nette, adresáře a databázový driver
+
+AI má pokyn zavolat ho jako první, aby kód, který píše, odpovídal verzím, které skutečně používáte, například atributům PHP 8.3 nebo zvyklostem Nette 3.3.
+
+
+DI kontejner
+------------
+
+| Nástroj | Co dělá
+|------|------
+| `di_get_services` | vypíše služby s typy, tagy, aliasy a autowiringem, volitelně filtrované podřetězcem názvu nebo typu
+| `di_get_service` | detaily jedné služby včetně toho, zda už byla vytvořena
+| `di_find_by_type` | služby implementující třídu nebo rozhraní a kterou z nich vybere autowiring
+| `di_find_by_tag` | služby nesoucí tag, s hodnotami tagu
+| `di_get_parameter_names` | názvy parametrů, vnořené v tečkové notaci (`database.default.dsn`)
+| `di_get_parameter` | hodnota jednoho parametru; tajemství (`password`, `token`, `dsn`, …) jsou maskována
+
+Když se zeptáte "jaké mám mailery?", AI zavolá `di_find_by_type("Nette\Mail\Mailer")` a vidí přesně to, co váš kontejner obsahuje. K dispozici jsou jen běhová data: inspektor zná typ, tagy a aliasy služby, ne výraz továrny ani volání `setup` z konfigurace. Tyto nástroje vyžadují `nette/di` 3.2.7 nebo novější; parametry navíc musí být exportované, a pokud máte v konfiguraci `di: export: parameters: no`, nástroje vám to řeknou.
+
+
+Router
+------
+
+| Nástroj | Co dělá
+|------|------
+| `router_get_routes` | všechny registrované routy s maskami, výchozími hodnotami a prefixy modulů
+| `router_match_url` | který presenter a akce obsluhují URL, s parametry (např. `/article/123`)
+| `router_generate_url` | URL pro presenter a akci, stejně jako to dělá `{link}` (např. `Article:show` s `{"id": 5}`)
+
+Inspektor běží bez HTTP požadavku, takže vaše aplikace nedokáže zjistit vlastní adresu tak, jak to dělá na webu. Řekněte jí ji v konfiguraci aplikace (`nette/http` 3.4):
+
+```neon
+http:
+	baseUrl: https://example.com/
+```
+
+Bez ní `router_generate_url` ohlásí chybu s návodem, co nastavit, a relativní URL předané do `router_match_url` se porovnávají vůči `http://localhost/`.
+
+
+Databáze
+--------
+
+| Nástroj | Co dělá
+|------|------
+| `db_get_tables` | tabulky a pohledy
+| `db_get_columns` | sloupce tabulky: typy, nullabilita, výchozí hodnoty, primární a cizí klíče
+| `db_get_relationships` | vztahy přes cizí klíče mezi všemi tabulkami (belongsTo, hasMany)
+| `db_get_indexes` | indexy tabulky
+| `db_query` | spustí jeden SQL příkaz s hodnotami navázanými na zástupné znaky `?`; ve výchozím stavu jen pro čtení
+| `db_explain_query` | spustí `EXPLAIN` nad dotazem `SELECT`
+
+Tahle skupina ukončí hádání o vašem schématu. "Vygeneruj entitu pro tabulku product" se změní ve volání `db_get_columns("product")` a entitu se sloupci, které skutečně máte.
+
+`db_query` dovolí AI podívat se i na data, třeba jaké hodnoty sloupec se stavem opravdu obsahuje. Ve výchozím stavu přijímá jen příkazy typu `SELECT` (`SELECT`, `SHOW`, `EXPLAIN`, `DESCRIBE`, `WITH`, `VALUES`, `TABLE`, jediný příkaz, žádné `INTO OUTFILE`) a na MySQL, PostgreSQL a SQLite je spouští uvnitř transakce jen pro čtení, takže cokoli, co by validátor přehlédl, odmítne sama databáze. Hodnoty sloupců, jejichž názvy vypadají na tajemství, jsou maskované a počet řádků je omezený.
+
+
+Tracy
+-----
+
+| Nástroj | Co dělá
+|------|------
+| `tracy_get_log` | nejnovější záznamy logu podle úrovně (`exception` ve výchozím stavu, `error`, `warning`, …), každý s názvem svého reportu
+| `tracy_get_report` | report výjimky tak, jak ho Tracy píše pro agenty: kód kolem výjimky, stack trace s argumenty a prostředí
+
+S těmito dvěma se mění podoba ladění. Místo kopírování stack trace do chatu řeknete "podívej se do logu a řekni mi, co se rozbilo", a AI si výjimku přečte sama. Adresář logů je ten, do kterého píše Tracy logger vaší aplikace, není co nastavovat. Markdownové reporty vyžadují Tracy 2.12 nebo novější; starší reporty jen v HTML se přečíst nedají.
+
+
+Zkoušení nástrojů z terminálu
+=============================
+
+K tomu, abyste viděli, co nástroj vrací, nepotřebujete AI. Příkaz `call` spustí nástroj přesně tak, jak by to udělal klient, a výsledek vypíše jako JSON:
+
+```shell
+vendor/bin/mcp-inspector call app_get_info
+vendor/bin/mcp-inspector call router_match_url '{"url": "/article/123"}'
+vendor/bin/mcp-inspector call db_query '{"query": "SELECT * FROM product WHERE id = ?", "params": [1]}'
+```
+
+Je to nejrychlejší způsob, jak zkontrolovat bootstrap a konfiguraci a podívat se na to, co uvidí AI. Volby `--project`, `--bootstrap` a `--config` fungují i tady.
+
+
+Konfigurace
+===========
+
+Inspektor je sám o sobě malá Nette aplikace a `config/mcp-inspector.neon` je konfigurace jeho vlastního DI kontejneru, s obvyklými sekcemi `parameters:`, `services:` a jednou sekcí pro každou skupinu nástrojů. Každá sekce je nepovinná; chybějící soubor znamená výchozí hodnoty. Tohle je soubor, který `init` vygeneruje:
+
+```neon
+# Configuration of nette/mcp-inspector: a Nette DI config for the inspector's own container.
+# The inspector reads it itself, do not add it to the application's configs.
+# Every section is optional; missing keys use the defaults shown here.
+
+inspector:
+	# false keeps the inspector from starting at all
+	enabled: true
+	# tool names or patterns hidden from the agent, e.g. [db_*, tracy_get_log]
+	disableTools: []
+
+database:
+	# true: only SELECT-like statements, run in a read-only transaction
+	# false: any statement, the agent can modify data
+	readOnly: true
+	# maximum number of rows returned by db_query
+	rowLimit: 100
+```
+
+Inspektor si tento soubor čte sám; nepřidávejte ho do konfigurace své aplikace. Změny se projeví po restartu MCP serveru, který AI nástroj dělá spolu se svou session.
+
+
+Skrývání nástrojů
+-----------------
+
+`disableTools` přijímá názvy nástrojů nebo vzory s `*`. Nechcete, aby AI vůbec četla vaše data? Skryjte celou databázovou skupinu:
+
+```neon
+inspector:
+	disableTools: [db_*]
+```
+
+
+Konfigurace databáze
+--------------------
+
+Jediná skutečná bezpečnostní otázka zní, zda AI smí měnit data, a ve výchozím stavu nesmí. Když to chcete, třeba na vývojové databázi, o kterou nejde, ochranu vypněte:
+
+```neon
+database:
+	readOnly: false
+	rowLimit: 500
+```
+
+S `readOnly: false` se spustí jakýkoli příkaz, včetně `UPDATE`, `DELETE` a DDL. AI nástroje jako Claude Code se vás pak před každým `db_query` zeptají na potvrzení, protože nástroj už o sobě netvrdí, že je jen pro čtení.
+
+
+Jiné AI nástroje
+================
+
+MCP Inspector funguje s každým nástrojem, který mluví MCP. `init` ho zaregistruje pro Claude Code do `.mcp.json` a pro Cursor a VS Code, když v projektu najde jejich adresáře `.cursor` nebo `.vscode`. Pro jakýkoli jiný nástroj zaregistrujte příkaz, který spustí server přes standardní vstup a výstup:
+
+```json
+{
+	"mcpServers": {
+		"nette-inspector": {
+			"type": "stdio",
+			"command": "php",
+			"args": ["vendor/bin/mcp-inspector"]
+		}
+	}
+}
+```
+
+Příkaz běží v kořeni projektu. Tam, kde to neplatí (některé editory spouštějí servery jinde), přidejte do argumentů `"--project=/cesta/k/projektu"`. Kde má konfigurační soubor ležet, najdete v dokumentaci svého AI nástroje.
+
+
+Bezpečnost
+==========
+
+Inspektor odhaluje DI graf, konfiguraci a data jakékoli aplikace, na kterou ho namíříte, proto ho miřte jen na vývojová prostředí a vývojová data. Proces v CLI nemá žádný spolehlivý způsob, jak poznat, že běží na produkčním serveru, a tak je ochrana vrstvená:
+
+1. **Vývojová závislost**: instalujte ho s `--dev` a `composer install --no-dev` na serveru ho nikdy nenainstaluje.
+2. **Bezpečné výchozí hodnoty**: nic nemění data, tajemství jsou maskovaná, žádný nástroj nespouští PHP kód ani nezapisuje soubory.
+3. **Vypínač**: `inspector: enabled: false` v `config/mcp-inspector.neon` nebo proměnná prostředí `MCP_INSPECTOR_DISABLED=1` způsobí, že server odmítne nastartovat.
+
+Dvě další věci se dějí potichu. Hodnoty pod klíči, které vypadají jako tajemství (`password`, `secret`, `token`, `apiKey`, `dsn`, …), vycházejí jako `***`, v parametrech i ve výsledcích dotazů. A výsledky nesoucí data z vaší aplikace, řádky z databáze a záznamy logu, jsou označené jako nedůvěryhodné, takže AI ví, že nemá poslouchat instrukce, které by v nich našla; uživatelský komentář "ignoruj své předchozí instrukce" zůstane jen komentářem.
+
+
+Vlastní toolkity
+================
+
+Vaše aplikace má i vlastní fakta, která by AI ráda znala: čekající objednávky, feature flagy, tenanty. Přidejte toolkit: třídu implementující `Nette\McpInspector\Toolkit`, jejíž veřejné metody označené `#[McpTool]` se stanou nástroji. Docblock je popis nástroje, pište ho tedy pro AI: co nástroj vrací a kdy ho volat.
+
+```php
+namespace App\Mcp;
+
+use Mcp\Capability\Attribute\McpTool;
+use Mcp\Schema\ToolAnnotations;
+use Nette\McpInspector\AppContainer;
+use Nette\McpInspector\Toolkit;
+use Nette\McpInspector\UntrustedData;
+
+class BlogToolkit implements Toolkit
+{
+	public function __construct(
+		private AppContainer $app,
+	) {}
+
+	public function isAvailable(): bool
+	{
+		return true;
+	}
+
+	/**
+	 * Get a blog post by ID.
+	 * @param int $id Post ID
+	 */
+	#[UntrustedData]
+	#[McpTool(name: 'blog_get_post', title: 'Blog post', annotations: new ToolAnnotations(readOnlyHint: true))]
+	public function getPost(int $id): array
+	{
+		$post = $this->app->get()->getByType(BlogFacade::class)->getPost($id);
+		return $post ? ['id' => $post->id, 'title' => $post->title] : ['error' => 'not found'];
+	}
+}
+```
+
+Několik věcí stojí za povšimnutí. Toolkit závisí na `AppContainer`, jehož `get()` vrací aktuální kontejner vaší aplikace, takže se respektuje znovunačtení konfigurace; přes něj se dostanete k jakékoli službě. `isAvailable()` dovolí toolkitu ustoupit, když aplikaci chybí to, co potřebuje. Atribut `#[UntrustedData]` označuje nástroj, jehož výsledek nese data z aplikace (příspěvky, komentáře, uživatelský vstup), a inspektor pak AI řekne, aby instrukce v nich neposlouchala. A `readOnlyHint: true` říká AI nástroji, že volání je bezpečné a nemusí se vás pokaždé ptát.
+
+Toolkit zaregistrujte jako službu v konfiguraci inspektoru, ne v konfiguraci aplikace:
+
+```neon
+# config/mcp-inspector.neon
+services:
+	- App\Mcp\BlogToolkit
+```
+
+AI teď může volat `blog_get_post` jako kterýkoli vestavěný nástroj. Vyzkoušejte ho nejdřív z terminálu: `vendor/bin/mcp-inspector call blog_get_post '{"id": 1}'`.
+
+{{composer: nette/mcp-inspector}}
+{{repo: nette/mcp-inspector}}

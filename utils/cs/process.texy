@@ -1,0 +1,382 @@
+Process: Spouštění externích programů .{data-version:4.1.4}
+***********************************************************
+
+.[perex]
+Třída [api:Nette\Utils\Process] umožňuje z PHP spouštět externí programy: posílat jim vstup, číst jejich výstup a reagovat na to, jak skončily. Je to přívětivý obal nad PHP funkcí `proc_open()`, který hlásí chyby vyhazováním výjimek místo vracení `false`.
+
+
+Instalace:
+
+```shell
+composer require nette/utils
+```
+
+Všechny příklady předpokládají vytvořený alias:
+
+```php
+use Nette\Utils\Process;
+```
+
+
+Nejjednodušší použití
+=====================
+
+Chcete spustit program a přečíst, co vypsal? Stačí tohle:
+
+```php
+$process = Process::runExecutable('git', ['log', '-1', '--format=%H']);
+echo $process->getStdOutput();
+```
+
+První argument je program, který se má spustit, druhý je seznam jeho argumentů: totéž, co byste napsali na příkazové řádce, jen rozdělené do pole. Metoda `getStdOutput()` počká, až program doběhne, a vrátí vše, co zapsal na svůj standardní výstup.
+
+To je celá myšlenka: spustíte proces a pak se ho ptáte: běží ještě, co vypsal, jak skončil. Zbytek této stránky probírá tyto otázky jednu po druhé.
+
+
+Spuštění procesu
+================
+
+Proces lze spustit dvěma způsoby a stojí za to ten rozdíl pochopit.
+
+
+static runExecutable(string $executable, array $arguments=[], ?array $env=null, array $options=[], mixed $stdin='', mixed $stdout=null, mixed $stderr=null, ?string $directory=null, ?float $timeout=60): Process .[method]
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Spustí **jeden konkrétní program** se seznamem argumentů. Argumenty se programu předají přímo, takže nikdy nemusíte escapovat mezery, uvozovky ani jiné speciální znaky. A protože nevstupuje do hry žádný shell, nehrozí *shell injection*. Tohle je bezpečná volba, zvlášť když část příkazu pochází z uživatelského vstupu:
+
+```php
+$file = $_GET['file']; // může být cokoli, třeba '; rm -rf /'
+$process = Process::runExecutable('wc', ['-l', $file]); // naprosto bezpečné
+```
+
+Pokud neuvedete plnou cestu, program se hledá v systémové proměnné `PATH`. Pro spuštění PHP skriptu se hodí konstanta `PHP_BINARY`:
+
+```php
+$process = Process::runExecutable(PHP_BINARY, ['-v']);
+```
+
+
+static runCommand(string $command, ?array $env=null, array $options=[], mixed $stdin='', mixed $stdout=null, mixed $stderr=null, ?string $directory=null, ?float $timeout=60): Process .[method]
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Spustí **příkaz zadaný řetězcem přes systémový shell** (`/bin/sh` na Linuxu a macOS, `cmd.exe` na Windows). Tím získáte možnosti shellu: roury `|`, přesměrování `>`, expanzi proměnných, řetězení příkazů přes `&&` a podobně:
+
+```php
+$process = Process::runCommand('git log --oneline | head -n 20');
+```
+
+Protože ale shell celý řetězec parsuje, **nikdy nesestavujte řetězec pro `runCommand()` z nedůvěryhodného vstupu**, což je klasická bezpečnostní díra. Když si nejste jisti, použijte raději `runExecutable()`.
+
+.[note]
+Při tolika parametrech je předávejte jako pojmenované argumenty, např. `Process::runExecutable('git', ['pull'], timeout: 30)`. Pole `$options` se předává přímo do `proc_open()` pro pokročilé potřeby, jako třeba `bypass_shell` na Windows.
+
+
+Proces běží na pozadí
+=====================
+
+Po spuštění proces běží **souběžně** s vaším PHP skriptem: `runExecutable()` i `runCommand()` se vrátí okamžitě a nečekají, až proces doběhne. Vy rozhodujete, kdy (a zda) na něj počkáte:
+
+```php
+$process = Process::runExecutable('npm', ['install']);
+
+// ... tady mezitím dělej jinou práci, zatímco běží npm ...
+
+$process->wait(); // teď počkej, až doběhne
+```
+
+V praxi voláte `wait()` přímo jen zřídka, protože `getStdOutput()`, `getExitCode()`, `isSuccess()` i `ensureSuccess()` na proces počkají automaticky, než vám dají odpověď. `wait()` zavolejte explicitně tehdy, když mu chcete předat [callback |#Sledování výstupu naživo].
+
+
+isRunning(): bool .[method]
+---------------------------
+
+Vrací `true`, dokud proces běží, a `false`, jakmile doběhl nebo byl ukončen. Hodí se, když chcete mezitím dělat něco jiného:
+
+```php
+while ($process->isRunning()) {
+	// dělej mezitím něco jiného
+	usleep(100_000); // 100 ms
+}
+```
+
+
+Jak skončil?
+============
+
+Každý dokončený proces má *návratový kód*: konvenčně `0` znamená úspěch a jakékoli jiné číslo nějaký druh selhání (co přesně, záleží na programu).
+
+
+getExitCode(): int .[method]
+----------------------------
+
+Vrátí návratový kód; pokud je potřeba, nejprve počká, až proces doběhne:
+
+```php
+$code = Process::runExecutable('git', ['pull'])->getExitCode(); // např. 0
+```
+
+
+isSuccess(): bool .[method]
+---------------------------
+
+Zkratka pro "rovná se návratový kód `0`?":
+
+```php
+$process = Process::runExecutable('git', ['pull']);
+if (!$process->isSuccess()) {
+	echo 'git selhal: ' . $process->getStdError();
+}
+```
+
+
+ensureSuccess(): void .[method]
+-------------------------------
+
+Často chcete prostě jen to, aby program uspěl, a jinak hlasitě selhat. `ensureSuccess()` počká na proces a vyhodí `Nette\Utils\ProcessFailedException`, pokud návratový kód není `0`:
+
+```php
+Process::runExecutable('git', ['pull'])->ensureSuccess();
+// dál se pokračuje, jen když git uspěl
+```
+
+
+Čtení výstupu
+=============
+
+Proces má dva oddělené výstupní proudy: **standardní výstup** (běžné výsledky) a **chybový výstup** (kam programy obvykle hlásí problémy a diagnostiku). Nette Utils tyto dva drží odděleně a ve výchozím nastavení oba zachytává do paměti, takže si je můžete přečíst, kdykoli budete chtít.
+
+
+getStdOutput(): string .[method]
+--------------------------------
+
+Počká, až proces doběhne, a vrátí vše, co zapsal na standardní výstup:
+
+```php
+$process = Process::runExecutable('date');
+echo $process->getStdOutput();
+```
+
+
+getStdError(): string .[method]
+-------------------------------
+
+Totéž, ale pro chybový výstup:
+
+```php
+$process = Process::runExecutable('some-tool', ['--do-stuff']);
+if (!$process->isSuccess()) {
+	throw new RuntimeException('Nástroj selhal: ' . $process->getStdError());
+}
+```
+
+.[note]
+Pokud výstupní proud [přesměrujete jinam |#Přesměrování výstupu jinam] (do souboru, do resource nebo na `false`), není v paměti co vracet a příslušný getter vyhodí `Nette\InvalidStateException`.
+
+
+consumeStdOutput(): string .[method]
+------------------------------------
+
+Někdy chcete vidět výstup **tak, jak přichází**, bez čekání na konec procesu, třeba abyste zobrazili průběh. Každé volání vrátí kus standardního výstupu, který se objevil od předchozího volání:
+
+```php
+$process = Process::runExecutable('long-running-tool');
+
+while ($process->isRunning()) {
+	echo $process->consumeStdOutput(); // vypíše, co je nového
+	usleep(100_000); // 100 ms
+}
+echo $process->consumeStdOutput(); // poslední kus, vypsaný těsně před koncem
+```
+
+Volání `consumeStdOutput()` za smyčkou není zbytečné: poslední kus výstupu mohl proces vypsat během poslední pauzy `usleep()`, tedy až po posledním volání uvnitř smyčky, ale ještě než si smyčka jeho konce všimla. (Pokud proces skončil přímo během některého volání uvnitř smyčky, vrátilo to volání zbytek samo a tohle vrátí prázdný řetězec.) Pro chybový výstup existuje obdobné `consumeStdError()`.
+
+
+Sledování výstupu naživo
+========================
+
+Místo pollování přes `consumeStdOutput()` můžete metodě `wait()` předat callback. Ten se zavolá pokaždé, když se objeví nový výstup, což se hodí pro průběžné logování nebo přeposílání výstupu jinam:
+
+```php
+$process = Process::runExecutable('npm', ['install']);
+
+$process->wait(function (string $stdOut, string $stdErr) {
+	echo $stdOut;            // přepošli standardní výstup
+	fwrite(STDERR, $stdErr); // a chybový výstup
+});
+```
+
+Callback dostane dva řetězce: nová data standardního výstupu a nová data chybového výstupu od předchozího volání (kterýkoli může být prázdný). Když se `wait()` vrátí, proces je dokončený a stále můžete volat `getExitCode()`, `getStdOutput()` a další.
+
+
+Posílání vstupu
+===============
+
+Parametr `$stdin` říká, co proces čte na svém standardním vstupu. Přijímá několik různých věcí.
+
+**Řetězec** se stane celým vstupem procesu:
+
+```php
+$process = Process::runExecutable('wc', ['-c'], stdin: 'hello world');
+echo $process->getStdOutput(); // 11
+```
+
+**Čitelný resource** (otevřený soubor, stream) se do vstupu zkopíruje:
+
+```php
+$file = fopen('data.csv', 'r');
+$process = Process::runExecutable('sort', stdin: $file);
+```
+
+**`null`** ponechá vstup otevřený, takže do něj můžete zapisovat postupně (viz níže).
+
+Výchozí hodnotou je prázdný řetězec, což znamená, že proces dostane prázdný, okamžitě uzavřený vstup. To je rozumné výchozí chování: zabrání tomu, aby programy, které čtou vstup, navždy visely a čekaly na něco, co nikdy nepřijde.
+
+
+writeStdInput(string $string): void .[method]
+---------------------------------------------
+
+Když proces spustíte s `stdin: null`, vstup zůstane otevřený a vy ho plníte po částech. Až skončíte, zavolejte `closeStdInput()`. Tím programu řeknete, že už žádný vstup nepřijde (pošle se konec souboru, EOF):
+
+```php
+$process = Process::runExecutable('some-repl', stdin: null);
+$process->writeStdInput("první příkaz\n");
+$process->writeStdInput("druhý příkaz\n");
+$process->closeStdInput();
+echo $process->getStdOutput();
+```
+
+.[note]
+Řetězec nebo stream předaný jako `$stdin` se zapíše celý najednou, ještě než se proces pořádně rozběhne. Pokud je tento vstup velký *a zároveň* program produkuje hodně výstupu, aniž by si nejdřív přečetl vstup, mohou obě strany uváznout v čekání na sebe navzájem. V tom (vzácném) případě použijte `stdin: null` a `writeStdInput()`, abyste prokládali zápis čtením.
+
+
+Řetězení procesů (piping)
+=========================
+
+Standardní výstup jednoho procesu můžete napojit přímo na standardní vstup druhého, přesně jako rourou `|` v shellu. Stačí jako `$stdin` předat `Process`:
+
+```php
+$producer = Process::runExecutable('cat', ['big.log']);
+$consumer = Process::runExecutable('grep', ['error'], stdin: $producer);
+
+echo $consumer->getStdOutput();
+```
+
+Zřetězit můžete libovolný počet procesů (`a | b | c`).
+
+.[note]
+Řetězení procesů **není podporováno na Windows** (vyhodí `Nette\NotSupportedException`). Na Windows zachyťte výstup prvního procesu pomocí `getStdOutput()` a předejte ho dalšímu jako řetězec.
+
+
+Přesměrování výstupu jinam
+==========================
+
+Ve výchozím nastavení se standardní i chybový výstup zachytávají do paměti. Parametry `$stdout` a `$stderr` umožňují poslat je místo toho jinam.
+
+**Název souboru** pošle výstup do tohoto souboru:
+
+```php
+Process::runExecutable('mysqldump', ['mydb'], stdout: 'backup.sql')
+	->ensureSuccess();
+```
+
+**Zapisovatelný resource** pošle výstup do tohoto streamu. Musí být podložený skutečným souborem (ne `php://memory` apod.):
+
+```php
+$log = fopen('build.log', 'a');
+Process::runExecutable('make', stdout: $log, stderr: $log);
+```
+
+**`false`** výstup úplně zahodí (jde do `/dev/null`, resp. `NUL` na Windows):
+
+```php
+Process::runExecutable('noisy-tool', stderr: false);
+```
+
+Přesměrování zároveň drží spotřebu paměti nízko: zachytávání do paměti je pohodlné, ale proces, který vypíše gigabajty, by spotřeboval gigabajty RAM, takže takový výstup zapisujte do souboru.
+
+
+Proměnné prostředí
+==================
+
+Parametr `$env` nastavuje proměnné prostředí, které proces uvidí. Ponechte `null` (výchozí), aby zdědil prostředí aktuálního procesu, nebo předejte pole a nastavte si je sami:
+
+```php
+// aktuální prostředí plus jedna proměnná navíc
+$process = Process::runExecutable('printenv', ['MY_VAR'], env: ['MY_VAR' => '123'] + getenv());
+
+// úplně prázdné prostředí
+$process = Process::runExecutable('some-tool', env: []);
+```
+
+
+Pracovní adresář
+================
+
+Parametr `$directory` nastavuje adresář, ve kterém proces startuje (výchozí je ten aktuální):
+
+```php
+$process = Process::runExecutable('git', ['status'], directory: '/path/to/repo');
+```
+
+
+Časový limit
+============
+
+Parametr `$timeout` (v sekundách, výchozí `60`) omezuje, jak dlouho budete na proces čekat. Pokud se limit překročí během toho, co na proces čekáte nebo čtete jeho výstup, proces se zabije a vyhodí se `Nette\Utils\ProcessTimeoutException`. Předáním `null` limit zrušíte:
+
+```php
+$process = Process::runExecutable('slow-tool', timeout: 5.0);
+try {
+	$process->wait();
+} catch (Nette\Utils\ProcessTimeoutException $e) {
+	echo 'Nástroj běžel příliš dlouho a byl ukončen.';
+}
+```
+
+Limit se kontroluje jen tehdy, když jste uvnitř `wait()`, `getExitCode()`, getterů výstupu nebo `consume*()`. Proces, který spustíte a pak na něj nikdy nečekáte, jím zabit není.
+
+
+Ukončení procesu
+================
+
+
+terminate(): void .[method]
+---------------------------
+
+Okamžitě zabije proces, pokud ještě běží; pokud už doběhl, neudělá nic:
+
+```php
+$process = Process::runExecutable('server');
+// ...
+$process->terminate();
+```
+
+Proces se také ukončí automaticky, když je jeho objekt `Process` zničen (například opustí platnost) a ještě nedoběhl.
+
+.[note]
+Chcete-li proces, který přežije běh PHP skriptu (démon, úloha na pozadí), nespouštějte ho přes `Process`, ale odpojeně přes shell, např. `nohup yourtask >/dev/null 2>&1 &` na POSIXu nebo `start /b yourtask` na Windows.
+
+
+getPid(): ?int .[method]
+------------------------
+
+Vrátí ID procesu (PID) operačního systému, dokud proces běží, nebo `null`, jakmile doběhl:
+
+```php
+$pid = $process->getPid();
+```
+
+
+Když se něco pokazí
+===================
+
+Chyby se vždy hlásí vyhozením výjimky, nikdy návratovou hodnotou:
+
+| `Nette\Utils\ProcessFailedException` | proces se nepodařilo spustit, nebo byla zavolána `ensureSuccess()` a návratový kód nebyl `0`
+| `Nette\Utils\ProcessTimeoutException` | byl překročen limit daný parametrem `$timeout`
+| `Nette\InvalidArgumentException` | jako `$stdin`, `$stdout` nebo `$stderr` byla předána neplatná hodnota
+| `Nette\IOException` | soubor zadaný jako `$stdout` nebo `$stderr` se nepodařilo otevřít
+| `Nette\InvalidStateException` | čtení výstupu, který nebyl zachytáván, nebo zápis do STDIN, který je už zavřený
+| `Nette\NotSupportedException` | o řetězení procesů se pokusilo na Windows
+
+`ProcessFailedException` a `ProcessTimeoutException` dědí z PHP `RuntimeException`.

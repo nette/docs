@@ -1,0 +1,268 @@
+Vlastní formulářové prvky
+*************************
+
+.[perex]
+Nette nabízí širokou paletu [vestavěných formulářových prvků |controls]. Když ale narazíte na požadavek, který mezi nimi není, nemusíte nic obcházet ani slepovat: napíšete si prvek vlastní. Bude umět všechno, co ty vestavěné - validovat, překládat se, vykreslovat - a používat se bude úplně stejně.
+
+Ukážeme si to na praktickém příkladu: prvku pro zadání data pomocí tří políček, den, měsíc a rok. Cestou se seznámíte se vším, co k psaní prvků potřebujete vědět.
+
+
+Kdy vlastní prvek psát a kdy ne
+===============================
+
+Vlastní prvek je nejsilnější nástroj, který formuláře nabízejí. A jako každý silný nástroj má být tou poslední volbou, ne první. Řadu situací totiž vyřeší jednodušší prostředky:
+
+- **Úpravu hodnoty** zvládne [addFilter() |validation#Úprava vstupu]. Chcete tolerovat mezery v PSČ nebo malá písmena v kódu? Filtr je pár řádků.
+- **Opakovanou konfiguraci** zabalí vlastní přidávací metoda. Přidáváte na deseti místech políčko na PSČ se stejnou validací? Vytvořte si pro ně pojmenovanou zkratku, [ukážeme si to na konci |#Vlastní přidávací metoda].
+- **Skupinu souvisejících polí** obslouží [kontejner |controls#addContainer]. Adresa složená z ulice, města a PSČ nepotřebuje vlastní prvek, stačí kontejner se třemi textovými políčky.
+- **Jiný vzhled** zařídí [setHtmlType() |controls#addText] a HTML atributy, případně [prototypy |rendering#Prototypy].
+
+Vlastní prvek dává smysl ve chvíli, kdy potřebujete **vlastní hodnotu**: když navenek vystupuje jako jediné pole s jedinou hodnotou, ale uvnitř se skládá z několika inputů nebo hodnotu ukládá jinak, než jak ji zobrazuje. Datum ze tří políček. Souřadnice vybrané kliknutím do mapy. Tag input s našeptávačem.
+
+
+Anatomie prvku
+==============
+
+Každý vlastní prvek dědí od abstraktní třídy [api:Nette\Forms\Controls\BaseControl]. Z ní zdědí obrovské množství hotové funkcionality: uchovávání hodnoty, validační pravidla a podmínky, chybové zprávy, překlady, HTML atributy, popisku i napojení na vykreslování. Vy dopíšete jen to, čím se váš prvek liší.
+
+Minimální funkční prvek je překvapivě krátký:
+
+```php
+use Nette\Forms\Form;
+use Nette\Forms\Helpers;
+use Nette\Utils\Html;
+
+class SimpleInput extends Nette\Forms\Controls\BaseControl
+{
+	public function loadHttpData(): void
+	{
+		$this->setValue($this->getHttpData(Form::DataLine));
+	}
+
+	public function getControl(): Html
+	{
+		return Html::el('input', [
+			'type' => 'text',
+			'name' => $this->getHtmlName(),
+			'id' => $this->getHtmlId(),
+			'value' => $this->getValue(),
+			'data-nette-rules' => Helpers::exportRules($this->getRules()) ?: null,
+		]);
+	}
+}
+```
+
+Dvě metody: jedna říká, jak z odeslaných dat získat hodnotu, druhá jak prvek vykreslit. Obě si hned podrobně rozebereme. Všechno ostatní - `setRequired()`, `addRule()`, `setDefaultValue()`, překlady - už funguje samo.
+
+Do formuláře prvek přidáte metodou `addComponent()`, nebo stručněji přes hranaté závorky:
+
+```php
+$form['nickname'] = new SimpleInput('Přezdívka:');
+```
+
+
+Životní cyklus prvku
+====================
+
+Než se pustíme do zajímavějšího prvku, je dobré vědět, co se s ním děje a kdy. Formulář i jeho prvky jsou [komponenty |component-model:], které tvoří strom. To má jeden příjemný důsledek: prvek nemusí nic zjišťovat sám, o všechno podstatné se postará framework v pravou chvíli:
+
+1) V okamžiku, kdy prvek připojíte k odeslanému formuláři, formulář na něm sám zavolá `loadHttpData()`. V ní si prvek přečte svou odeslanou hodnotu, jak si ukážeme za chvíli. Nikdy nepracuje přímo s `$_POST` a nemusí vůbec řešit, zda je zanořený v kontejnerech.
+
+2) Při odeslání formuláře proběhne validace: vyhodnotí se pravidla přidaná přes `addRule()`, která pracují s hodnotou z `getValue()`.
+
+3) Kdo pak zavolá `$form->getValues()` nebo `getValue()` na prvku, dostane už čistou, typovanou hodnotu - třeba objekt `DateTimeImmutable`, nikoliv trojici řetězců z formuláře.
+
+A při vykreslování se zavolá `getControl()`, respektive `getLabel()` pro popisku.
+
+
+Čtení odeslané hodnoty
+======================
+
+V metodě `loadHttpData()` si prvek řekne o svou odeslanou hodnotu metodou `getHttpData()`. Jejím parametrem je typ, který určuje, jak se má hodnota očistit:
+
+| typ | význam
+|-------
+| `Form::DataLine` | jednořádkový text: nahradí odřádkování mezerami, ořeže mezery
+| `Form::DataText` | víceřádkový text: znormalizuje konce řádků na `\n`
+| `Form::DataFile` | upload, instance `Nette\Http\FileUpload`
+
+Ať se útočník snaží sebevíc, výsledkem je vždy validní UTF-8 řetězec bez kontrolních znaků (nebo objekt uploadu či `null`). Právě proto hodnotu nikdy nečteme přímo z `$_POST` - přišli bychom o všechny tyto záruky.
+
+Prvek skládající se z více inputů, jako naše datum, předá druhým parametrem část HTML jména a přečte si tak jednotlivé pod-hodnoty. Ukládá si je do vlastních properties `$day`, `$month` a `$year` typu string:
+
+```php
+public function loadHttpData(): void
+{
+	$this->day = $this->getHttpData(Form::DataLine, '[day]') ?? '';
+	$this->month = $this->getHttpData(Form::DataLine, '[month]') ?? '';
+	$this->year = $this->getHttpData(Form::DataLine, '[year]') ?? '';
+}
+```
+
+Pokud HTML jméno končí na `[]`, vrátí se pole hodnot. Kombinací s typem `Form::DataKeys` (tedy `Form::DataLine | Form::DataKeys`) navíc zachováte jeho klíče:
+
+```php
+$tags = $this->getHttpData(Form::DataLine, '[tags][]');
+```
+
+Chybějící hodnota je `null` (u polí prázdné pole). Požadavek totiž nemusí data prvku vůbec obsahovat, útočníkovi nic nebrání poslat, co se mu zlíbí - proto v ukázce doplňujeme `?? ''` a proto vždy počítejte i s touto variantou.
+
+
+Hodnota prvku
+=============
+
+Prvek uchovává svou hodnotu a navenek ji zpřístupňuje trojicí metod, jejichž kontrakt je dobré dodržet.
+
+Metoda `setValue()` přijímá hodnotu od programátora - touto cestou přichází i `setDefaultValue()` a `$form->setDefaults()`. Měla by akceptovat vše, co dává smysl, hodnotu si převést do vnitřní podoby a na nesmyslný vstup vyhodit výjimku, aby se chyba projevila hned a ne až záhadným chováním formuláře. Naše datum přijme `DateTimeInterface`, řetězec, timestamp nebo `null` a rozloží je do tří políček:
+
+```php
+public function setValue(mixed $value): static
+{
+	if ($value === null) {
+		$this->day = $this->month = $this->year = '';
+	} else {
+		$date = Nette\Utils\DateTime::from($value); // nesmysl vyhodí výjimku
+		$this->day = $date->format('j');
+		$this->month = $date->format('n');
+		$this->year = $date->format('Y');
+	}
+	return $this;
+}
+```
+
+Metoda `getValue()` naopak skládá čistou, typovanou hodnotu - to jediné, co uvidí uživatel vašeho prvku. Pokud hodnota není platná, vrací `null`. Statická metoda `validateDate()` prostě zkontroluje, že trojice políček dává dohromady existující datum:
+
+```php
+public function getValue(): ?DateTimeImmutable
+{
+	return self::validateDate($this)
+		? (new DateTimeImmutable)->setDate((int) $this->year, (int) $this->month, (int) $this->day)->setTime(0, 0)
+		: null;
+}
+```
+
+A metoda `isFilled()` říká, zda uživatel prvek vyplnil - používá ji pravidlo `setRequired()`. Výchozí implementace (neprázdná hodnota) často stačí, u složeného prvku ji ale přepište podle jeho logiky:
+
+```php
+public function isFilled(): bool
+{
+	return $this->day !== '' || $this->year !== '';
+}
+```
+
+
+Vykreslování
+============
+
+Metoda `getControl()` vrací HTML podobu prvku, obvykle jako objekt [Html |utils:html-elements], klidně ale i jako řetězec - na tom nezáleží. Po objektu Html sáhneme hlavně při skládání kódu, protože s ním výsledné HTML sestavíme bezpečně a s příjemným API. K dispozici máte několik pomocníků:
+
+- `getHtmlName()` vrací HTML atribut `name`, včetně případného zanoření do kontejnerů (např. `invoice[date]`). U složeného prvku k němu připojíte části jmen jednotlivých inputů: `$name . '[day]'`.
+- `getHtmlId()` vrací atribut `id` provázaný s popiskou.
+- `Helpers::exportRules($this->getRules())` vyexportuje validační pravidla pro atribut `data-nette-rules`, díky kterému bude fungovat [JavaScriptová validace |validation#JavaScriptová validace] i u vašeho prvku. Atribut patří na první input prvku.
+- `Helpers::createSelectBox($items, $optionAttrs, $selected)` sestaví z pole položek element `<select>` (zanořená pole se vykreslí jako `<optgroup>`) a vrátí jej jako `Html` - hodí se třeba pro políčko měsíce našeho data.
+- `Helpers::createInputList($items, $inputAttrs, $labelAttrs)` vygeneruje seznam prvků `<input>` obalených v `<label>` (radio buttony nebo checkboxy) a vrátí jej jako řetězec.
+
+První políčko našeho data tedy vznikne takto:
+
+```php
+public function getControl(): Html
+{
+	$name = $this->getHtmlName();
+	return Html::el()
+		->addHtml(Html::el('input', [
+			'name' => $name . '[day]',
+			'id' => $this->getHtmlId(),
+			'value' => $this->day,
+			'type' => 'number',
+			'data-nette-rules' => Helpers::exportRules($this->getRules()) ?: null,
+		]))
+		->addHtml(/* ... select pro měsíc a input pro rok ... */);
+}
+```
+
+Popisku vykresluje `getLabel()` a její výchozí implementace obvykle vyhovuje. Jen pozor: u složeného prvku ukazuje atributem `for` na `getHtmlId()`, dejte tedy toto id prvnímu inputu - přesně jako v ukázce.
+
+Aby šlo složený prvek v šabloně vykreslovat po částech (např. `{input birthdate:day}`), přepište metody `getControlPart($key)` a `getLabelPart($key)`, které vrací `Html` element dané části - stejně, jako to dělají `CheckboxList` a `RadioList`.
+
+.[note]
+Pokud přepisujete `getControl()`, mějte na paměti, že `BaseControl::getControl()` zároveň označuje prvek jako vykreslený pomocí `setOption('rendered', true)`. Zavolejte to také (nebo zavolejte `parent::getControl()`), když kombinujete ruční a automatické vykreslování téhož formuláře, aby se prvek nevykreslil dvakrát. (Ukázka `DateInput` výše to pro stručnost nedělá.)
+
+
+Kompletní příklad: DateInput
+============================
+
+Všechny popsané kousky pohromadě, doplněné o select box pro výběr měsíce, najdete v hotovém prvku `DateInput` mezi [příklady přímo v repozitáři |https://github.com/nette/forms/blob/master/examples/custom-control.php].
+
+Za pozornost stojí, že prvek si v konstruktoru sám přidává validační pravidlo kontrolující smysluplnost data. Nesmyslný vstup, třeba 31. února, se tak projeví jako běžná validační chyba formuláře:
+
+```php
+public function __construct($label = null)
+{
+	parent::__construct($label);
+	$this->addRule(self::validateDate(...), 'Datum není platné.');
+}
+```
+
+A použití? Přesně jako u vestavěných prvků:
+
+```php
+$form['birthdate'] = (new DateInput('Datum narození:'))
+	->setDefaultValue(new DateTime('2000-01-01'))
+	->setRequired('Kdy jste se narodil?');
+
+$date = $form->getValues()->birthdate; // ?DateTimeImmutable
+```
+
+V Latte šabloně ho vykreslíte běžnou značkou `{input birthdate}` nebo `{label birthdate /}`, stejně jako kterýkoliv jiný prvek.
+
+
+Validace
+========
+
+Vestavěná validační pravidla fungují s vlastním prvkem rovnou - pracují s hodnotou z `getValue()`. Náš `DateInput` tak může používat třeba `Form::Min` pro nejstarší povolené datum. Jak psát pravidla vlastní, včetně JavaScriptového protějšku, popisuje kapitola [Vlastní pravidla a podmínky |validation#Vlastní pravidla a podmínky].
+
+
+Vlastní přidávací metoda
+========================
+
+Vestavěné prvky přidáváme pohodlnými metodami `$form->addText()` a spol. Vlastní prvek žádnou takovou metodu nemá, přidáte ho proto prostým přiřazením - funguje stejně ve formuláři i v kontejneru a editory i statická analýza tomu rozumí:
+
+```php
+$form['birthdate'] = new DateInput('Datum narození:');
+```
+
+Pokud chcete přidávání zkrátit a zároveň zachovat našeptávání, nabízí se statická tovární metoda přímo na prvku. Ta funguje i ve vnořených kontejnerech, což by metoda na potomkovi třídy `Form` neuměla - vnořené kontejnery ji totiž neznají:
+
+```php
+class DateInput extends Nette\Forms\Controls\BaseControl
+{
+	public static function addTo(
+		Nette\Forms\Container $container,
+		string $name,
+		?string $label = null,
+	): self {
+		return $container[$name] = new self($label);
+	}
+}
+
+// funguje ve formuláři i v libovolném kontejneru:
+DateInput::addTo($form, 'birthdate', 'Datum narození:');
+```
+
+Stejný postup se hodí i jako pojmenovaná zkratka pro opakovanou konfiguraci vestavěného prvku:
+
+```php
+final class ZipInput
+{
+	public static function addTo(
+		Nette\Forms\Container $container,
+		string $name,
+		?string $label = null,
+	): Nette\Forms\Controls\TextInput {
+		return $container->addText($name, $label)
+			->addRule(Nette\Forms\Form::Pattern, 'PSČ musí mít přesně 5 číslic', '[0-9]{5}');
+	}
+}
+
+ZipInput::addTo($form, 'zip', 'PSČ:');
+```

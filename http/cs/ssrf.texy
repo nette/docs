@@ -1,0 +1,183 @@
+Ochrana proti SSRF
+******************
+
+.[perex]
+Když vaše aplikace stahuje URL zadanou uživatelem, může toho útočník zneužít a dostat se do vaší interní sítě. Třídy [#UrlValidator] a [#IPAddress] vám pomohou bránit se těmto útokům Server-Side Request Forgery (SSRF).
+
+→ [Instalace a požadavky |@home#Instalace]
+
+
+Co je SSRF?
+===========
+
+Představte si funkci, kde uživatel zadá URL a váš server ji stáhne – avatar ze vzdálené adresy, cíl webhooku, náhled odkazu. Vypadá to neškodně, ale na adresu se připojuje server, ne prohlížeč uživatele. A server vidí místa, kam útočník nedosáhne: loopback rozhraní, privátní síť, cloudové služby.
+
+Útočník proto pošle URL, která místo na veřejný internet míří dovnitř. Typickými cíli jsou:
+
+- cloudová metadata na `http://169.254.169.254/`, která mohou prozradit přístupové klíče
+- interní administrace a routery jako `http://192.168.1.1/`
+- služby bez autentizace, například Redis na `http://localhost:6379/`
+
+Tato třída zranitelností je tak rozšířená, že patří mezi [OWASP Top 10 |https://owasp.org/Top10/]. Obranou je ověřit URL **dříve**, než ji stáhnete, a odmítnout vše, co se přeloží na neveřejnou adresu.
+
+
+UrlValidator
+============
+
+[api:Nette\Http\UrlValidator] ověřuje URL proti konfigurovatelné politice: schéma, port, host, userinfo a IP adresy, na které se host přeloží. Základní použití je jediné volání:
+
+```php
+use Nette\Http\UrlValidator;
+
+if (!(new UrlValidator)->allows($userUrl)) {
+	return; // nebezpečná URL, nestahujte ji
+}
+```
+
+Výchozí politika je záměrně přísná – akceptuje pouze `https` na portu 443 mířící na veřejnou IP adresu. Vše ostatní (loopback, privátní rozsahy, link-local včetně cloudových metadat, rezervované rozsahy) je odmítnuto a multicast je odmítnut bezpodmínečně. To je správný výchozí bod pro stahování libovolných URL zadaných uživatelem.
+
+
+Konfigurace politiky
+--------------------
+
+Politiku tvarujete přes konstruktor. Například chcete-li povolit prosté `http` na libovolném portu a dosáhnout na privátní adresy (užitečné uvnitř důvěryhodné sítě):
+
+```php
+$validator = new UrlValidator(
+	schemes: ['http', 'https'],
+	ports: null, // libovolný port
+	allowPrivateIps: true,
+);
+```
+
+Častým vzorem je omezit stahování na pevnou sadu partnerských domén pomocí allowlistu hostů. Prefix `*.` odpovídá libovolné hloubce subdomény, ale ne samotné doméně – pokud ji potřebujete, uveďte oba tvary:
+
+```php
+$validator = new UrlValidator(
+	hostAllowlist: ['example.com', '*.example.com'],
+);
+```
+
+Kompletní sada možností konstruktoru:
+
+| Parametr | Výchozí | Význam
+|---------------------
+| `schemes` | `['https']` | povolená schémata; `[]` odmítne vše
+| `ports` | `[443]` | povolené porty, `null` = libovolný; implicitní port ze schématu je respektován
+| `allowPrivateIps` | `false` | povolit privátní rozsahy (10/8, 172.16/12, 192.168/16, fc00::/7)
+| `allowLoopback` | `false` | povolit loopback (127.0.0.0/8, ::1)
+| `allowLinkLocal` | `false` | povolit link-local vč. cloudových metadat 169.254.169.254
+| `allowReserved` | `false` | povolit rozsahy rezervované IANA
+| `allowUserinfo` | `false` | povolit `user:pass@` v URL
+| `hostAllowlist` | `null` | pokud je nastaven, host musí odpovídat jednomu vzoru; `[]` odmítne vše
+| `hostBlocklist` | `null` | pokud je nastaven, host nesmí odpovídat žádnému vzoru
+
+
+Metody validace
+--------------
+
+Validátor nabízí tři metody. `allows()` provede plnou kontrolu včetně překladu DNS – host se přeloží a **každá** A/AAAA adresa musí projít IP politikou:
+
+```php
+(new UrlValidator)->allows($url); // bool
+```
+
+`allowsWithoutDns()` přeskakuje překlad DNS a kontroly IP rozsahů. Použijte ji jako rychlý předfiltr, nebo když je validace DNS delegována na stahovací vrstvu:
+
+```php
+(new UrlValidator)->allowsWithoutDns($url); // bool
+```
+
+Obě metody přijímají řetězec, objekt [UrlImmutable |urls#UrlImmutable] nebo `null` (které vždy selže).
+
+
+Obrana proti DNS rebindingu
+--------------------------
+
+Mezi validací a stažením je záludný souboj: útočník může při ověřování hostu vrátit bezpečnou IP a poté pro samotné stažení přepnout DNS na interní IP. K uzavření této díry vrací `getResolvedIPs()` ověřené IP adresy a vy na ně připnete spojení, aby stahování nešlo přesměrovat jinam:
+
+```php
+$ips = (new UrlValidator)->getResolvedIPs($url);
+if (!$ips) {
+	return; // nebezpečná URL
+}
+
+$ch = curl_init($url);
+$host = parse_url($url, PHP_URL_HOST);
+curl_setopt($ch, CURLOPT_RESOLVE, ["$host:443:" . implode(',', $ips)]);
+// ... proveďte požadavek
+```
+
+Metoda vrací pole IP řetězců (nejprve A záznamy, poté AAAA), které prošly celou politikou, nebo prázdné pole při jakémkoli selhání. Pro IP literál v URL ověří adresu přímo a žádný překlad DNS neprovádí.
+
+
+IPAddress
+=========
+
+[api:Nette\Http\IPAddress] je neměnný hodnotový objekt pro práci s IPv4 a IPv6 adresami. `UrlValidator` jej využívá interně, ale hodí se i samostatně, kdykoli adresy klasifikujete. Konstruktor vyhodí `Nette\InvalidArgumentException` u neplatné adresy:
+
+```php
+use Nette\Http\IPAddress;
+
+$ip = new IPAddress('169.254.169.254');
+echo $ip; // '169.254.169.254'
+```
+
+Když nechcete výjimku, použijte tovární metodu `tryFrom()` nebo kontrolu `isValid()`:
+
+```php
+$ip = IPAddress::tryFrom($input); // ?IPAddress
+IPAddress::isValid($input);       // bool
+```
+
+
+Klasifikace adres
+----------------
+
+Predikáty říkají, do jaké třídy adresa patří. Klíčový je `isPublic()` – pravdivý jen pro veřejně směrovatelné adresy, což je přesně to, co obrana proti SSRF potřebuje:
+
+```php
+$ip = new IPAddress('169.254.169.254');
+$ip->isPublic();    // false
+$ip->isLinkLocal(); // true (rozsah cloudových metadat)
+```
+
+Kompletní sada predikátů:
+
+| Metoda | Testuje
+|--------------------
+| `isPublic()` | veřejně směrovatelná (žádná z níže uvedených)
+| `isPrivate()` | privátní rozsahy RFC 1918 / 4193
+| `isLoopback()` | 127.0.0.0/8, ::1
+| `isLinkLocal()` | 169.254.0.0/16 (vč. cloudových metadat), fe80::/10
+| `isMulticast()` | 224.0.0.0/4, ff00::/8
+| `isReserved()` | rezervováno IANA (dokumentace, CGNAT, budoucí použití, …)
+
+
+Příslušnost k rozsahu
+--------------------
+
+`isInRange()` testuje, zda adresa spadá do CIDR bloku. Můžete předat síť s prefixem, nebo holou adresu pro přesnou shodu (implicitní /32 pro IPv4, /128 pro IPv6):
+
+```php
+$ip = new IPAddress('192.168.1.50');
+$ip->isInRange('192.168.0.0/16'); // true
+$ip->isInRange('10.0.0.1');       // false (přesná shoda)
+```
+
+Chybný vstup nebo jiná rodina IP vrací `false`.
+
+
+IPv4-mapped IPv6
+----------------
+
+Adresy zapsané jako IPv4-mapped IPv6 (například `::ffff:127.0.0.1`) jsou klasickým způsobem, jak proklouznout naivními filtry. `IPAddress` je normalizuje, takže predikáty rozsahů prohlédnou přestrojení:
+
+```php
+$ip = new IPAddress('::ffff:127.0.0.1');
+$ip->isLoopback();   // true
+$ip->isIPv4Mapped(); // true
+$ip->toIPv4();       // IPAddress('127.0.0.1')
+```
+
+Metody `isIPv4()` a `isIPv6()` hlásí textový tvar: mapovaná adresa je IPv6, nikoli IPv4.

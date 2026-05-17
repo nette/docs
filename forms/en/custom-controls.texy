@@ -1,0 +1,268 @@
+Custom Form Controls
+********************
+
+.[perex]
+Nette offers a wide palette of [built-in form controls |controls]. But when you run into a requirement that isn't among them, you don't have to work around anything or glue things together: you write your own control. It will be able to do everything the built-in ones can - validate, translate itself, render - and it will be used exactly the same way.
+
+We'll show it on a practical example: a control for entering a date using three fields, day, month, and year. Along the way, you'll learn everything you need to know about writing controls.
+
+
+When to Write a Custom Control and When Not To
+==============================================
+
+A custom control is the most powerful tool that forms offer. And like every powerful tool, it should be the last choice, not the first. Many situations can be solved by simpler means:
+
+- **Modifying a value** is handled by [addFilter() |validation#Modifying Input Values]. Want to tolerate spaces in a ZIP code or lowercase letters in a code? A filter is a few lines.
+- **Repeated configuration** is wrapped by a custom adding method. Adding a ZIP code field with the same validation in ten places? Create a named shortcut for them, [we'll show it at the end |#Custom Adding Method].
+- **A group of related fields** is served by a [container |controls#addContainer]. An address composed of street, city, and ZIP code doesn't need a custom control, a container with three text fields is enough.
+- **A different look** is achieved with [setHtmlType() |controls#addText] and HTML attributes, or [prototypes |rendering#Prototypes].
+
+A custom control makes sense the moment you need a **custom value**: a control that acts as a single field with a single value on the outside, but internally consists of several inputs or stores the value differently than it displays it. A date from three fields. Coordinates picked by clicking on a map. A tag input with autocomplete.
+
+
+Anatomy of a Control
+====================
+
+Every custom control inherits from the abstract class [api:Nette\Forms\Controls\BaseControl]. From it, it inherits a huge amount of ready-made functionality: value storage, validation rules and conditions, error messages, translations, HTML attributes, the label, and the connection to rendering. You write only what makes your control different.
+
+A minimal working control is surprisingly short:
+
+```php
+use Nette\Forms\Form;
+use Nette\Forms\Helpers;
+use Nette\Utils\Html;
+
+class SimpleInput extends Nette\Forms\Controls\BaseControl
+{
+	public function loadHttpData(): void
+	{
+		$this->setValue($this->getHttpData(Form::DataLine));
+	}
+
+	public function getControl(): Html
+	{
+		return Html::el('input', [
+			'type' => 'text',
+			'name' => $this->getHtmlName(),
+			'id' => $this->getHtmlId(),
+			'value' => $this->getValue(),
+			'data-nette-rules' => Helpers::exportRules($this->getRules()) ?: null,
+		]);
+	}
+}
+```
+
+Two methods: one says how to obtain the value from the submitted data, the other how to render the control. We'll take a close look at both in a moment. Everything else - `setRequired()`, `addRule()`, `setDefaultValue()`, translations - already works by itself.
+
+You add the control to the form using the `addComponent()` method, or more concisely via square brackets:
+
+```php
+$form['nickname'] = new SimpleInput('Nickname:');
+```
+
+
+Life Cycle of a Control
+=======================
+
+Before we get to a more interesting control, it's good to know what happens to a control and when. The form and its controls are [components |component-model:] forming a tree. This has one pleasant consequence: the control doesn't have to find out anything on its own, the framework takes care of everything important at the right moment:
+
+1) The moment you attach the control to a submitted form, the form itself calls `loadHttpData()` on it. In it, the control reads its submitted value, as we'll show in a moment. It never works directly with `$_POST` and doesn't have to care at all whether it's nested in containers.
+
+2) When the form is submitted, validation takes place: the rules added via `addRule()` are evaluated, working with the value from `getValue()`.
+
+3) Whoever then calls `$form->getValues()` or `getValue()` on the control gets a clean, typed value - such as a `DateTimeImmutable` object, not a triple of strings from the form.
+
+And during rendering, `getControl()` is called, or `getLabel()` for the label.
+
+
+Reading the Submitted Value
+===========================
+
+In the `loadHttpData()` method, the control asks for its submitted value using the `getHttpData()` method. Its parameter is a type that determines how the value should be cleaned:
+
+| type | meaning
+|-------
+| `Form::DataLine` | single-line text: replaces line breaks with spaces, trims spaces
+| `Form::DataText` | multi-line text: normalizes line endings to `\n`
+| `Form::DataFile` | upload, an instance of `Nette\Http\FileUpload`
+
+No matter how hard an attacker tries, the result is always a valid UTF-8 string without control characters (or an upload object or `null`). This is exactly why we never read the value directly from `$_POST` - we'd lose all these guarantees.
+
+A control consisting of several inputs, like our date, passes a part of the HTML name as the second parameter and reads its individual sub-values this way. It stores them in its own properties `$day`, `$month`, and `$year` of type string:
+
+```php
+public function loadHttpData(): void
+{
+	$this->day = $this->getHttpData(Form::DataLine, '[day]') ?? '';
+	$this->month = $this->getHttpData(Form::DataLine, '[month]') ?? '';
+	$this->year = $this->getHttpData(Form::DataLine, '[year]') ?? '';
+}
+```
+
+If the HTML name ends with `[]`, an array of values is returned. By combining with the `Form::DataKeys` type (i.e. `Form::DataLine | Form::DataKeys`), you also preserve its keys:
+
+```php
+$tags = $this->getHttpData(Form::DataLine, '[tags][]');
+```
+
+A missing value is `null` (an empty array for arrays). The request doesn't have to contain the control's data at all, nothing prevents an attacker from sending whatever they like - that's why we add `?? ''` in the example and why you should always account for this variant.
+
+
+Value of the Control
+====================
+
+The control keeps its value and exposes it through a trio of methods whose contract is worth following.
+
+The `setValue()` method accepts a value from the programmer - this is also the path taken by `setDefaultValue()` and `$form->setDefaults()`. It should accept everything that makes sense, convert the value to its internal form, and throw an exception on nonsensical input, so that the error shows up immediately and not through mysterious form behavior. Our date accepts a `DateTimeInterface`, a string, a timestamp, or `null`, and splits them into the three fields:
+
+```php
+public function setValue(mixed $value): static
+{
+	if ($value === null) {
+		$this->day = $this->month = $this->year = '';
+	} else {
+		$date = Nette\Utils\DateTime::from($value); // nonsense throws an exception
+		$this->day = $date->format('j');
+		$this->month = $date->format('n');
+		$this->year = $date->format('Y');
+	}
+	return $this;
+}
+```
+
+The `getValue()` method, on the other hand, composes a clean, typed value - the only thing the user of your control will see. If the value is not valid, it returns `null`. The static method `validateDate()` simply checks that the three fields add up to an existing date:
+
+```php
+public function getValue(): ?DateTimeImmutable
+{
+	return self::validateDate($this)
+		? (new DateTimeImmutable)->setDate((int) $this->year, (int) $this->month, (int) $this->day)->setTime(0, 0)
+		: null;
+}
+```
+
+And the `isFilled()` method says whether the user has filled in the control - it's used by the `setRequired()` rule. The default implementation (a non-empty value) often suffices, but for a composite control, override it according to its logic:
+
+```php
+public function isFilled(): bool
+{
+	return $this->day !== '' || $this->year !== '';
+}
+```
+
+
+Rendering
+=========
+
+The `getControl()` method returns the HTML form of the control, usually as an [Html |utils:html-elements] object, but a plain string is fine too - it doesn't matter. We reach for the Html object mainly when assembling the code, because it lets us build the resulting markup safely and with a pleasant API. You have several helpers at your disposal:
+
+- `getHtmlName()` returns the HTML `name` attribute, including possible nesting in containers (e.g. `invoice[date]`). For a composite control, you append the name parts of the individual inputs to it: `$name . '[day]'`.
+- `getHtmlId()` returns the `id` attribute linked with the label.
+- `Helpers::exportRules($this->getRules())` exports the validation rules for the `data-nette-rules` attribute, thanks to which [JavaScript validation |validation#JavaScript Validation] will work for your control too. The attribute belongs on the first input of the control.
+- `Helpers::createSelectBox($items, $optionAttrs, $selected)` assembles a `<select>` element from an array of items (nested arrays are rendered as `<optgroup>`) and returns it as `Html` - handy for the month field of our date.
+- `Helpers::createInputList($items, $inputAttrs, $labelAttrs)` generates a list of `<input>` elements wrapped in `<label>`s (radio buttons or checkboxes) and returns it as a string.
+
+The first field of our date is therefore created like this:
+
+```php
+public function getControl(): Html
+{
+	$name = $this->getHtmlName();
+	return Html::el()
+		->addHtml(Html::el('input', [
+			'name' => $name . '[day]',
+			'id' => $this->getHtmlId(),
+			'value' => $this->day,
+			'type' => 'number',
+			'data-nette-rules' => Helpers::exportRules($this->getRules()) ?: null,
+		]))
+		->addHtml(/* ... select for the month and input for the year ... */);
+}
+```
+
+The label is rendered by `getLabel()` and its default implementation usually suits. Just beware: for a composite control, its `for` attribute points to `getHtmlId()`, so give this id to the first input - exactly as in the example.
+
+To let the composite control be rendered part by part in a template (e.g. `{input birthdate:day}`), override the `getControlPart($key)` and `getLabelPart($key)` methods, which return the `Html` element for the given part - the same way `CheckboxList` and `RadioList` do.
+
+.[note]
+If you override `getControl()`, keep in mind that `BaseControl::getControl()` also marks the control as rendered via `setOption('rendered', true)`. Call it as well (or call `parent::getControl()`) when you combine manual and automatic rendering of the same form, so the control is not rendered twice. (The `DateInput` example above omits this for brevity.)
+
+
+Complete Example: DateInput
+===========================
+
+All the described pieces together, complemented by a select box for choosing the month, can be found in the finished `DateInput` control among the [examples right in the repository |https://github.com/nette/forms/blob/master/examples/custom-control.php].
+
+Note that in the constructor, the control adds a validation rule to itself that checks the date makes sense. Nonsensical input, such as February 31, thus shows up as an ordinary form validation error:
+
+```php
+public function __construct($label = null)
+{
+	parent::__construct($label);
+	$this->addRule(self::validateDate(...), 'The date is invalid.');
+}
+```
+
+And the usage? Exactly like with the built-in controls:
+
+```php
+$form['birthdate'] = (new DateInput('Date of birth:'))
+	->setDefaultValue(new DateTime('2000-01-01'))
+	->setRequired('When were you born?');
+
+$date = $form->getValues()->birthdate; // ?DateTimeImmutable
+```
+
+In a Latte template, you render it with the usual `{input birthdate}` or `{label birthdate /}` tag, just like any other control.
+
+
+Validation
+==========
+
+The built-in validation rules work with a custom control right away - they operate on the value from `getValue()`. Our `DateInput` can thus use, for example, `Form::Min` for the oldest allowed date. How to write your own rules, including their JavaScript counterpart, is described in the chapter [Custom Rules and Conditions |validation#Custom Rules and Conditions].
+
+
+Custom Adding Method
+====================
+
+We add built-in controls with the convenient methods `$form->addText()` and friends. A custom control has no such method, so you add it by plain assignment - it works the same in a form and in a container, and editors and static analysis understand it:
+
+```php
+$form['birthdate'] = new DateInput('Date of birth:');
+```
+
+If you want to shorten the adding while keeping autocompletion, a static factory method right on the control comes in handy. It works even in nested containers, which a method on a descendant of the `Form` class couldn't do - nested containers don't know about it:
+
+```php
+class DateInput extends Nette\Forms\Controls\BaseControl
+{
+	public static function addTo(
+		Nette\Forms\Container $container,
+		string $name,
+		?string $label = null,
+	): self {
+		return $container[$name] = new self($label);
+	}
+}
+
+// works in a form and in any container:
+DateInput::addTo($form, 'birthdate', 'Date of birth:');
+```
+
+The same approach also works as a named shortcut for repeated configuration of a built-in control:
+
+```php
+final class ZipInput
+{
+	public static function addTo(
+		Nette\Forms\Container $container,
+		string $name,
+		?string $label = null,
+	): Nette\Forms\Controls\TextInput {
+		return $container->addText($name, $label)
+			->addRule(Nette\Forms\Form::Pattern, 'The ZIP code must be exactly 5 digits', '[0-9]{5}');
+	}
+}
+
+ZipInput::addTo($form, 'zip', 'ZIP code:');
+```

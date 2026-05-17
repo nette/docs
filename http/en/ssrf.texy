@@ -1,0 +1,183 @@
+SSRF Protection
+***************
+
+.[perex]
+When your application downloads a URL supplied by a user, an attacker can abuse it to reach your internal network. The [#UrlValidator] and [#IPAddress] classes help you guard against these Server-Side Request Forgery (SSRF) attacks.
+
+→ [Installation and requirements |@home#Installation]
+
+
+What is SSRF?
+=============
+
+Imagine a feature where the user enters a URL and your server downloads it – an avatar from a remote address, a webhook target, a link preview. It looks harmless, but the server reaches the address, not the user's browser. And the server can see places the attacker can't: the loopback interface, the private network, cloud services.
+
+An attacker therefore submits a URL that points inward instead of to the public internet. Typical targets are:
+
+- cloud metadata at `http://169.254.169.254/`, which can leak access keys
+- internal admin panels and routers like `http://192.168.1.1/`
+- services with no authentication, such as Redis on `http://localhost:6379/`
+
+This class of vulnerability is so common it ranks among the [OWASP Top 10 |https://owasp.org/Top10/]. The defense is to validate the URL **before** you fetch it and to refuse anything that resolves to a non-public address.
+
+
+UrlValidator
+============
+
+[api:Nette\Http\UrlValidator] checks a URL against a configurable policy: the scheme, port, host, userinfo, and the IP addresses the host resolves to. The basic usage is a single call:
+
+```php
+use Nette\Http\UrlValidator;
+
+if (!(new UrlValidator)->allows($userUrl)) {
+	return; // unsafe URL, do not fetch it
+}
+```
+
+The default policy is deliberately strict – it only accepts `https` on port 443 pointing to a public IP address. Everything else (loopback, private ranges, link-local including cloud metadata, reserved ranges) is rejected, and multicast is rejected unconditionally. This is the right starting point for fetching arbitrary user-supplied URLs.
+
+
+Configuring the Policy
+----------------------
+
+You shape the policy through the constructor. For example, to allow plain `http` on any port and reach private addresses (useful inside a trusted network):
+
+```php
+$validator = new UrlValidator(
+	schemes: ['http', 'https'],
+	ports: null, // any port
+	allowPrivateIps: true,
+);
+```
+
+A common pattern is to restrict fetching to a fixed set of partner domains using a host allowlist. The `*.` prefix matches any subdomain depth but not the apex – list both forms if you need it:
+
+```php
+$validator = new UrlValidator(
+	hostAllowlist: ['example.com', '*.example.com'],
+);
+```
+
+The full set of constructor options:
+
+| Parameter | Default | Meaning
+|---------------------
+| `schemes` | `['https']` | allowed schemes; `[]` rejects everything
+| `ports` | `[443]` | allowed ports, `null` = any; the implicit port from the scheme is honored
+| `allowPrivateIps` | `false` | allow private ranges (10/8, 172.16/12, 192.168/16, fc00::/7)
+| `allowLoopback` | `false` | allow loopback (127.0.0.0/8, ::1)
+| `allowLinkLocal` | `false` | allow link-local incl. cloud metadata 169.254.169.254
+| `allowReserved` | `false` | allow IANA-reserved ranges
+| `allowUserinfo` | `false` | allow `user:pass@` in the URL
+| `hostAllowlist` | `null` | if set, host must match one pattern; `[]` rejects all
+| `hostBlocklist` | `null` | if set, host must not match any pattern
+
+
+Validation Methods
+------------------
+
+The validator offers three methods. `allows()` runs the full check including DNS resolution – the host is resolved and **every** A/AAAA address must pass the IP policy:
+
+```php
+(new UrlValidator)->allows($url); // bool
+```
+
+`allowsWithoutDns()` skips DNS resolution and the IP-range checks. Use it as a fast pre-filter, or when DNS validation is delegated to the fetch layer:
+
+```php
+(new UrlValidator)->allowsWithoutDns($url); // bool
+```
+
+Both methods accept a string, a [UrlImmutable |urls#UrlImmutable] object, or `null` (which always fails).
+
+
+Defeating DNS Rebinding
+-----------------------
+
+There is a subtle race between validation and fetching: an attacker can return a safe IP when you validate the host, then switch DNS to an internal IP for the actual download. To close this hole, `getResolvedIPs()` returns the validated IP addresses, and you pin the connection to them so the fetch can't be redirected elsewhere:
+
+```php
+$ips = (new UrlValidator)->getResolvedIPs($url);
+if (!$ips) {
+	return; // unsafe URL
+}
+
+$ch = curl_init($url);
+$host = parse_url($url, PHP_URL_HOST);
+curl_setopt($ch, CURLOPT_RESOLVE, ["$host:443:" . implode(',', $ips)]);
+// ... execute the request
+```
+
+The method returns an array of IP strings (A records first, then AAAA) that passed the full policy, or an empty array on any failure. For an IP literal in the URL it validates the address directly and performs no DNS lookup.
+
+
+IPAddress
+=========
+
+[api:Nette\Http\IPAddress] is an immutable value object for working with IPv4 and IPv6 addresses. `UrlValidator` uses it internally, but it's handy on its own whenever you classify addresses. The constructor throws `Nette\InvalidArgumentException` for an invalid address:
+
+```php
+use Nette\Http\IPAddress;
+
+$ip = new IPAddress('169.254.169.254');
+echo $ip; // '169.254.169.254'
+```
+
+When you don't want an exception, use the `tryFrom()` factory or the `isValid()` checker:
+
+```php
+$ip = IPAddress::tryFrom($input); // ?IPAddress
+IPAddress::isValid($input);       // bool
+```
+
+
+Address Classification
+----------------------
+
+The predicates tell you which class an address belongs to. The key one is `isPublic()` – true only for publicly routable addresses, which is exactly what an SSRF guard wants:
+
+```php
+$ip = new IPAddress('169.254.169.254');
+$ip->isPublic();    // false
+$ip->isLinkLocal(); // true (cloud metadata range)
+```
+
+The full set of predicates:
+
+| Method | Tests for
+|--------------------
+| `isPublic()` | publicly routable (none of the below)
+| `isPrivate()` | RFC 1918 / 4193 private ranges
+| `isLoopback()` | 127.0.0.0/8, ::1
+| `isLinkLocal()` | 169.254.0.0/16 (incl. cloud metadata), fe80::/10
+| `isMulticast()` | 224.0.0.0/4, ff00::/8
+| `isReserved()` | IANA-reserved (documentation, CGNAT, future-use, …)
+
+
+Range Membership
+----------------
+
+`isInRange()` tests whether the address falls within a CIDR block. You can pass a network with a prefix, or a bare address for an exact match (implicit /32 for IPv4, /128 for IPv6):
+
+```php
+$ip = new IPAddress('192.168.1.50');
+$ip->isInRange('192.168.0.0/16'); // true
+$ip->isInRange('10.0.0.1');       // false (exact match)
+```
+
+Malformed input or a different IP family returns `false`.
+
+
+IPv4-mapped IPv6
+----------------
+
+Addresses written as IPv4-mapped IPv6 (such as `::ffff:127.0.0.1`) are a classic way to slip past naive filters. `IPAddress` normalizes them, so the range predicates see through the disguise:
+
+```php
+$ip = new IPAddress('::ffff:127.0.0.1');
+$ip->isLoopback();   // true
+$ip->isIPv4Mapped(); // true
+$ip->toIPv4();       // IPAddress('127.0.0.1')
+```
+
+The `isIPv4()` and `isIPv6()` methods report the textual form: a mapped address is IPv6, not IPv4.

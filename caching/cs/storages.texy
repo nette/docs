@@ -1,0 +1,190 @@
+Úložiště
+********
+
+<div class=perex>
+
+Úložiště určuje, kde data z cache fyzicky leží: v souborech na disku, na serveru Memcached nebo v databázi SQLite. Vyměnit ho můžete, aniž byste sáhli na kód, který cache používá. Tato stránka vám pomůže:
+
+- vybrat správné úložiště a zjistit, co které umí
+- nastavit ho v aplikaci Nette, případně cache vypnout
+- použít úložiště z Nette jako PSR-16 cache
+- napsat si vlastní úložiště
+
+</div>
+
+
+Výběr úložiště
+==============
+
+Pokud si nejste jistí, nechte výchozí `FileStorage`. Stačí mu adresář, je bezpečné, i když najednou čte a zapisuje mnoho požadavků, a podporuje všechny druhy závislostí.
+
+Když aplikace běží na více serverech, `FileStorage` dá každému z nich vlastní cache. `MemcachedStorage` ukládá data na server, který sdílejí všechny, jenže tagy a priority si drží v [journalu |#journal], což je soubor na každém serveru zvlášť, takže mazání podle tagu na jednom serveru se k ostatním nedostane.
+
+Úložiště se liší tím, které [závislosti |expiration] umí respektovat:
+
+|-------------------------------------------------------------------------------------------------
+| Úložiště | Tagy, priority | Soubory, konstanty, callbacky | Jiné položky | Klouzavá expirace | Mazání jmenných prostorů | Ochrana proti stampede
+|-------------------------------------------------------------------------------------------------
+| [#FileStorage] | s [journalem |#journal] | ano | ano | ano | ano | ano
+| [#MemcachedStorage] | s [journalem |#journal] | ano | ne | ano | ignoruje | ne
+| [#SQLiteStorage] | jen tagy | ignoruje | ignoruje | ano | ignoruje | ne
+| [#MemoryStorage] | ignoruje | ignoruje | ignoruje | ignoruje | ignoruje | ne
+| [#DevNullStorage] | nic neukládá | | | | |
+
+Kde tabulka uvádí ignoruje, úložiště závislost potichu zahodí, takže položka podle ní prostě nevyexpiruje. `MemoryStorage` ignoruje dokonce i expiraci. Jen `MemcachedStorage` vyhodí `Nette\NotSupportedException`, a to pro závislost na jiných položkách.
+
+Ochrana proti stampede znamená, že když o chybějící položku požádá najednou mnoho požadavků, generátor z `load()` spustí jen první z nich a ostatní počkají na jeho výsledek. Bez ní hodnotu počítají všechny zároveň.
+
+
+Konfigurace
+===========
+
+V aplikaci postavené na Nette poskytuje DI kontejner `FileStorage`, které ukládá data do podadresáře `cache` v adresáři pro [dočasné soubory |application:bootstrapping#Dočasné soubory], a k němu i journal. Dostanete ho pomocí [dependency injection |dependency-injection:passing-dependencies], když si řeknete o typ `Nette\Caching\Storage`.
+
+Pokud chcete jiné úložiště, nahraďte v konfiguraci službu `cache.storage`:
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\MemcachedStorage('10.0.0.5')
+```
+
+Kontejner obsahuje tyto dvě služby:
+
+| Název | Typ | Popis
+|----------------------------------------------------------
+| `cache.storage` | [api:Nette\Caching\Storage] | úložiště
+| `cache.journal` | [api:Nette\Caching\Storages\Journal] | [journal |#journal] pro tagy a priority
+
+
+Vypnutí cache
+-------------
+
+Pokud chcete cache vypnout, třeba v testech, použijte [#DevNullStorage], které nic neukládá:
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\DevNullStorage
+```
+
+Na cache šablon Latte a DI kontejneru to nemá vliv, ty jsou samostatné a toto úložiště nepoužívají. Během vývoje je ostatně [není potřeba vypínat |nette:troubleshooting#Jak vypnout cache během vývoje].
+
+
+FileStorage
+===========
+
+`Nette\Caching\Storages\FileStorage` zapisuje každou položku do souboru v zadaném adresáři, který musí existovat. Tagy a priority potřebují [journal |#journal]:
+
+```php
+$journal = new Nette\Caching\Storages\SQLiteJournal('/path/to/temp/journal.s3db');
+$storage = new Nette\Caching\Storages\FileStorage('/path/to/temp', $journal);
+```
+
+Všechny operace jsou atomické. Nikdy nepřečtete soubor, který jiný požadavek ještě nedopsal, a nikdo vám ho nemůže smazat pod rukama, zatímco ho čtete. Úložiště je proto bezpečné i pod velkou zátěží.
+
+Navíc chrání před [cache stampede |https://en.wikipedia.org/wiki/Cache_stampede]. Když o chybějící položku požádá najednou mnoho požadavků, třeba hned po nasazení, první z nich soubor zamkne a spustí generátor. Ostatní počkají na zámek a pak přečtou čerstvou hodnotu, místo aby ji počítaly znovu.
+
+Vyexpirované soubory čas od času smaže konstruktor. Pokud je chcete smazat v okamžiku, který si zvolíte sami, zavolejte `$storage->clean([])`.
+
+
+MemcachedStorage
+================
+
+`Nette\Caching\Storages\MemcachedStorage` ukládá data na server [Memcached |https://memcached.org]. Konstruktor přijímá adresu serveru a port, výchozí je 11211. Tagy a priority potřebují [journal |#journal].
+
+.[caution]
+Vyžaduje PHP rozšíření `memcached`.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\MemcachedStorage('10.0.0.5')
+```
+
+Memcached neumí vypsat své klíče, takže úložiště mazání podle jmenných prostorů ignoruje. Pro závislost na jiných položkách vyhodí výjimku. Smazání celé cache vyprázdní celý server Memcached včetně dat jiných aplikací.
+
+
+SQLiteStorage
+=============
+
+`Nette\Caching\Storages\SQLiteStorage` drží celou cache v jediném souboru databáze SQLite. Tagy si ukládá do vlastní tabulky, takže nepotřebuje journal.
+
+.[caution]
+Vyžaduje PHP rozšíření `pdo` a `pdo_sqlite`.
+
+```neon
+services:
+	cache.storage: Nette\Caching\Storages\SQLiteStorage('%tempDir%/cache.db')
+```
+
+Úložiště podporuje expiraci, klouzavou expiraci a tagy. Priority, závislosti na souborech, konstantách, callbackech a jiných položkách i mazání podle jmenných prostorů potichu ignoruje.
+
+
+MemoryStorage
+=============
+
+`Nette\Caching\Storages\MemoryStorage` drží data v PHP poli, takže se s koncem požadavku ztratí. Hodí se pro testy a pro cachování v rámci jednoho požadavku.
+
+Ignoruje všechny závislosti včetně expirace a z podmínek metody `clean()` respektuje jen `Cache::All`. Myslete na to, když jím v testech nahrazujete skutečné úložiště: položka, která by tam vyexpirovala, tady zůstane.
+
+
+DevNullStorage
+==============
+
+`Nette\Caching\Storages\DevNullStorage` nic neukládá, takže každé `load()` zavolá generátor. Použijte ho pro [vypnutí cache |#Vypnutí cache].
+
+
+Journal
+=======
+
+`FileStorage` a `MemcachedStorage` neumí své položky vyhledávat podle tagu nebo priority, proto si vedou samostatný index, tzv. journal. Vestavěný `Nette\Caching\Storages\SQLiteJournal` ho ukládá do databáze SQLite:
+
+```php
+$journal = new Nette\Caching\Storages\SQLiteJournal('/path/to/temp/journal.s3db');
+```
+
+.[caution]
+Vyžaduje PHP rozšíření `pdo` a `pdo_sqlite`.
+
+V aplikaci postavené na Nette se journal vytvoří za vás jako služba `cache.journal` v souboru `journal.s3db` a úložišti se předá automaticky. Nahradit ho může vaše vlastní implementace rozhraní `Nette\Caching\Storages\Journal`:
+
+```neon
+services:
+	cache.journal: MyJournal
+```
+
+Bez journalu tato úložiště fungují také, jen uložení položky s tagy nebo prioritou vyhodí výjimku.
+
+
+Úložiště jako PSR-16 cache .{data-version:3.3.1}
+================================================
+
+Některé knihovny očekávají [PSR-16 |https://www.php-fig.org/psr/psr-16/] cache. Adaptér `Nette\Bridges\Psr\PsrCacheAdapter` jim ji poskytne nad libovolným úložištěm z Nette:
+
+```php
+$psrCache = new Nette\Bridges\Psr\PsrCacheAdapter($storage);
+
+$psrCache->set('key', 'value', 3600); // uloží hodnotu na 1 hodinu
+$value = $psrCache->get('key', 'default');
+```
+
+Adaptér podporuje všechny metody PSR-16 včetně `getMultiple()`, `setMultiple()` a `deleteMultiple()`.
+
+
+Vlastní úložiště
+================
+
+Úložiště je třída, která implementuje rozhraní `Nette\Caching\Storage` (před verzí 3.1 se jmenovalo `Nette\Caching\IStorage`) s pěti metodami:
+
+- `read(string $key)` vrátí uloženou hodnotu, nebo `null`, když položka neexistuje nebo vyexpirovala
+- `lock(string $key): void` zamkne položku, než `Cache` spustí generátor; zámek uvolní `write()` nebo `remove()` a úložiště, které před cache stampede nechrání, nechá metodu prázdnou
+- `write(string $key, mixed $data, array $dependencies): void` hodnotu uloží
+- `remove(string $key): void` položku smaže
+- `clean(array $conditions): void` smaže položky podle podmínek metody [clean() |expiration#Mazání položek]; prázdné pole znamená odstranit vyexpirované položky
+
+Závislosti přicházejí jako pole s klíči `Cache::*`, které už `Cache` zjednodušila: expirace je počet sekund od teď, ze souborů a konstant se staly callbacky a jiné položky jsou dané svými klíči v úložišti. Při čtení položky ověřte její callbacky pomocí `Nette\Caching\Cache::checkCallbacks()`. Pro závislost nebo podmínku, kterou vaše úložiště neumí, vyhoďte `Nette\NotSupportedException`.
+
+Další schopnosti přidávají volitelná rozhraní. `Nette\Caching\BulkReader` a od verze 3.3 i `Nette\Caching\BulkWriter` umožní úložišti číst a zapisovat více položek najednou.
+
+Krátkým úplným příkladem je zdrojový kód [SQLiteStorage |https://github.com/nette/caching/blob/v3.4/src/Caching/Storages/SQLiteStorage.php].
+
+{{maintitle: Úložiště Nette Caching: soubory, Memcached, SQLite}}
+{{description: Vyberte, kam cache z Nette ukládá data: soubory, Memcached nebo SQLite. Porovnejte, co které úložiště umí, a nastavte ho ve své aplikaci.}}

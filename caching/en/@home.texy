@@ -1,0 +1,252 @@
+Nette Caching
+*************
+
+<div class=perex>
+
+Does your application compute the same thing over and over, such as turning an article into HTML, running a slow database query or calling a remote API? Nette Caching remembers the result and hands it back next time in a fraction of the time:
+
+- One method reads the value from the cache, or computes and stores it when it is missing
+- Data expires after a while, or when a file, another item or your own condition changes
+- Tags delete exactly the items related to the article you just edited
+- A crowd of requests for a missing item does not overload the server
+- Stores data in files, Memcached or SQLite
+- Caches parts of Latte templates
+
+</div>
+
+
+Installation
+============
+
+Download and install the package using [Composer|best-practices:composer]:
+
+```shell
+composer require nette/caching
+```
+
+
+Your First Cache
+================
+
+The easiest way to show it is with an example. Let's say you run a blog. Every time someone opens an article, your code loads it from the database and turns its text into HTML. That takes a while, and the result is the same for every visitor until you edit the article. A perfect candidate for the cache.
+
+We'll write it as a short script. First, we create two objects:
+
+```php
+use Nette\Caching\Cache;
+use Nette\Caching\Storages\FileStorage;
+
+require __DIR__ . '/vendor/autoload.php';
+
+$storage = new FileStorage(__DIR__ . '/temp');
+$cache = new Cache($storage, 'articles');
+```
+
+The **storage** decides where the data physically lives. `FileStorage` keeps it in files in the `temp` directory, which must exist. The **cache** is the object you will work with. Its second argument, `'articles'`, is a namespace: it keeps the articles apart from whatever else the application caches, so two parts of the program can use the same key without clashing.
+
+Now the important part. The cache works like an associative array: you read and write values under keys. The method `load()` does both at once:
+
+```php
+$html = $cache->load("article/$id", function () use ($id) {
+	return renderArticle($id); // loads the article from the database and turns it into HTML
+});
+```
+
+Here `$id` is the ID of the article being displayed. The first argument of `load()` is the key, the second is a function called the **generator**. When the key is not in the cache yet, `load()` calls the generator, stores what it returns and returns it to you. Next time, it finds the value in the cache and returns it right away, without calling the generator at all.
+
+Notice that you never check whether the value is already cached. You only say how to compute it.
+
+And what if a hundred visitors open the same article at the moment it is not cached yet, for example right after a deployment? Without protection, all hundred requests would render it at once and could overload the server. This is called a [cache stampede |https://en.wikipedia.org/wiki/Cache_stampede]. `FileStorage` prevents it: only the first request runs the generator, the others wait for its result.
+
+.[tip]
+You can cache any value PHP can serialize, not just strings: arrays, objects, numbers. The same goes for keys.
+
+To read a value without generating it, call `load()` with the key only; it returns `null` when the item is not in the cache. The method `remove()` deletes an item:
+
+```php
+$cache->remove("article/$id");
+```
+
+
+How Long Is the Data Valid?
+===========================
+
+Our cached article now never changes. But what if you fix a typo in it? Visitors would keep seeing the old version. You need to tell the cache when an item stops being valid. The simplest way is a time limit:
+
+```php
+$html = $cache->load("article/$id", function (&$dependencies) use ($id) {
+	$dependencies[Cache::Expire] = '1 hour';
+	return renderArticle($id);
+});
+```
+
+The generator now takes the parameter `$dependencies` by reference. It is an array into which the generator writes when the item expires. It is called dependencies because the validity of the item depends on them. Here it is one hour.
+
+Time is just one option. An item can also expire when a file changes, when another item in the cache changes, or when your own condition says so. All of that is described on the page [Expiration and Invalidation |expiration].
+
+
+Deleting Exactly What Changed
+=============================
+
+A time limit is a compromise: set it short, and the cache helps little; set it long, and visitors see stale data. It is better to delete the article from the cache exactly when you edit it. That is what **tags** are for. You attach them to an item as arbitrary strings:
+
+```php
+$html = $cache->load("article/$id", function (&$dependencies) use ($id) {
+	$dependencies[Cache::Tags] = ["article/$id", "comments/$id"];
+	return renderArticle($id);
+});
+```
+
+The page shows the article together with its comments, so we gave it two tags. Then, in the administration, right after you save the edited article to the database, you delete everything tagged with it:
+
+```php
+$cache->clean([Cache::Tags => ["article/$id"]]);
+```
+
+And the same when someone adds a comment, this time with the tag `comments/$id`. From now on, the cached page disappears exactly when its article or its comments change, and the next visitor gets a freshly rendered one.
+
+`FileStorage` remembers which item carries which tag in a so-called journal, a small SQLite database. In a Nette application it is set up for you; in our script, we create it and pass it to the storage:
+
+```php
+use Nette\Caching\Storages\SQLiteJournal;
+
+$journal = new SQLiteJournal(__DIR__ . '/temp/journal.s3db');
+$storage = new FileStorage(__DIR__ . '/temp', $journal);
+```
+
+Besides tags, you can delete items by priority or a whole namespace at once. See [Expiration and Invalidation |expiration#Deleting Items].
+
+
+Namespaces
+==========
+
+We already met the namespace `'articles'` in the constructor of the cache. Each part of the application should have its own, so their keys never collide. The comments could use their own cache, for example:
+
+```php
+$commentCache = new Cache($storage, 'comments');
+```
+
+The method `derive()` creates a cache in a nested namespace: `$cache->derive('previews')` gives the namespace `previews` inside `articles`. And when you want to throw away everything in a namespace, call:
+
+```php
+$cache->clean([Cache::Namespaces => ['articles']]);
+```
+
+Other namespaces, the nested ones included, stay untouched. Cleaning by namespace works with `FileStorage`; other storages ignore it. Be careful with `Cache::All`, which deletes the entire storage, all namespaces included.
+
+
+Memoization
+===========
+
+Sometimes you want to cache the result of a function call. In the comment moderation, for example, you show the host name of each author's IP address. Finding it out with `gethostbyaddr()` asks a DNS server and can take seconds. The method `call()` calls the function only once for each argument and then returns the result from the cache:
+
+```php
+$host = $cache->call('gethostbyaddr', $ip);
+```
+
+Here `$ip` is the IP address of a comment's author. The method `wrap()` does the same, but instead of calling the function right away, it returns a new function you can call later, as many times as you like:
+
+```php
+$getHost = $cache->wrap('gethostbyaddr');
+
+$host = $getHost($ip); // asks the DNS server the first time
+$host = $getHost($ip); // returns the cached result the second time
+```
+
+
+Caching Part of a Page
+======================
+
+Not everything you want to cache is a return value. Sometimes it is a block of HTML that a piece of code prints. The method `capture()` catches it:
+
+```php
+if ($capture = $cache->capture('sidebar')) {
+	// echo ... prints the sidebar with the latest articles
+	$capture->end(); // stores the printed output in the cache
+}
+```
+
+When the output is already cached, `capture()` prints it and returns `null`, so the block inside `if` does not run at all. Otherwise it starts capturing the output and returns an object whose method `end()` stores everything printed in the meantime. You can pass it dependencies, for example `$capture->end([Cache::Tags => ['articles']])`. In version 3.0, the method `capture()` was named `start()`.
+
+
+Caching in Latte
+================
+
+In [Latte|latte:] templates, it is even easier. Wrap the part you want to cache in the tags `{cache}...{/cache}`:
+
+```latte
+{cache expire: '20 minutes', tags: [articles]}
+	<h2>Latest Articles</h2>
+	...
+{/cache}
+```
+
+The block is invalidated automatically whenever the template changes, including any templates included inside the block. Blocks can be nested; when a nested block is invalidated, its parent block is invalidated too.
+
+All the parameters are optional. Without `expire`, the block expires after 7 days. If the content depends on a variable, list it at the start, and each value gets its own cached copy: `{cache $article->id}`. And the parameter `if` decides whether to cache at all:
+
+```latte
+{cache $id, if: !$form->isSubmitted()}
+	{$form}
+{/cache}
+```
+
+
+Where the Data Is Stored
+========================
+
+So far, we have used `FileStorage`, which needs nothing but a directory. Thanks to atomic file operations, it is safe even when many requests read and write at once. But it is just one of several storages:
+
+|----------------------
+| Storage | Where the data lives
+|----------------------
+| `FileStorage` | in files on disk; the default storage
+| `MemcachedStorage` | on a Memcached server
+| `SQLiteStorage` | in an SQLite database file
+| `MemoryStorage` | in memory, only until the request ends
+| `DevNullStorage` | nowhere; for tests and for turning the cache off
+
+You can switch the storage without touching the code that uses the cache. Which one to choose, what each supports and how to configure it, including turning the cache off, is described on the page [Storages |storages].
+
+
+Cache in a Nette Application
+============================
+
+In a Nette application, you do not create the storage yourself. Nette provides a `FileStorage` that stores data in the `cache` subdirectory of the directory for [temporary files |application:bootstrapping#Temporary Files], together with a journal. You get it via [dependency injection |dependency-injection:passing-dependencies] by asking for the type `Nette\Caching\Storage` (before version 3.1 named `Nette\Caching\IStorage`), and create your cache in the constructor:
+
+```php
+use Nette\Caching\Cache;
+use Nette\Caching\Storage;
+
+class ArticleFacade
+{
+	private Cache $cache;
+
+
+	public function __construct(Storage $storage)
+	{
+		$this->cache = new Cache($storage, 'articles');
+	}
+}
+```
+
+The rest is the same as in our script. Alternatively, you can have the `Cache` object itself passed to the constructor and define it in the configuration:
+
+```neon
+services:
+	- ArticleFacade( Nette\Caching\Cache(namespace: 'articles') )
+```
+
+.[note]
+The caches of Latte templates and of the DI container are separate and do not use this storage. They [do not need to be turned off |nette:troubleshooting#How to Disable Cache During Development] during development.
+
+
+What's Next
+===========
+
+- [Expiration and Invalidation |expiration] - every way to tell the cache when data expires, deleting by tags, priority and namespace
+- [Storages |storages] - choosing and configuring a storage, PSR-16, writing your own storage
+- [Upgrading |upgrading] - what changed in each version
+
+{{maintitle: PHP Caching with Nette: Storages, Expiration, Invalidation}}
+{{description: Speed up your application by storing expensive results for later. Use the Nette cache in PHP and Latte, change storages and invalidate data correctly.}}

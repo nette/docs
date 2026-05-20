@@ -1,0 +1,204 @@
+Hezké URL se slugem
+*******************
+
+.[perex]
+URL jako `/clanek/123-jak-upect-chleba` vypadá lépe než `/clanek/123` a pomáhá uživatelům i vyhledávačům pochopit, co na stránce čeká. Tento návod ukazuje, jak je generovat čistě v routeru — bez zásahu do jediné šablony — a jak zařídit, aby každý návštěvník skončil na kanonické URL.
+
+
+Proč slug v URL
+===============
+
+Porovnejte tyto dvě adresy:
+
+```
+/clanek/123
+/clanek/123-jak-upect-chleba
+```
+
+Druhá uživateli (a Googlu) prozradí, co ho po kliknutí čeká. To je dobré pro SEO, dělá odkazy čitelné v chatu nebo e-mailu a dá smysl i URL liště.
+
+Slug ale není skutečný identifikátor. Stránku určuje ID. Slug je jen dekorace, kterou aplikace generuje z titulku. Když se titulek změní, slug by se měl změnit taky. A když někdo URL ručně upraví nebo přijde po starém odkazu, aplikace by stejně měla najít správnou stránku.
+
+
+Cíl
+===
+
+Chceme routu, která zvládne všechny tyto případy:
+
+```
+/clanek/123                              → otevře článek 123, přesměruje na kanonickou URL
+/clanek/123-jak-upect-chleba             → otevře článek 123 přímo
+/clanek/123-cokoli-co-nekdo-napsal       → otevře článek 123, přesměruje na kanonickou URL
+/clanek/                                 → 404 (chybí ID)
+```
+
+A chceme, aby každé `n:href` a `link()` napříč aplikací automaticky vyrobilo `/clanek/123-jak-upect-chleba` — **bez přepisování jediné šablony**.
+
+
+Maska routy
+===========
+
+Trik spočívá v označení slugu v masce jako **nepovinného** pomocí hranatých závorek:
+
+```php
+$router->addRoute('clanek/<id [0-9]+>[-<slug>]', 'Article:detail');
+```
+
+Maska `[-<slug>]` říká: po ID může (ale nemusí) následovat pomlčka a slug. Routa přijímá `/clanek/123` i `/clanek/123-cokoli`.
+
+Poznámka k parametru `<slug>`: defaultně matchuje libovolné znaky **kromě lomítka** — přesně to, co chceme. Pokud napíšete `<slug .+>`, parametr bude matchovat i lomítka, takže `/clanek/123-neco/jineho` by se naparsovalo jako jediný slug obsahující `/`. Pokud nechcete lomítka ve slugu, zůstaňte u defaultního `<slug>`.
+
+URL se teď parsuje správně, ale generované odkazy slug neobsahují. Dalším krokem je routu naučit, jak slug doplnit.
+
+
+Generování slugu bez zásahu do šablon
+=====================================
+
+Tohle je hlavní varianta. Stávající `n:href="Article:detail, $id"` volání zůstávají beze změny napříč celou aplikací — router si titulek vyhledá sám.
+
+Použijeme **obecný filtr** pod klíčem prázdného stringu — ten vidí všechny parametry najednou a může slug doplnit:
+
+```php
+use Nette\Routing\Route;
+use Nette\Utils\Strings;
+
+$router->addRoute('clanek/<id [0-9]+>[-<slug>]', [
+	'presenter' => 'Article',
+	'action' => 'detail',
+	'' => [
+		Route::FilterOut => function (array $params) use ($slugProvider): array {
+			if (isset($params['id']) && empty($params['slug'])) {
+				$params['slug'] = $slugProvider->getSlug((int) $params['id']);
+			}
+			return $params;
+		},
+	],
+]);
+```
+
+`FilterOut` se spustí pokaždé, když router **generuje** URL. Pokud slug nebyl předán, filtr titulek dohledá a doplní.
+
+Slugy můžete nasadit napříč celou aplikací jedinou změnou — jednou definicí routy. Každý odkaz v každé šabloně začne automaticky produkovat `/clanek/123-jak-upect-chleba`. Žádný grep, žádné hledání po šablonách, žádný přehlédnutý case.
+
+
+Cache pro vyhledávání
+=====================
+
+Jedno volání odkazu znamená jeden DB dotaz, ale typická stránka jich má hodně — výpisy, drobečková navigace, „naposledy prohlížené", související články. Stejné ID článku se v rámci jednoho requestu objeví v několika odkazech a nechceme do DB chodit pokaždé.
+
+Stačí drobná per-request cache. Obalte DB volání malou službou:
+
+```php
+final class SlugProvider
+{
+	/** @var array<int, string> */
+	private array $cache = [];
+
+	public function __construct(
+		private Nette\Database\Explorer $db,
+	) {
+	}
+
+	public function getSlug(int $id): string
+	{
+		return $this->cache[$id] ??= Strings::webalize(Strings::truncate(
+			(string) $this->db->fetchField('SELECT title FROM article WHERE id = ?', $id),
+			100, ''
+		));
+	}
+}
+```
+
+To stačí — jeden DB dotaz na unikátní ID za request.
+
+
+Předání titulku ze šablony (volitelná rychlá cesta)
+===================================================
+
+Pokud máte titulek v šabloně po ruce, můžete se DB dotazu úplně vyhnout. Předejte titulek jako pojmenovaný parametr:
+
+```latte
+<a n:href="Article:detail, $article->id, slug => $article->title">{$article->title}</a>
+```
+
+…a přidejte per-parametrový `FilterOut`, který titulek převede na URL-bezpečný tvar:
+
+```php
+$router->addRoute('clanek/<id [0-9]+>[-<slug>]', [
+	'presenter' => 'Article',
+	'action' => 'detail',
+	'slug' => [
+		Route::FilterOut => fn($title) => Strings::webalize(Strings::truncate($title, 100, '')),
+	],
+	'' => [/* fallback s vyhledáním z předchozí ukázky */],
+]);
+```
+
+Oba filtry spolupracují. Per-parametrový `FilterOut` proběhne první a předaný titulek převede na slug. Obecný filtr pak vidí, že slug je už vyplněn, a vyhledání v DB přeskočí. Šablony, které titulek nepředávají, dál fungují — projdou cestou s vyhledáváním.
+
+Použijte to jen tam, kde to opravdu hraje roli (velké výpisy renderované stokrát za request). Pro většinu aplikace cachované vyhledávání stačí.
+
+
+Kanonizace: přesměrování na správnou URL
+========================================
+
+Umíme teď generovat `/clanek/123-jak-upect-chleba`, ale routa pořád přijímá `/clanek/123` i `/clanek/123-cokoli-co-nekdo-napsal`. To je záměr — chceme krátké URL (viz níže) a chceme, aby staré nebo ručně napsané odkazy fungovaly. Ale nechceme, aby vyhledávače indexovaly stejný článek pod několika adresami.
+
+Řešením je [kanonizace |application:presenters#kanonizace]: když uživatel přijde po nekanonické URL, aplikace ho přesměruje 301 na správnou. Stará se o to metoda `canonicalize()`:
+
+```php
+public function actionDetail(int $id, ?string $slug = null): void
+{
+	$article = $this->facade->getArticle($id);
+	if (!$article) {
+		$this->error();
+	}
+
+	// vygeneruje kanonickou URL přes stejný FilterOut
+	// a pokud se liší od současné URL, přesměruje HTTP 301
+	$this->canonicalize('detail', ['id' => $id]);
+
+	$this->template->article = $article;
+}
+```
+
+`canonicalize()` vygeneruje kanonickou URL stejným způsobem jako `link()` (takže projde stejným `FilterOut`) a porovná ji s aktuální URL. Pokud se liší, přesměruje HTTP 301. Návštěvník skončí na správné URL, vyhledávače vidí jen jednu kanonickou verzi.
+
+
+Jedno místo, které určuje, jak slug vypadá
+==========================================
+
+Všimněte si, že `Strings::webalize(Strings::truncate(..., 100, ''))` žije na **jediném místě** — uvnitř `SlugProvider` (nebo v per-parametrovém `FilterOut`). Stejná logika vyrobí odkaz v šabloně, URL v `redirect()` i kanonický tvar v `canonicalize()`.
+
+Když budete chtít pravidla později změnit (jiný limit délky, jiná transliterace, vyhazování dalších znaků), upravíte jeden řádek. Bez tohoto byste riskovali, že `redirect()` vygeneruje `/clanek/123-jak-upect-chleba`, zatímco `canonicalize()` bude očekávat `/clanek/123-jak-upect-chl` (protože někde někdo použil jiný `truncate`), a aplikace by se přesměrovávala donekonečna.
+
+
+Bonus: krátké URL stále fungují
+===============================
+
+Protože je slug nepovinný, fungují i adresy bez něj:
+
+```
+/clanek/123
+```
+
+To se hodí pro:
+- **QR kódy** — kratší URL znamená méně hustý a lépe skenovatelný kód
+- **SMS a chat** — vejde se do tweetu, vypadá úhledně
+- **Tištěné materiály** — krátkou URL se rychleji napíše
+
+Když uživatel takovou URL otevře, `canonicalize()` ho přesměruje 301 na plnou verzi se slugem, takže vyhledávače stejně uvidí jen kanonický tvar. Můžete mít krátkost i SEO zároveň.
+
+
+Shrnutí
+=======
+
+- Maska `<id>[-<slug>]` dělá slug nepovinným. Defaultní `<slug>` nematchuje `/`; `<slug .+>` použijte jen tehdy, když opravdu chcete lomítka ve slugu.
+- Obecný `FilterOut` pod klíčem `''` dohledá titulek podle ID — **bez zásahu do šablon kdekoli v aplikaci**.
+- Vyhledávání obalte drobnou per-request cache; jeden DB dotaz na unikátní ID stačí.
+- Volitelně může per-parametrový `FilterOut` umožnit šablonám titulek předat přímo a vyhledávání přeskočit.
+- `$this->canonicalize()` v action přesměruje nekanonické URL na správnou s HTTP 301.
+- Vzorec pro slug (`webalize` + `truncate`) žije na jednom místě — změníte ho jednou, projeví se všude.
+- Krátké URL jen s ID dál fungují, což se hodí pro QR kódy a SMS.
+
+Více o filtrech a kanonizaci najdete v dokumentaci [routování |application:routing#obecne-filtry] a [presenterů |application:presenters#kanonizace].

@@ -1,0 +1,296 @@
+Nette PHPStan Rules
+*******************
+
+.[perex]
+[PHPStan Rules |https://github.com/nette/phpstan-rules] naučí PHPStan rozumět Nette kódu, takže statická analýza odvozuje přesné typy a hlásí méně falešných chyb.
+
+Stačí rozšíření nainstalovat a [PHPStan |https://phpstan.org] například sám pozná typ komponenty tam, kde dříve viděl chybu:
+
+```php
+class HomePresenter extends Presenter
+{
+	protected function createComponentMenu(): MenuControl
+	{
+		return new MenuControl;
+	}
+
+	public function renderDefault(): void
+	{
+		$menu = $this['menu'];      // PHPStan nyní odvodí MenuControl
+		$menu->setActive('home');   // bez varování o neznámé metodě
+	}
+}
+```
+
+
+Instalace
+=========
+
+Rozšíření staví na statickém analyzátoru PHPStan, který odhalí logické chyby v kódu ještě dřív, než jej spustíte. Pokud ho zatím nepoužíváte, nainstalujte ho Composerem:
+
+```shell
+composer require --dev phpstan/phpstan
+```
+
+Vytvořte konfigurační soubor `phpstan.neon`, kde uvedete adresáře k analýze a úroveň přísnosti:
+
+```neon
+parameters:
+	paths:
+		- app
+
+	level: 8
+```
+
+PHPStan se pak spouští příkazem:
+
+```shell
+vendor/bin/phpstan analyse
+```
+
+Podrobnou dokumentaci najdete na [stránkách PHPStan |https://phpstan.org].
+
+Poté nainstalujte samotné rozšíření:
+
+```shell
+composer require --dev nette/phpstan-rules
+```
+
+Potřebujete PHP 8.1 nebo vyšší a PHPStan 2.1+.
+
+Aby PHPStan rozšíření používal, je potřeba ho aktivovat. Buď si nainstalujte [phpstan/extension-installer |https://github.com/phpstan/extension-installer], který to zařídí za vás, nebo rozšíření přidejte ručně do `phpstan.neon`:
+
+```neon
+includes:
+	- vendor/nette/phpstan-rules/extension.neon
+```
+
+Většina kontrol funguje bez další konfigurace. Pouze pro funkce popsané v sekci [#Assety] je potřeba malý konfigurační blok v `phpstan.neon` (viz níže). Veškerá konfigurace uvedená na této stránce patří do `phpstan.neon`, nikoli do `common.neon` nebo jiných konfiguračních souborů Nette DI.
+
+
+Nativní PHP funkce
+==================
+
+Mnoho nativních PHP funkcí má v deklarovaném návratovém typu `string|false` nebo `array|null`, ačkoli se chybová hodnota objevuje jen za podmínek, které v moderním kódu prakticky nemohou nastat: selhání `getcwd()` na funkčním filesystému, selhání `json_encode()` bez `JSON_THROW_ON_ERROR`, selhání `preg_split()` na konstantním patternu a podobně. Rozšíření tyto chybové hodnoty z návratových typů odstraní, takže PHPStan přestane vyžadovat ošetření chyb, které *nemohou* nastat.
+
+Kompletní seznam je v [extension-php.neon |https://github.com/nette/phpstan-rules/blob/master/extension-php.neon].
+
+
+Closures pro runtime kontrolu typů
+----------------------------------
+
+Běžný PHP idiom pro runtime ověření, že pole obsahuje hodnoty deklarovaného typu, používá typovanou variadickou closure volanou s operátorem spread:
+
+```php
+/** @param string[] $items */
+public function setItems(array $items): void
+{
+	(function (string ...$items) {})(...$items);
+}
+```
+
+PHP vynutí typ `string` na každém argumentu a vyhodí `TypeError`, pokud některý prvek není string. Tělo closure je prázdné a výraz existuje pouze kvůli vedlejšímu efektu. PHPStan by jinak hlásil `expr.resultUnused`, toto pravidlo ale daný vzor rozpozná a chybu nevypíše.
+
+
+Aplikace
+========
+
+V presenterech metody jako `redirect()`, `forward()` nebo `sendJson()` ukončují běh vyhozením `Nette\Application\AbortException`. Když takové volání obalíte do `try` a zachytíte ho širokým `catch (\Throwable)` nebo `catch (\Exception)`, nechtěně tím přesměrování spolknete. Rozšíření na to upozorní:
+
+```php
+try {
+	$this->redirect('Homepage:');
+} catch (\Throwable $e) {   // chyba: spolkne AbortException
+	Debugger::log($e);
+}
+```
+
+Řešením je výjimku znovu vyhodit, nebo ji vyčlenit do samostatné větve ještě před širokým catchem:
+
+```php
+try {
+	$this->redirect('Homepage:');
+} catch (Nette\Application\AbortException $e) {
+	throw $e;
+} catch (\Throwable $e) {
+	Debugger::log($e);
+}
+```
+
+
+Assety
+======
+
+V `phpstan.neon` (nikoli v konfiguraci Nette DI) nastavte mapování ID mapperů na třídy, aby PHPStan dokázal zúžit obecný typ `Asset` na konkrétní třídu:
+
+```neon
+parameters:
+	nette:
+		assets:
+			mapping:
+				default: file              # Nette\Assets\FilesystemMapper
+				images: file
+				vite: vite                 # Nette\Assets\ViteMapper
+				custom: App\MyMapper       # libovolné FQCN
+```
+
+Hodnoty `file` a `vite` jsou zkratky pro vestavěné `FilesystemMapper` a `ViteMapper`. Jakákoli jiná hodnota se považuje za plně kvalifikovaný název vlastní třídy mapperu.
+
+Po nastavení:
+
+- `Registry::getMapper('vite')` vrací `ViteMapper` místo `Mapper`.
+- `Registry::getAsset('default:logo.png')` vrací `ImageAsset`. `tryGetAsset()` vrací `ImageAsset|null`.
+- `FilesystemMapper::getAsset('button.js')` a `ViteMapper::getAsset()` se zúžují stejným způsobem.
+
+
+Component Model
+===============
+
+Rozšíření zúží návratový typ `Container::getComponent()` a `Container::offsetGet()` (tedy `$this['name']`) podle factory metod `createComponent<Name>()` deklarovaných na téže třídě.
+
+```php
+class HomePresenter extends Presenter
+{
+	protected function createComponentMenu(): MenuControl
+	{
+		return new MenuControl;
+	}
+
+	public function renderDefault(): void
+	{
+		$menu = $this->getComponent('menu');   // MenuControl
+		$menu = $this['menu'];                 // MenuControl
+	}
+}
+```
+
+Pokud odpovídající factory neexistuje nebo název komponenty není konstantní string, zůstane návratový typ `getComponent()` i `$this['name']` nezměněný, tedy obecný `IComponent`.
+
+
+Dependency Injection
+====================
+
+Vlastnosti označené atributem `#[Nette\DI\Attributes\Inject]` plní dependency injection až po vytvoření objektu. PHPStan by je proto hlásil jako neinicializované; rozšíření je naopak bere jako zapsané a inicializované:
+
+```php
+class HomePresenter extends Presenter
+{
+	#[Inject]
+	public CartFacade $cart;   // bez chyby o neinicializované vlastnosti
+}
+```
+
+
+Formuláře
+=========
+
+Pokud je volání `$form->addText('name', …)`, `$form->addSelect(…)` apod. ve stejné funkci nebo metodě jako přístup k `$form['name']` (případně `$form->getComponent('name')`), rozšíření odvodí typ přístupu z odpovídajícího volání `addXxx()`:
+
+```php
+public function createComponentSignInForm(): Form
+{
+	$form = new Form;
+	$form->addText('username', 'Username');
+	$form->addPassword('password', 'Password');
+
+	$form['username'];           // TextInput
+	$form['password'];           // TextInput (Password je potomek)
+	return $form;
+}
+```
+
+Přístup funguje i z jiné metody, než ve které formulář vznikl. Když ho vytvoříte ve factory `createComponentSignInForm()` a k jeho prvkům přistupujete jinde, rozšíření si přiřazení vystopuje zpět až k factory a dohledá odpovídající volání `addXxx()`:
+
+```php
+public function renderDefault(): void
+{
+	$form = $this['signInForm'];      // dohledá se createComponentSignInForm()
+	$form['username'];                // TextInput
+
+	// stejně tak funguje i přímý přístup
+	$this['signInForm']['username'];  // TextInput
+	$this['signInForm-username'];     // TextInput
+}
+```
+
+Pokud žádné odpovídající volání `addXxx()` neexistuje, rozšíření se stejně jako Component Model pokusí najít factory `createComponent<Name>()`.
+
+
+Vlastnosti event handlerů
+-------------------------
+
+Formuláře data převedou na typ deklarovaný v parametru callbacku, ať jde o `stdClass`, `array` nebo vlastní DTO. Callback s užším datovým parametrem, než je deklarovaný union `array|object`, je proto v pořádku:
+
+```php
+$form->onSuccess[] = function (Form $form, MyDto $data): void {
+	// …
+};
+```
+
+PHPStan by jinak hlásil `assign.propertyType`, protože `MyDto` je užší než `array|object`. Pravidlo tuto chybu potlačuje u vlastností `Form::$onSuccess`, `$onError`, `$onSubmit`, `$onRender`, `Container::$onValidate`, `SubmitButton::$onClick` a `$onInvalidClick`.
+
+
+Schema
+======
+
+Rozšíření zúží návratový typ `Expect::array()` z deklarovaného unionu `Structure|Type` podle předaného argumentu:
+
+```php
+Expect::array();                                   // Type
+Expect::array(['name' => Expect::string()]);       // Structure (všechny hodnoty jsou Schema)
+Expect::array(['name' => Expect::string(), 'x']);  // Structure|Type (Schema i ne-Schema hodnoty)
+```
+
+Pokud argument obsahuje Schema i ne-Schema hodnoty, deklarovaný union zůstane zachován.
+
+
+Tester
+======
+
+PHPStan po voláních metod `Tester\Assert` zúží typ proměnné. Podporované metody: `null()`, `notNull()`, `true()`, `false()`, `truthy()`, `falsey()`, `same()`, `notSame()`, `type()`.
+
+```php
+function process(?User $user): void
+{
+	Assert::notNull($user);
+	$user->getName();          // bez varování o volání na null
+}
+```
+
+
+Arrow funkce jako void callbacky
+--------------------------------
+
+Funkce Testeru `test()` a `Assert::exception()` přijímají callbacky typované jako `Closure(): void`, ale často se jim předávají arrow funkce ve stylu `fn () => throw new MyException`. Arrow funkce vždy vrací nějakou hodnotu, což by PHPStan jinak označil za typovou neshodu. Pravidlo tuto chybu potlačuje u následujících funkcí a metod: `test()`, `testException()`, `testNoError()`, `Tester\Assert::exception()`, `Tester\Assert::throws()`, `Tester\Assert::error()`, `Tester\Assert::noError()`.
+
+
+Utils
+=====
+
+**`Strings::match()` a `matchAll()`**: u konstantního patternu se návratový typ odvodí přímo z regulárního výrazu, tedy z jeho zachytávajících skupin (včetně pojmenovaných a volitelných). Flagy `captureOffset`, `unmatchedAsNull` a u `matchAll()` i `patternOrder` a `lazy` se promítnou do výsledného tvaru:
+
+```php
+Strings::match($s, '#(\d+)-(\w+)#');  // array{non-falsy-string, decimal-int-string, non-empty-string}|null
+Strings::match($s, '#(?<id>\d+)#');   // array{0: non-empty-string, id: decimal-int-string, 1: decimal-int-string}|null
+Strings::matchAll($s, '#(\w+)#');     // list<array{string, non-empty-string}>
+```
+
+U nekonstantního patternu (a u metody `split()`) se tvar odvodí jen z flagů.
+
+**`Strings::replace()`**: je-li náhrada callback, typ jeho parametru `$matches` se odvodí ze stejného regulárního výrazu:
+
+```php
+Strings::replace($s, '#(\d+)#', function (array $m) {
+	return $m[1];   // $m má typ array{non-empty-string, decimal-int-string}
+});
+```
+
+**Zúžení subjektu po `match()`**: uvnitř `if (Strings::match($s, …))` se podle patternu zúží i typ prohledávaného řetězce `$s`, například na `non-empty-string`.
+
+**Validace patternů**: nevalidní regulární výraz předaný do `match()`, `matchAll()`, `split()` nebo `replace()` rozšíření nahlásí už při analýze, ne až za běhu.
+
+**`Arrays::invoke()`** a **`Arrays::invokeMethod()`** vracejí místo deklarovaného `array` pole s typem návratové hodnoty volaného callable, resp. metody.
+
+**`Helpers::falseToNull()`** zúží návratový typ tak, že odstraní `false` a přidá `null`. Z `string|false` se tedy stane `string|null`.
+
+**`Html` magické metody**: `$el->setClass(…)`, `$el->addData(…)`, `$el->getHref()` a podobné se rozpoznají i bez `@method` anotací. `setXxx()` a `addXxx()` vrací `static` (fluent API), `getXxx()` vrací `mixed`.

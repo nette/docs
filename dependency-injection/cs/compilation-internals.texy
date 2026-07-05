@@ -1,0 +1,222 @@
+Kompilace kontejneru do hloubky
+*******************************
+
+.[perex]
+Tato stránka odkrývá, co se děje, když Nette sestavuje váš DI kontejner: jakými fázemi prochází, kdy se rozbalují konfigurační parametry, kdy se z řetězců `@service` stávají skutečné reference a - to je otázka, kterou si autoři rozšíření kladou nejčastěji - ve které fázi můžete bezpečně hledat služby podle typu. Je to hlubší doplněk k [tvorbě rozšíření |extensions].
+
+Nic z toho nepotřebujete k napsání běžné aplikace, ani běžného rozšíření. Jakmile ale vaše rozšíření začne zkoumat nebo přetvářet graf služeb, začne na načasování záležet všechno: totéž volání `getByType()` dá v jedné fázi spolehlivou odpověď a v jiné zavádějící. Tato stránka vysvětluje proč, abyste vždy věděli, kam váš kód patří.
+
+
+Dva světy: kompilace vs. běh aplikace
+=====================================
+
+Nejdůležitější věc k pochopení je, že se Nette kontejner **nesestavuje při každém requestu**. Sestaví se jednou do optimalizované PHP třídy, ta se uloží na disk a každý další request pak hotový soubor už jen načte přes `include`. Celý mechanismus popsaný níže - rozšíření, resolvery, generátor kódu - běží **jen při (re)kompilaci**.
+
+To rozděluje svět na dvě reprezentace, které nikdy neexistují zároveň:
+
+| | při kompilaci | za běhu
+|---|---|---
+| Co existuje | **definice** (recepty) v `ContainerBuilder` | **instance** služeb v `Container`
+| Klíčové třídy | `Compiler`, `ContainerBuilder`, `Resolver`, `PhpGenerator` | `Container` (rodič vygenerované třídy)
+| `%param%`, `@service` | textové značky, které se stále překládají | už přeložené / zapečené do kódu
+
+Vygenerovaná třída dědí z `Nette\DI\Container` a pro každou službu má metodu `createServiceXxx()`. Její parametry i autowiring metadata jsou předpočítané, takže za běhu už není co řešit - jen na požádání vytvořit instance služeb.
+
+.[note]
+V debug módu se kontejner překompiluje automaticky, kdykoli se změní konfigurační soubor nebo třída rozšíření; obojí se sleduje jako závislost. V produkci se zkompiluje jednou a už se nikdy nekontroluje, a právě odtud plyne rychlost.
+
+
+Fáze v kostce
+=============
+
+Kompilaci řídí `Compiler::compile()` a scvrkává se na tři kroky:
+
+```php
+public function compile(): string
+{
+	$this->processExtensions();     // FÁZE A: schémata + loadConfiguration()
+	$this->processBeforeCompile();  // FÁZE B: resolve + beforeCompile() + complete
+	return $this->generateCode();   // FÁZE C: generování kódu + afterCompile()
+}
+```
+
+Celý mentální model se vejde do jediné myšlenky - **každá fáze ví víc než ta předchozí:**
+
+- **Fáze A** naplní graf definicemi. Typy služeb **ještě nejsou spolehlivě známé**, protože typ může plynout z návratové hodnoty továrny, na kterou se zatím nikdo nepodíval.
+- **Fáze B** nejdřív vyřeší všechny typy (`resolve`), pak dá rozšířením šanci graf přetvořit (`beforeCompile`) a nakonec [autowiruje |autowiring] argumenty (`complete`).
+- **Fáze C** z hotového grafu vygeneruje PHP a nechá rozšíření sáhnout do vygenerovaného kódu.
+
+Právě tato rostoucí znalost je důvod, proč je táž operace v jedné fázi bezpečná a v jiné nespolehlivá. Zbytek stránky prochází fáze právě touto optikou.
+
+
+Fáze A: registrace definic
+==========================
+
+V této fázi Nette volá na každém rozšíření tři metody - `getConfigSchema()`, pak `setConfig()` a nakonec `loadConfiguration()` - ale v **pečlivě řízeném pořadí**, protože tady na pořadí opravdu záleží.
+
+
+Proč na pořadí záleží
+---------------------
+
+- **`ParametersExtension` a `ExtensionsExtension` jdou první.** První musí proběhnout dřív než cokoli jiného, aby mohlo rozbalit `%param%` v celé konfiguraci - každé další rozšíření pak dostane svoji sekci s už dosazenými hodnotami. Druhé registruje další rozšíření uvedená v sekci `extensions:`, takže také musí být na světě dřív, než přijdou na řadu ostatní.
+- **`ServicesExtension` jde poslední.** Uživatelská sekce `services:` má tak vždy poslední slovo a může přepsat cokoli, co rozšíření nastavila.
+- **`InjectExtension` se přesune úplně na konec**, aby jeho práce viděla setupy přidané všemi ostatními rozšířeními.
+
+Co si z toho odnést: v okamžiku, kdy běží `loadConfiguration()` vašeho rozšíření, jsou parametry už rozbalené, ale uživatelské služby tam ještě nejsou. Tenhle jediný fakt řídí většinu časových pravidel níže.
+
+
+Ze services: na objekty definic
+-------------------------------
+
+Uživatelská sekce `services:` se právě tady, v posledním kroku fáze A, převede na [objekty definic |extensions#Typy definic]. Každý NEON záznam se znormalizuje (sjednotí se zkratkové zápisy), rozpozná se jeho druh (běžná služba, továrna, accessor, ...) a v builderu vznikne odpovídající definice. Tady také poprvé jednoduché argumenty `@name` / `@Type` získávají podobu reference - viz [dále |#Reference: kdy se @service mění na Reference].
+
+Na konci fáze A je graf **kompletní co do počtu** - všechna rozšíření i uživatel zaregistrovali, co chtěli - ale obraz ještě není ostrý:
+
+- **typy nejsou vyřešené** u definic, jejichž typ plyne z návratové hodnoty továrny,
+- **argumenty nejsou autowirované**,
+- některé reference `@service` jsou stále jen stringy.
+
+Přesně proto je hledání podle typu tady nespolehlivé - o tom více [dále |#Introspekce ContainerBuilder: kdy je bezpečná].
+
+
+Parametry: kdy se rozbalují %param%
+===================================
+
+Jedna ze dvou hlavních otázek. Odpověď je krátká: **jednorázově, na úplném začátku fáze A, přes celý konfigurační strom.**
+
+`ParametersExtension` běží první a jednou z prvních věcí, které dělá, je rozbalení placeholderů `%param%` - nejdřív uvnitř samotných parametrů (parametr smí odkazovat na jiný), pak v celém zbytku konfigurace. Takže než jakékoli jiné rozšíření, včetně `ServicesExtension`, dostane svou sekci, jsou placeholdery už pryč. Rozšíření pracují s konkrétními hodnotami, nikdy s `%...%`.
+
+Když placeholder tvoří celý řetězec, vrátí se jeho hodnota *jak je* - včetně polí a objektů - takže se `%mailer%` může rozbalit na celé pole. Kdekoli jinde se konkatenuje do stringu a tečková notace `%foo.bar%` sahá do vnořených polí.
+
+
+Statické vs. dynamické parametry
+--------------------------------
+
+Ne každou hodnotu lze zapéct do kódu. Parametr, jehož hodnota se liší podle prostředí - proměnná prostředí, `baseUrl` odvozená z requestu - musí zůstat **dynamický**. Takové parametry ohlásíte přes `setDynamicParameterNames()` nebo `Expect::...->dynamic()` ve schématu; více v [dynamických parametrech |application:bootstrapping#Dynamické parametry].
+
+Dynamický parametr se nenahradí hodnotou, ale výrazem, který ji přečte *až za běhu*. Takže `%env.DB_HOST%` se nezapeče do stringu; stane se z něj runtime přístup ve vygenerovaném kontejneru. Všechno ostatní je statické a zapeče se v čase kompilace - a odtud plyne obvyklé překvapení "moje hodnota z `getenv()` je v každém prostředí stejná": ten parametr byl prostě statický.
+
+Opačná operace je **escapování**: aby se doslovné `%` nebo `@` nebralo jako placeholder či reference, zdvojí se (`%%`, `@@`). Nette to dělá automaticky u parametrů, které vkládá za vás, takže se jejich hodnoty nikdy nezamění za placeholder nebo referenci.
+
+
+Reference: kdy se @service mění na Reference
+============================================
+
+Druhá hlavní otázka. Překlad `@service` probíhá **v několika krocích napříč různými fázemi**, podle toho, jak složitý ten řetězec je. Málokdy potřebujete tohle sledovat ručně, ale znalost tvaru vysvětluje, proč se některé reference vyřeší dřív než jiné.
+
+- **Parsování (načtení configu).** `@service` použitý *jako entita* - to, co službu vytváří, jako ve `Foo(@bar)` - se stane referencí okamžitě. `@service` použitý *jako argument* zůstává prozatím stringem. `@` v uvozovkách se escapuje na `@@`, takže se bere jako doslovný text, ne jako reference.
+- **Fáze A (`loadConfiguration`).** Když se zpracovávají definice, čistý argument `@name` nebo `@Type` se překlopí na objekt `Reference`. To chytí jen jednoduché tvary; `@service::CONST` nebo `@` uvnitř složitějšího výrazu jde na později.
+- **Fáze B (`complete`).** Tady proběhne skutečný „chytrý" překlad: `@service` → reference, `@service::CONSTANT` → literál konstanty třídy, `@service::property` → čtení té property, `@@x` → doslovný text `@x`.
+
+Ve slově *reference* se skrývá druhý překlad. `Reference` může ukazovat buď podle **jména**, nebo podle **typu** (`@Namespace\Type`). Typová reference **ještě není jméno služby** - na konkrétní jméno se vyřeší autowiringem, a to až v kroku **complete**, jakmile je postavený autowiring index. To je můstek k další sekci: vyhledávání autowiringem se záměrně odkládá, dokud není index hotový.
+
+| Tvar | Na referenci/výraz ve fázi | Na konkrétní službu ve fázi
+|---|---|---
+| entita (`@foo` jako továrna) | parsování | complete
+| argument `@foo`, `@Type` | fáze A | complete
+| `@foo::CONST`, `@foo::prop` | fáze B | complete
+| typová reference `@Type` | fáze A/B | complete (autowiring)
+
+
+Introspekce ContainerBuilder: kdy je bezpečná
+=============================================
+
+Teď otázka, kterou si autoři rozšíření kladou nejčastěji: **ve které metodě můžu hledat služby podle typu?** Odpověď plyne z jednoho prostého pravidla o tom, jak si builder hlídá svůj vlastní stav.
+
+Hledání **podle typu** (`getByType()`, `getDefinitionByType()`, `findByType()`) vyžaduje, aby byl graf služeb *vyřešený* - každý typ známý, autowiring index postavený. Takže kdykoli některé z nich zavoláte a graf se od posledního resolve změnil, builder **na místě vyřeší celý dosud známý graf**. Během samotného resolve je jakékoli hledání podle typu zakázané a vyhodí `NotAllowedDuringResolvingException`.
+
+Hledání **podle tagu** (`findByTag()`) takový požadavek nemá - tagy na typech nezávisí, takže funguje **v každé fázi**.
+
+Fáze po fázi:
+
+- **`loadConfiguration()` (fáze A) - hledání podle typu je nespolehlivé.** Graf je neúplný: rozšíření, která běží později, ještě neregistrovala své služby, a hlavně tu ještě není uživatelská `services:` (ta běží poslední). Volání `getByType()` sice funguje - spustí předčasný resolve části grafu - ale odpověď je z neúplného obrazu a předčasný resolve stojí výkon. Pravidlo: **v `loadConfiguration()` jen registrujte definice; nehledejte podle typu.** `findByTag()` je v pořádku.
+- **`beforeCompile()` (fáze B) - správné místo pro introspekci.** Teď už existují **všechny** definice (i uživatelské), **typy jsou vyřešené** a **autowiring index je postavený**, takže `getByType()`, `findByType()` i `findByTag()` vrací **spolehlivé** odpovědi. Argumenty *ještě nejsou* autowirované - to je až úplně další krok (`complete`), po všech voláních `beforeCompile()`. Když tu definici změníte, další `getByType()` graf transparentně přeresolvuje, takže můžete volně střídat úpravy a dotazy.
+- **`afterCompile()` (fáze C) - už jen kód.** Pracuje nad vygenerovanou třídou, ne nad builderem. Graf je hotový; tady tvarujete výsledné PHP.
+
+| Chci... | Fáze
+|---|---
+| zaregistrovat službu | `loadConfiguration()`
+| hledat podle **tagu** a upravit definice | `loadConfiguration()` nebo `beforeCompile()`
+| hledat podle **typu** (`getByType`/`findByType`) | **`beforeCompile()`**
+| zjistit, které služby autowiring dosadil do argumentů | při kompilaci ne - až za běhu
+| sáhnout do generovaného kódu | `afterCompile()`
+| spustit kód po startu kontejneru | [inicializační kód |extensions#Inicializační kód]
+
+
+Uvnitř fáze B: resolve a complete
+=================================
+
+Fáze B jsou dva průchody s voláními `beforeCompile()` vloženými mezi ně:
+
+```php
+$this->builder->resolve();     // typy vyřešené, autowiring index postavený
+foreach ($this->extensions as $extension) {
+	$extension->beforeCompile();
+}
+$this->builder->complete();    // AŽ TEĎ se autowirují argumenty
+```
+
+**`resolve()`** určí typ každé služby - vezme se z jejího `type`, nebo se odvodí z její továrny: z návratového typu tovární metody, z vytvářené třídy nebo ze služby, na kterou míří reference - a pak postaví autowiring index, který mapuje každý typ (třídu plus její rodiče a rozhraní) na jméno služby. Služba označená `autowired: false` se do indexu nezanese; `autowired: [A, B]` zúží typy, pod kterými je viditelná. Klíčové: resolve řeší *typy*, ne *argumenty* - autowiring argumentů by potřeboval hotový index, který existuje až po tomto průchodu.
+
+**`complete()`** je místo, kde se autowiring argumentů skutečně provede. Pro každou definici doplní chybějící argumenty konstruktoru a setupů tím, že jejich typy dohledá v nyní už hotovém indexu. Právě proto se typové reference nechávaly během resolve nevyřešené: to dohledání patří sem, jakmile je do čeho spolehlivě nahlížet.
+
+
+Fáze C: generování kódu
+=======================
+
+`generateCode()` předá hotový graf `PhpGenerator`u, který vytvoří třídu dědící z `Container` s metodou `createServiceXxx()` pro každou službu a s předpočítanými metadaty `aliases`, `tags` a `wiring`. Každý `Statement` se stane PHP textem (`new Foo(...)`, volání metod, přístup k property) a každá `Reference` voláním `$this->getService(...)`.
+
+Rozšíření pak dostanou závěrečný průchod `afterCompile()` nad vygenerovanou třídou - tady se například vygenerují gettery statických a dynamických parametrů - plus možnost přidat [inicializační kód |extensions#Inicializační kód], který běží při každém requestu.
+
+
+Časová osa na jednom obrázku
+============================
+
+```
+KOMPILACE (jednou, do cache)
+│
+├─ načtení config souborů         NEON -> Statement/pole; merge souborů
+│                                 @ v uvozovkách -> @@ ; entity -> Statement
+│
+▼ Compiler::compile()
+│
+├─ FÁZE A  processExtensions()
+│   ├─ ParametersExtension (PRVNÍ) ── %param% ROZBALENY v celém configu
+│   │                                 dynamické -> runtime výraz
+│   ├─ ExtensionsExtension (PRVNÍ) ── registruje další rozšíření
+│   ├─ ...ostatní rozšíření...     ── loadConfiguration(): jen registrujte definice
+│   └─ ServicesExtension (POSLEDNÍ)── services: -> objekty Definition
+│                                     @name/@Type -> Reference
+│   [graf úplný co do počtu; TYPY a ARGUMENTY ještě ne; hledání podle typu nespolehlivé]
+│
+├─ FÁZE B  processBeforeCompile()
+│   ├─ builder.resolve()          ── vyřeš všechny typy; postav autowiring index
+│   │                                [typy hotové; index hotový]
+│   ├─ beforeCompile() rozšíření  ── ZDE bezpečné getByType/findByType/findByTag
+│   │                                (argumenty ještě nejsou autowirované)
+│   └─ builder.complete()         ── autowiruj ARGUMENTY; dokonči překlad referencí
+│                                    typové reference -> jména služeb
+│
+└─ FÁZE C  generateCode()
+    ├─ PhpGenerator.generate()    ── Statement -> PHP; metody createServiceXxx()
+    ├─ afterCompile() rozšíření   ── úpravy kódu; gettery parametrů
+    └─ toString()                 ── výsledný PHP kód -> cache
+
+────────────────────────────────────────────────────────────
+
+BĚH (každý request)
+│
+├─ new Container($dynamicParams)
+├─ initialize()                   ── boot kód rozšíření (session, hlavičky, validace)
+└─ getService()/getByType()       ── lazy instance z předpočítaných metadat
+```
+
+
+Nejčastější omyly
+=================
+
+- „V `loadConfiguration()` si najdu služby podle typu." Ne - graf je neúplný (uživatelská `services:` běží až po vás) a `getByType()` spustí předčasný resolve neúplného grafu. Přesuňte to do `beforeCompile()`. `findByTag()` je v pořádku i zde.
+- „Hodnota z `getenv()` v parametru bude v každém prostředí jiná." Jen když je parametr dynamický. Jinak se zapeče v čase kompilace a je všude stejná.
+- „Reference `@Type` je hned jméno služby." Není - je to typová reference, na konkrétní jméno se vyřeší autowiringem až v kroku complete.
+- „Moje rozšíření čte pomocný soubor, ale změny se neprojeví." Registrujte ho přes `$builder->addDependency($file)`, jinak o něm cache neví a nepřekompiluje se.
+- „Během `resolve()` můžu volat `getByType()`." Ne - vyhodí výjimku. Hledání podle typu patří do `beforeCompile()` nebo později, nikdy ne doprostřed resolvingu.

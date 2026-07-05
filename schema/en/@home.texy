@@ -102,6 +102,7 @@ Expect::float($default = null)
 Expect::bool($default = null)
 Expect::null()
 Expect::array($default = [])
+Expect::list($default = [])
 ```
 
 And also all types [supported by the Validators class |utils:validators#Expected Types], for example `Expect::type('scalar')` or shorthand `Expect::scalar()`. Also class or interface names, e.g., `Expect::type('AddressEntity')`.
@@ -212,6 +213,22 @@ $processor->process($schema, ['optional' => '']);
 
 $processor->process($schema, ['required' => 'foo']);
 // OK, returns {'required' => 'foo', 'optional' => null}
+```
+
+A structure itself is mandatory. Therefore, if it is nested inside another structure and the input does not contain it, it is created anyway – and it reports an error when it contains a required property. Use `required(false)` to make the entire nested structure optional. If it is missing in the input, `null` appears in the output, but if it is present, its required properties are enforced:
+
+```php
+$schema = Expect::structure([
+	'db' => Expect::structure([
+		'dsn' => Expect::string()->required(),
+	])->required(false),
+]);
+
+$processor->process($schema, []);
+// OK, returns {'db' => null}
+
+$processor->process($schema, ['db' => []]);
+// ERROR: 'db › dsn' is missing
 ```
 
 If you do not want properties with default value in the output, use `skipDefaults()`:
@@ -504,7 +521,7 @@ You can have the structure schema generated from a class. Example:
 class Config
 {
 	public string $name;
-	public string|null $password;
+	public string|null $password = null;
 	public bool $admin = false;
 }
 
@@ -524,7 +541,7 @@ Anonymous classes are also supported:
 ```php
 $schema = Expect::from(new class {
 	public string $name;
-	public ?string $password;
+	public ?string $password = null;
 	public bool $admin = false;
 });
 ```
@@ -536,3 +553,117 @@ $schema = Expect::from(new Config, [
 	'name' => Expect::string()->pattern('\w:.*'),
 ]);
 ```
+
+
+Merging Multiple Configurations
+-------------------------------
+
+Applications often assemble their configuration in layers: there are built-in default values, and on top of them the user supplies their own settings, which should override only the items they actually specify. That is exactly what `processMultiple()` does – it takes several datasets, merges them in order so that later ones take precedence, and validates the final result as a whole:
+
+```php
+$schema = Expect::structure([
+	'host' => Expect::string(),
+	'port' => Expect::int(),
+	'logging' => Expect::bool(),
+]);
+
+$defaults = ['host' => 'localhost', 'port' => 3306, 'logging' => false];
+$userConfig = ['port' => 5432, 'logging' => true];
+
+$config = $processor->processMultiple($schema, [$defaults, $userConfig]);
+// $config = {'host' => 'localhost', 'port' => 5432, 'logging' => true}
+```
+
+The `host` item keeps its default value because the user did not set it, while `port` and `logging` are overwritten by the later dataset. Values stored under string keys are merged this way; numerically indexed items (lists) are appended one after another instead of being overwritten.
+
+
+Under the Hood: normalize, merge, complete
+------------------------------------------
+
+Every schema element – whether built-in or one you write yourself – implements four methods that together define how it handles data. Three of them form the processing pipeline:
+
+1. **normalize()** – prepares the raw input. This is where `before()` hooks run and where, for example, an object is turned into an array. It runs first, separately on each dataset.
+2. **merge()** – combines two already normalized datasets, with the later one taking priority. This step is used only by `processMultiple()`; `process()` skips it, because it has just a single dataset.
+3. **complete()** – performs the actual validation, fills in default values for missing items, and applies `assert()`, `transform()` and `castTo()`. It runs last, on the merged result.
+
+The fourth method, **completeDefault()**, is called by the parent element for an item entirely missing from the input – it either supplies the default value or reports that a `required()` item is missing.
+
+So `process()` runs *normalize → complete*, while `processMultiple()` runs *normalize (each dataset) → merge → complete*. This order is why `before()` sees the raw input, whereas `transform()` sees the already validated value.
+
+
+Custom Schema Elements
+----------------------
+
+You can get a long way with `assert()`, `transform()` and `before()`, so you rarely need to build anything from scratch. But when you want a reusable, self-contained element with its own validation and merging logic, you can create one by implementing the [api:Nette\Schema\Schema] interface. It has exactly the four methods described above:
+
+```php
+interface Schema
+{
+	function normalize(mixed $value, Context $context);
+	function merge(mixed $value, mixed $base);
+	function complete(mixed $value, Context $context);
+	function completeDefault(Context $context);
+}
+```
+
+Errors are not thrown; instead you report them through the [Context |api:Nette\Schema\Context] object using `$context->addError()` and return `null`. The `Processor` gathers all errors and throws them together at the end.
+
+As an example, let's build a reusable element that accepts the backing value of an enum (e.g. the string `'hearts'`) and returns the enum instance:
+
+```php
+use Nette\Schema\Context;
+use Nette\Schema\Schema;
+
+class EnumSchema implements Schema
+{
+	public function __construct(
+		private string $enumClass,
+	) {
+	}
+
+	public function normalize(mixed $value, Context $context): mixed
+	{
+		return $value; // no pre-processing needed
+	}
+
+	public function merge(mixed $value, mixed $base): mixed
+	{
+		return $value ?? $base; // the later value wins
+	}
+
+	public function complete(mixed $value, Context $context): mixed
+	{
+		$enum = is_string($value) ? ($this->enumClass)::tryFrom($value) : null;
+		if ($enum === null) {
+			$context->addError('The item %path% is not a valid value.', 'enum.value');
+			return null;
+		}
+
+		return $enum;
+	}
+
+	public function completeDefault(Context $context): mixed
+	{
+		return null; // value used when the item is missing from the input
+	}
+}
+```
+
+You can use it anywhere a built-in element is expected – on its own or as part of a larger structure:
+
+```php
+enum Suit: string
+{
+	case Hearts = 'hearts';
+	case Spades = 'spades';
+}
+
+$schema = Expect::structure([
+	'suit' => new EnumSchema(Suit::class),
+]);
+
+$processor->process($schema, ['suit' => 'hearts']);
+// OK, returns {'suit' => Suit::Hearts}
+```
+
+Because the element implements the whole interface, it also works automatically inside `processMultiple()` – the `Processor` calls its `merge()` method just like for any other element.

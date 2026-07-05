@@ -5,7 +5,7 @@ Návody
 Content Security Policy
 =======================
 
-Pokud váš web používá Content Security Policy, budete muset přidat stejné `'nonce-<value>'` a `'strict-dynamic'` do `script-src`, aby Tracy správně fungovala. Některé doplňky třetích stran mohou vyžadovat další nastavení. Nonce není podporována v direktivě `style-src`, pokud tuto direktivu používáte, musíte přidat `'unsafe-inline'`, ale v produkčním režimu byste se tomu měli vyhnout.
+Pokud váš web používá Content Security Policy, budete muset přidat stejné `'nonce-<value>'` a `'strict-dynamic'` do `script-src`, aby Tracy správně fungovala. Některé doplňky třetích stran mohou vyžadovat další nastavení. Nonce není podporována v direktivě `style-src`; pokud tuto direktivu používáte, musíte přidat `'unsafe-inline'`, ale v produkčním režimu byste se tomu měli vyhnout.
 
 Příklad konfigurace pro [Nette Framework |nette:configuring]:
 
@@ -40,8 +40,22 @@ Spuštění je přímočaré, pokud však máte na webové stránce pomalu nač�
 ```
 
 
-Ladění AJAXový požadavků
-========================
+Hledání zdroje výstupu
+======================
+
+Setkali jste se někdy s hláškou *Cannot modify header information - headers already sent*? Objeví se, když se do prohlížeče odešle něco (přebytečná mezera, prázdný řádek nebo BOM na začátku souboru) dřív, než váš kód nastaví HTTP hlavičku nebo nastartuje session. Dohledat viníka bývá otrava.
+
+`Tracy\OutputDebugger` vám pomůže. Zapněte jej jako úplně první věc v programu:
+
+```php
+Tracy\OutputDebugger::enable();
+```
+
+Sleduje veškerý výstup a na konci stránky vypíše seznam všech míst, odkud se něco odeslalo, spolu se souborem, řádkem a odkazem, který je otevře ve vašem editoru. Zvýrazní i BOM na začátku souboru, protože je to častá neviditelná příčina problému.
+
+
+Ladění AJAXových požadavků
+==========================
 
 Tracy automaticky zachycuje AJAXové požadavky vytvořené pomocí jQuery nebo nativního API `fetch`. Požadavky jsou v liště Tracy zobrazeny jako další řádky, což umožňuje snadné a pohodlné ladění AJAXu.
 
@@ -51,7 +65,7 @@ Pokud nechcete AJAXové požadavky zachycovat automaticky, můžete tuto funkci 
 window.TracyAutoRefresh = false;
 ```
 
-Pro ruční monitorování specifických AJAX požadavků přidejte HTTP hlavičku `X-Tracy-Ajax` s hodnotou, kterou vrátí `Tracy.getAjaxHeader()`. Zde je příklad použití s funkcí `fetch`:
+Pro ruční monitorování konkrétních AJAXových požadavků přidejte HTTP hlavičku `X-Tracy-Ajax` s hodnotou, kterou vrátí `Tracy.getAjaxHeader()`. Příklad použití s funkcí `fetch`:
 
 ```js
 fetch(url, {
@@ -62,13 +76,13 @@ fetch(url, {
 })
 ```
 
-Tento přístup umožňuje selektivní ladění AJAX požadavků.
+Tento přístup umožňuje selektivní ladění AJAXových požadavků.
 
 
 Datové úložiště
 ===============
 
-Tracy umí zobrazit panely v Tracy baru a Bluescreeny pro AJAXové požadavky a přesměrovaní. Tracy si vytváří vlastní session, data uchovává ve vlastních dočasných souborech a používá cookie `tracy-session`.
+Tracy umí zobrazit panely v Tracy baru a Bluescreeny pro AJAXové požadavky a přesměrování. Tracy si vytváří vlastní session, data uchovává ve vlastních dočasných souborech a používá cookie `tracy-session`.
 
 Tracy lze nakonfigurovat také tak, aby používala nativní PHP session, kterou nastartujeme ještě před zapnutím Tracy:
 
@@ -100,7 +114,7 @@ Vlastní scrubber
 Scrubber je filtr, který zabraňuje úniku citlivých dat při dumpování, jako jsou hesla nebo přístupové údaje. Filtr se volá pro každý prvek dumpovaného pole nebo objektu a vrací `true`, pokud je hodnota citlivá. V takovém případě se místo hodnoty vypíše `*****`.
 
 ```php
-// zamezí vypsaní hodnot klíčů a properties jako `password`,
+// zamezí vypsání hodnot klíčů a properties jako `password`,
 // `password_repeat`, `check_password`, `DATABASE_PASSWORD`, apod.
 $scrubber = function(string $key, $value, ?string $class): bool
 {
@@ -135,7 +149,7 @@ A následně jej aktivujeme:
 Tracy\Debugger::setLogger(new SlackLogger);
 ```
 
-Pokud používáme plný Nette Framework, můžete jej nastavit v konfiguračním NEON souboru:
+Pokud používáte celý Nette Framework, můžete jej nastavit v konfiguračním NEON souboru:
 
 ```neon
 services:
@@ -161,10 +175,71 @@ Debugger::log('warning', Debugger::WARNING); // writes: [<TIMESTAMP>] main-chann
 ```
 
 
+Integrace Sentry
+----------------
+
+Chyby můžete přeposílat do služby jako [Sentry |https://sentry.io] a přitom si ponechat vlastní logování Tracy. Trik spočívá v obalení původního loggeru: nový logger předá zprávu do Sentry a pak ji deleguje na ten předchozí, takže logování do souborů i e-mailové notifikace fungují dál.
+
+```php
+use Sentry\Severity;
+use Tracy\Debugger;
+use Tracy\ILogger;
+
+class SentryLogger implements ILogger
+{
+	private ILogger $originalLogger;
+
+	public function __construct(string $dsn)
+	{
+		$this->originalLogger = Debugger::getLogger();
+		\Sentry\init(['dsn' => $dsn]);
+	}
+
+	public function log(mixed $value, string $level = self::INFO)
+	{
+		// pošle do Sentry
+		if ($severity = $this->getSeverity($level)) {
+			$value instanceof \Throwable
+				? \Sentry\captureException($value)
+				: \Sentry\captureMessage((string) $value, $severity);
+		}
+
+		// zachová původní logování Tracy (soubory, e-mail)
+		return $this->originalLogger->log($value, $level);
+	}
+
+	private function getSeverity(string $level): ?Severity
+	{
+		return match ($level) {
+			ILogger::DEBUG => Severity::debug(),
+			ILogger::INFO => Severity::info(),
+			ILogger::WARNING => Severity::warning(),
+			ILogger::ERROR, ILogger::EXCEPTION => Severity::error(),
+			ILogger::CRITICAL => Severity::fatal(),
+			default => null,
+		};
+	}
+}
+```
+
+Aktivujete jej stejně jako kterýkoli jiný vlastní logger:
+
+```php
+Debugger::setLogger(new SentryLogger('https://public@sentry.example.com/1'));
+```
+
+V Nette aplikaci jej místo toho zaregistrujte jako službu `tracy.logger`:
+
+```neon
+services:
+	tracy.logger: SentryLogger('https://public@sentry.example.com/1')
+```
+
+
 nginx
 =====
 
-Pokud vám nefunguje Tracy na serveru nginx, nespíš je špatně nakonfigurovaný. Pokud je v konfiguraci něco jako:
+Pokud vám nefunguje Tracy na serveru nginx, nejspíš je špatně nakonfigurovaný. Pokud je v konfiguraci něco jako:
 
 ```nginx
 try_files $uri $uri/ /index.php;

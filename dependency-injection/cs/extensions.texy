@@ -2,38 +2,66 @@ Tvorba rozšíření pro Nette DI
 *****************************
 
 .[perex]
-Generování DI kontejneru kromě konfiguračních souborů ovlivňují ještě tzv *rozšíření*. Aktivujeme je v konfiguračním souboru v sekci `extensions`.
+Rozšíření je třída, která se zapojuje do kompilace DI kontejneru. Umí programově registrovat služby, validovat vlastní konfigurační sekci, upravovat služby definované ostatními a dokonce zasáhnout do vygenerovaného kódu kontejneru. Na této stránce se naučíte, jak rozšíření napsat, co se kdy děje a na co si dát pozor.
 
-Takto přidáme rozšíření reprezentované třídou `BlogExtension` pod názvem `blog`:
+Rozšíření jsou způsob, jakým se balíčky integrují do Nette nativní cestou: používají je všechny balíčky `nette/*` a může je používat i ten váš. Typické rozšíření dělá jednu nebo více z těchto věcí:
+
+- **integruje knihovnu** - zaregistruje její služby v kontejneru a nabídne přívětivou, validovanou konfigurační sekci (přesně odtud pocházejí sekce `mail:` nebo `database:`)
+- **automatizuje registraci** - zaregistruje mnoho podobných služeb ve smyčce nebo podle pravidla tam, kde by jejich vypisování v `services:` bylo úmorné
+- **provádí plošné změny** - najde služby zaregistrované ostatními a doplní je, např. připojí logger ke každé službě s určitým tagem
+
+Pro každodenní práci na aplikaci rozšíření většinou nepotřebujete - registraci a propojování vašich tříd pokryje sekce [services |services] v konfiguraci. Po rozšíření sáhněte, když samotná konfigurace přestane stačit.
+
+Rozšíření se aktivuje v sekci `extensions`. Takto přidáme rozšíření reprezentované třídou `BlogExtension` pod názvem `blog`:
 
 ```neon
 extensions:
 	blog: BlogExtension
 ```
 
-Každé rozšíření kompileru dědí od [api:Nette\DI\CompilerExtension] a může implementovat následující metody, které jsou postupně volány během sestavování DI kontejneru:
-
-1. getConfigSchema()
-2. loadConfiguration()
-3. beforeCompile()
-4. afterCompile()
-
-
-getConfigSchema() .[method]
-===========================
-
-Tato metoda se volá jako první. Definuje schema pro validaci konfiguračních parametrů.
-
-Rozšíření konfigurujeme v sekci, jejíž název je stejný jako ten, pod kterým bylo rozšíření přidáno, tedy `blog`:
+Pokud jeho konstruktor přijímá argumenty, předáme je rovnou tam:
 
 ```neon
-# stejné jméno jako má extension
-blog:
-	postsPerPage: 10
-	allowComments: false
+extensions:
+	blog: BlogExtension(%debugMode%)
 ```
 
-Vytvoříme schema popisující všechny konfigurační volby včetně jejich typů, povolených hodnot a případně i výchozích hodnot:
+
+Jak probíhá kompilace
+=====================
+
+Abyste psali rozšíření s jistotou, potřebujete vědět jednu klíčovou věc: **kdy váš kód běží.** Nette nepropojuje služby během obsluhy požadavků. Místo toho kontejner předem *zkompiluje*: přečte všechny konfigurační soubory, nechá rozšíření udělat svou práci a vygeneruje optimalizovanou PHP třídu, kterou uloží na disk. Každý další požadavek už jen načte tuto hotovou třídu. Kód vašeho rozšíření tedy běží jen ve chvíli, kdy se kontejner (znovu) sestavuje - ne při každém požadavku.
+
+Z toho plyne důležitý důsledek: během kompilace ještě žádné služby neexistují. Existují jen **definice** - recepty popisující, jakou třídu bude každá služba mít, jak se vytvoří a co se na ní potom zavolá. Definice drží objekt [ContainerBuilder |#ContainerBuilder]. Rozšíření je v podstatě *skriptovatelná konfigurace*: cokoli lze deklarovat v sekci `services:`, můžete stejně tak poskládat v PHP - podmíněně, ve smyčkách nebo v reakci na to, co zaregistrovali ostatní.
+
+Kompilace probíhá po fázích a rozšíření může vstoupit do každé z nich:
+
+1) zvaliduje se konfigurační sekce všech rozšíření (`getConfigSchema()`)
+2) každé rozšíření zaregistruje své služby (`loadConfiguration()`); uživatelská sekce `services:` se zpracovává jako poslední, takže aplikace má vždy poslední slovo
+3) jakmile jsou všechny definice na místě a typy služeb vyřešené, mohou je rozšíření upravovat (`beforeCompile()`)
+4) vygeneruje se třída kontejneru; rozšíření mohou ještě zasáhnout do jejího kódu (`afterCompile()`) a přidat kód, který poběží při startu aplikace ([inicializace |#Inicializační kód])
+
+.[note]
+Ve vývojářském režimu se kontejner automaticky překompiluje, kdykoli změníte konfigurační soubor nebo samotnou třídu rozšíření - obojí se sleduje jako závislost. Rozšíření tak můžete vyvíjet, aniž byste kdy mazali cache.
+
+.[tip]
+Hlubší pohled na to, co se v každé fázi děje - kdy se rozbalují parametry, kdy se z `@service` stává reference a přesně kdy je bezpečné hledat služby podle typu - najdete v [kompilaci kontejneru do hloubky |compilation-internals].
+
+
+První rozšíření
+===============
+
+Tady je malé, ale kompletní rozšíření. Aktivujeme ho a nakonfigurujeme ve stejném souboru:
+
+```neon
+extensions:
+	blog: BlogExtension
+
+blog:
+	postsPerPage: 5
+```
+
+A toto je celá třída:
 
 ```php
 use Nette\Schema\Expect;
@@ -43,62 +71,87 @@ class BlogExtension extends Nette\DI\CompilerExtension
 	public function getConfigSchema(): Nette\Schema\Schema
 	{
 		return Expect::structure([
-			'postsPerPage' => Expect::int(),
-			'allowComments' => Expect::bool()->default(true),
+			'postsPerPage' => Expect::int(10),
+			'allowComments' => Expect::bool(true),
 		]);
 	}
-}
-```
 
-Dokumentaci najdete na stránce [Schema |schema:]. Navíc lze určit, které volby mohou být [dynamické |application:bootstrapping#Dynamické parametry] pomocí `dynamic()`, např. `Expect::int()->dynamic()`.
 
-Ke konfiguraci se dostaneme přes proměnnou `$this->config`, což je objekt `stdClass`:
-
-```php
-class BlogExtension extends Nette\DI\CompilerExtension
-{
-	public function loadConfiguration()
+	public function loadConfiguration(): void
 	{
-		$num = $this->config->postPerPage;
+		$builder = $this->getContainerBuilder();
+
+		$builder->addDefinition($this->prefix('articles'))
+			->setFactory(Blog\Articles::class, ['postsPerPage' => $this->config->postsPerPage]);
+
 		if ($this->config->allowComments) {
-			// ...
+			$builder->addDefinition($this->prefix('comments'))
+				->setFactory(Blog\Comments::class);
 		}
 	}
 }
 ```
 
+`getConfigSchema()` popisuje, co smí obsahovat sekce `blog:` (pojmenovaná podle klíče, pod kterým jsme rozšíření zaregistrovali), včetně typů a výchozích hodnot - zvalidované hodnoty jsou pak k dispozici v `$this->config`. V `loadConfiguration()` registrujeme služby. Všimněte si názvů: `$this->prefix('articles')` vytvoří `blog.articles`, takže se služby různých rozšíření nemohou srazit.
 
-loadConfiguration() .[method]
-=============================
+A poslední řádky ukazují, proč rozšíření vůbec existují: služba `comments` se zaregistruje jen tehdy, když jsou komentáře povolené. Obyčejný konfigurační soubor takhle rozhodovat neumí.
 
-Používá se přidání služeb do kontejneru. K tomu slouží [api:Nette\DI\ContainerBuilder]:
+Takto zaregistrované služby se chovají úplně stejně, jako by byly zapsané v `services:` - vytvářejí se líně na vyžádání a autowiring je předá všude tam, kde je type-hint `Blog\Articles`.
+
+Následující kapitoly popisují podrobně životní cyklus rozšíření, dále API [ContainerBuilderu |#ContainerBuilder], které budete v rozšíření používat, a nakonec [úskalí |#Tipy a úskalí], která stojí za to znát.
+
+
+Životní cyklus rozšíření
+========================
+
+Rozšíření dědí od [api:Nette\DI\CompilerExtension] a přepisuje některé ze čtyř metod `getConfigSchema()`, `loadConfiguration()`, `beforeCompile()` a `afterCompile()`, které kompilátor během kompilace volá v tomto pořadí.
+
+
+getConfigSchema(): Nette\Schema\Schema .[method]
+------------------------------------------------
+
+Definuje schéma konfigurační sekce rozšíření. Díky němu dostanou uživatelé validaci a jasné chybové hlášky zadarmo: překlep nebo špatný typ v sekci `blog:` se ohlásí srozumitelnou zprávou, aniž byste napsali jedinou kontrolu.
+
+Schéma se popisuje knihovnou [Schema |schema:] a umí vyjádřit typy, výchozí hodnoty, povolené hodnoty a mnohem víc:
 
 ```php
-class BlogExtension extends Nette\DI\CompilerExtension
+public function getConfigSchema(): Nette\Schema\Schema
 {
-	public function loadConfiguration()
-	{
-		$builder = $this->getContainerBuilder();
-		$builder->addDefinition($this->prefix('articles'))
-			->setFactory(App\Model\HomepageArticles::class, ['@connection']) // or setCreator()
-			->addSetup('setLogger', ['@logger']);
-	}
+	return Expect::structure([
+		'postsPerPage' => Expect::int(10),
+		'storage' => Expect::anyOf('files', 'database')->firstIsDefault(),
+	]);
 }
 ```
 
-Konvence je prefixovat služby přidané rozšířením jeho názvem, aby nevznikaly jmenné konflikty. To dělá metoda `prefix()`, takže pokud se rozšíření jmenuje `blog`, služba ponese název `blog.articles`.
+Zvalidovaná konfigurace je k dispozici v `$this->config` jako objekt `stdClass` (nebo jako pole, pokud ke schématu připojíte `castTo('array')`).
 
-Pokud potřebujeme přejmenovat službu, můžeme kvůli zachování zpětné kompatibility vytvořit alias s původním názvem. Podobně to dělá Nette např. u služby `routing.router`, která je dostupná i pod dřívějším názvem `router`.
+Pokud hodnotu volby nelze znát v čase kompilace - pochází třeba z proměnné prostředí - označte ji pomocí `dynamic()`, např. `Expect::int()->dynamic()`. Více v [dynamických parametrech |application:bootstrapping#Dynamické parametry].
+
+
+loadConfiguration() .[method]
+-----------------------------
+
+Místo, kde rozšíření registruje své služby, a to pomocí [ContainerBuilderu |#ContainerBuilder]:
 
 ```php
-$builder->addAlias('router', 'routing.router');
+public function loadConfiguration(): void
+{
+	$builder = $this->getContainerBuilder();
+	$builder->addDefinition($this->prefix('articles'))
+		->setFactory(Blog\Articles::class);
+}
 ```
 
+Má-li být služba dostupná i pod krátkým názvem, přidejte alias. Podle konvence se to dělá jen tehdy, když je rozšíření zaregistrované pod svým obvyklým názvem, aby se o alias nemohlo přetahovat víc instancí rozšíření:
 
-Načtení služeb ze souboru
--------------------------
+```php
+if ($this->name === 'blog') {
+	$builder->addAlias('articles', $this->prefix('articles'));
+}
+```
 
-Služby nemusíme vytvářet jen pomocí API třídy ContainerBuilder, ale i známým zápisem používaným v konfiguračním souboru NEON v sekci services. Prefix `@extension` představuje aktuální extension.
+Když je služeb hodně, může být pohodlnější definovat je v samostatném NEON souboru známou syntaxí [services |services]. Prefix `@extension` odkazuje na aktuální rozšíření:
 
 ```neon
 services:
@@ -107,88 +160,284 @@ services:
 
 	comments:
 		create: MyBlog\CommentsModel(@connection, @extension.articles)
-
-	articlesList:
-		create: MyBlog\Components\ArticlesList(@extension.articles)
 ```
 
-Služby načteme:
+Tyto definice načteme metodou `loadDefinitionsFromConfig()`; názvy se oprefixují automaticky a soubor se sleduje jako závislost, takže jeho změna vyvolá překompilování:
 
 ```php
-class BlogExtension extends Nette\DI\CompilerExtension
+public function loadConfiguration(): void
 {
-	public function loadConfiguration()
-	{
-		$builder = $this->getContainerBuilder();
-
-		// načtení konfiguračního souboru pro rozšíření
-		$this->compiler->loadDefinitionsFromConfig(
-			$this->loadFromFile(__DIR__ . '/blog.neon')['services'],
-		);
-	}
+	$this->loadDefinitionsFromConfig(
+		$this->loadFromFile(__DIR__ . '/services.neon')['services'],
+	);
 }
 ```
 
 
 beforeCompile() .[method]
-=========================
+-------------------------
 
-Metoda se volá ve chvíli, kdy kontejner obsahuje všechny služby přidané jednotlivými rozšířeními v metodách `loadConfiguration` a taktéž uživatelskými konfiguračními soubory. V této fázi sestavování tedy můžeme definice služeb upravovat nebo doplnit vazby mezi nimi. Pro vyhledávání služeb v kontejneru podle tagů lze využít metodu `findByTag()`, podle třídy či rozhraní zase metodu `findByType()`.
+Ve chvíli volání této metody už builder drží **všechny** definice: vaše, definice ostatních rozšíření i ty z uživatelských konfiguračních souborů. Typy služeb jsou také vyřešené, takže vyhledávání podle typu je spolehlivé. Tato fáze je proto ideální pro prozkoumání a doplnění výsledného grafu služeb.
+
+Typicky vyhledáte služby podle tagu nebo typu a nalezené definice doplníte:
 
 ```php
-class BlogExtension extends Nette\DI\CompilerExtension
+public function beforeCompile(): void
 {
-	public function beforeCompile()
-	{
-		$builder = $this->getContainerBuilder();
+	$builder = $this->getContainerBuilder();
 
-		foreach ($builder->findByTag('logaware') as $serviceName => $tagValue) {
-			$builder->getDefinition($serviceName)->addSetup('setLogger');
-		}
+	foreach ($builder->findByTag('logaware') as $name => $attrs) {
+		$builder->getDefinition($name)->addSetup('setLogger');
 	}
 }
 ```
 
+Volání `setLogger()` nemá žádné explicitní argumenty - dodá je autowiring, stejně jako to dělá u továren.
 
-afterCompile() .[method]
-========================
-
-V této fázi už je třída kontejneru vygenerována v podobě objektu [ClassType |php-generator:#Třídy], obsahuje všechny metody, které vytváří služby, a je připravena na zápis do cache. Výsledný kód třídy můžeme v této chvíli ještě upravit.
+Můžete také spolupracovat s ostatními zaregistrovanými rozšířeními, která získáte přes `$this->compiler->getExtensions()`, volitelně filtrovaná podle třídy nebo rozhraní:
 
 ```php
-class BlogExtension extends Nette\DI\CompilerExtension
-{
-	public function afterCompile(Nette\PhpGenerator\ClassType $class)
-	{
-		$method = $class->getMethod('__construct');
-		// ...
-	}
+foreach ($this->compiler->getExtensions(FooExtension::class) as $extension) {
+	// ...
 }
 ```
 
 
-$initialization .[method]
-=========================
+afterCompile(Nette\PhpGenerator\ClassType $class) .[method]
+-----------------------------------------------------------
 
-Třída Configurator po [vytvoření kontejneru |application:bootstrapping#index.php] volá inicializační kód, který se vytváří zápisem do objektu `$this->initialization` pomocí [metody addBody() |php-generator:#Těla metod a funkcí].
+V poslední fázi je třída kontejneru vygenerovaná jako objekt [ClassType |php-generator:#Třídy] knihovny [PHP Generator |php-generator:]. Obsahuje tovární metodu pro každou službu a čeká na zápis do cache. Její kód můžete ještě upravit:
 
-Ukážeme si příklad, jak třeba inicializačním kódem nastartovat session nebo spustit služby, které mají tag `run`:
+```php
+public function afterCompile(Nette\PhpGenerator\ClassType $class): void
+{
+	$method = $class->getMethod('__construct');
+	// ...
+}
+```
+
+Tuto fázi budete potřebovat jen výjimečně. Pro přidání kódu, který poběží při startu aplikace, použijte raději inicializaci:
+
+
+Inicializační kód
+-----------------
+
+Všechny předchozí fáze ovlivňují, jak se kontejner *sestaví*. Kromě toho může rozšíření vygenerovat kód, který poběží za *běhu aplikace*, hned po vytvoření kontejneru - třeba nastartovat session nebo spustit služby. Kód se zapisuje do objektu `$this->initialization` jeho metodou [addBody() |php-generator:#Těla metod a funkcí]:
+
+```php
+public function loadConfiguration(): void
+{
+	// služby s tagem 'run' se musí vytvořit hned po startu kontejneru
+	$builder = $this->getContainerBuilder();
+	foreach ($builder->findByTag('run') as $name => $attrs) {
+		$this->initialization->addBody('$this->getService(?);', [$name]);
+	}
+}
+```
+
+Samotné Nette inicializaci používá například k automatickému startu session nebo k odeslání bezpečnostních HTTP hlaviček. A pamatujte: na rozdíl od všeho ostatního v rozšíření tento kód běží při **každém požadavku**, takže ho udržujte malý.
+
+
+ContainerBuilder
+================
+
+[api:Nette\DI\ContainerBuilder] je objekt, kterým rozšíření mluví s kompilátorem. Drží [definice |#Jak probíhá kompilace] všech služeb a nabízí metody pro jejich přidávání, vyhledávání a úpravy. Získáte ho v `loadConfiguration()` a `beforeCompile()`:
+
+```php
+$builder = $this->getContainerBuilder();
+```
+
+
+Přidávání služeb
+----------------
+
+Registrace služby je totéž, co děláte v sekci `services:` NEON souboru - jen zapsané v PHP. Každý konfigurační klíč má odpovídající metodu na definici, takže tyto dva zápisy jsou rovnocenné:
+
+```neon
+services:
+	articles:
+		create: Blog\Articles(@connection)
+		setup:
+			- setLogger(@logger)
+		tags: [logaware]
+```
+
+```php
+$builder->addDefinition($this->prefix('articles'))
+	->setFactory(Blog\Articles::class, ['@connection'])
+	->addSetup('setLogger', ['@logger'])
+	->addTag('logaware');
+```
+
+Definice vrácená metodou `addDefinition()` je [ServiceDefinition |#Typy definic] nabízející protějšky konfiguračních klíčů: `setType()` (třída služby), `setFactory()` (jak ji vytvořit), `setArguments()`, `addSetup()`, `addTag()` a `setAutowired()`.
+
+`addSetup()` odpovídá seznamu `setup:` a přijímá stejné formy: volání metody `addSetup('setLogger', ['@logger'])`, přiřazení do vlastnosti `addSetup('$cache', ['@cache'])` nebo volání na jiné službě `addSetup('@Tracy\Bar::addPanel', [$panel])`.
+
+Kromě běžných služeb umí builder zaregistrovat i [generované |factory] továrny, accessory a locatory - každý svou metodou, která vrací odpovídající [typ definice |#Typy definic]:
+
+| Metoda | Registruje
+|--------|----------
+| `addDefinition()` | běžnou službu (vrací `ServiceDefinition`)
+| `addFactoryDefinition()` | generovanou [továrnu |factory] (rozhraní s metodou `create()`)
+| `addAccessorDefinition()` | generovaný [accessor |factory#Accessor] (rozhraní s metodou `get()`)
+| `addLocatorDefinition()` | [multifactory / locator |factory#Vícenásobná továrna/accessor] sdružující více továren
+| `addImportedDefinition()` | službu předanou kontejneru zvenčí za běhu
+| `addAlias()` | druhý název pro existující službu
+
+U továrny nastavíte vytvářený objekt přes `getResultDefinition()`; accessor místo toho odkazuje na existující službu přes `setReference()`:
+
+```php
+$builder->addFactoryDefinition($this->prefix('latteFactory'))
+	->setImplement(LatteFactory::class)
+	->getResultDefinition()
+		->setFactory(Latte\Engine::class)
+		->addSetup('setStrictTypes', [true]);
+```
+
+`addLocatorDefinition()` a `addImportedDefinition()` potřebujete jen zřídka - takové služby obvykle vznikají z klíčů `implement:` a imported služeb v NEONu, ne ručním zápisem.
+
+
+Vyhledávání a úprava služeb
+---------------------------
+
+Pro vyhledávání a procházení existujících definic builder nabízí:
+
+| Metoda | Popis
+|--------|------
+| `getDefinition(string $name)` | definici daného názvu (vyhodí výjimku, pokud chybí)
+| `hasDefinition(string $name)` | zda definice nebo alias daného názvu existuje
+| `getDefinitions()` | všechny definice
+| `removeDefinition(string $name)` | odstraní definici
+| `getByType(string $type)` | název autowirované služby daného typu, nebo `null`
+| `getDefinitionByType(string $type)` | autowirovanou definici daného typu
+| `findByType(string $type)` | všechny definice daného typu jako dvojice `name => definice`
+| `findByTag(string $tag)` | služby nesoucí daný tag jako dvojice `name => hodnota tagu`
+| `addExcludedClasses(array $types)` | vyloučí třídy a rozhraní z autowiringu
+
+Šikovný obrat je zjistit pomocí `getByType()`, jestli nějaká služba vůbec existuje - třeba napojit se na logger jen tehdy, když ho aplikace má:
+
+```php
+if ($builder->getByType(Psr\Log\LoggerInterface::class)) {
+	$builder->getDefinition($this->prefix('articles'))
+		->addSetup('setLogger');
+}
+```
+
+
+Typy definic
+------------
+
+Každá metoda `add*Definition()` vrací jiný druh definice. Všechny dědí od společného předka `Nette\DI\Definitions\Definition`:
+
+- **`ServiceDefinition`** - běžná služba; nastavuje se přes `setType()`, `setFactory()`, `addSetup()`, `addTag()` a `setAutowired()`
+- **`FactoryDefinition`** - [generovaná továrna |factory]: rozhraní, jehož metoda `create()` vrací při každém volání nový objekt
+- **`AccessorDefinition`** - [generovaný accessor |factory#Accessor]: rozhraní, jehož metoda `get()` vrací existující službu
+- **`LocatorDefinition`** - [multifactory / locator |factory#Vícenásobná továrna/accessor] sdružující více továren nebo accessorů v jednom rozhraní
+- **`ImportedDefinition`** - služba, kterou kontejner sám nevytváří, ale dostává zvenčí za běhu
+
+Pamatujte, že `getDefinition()` vrací takový druh definice, jaký se pod daným názvem skrývá. Pokud může váš kód narazit na generovanou továrnu, nejdřív zkontrolujte typ a vytvářený objekt nastavte přes `getResultDefinition()`:
+
+```php
+$def = $builder->getDefinition($name);
+if ($def instanceof Nette\DI\Definitions\FactoryDefinition) {
+	$def = $def->getResultDefinition();
+}
+$def->addSetup('setLogger');
+```
+
+
+Tipy a úskalí
+=============
+
+
+Kompilace vs. běh aplikace
+--------------------------
+
+Nejčastější zdroj zmatení: kód rozšíření běží, když se kontejner **kompiluje**, ne když aplikace obsluhuje požadavky. V praxi to znamená:
+
+- Rozšíření nikdy nepracuje s instancemi služeb - ty ještě neexistují. Nevytvářejte služby přes `new`; zaregistrujte definici a nechte kontejner, ať je vytvoří sám.
+- Všechny hodnoty z konfigurace se zapečou do vygenerovaného kódu. Hodnota, která se může lišit mezi prostředími (cesta, heslo z `getenv()`), musí být označená jako [dynamická |application:bootstrapping#Dynamické parametry], jinak zamrzne v čase kompilace.
+- Řetězce předané do `$this->initialization->addBody()` se nespouštějí teď - je to PHP kód vygenerovaný do kontejneru, který se spouští při každém požadavku.
+
+
+Závislosti na souborech
+-----------------------
+
+Kontejner se překompiluje při změně konfiguračních souborů nebo tříd rozšíření. Pokud ale vaše rozšíření čte jakýkoli jiný soubor - seznam entit, XML konfiguraci knihovny - kontejner o něm nemá jak vědět. Takové soubory zaregistrujte pomocí:
+
+```php
+$builder->addDependency($file);
+```
+
+Jinak se dočkáte klasické záhady: upravíte soubor, ale aplikace se dál chová postaru - změna se projeví až ve chvíli, kdy se kontejner přestaví z nějakého jiného důvodu. (Soubory načtené přes `loadFromFile()` se sledují automaticky.)
+
+
+Podmíněná registrace
+--------------------
+
+Rozšíření se umí přizpůsobit svému prostředí. Volitelné integrace se typicky hlídají přes `class_exists()`:
+
+```php
+if (class_exists(Symfony\Component\Console\Command\Command::class)) {
+	$builder->addDefinition($this->prefix('command'))
+		->setFactory(Blog\Console\SitemapCommand::class);
+}
+```
+
+A hodnoty jako `%debugMode%` je nejlepší předávat konstruktorem rozšíření:
+
+```neon
+extensions:
+	blog: BlogExtension(%debugMode%)
+```
 
 ```php
 class BlogExtension extends Nette\DI\CompilerExtension
 {
-	public function loadConfiguration()
-	{
-		// automatické startování session
-		if ($this->config->session->autoStart) {
-			$this->initialization->addBody('$this->getService("session")->start()');
-		}
-
-		// služby s tagem run musejí být vytvořeny po instancování kontejneru
-		$builder = $this->getContainerBuilder();
-		foreach ($builder->findByTag('run') as $name => $foo) {
-			$this->initialization->addBody('$this->getService(?);', [$name]);
-		}
-	}
+	public function __construct(
+		private bool $debugMode = false,
+	) {}
 }
 ```
+
+Typickým využitím je registrace Tracy panelu jen ve vývojářském režimu.
+
+
+Složitější argumenty
+--------------------
+
+Někdy argument továrny nebo setup volání není obyčejná hodnota, název třídy ani reference `@service`. Pro tyto případy existují:
+
+- `new Nette\DI\Definitions\Statement(Blog\Panel::class, [$args])` - objekt vytvořený na místě, "anonymní služba" použitá jako argument
+- `new Nette\DI\Definitions\Reference('blog.articles')` - reference na službu, objektový protějšek zápisu `@name`
+- `$builder::literal('PHP_SAPI')` - kus surového PHP kódu vloženého tak, jak je, do vygenerovaného kontejneru
+
+Příklad - registrace Tracy panelu:
+
+```php
+$builder->getDefinition($this->prefix('articles'))
+	->addSetup('@Tracy\Bar::addPanel', [
+		new Nette\DI\Definitions\Statement(Blog\ArticlesPanel::class),
+	]);
+```
+
+
+Exportované tagy a typy
+-----------------------
+
+[Export metadat |configuration#Export metadat] lze v konfiguraci omezit tak, aby si zkompilovaný kontejner ponechal jen tagy a typy pro autowiring, které aplikace skutečně používá. Pokud vaše rozšíření získává služby za běhu pomocí `$container->findByTag()` nebo `$container->getByType()`, takové omezení může odstranit právě ta metadata, na kterých závisíte.
+
+Abyste tomu předešli, řekněte kompilátoru, které tagy a typy se musí vždy exportovat:
+
+```php
+public function loadConfiguration(): void
+{
+	// tento tag se bude exportovat vždy, i když je export omezený
+	$this->compiler->addExportedTag('event.subscriber');
+
+	// tento typ bude vždy dostupný pro getByType()
+	$this->compiler->addExportedType(Nette\Database\Connection::class);
+}
+```
+
+Obě metody metadata pouze přidávají; nikdy nepřepíšou nastavení `di › export` z aplikace. Když tedy aplikace omezí export na výčet, tagy a typy, které vaše rozšíření potřebuje, zůstanou zachovány; jen úplné vypnutí exportu tagů (`tags: false`) je zahodí spolu se vším ostatním.

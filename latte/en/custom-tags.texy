@@ -69,7 +69,7 @@ Tag Parsing Function
 --------------------
 
 - This PHP callable parses the Latte tag syntax (`{...}`) in the template source.
-- It receives information about the tag (like its name, position, and whether it's an n:attribute) via a [api:Latte\Compiler\Tag] object.
+- It receives information about the tag (like its name, position, and whether it's an n:attribute) via a [api:Latte\Compiler\Tag] object, and the main [api:Latte\Compiler\TemplateParser] as a second argument. Its full signature is `callable(Tag, TemplateParser): (Node|\Generator|void)`.
 - Its primary tool for parsing arguments and expressions within the tag delimiters is the [api:Latte\Compiler\TagParser] object, accessible via `$tag->parser` (this is a different parser than the one that parses the whole template).
 - For paired tags, it uses `yield` to signal Latte to parse the inner content between the start and end tags.
 - The ultimate goal of the parsing function is to create and return a **Node Class** instance, which gets added to the AST.
@@ -100,7 +100,7 @@ We will now explore how to implement these components step-by-step.
 Creating a Simple Tag
 =====================
 
-Let's dive into creating your first custom Latte tag. We'll start with a very simple example: a tag named `{datetime}` that outputs the current date and time. **Initially, this tag won't accept any arguments**, but we will enhance it later in the [#"Parsing Tag Arguments"] section. It also doesn't have inner content.
+Let's dive into creating your first custom Latte tag. We'll start with a very simple example: a tag named `{datetime}` that outputs the current date and time. **Initially, this tag won't accept any arguments**, but we will enhance it later in the [#Parsing Tag Arguments] section. It also doesn't have inner content.
 
 This example will guide you through the essential steps: defining the Node class, implementing its `print()` and `getIterator()` methods, creating the parsing function, and finally registering the tag.
 
@@ -130,6 +130,8 @@ class DatetimeNode extends StatementNode
 	 */
 	public static function create(Tag $tag): self
 	{
+		// Our tag outputs content, so keep the surrounding indentation
+		$tag->outputMode = $tag::OutputKeepIndentation;
 		// Our simple tag currently takes no arguments, so we don't have to parse anything
 		$node = $tag->node = new self;
 		return $node;
@@ -156,9 +158,9 @@ class DatetimeNode extends StatementNode
 }
 ```
 
-When Latte encounters `{datetime}` in a template, it calls the tag parsing function `create()`. Its job is to return an instance of `DatetimeNode`.
+When Latte encounters `{datetime}` in a template, it calls the tag parsing function `create()`. Its job is to return an instance of `DatetimeNode`. We also set `$tag->outputMode` to `OutputKeepIndentation`; because a tag runs in the default `OutputNone` mode (explained in [#Tag Output Modes]), a tag placed before the template's first text could otherwise emit its output in the generated `prepare()` method instead of `main()`. Setting this mode ensures the output lands where the tag stands.
 
-The `print()` method generates the PHP code that will be executed when the template is rendered. We call the `$context->format()` method, which assembles the resulting PHP code string for the compiled template. The first argument, `'echo date('Y-m-d H:i:s') %line;'`, is the mask into which the subsequent parameters are substituted. The `%line` placeholder tells the `format()` method to take the second following argument, which is `$this->position`, and inserts a comment like `/* line 15 */` that links the generated PHP code back to the original template line, which is crucial for debugging.
+The `print()` method generates the PHP code that will be executed when the template is rendered. We call the `$context->format()` method, which assembles the resulting PHP code string for the compiled template. The first argument, `'echo date('Y-m-d H:i:s') %line;'`, is the mask into which the subsequent parameters are substituted. The `%line` placeholder tells the `format()` method to take the following argument, which is `$this->position`, and inserts a comment like `/* pos 15:1 */` that links the generated PHP code back to the original template line, which is crucial for debugging.
 
 Property `$this->position` is inherited from the base `Node` class, and is automatically set by Latte's parser. It holds a [api:Latte\Compiler\Range] object (a subclass of `Position` extended with a `length` in bytes) indicating where the tag is located in the source `.latte` file. For paired tags the range spans from the opening to the closing tag, and `StatementNode` descendants additionally expose `$this->tagRanges` listing the `Range` of every constituent tag (opening, intermediate like `{else}`/`{case}`, and closing).
 
@@ -413,6 +415,8 @@ class DebugNode extends StatementNode
 ```
 
 Note: `$endTag` is `null` if the tag is used as n:attribute, i.e. `<div n:debug>...</div>`.
+
+A paired tag can also be closed with a slash, like `{debug/}` (or `<div n:debug/>`). It then has no inner content: the generator receives `[$emptyFragmentNode, $startTag]`, where the second element is the *start* tag itself, not `null`.
 
 
 Implementing `print()` for Conditional Rendering
@@ -704,7 +708,7 @@ If both the outer and inner `{repeat}` tags generated code using the *same* temp
 
 We need to ensure that the temporary variables generated for each instance of the `{repeat}` tag are **unique**. We achieve this using `PrintContext::generateId()`. This method returns a unique integer during the compilation phase. We can append this ID to our temporary variable names.
 
-So, instead of `$__count`, we'll generate `$__count_1` for the first repeat tag, `$__count_2` for the second, and so on. Similarly for the loop counter, we'll use `$__i_1`, `$__i_2`, etc.
+So, instead of `$__count`, we'll generate a name with a unique numeric suffix, such as `$__count_0`, and likewise for the loop counter, e.g. `$__i_0`. The actual numbers come from a compilation-wide counter shared by all nodes, so they are only guaranteed to be unique, not to form a per-tag sequence.
 
 
 Implementing `RepeatNode`
@@ -750,8 +754,8 @@ class RepeatNode extends StatementNode
 	{
 		// Generate unique variable names
 		$id = $context->generateId();
-		$countVar = '$__count_' . $id; // e.g., $__count_1, $__count_2, etc.
-		$iteratorVar = '$__i_' . $id;  // e.g., $__i_1, $__i_2, etc.
+		$countVar = '$__count_' . $id; // unique name, e.g. $__count_0
+		$iteratorVar = '$__i_' . $id;  // unique name, e.g. $__i_0
 
 		return $context->format(
 			<<<'XX'
@@ -878,7 +882,7 @@ class ConfirmNode extends StatementNode
 		// It ensures correct escaping for both JavaScript and HTML attribute contexts.
 		return $context->format(
 			<<<'XX'
-				echo ' onclick="', LR\Filters::escapeHtmlAttr('return confirm(' . LR\Filters::escapeJs(%node) . ')'), '"' %line;
+				echo ' onclick="', LR\HtmlHelpers::escapeAttr('return confirm(' . LR\Helpers::escapeJs(%node) . ')'), '"' %line;
 				XX,
 			$this->message,
 			$this->position,
@@ -892,7 +896,7 @@ class ConfirmNode extends StatementNode
 }
 ```
 
-Method `print()` generates the PHP code that will ultimately output the `onclick="..."` HTML attribute during template rendering. Handling nested contexts (JavaScript inside an HTML attribute) requires careful escaping. The `LR\Filters::escapeJs(%node)` filter is called at runtime and escapes the message correctly for use inside JavaScript (the output would be like `"Sure?"`). Then the `LR\Filters::escapeHtmlAttr(...)` filter escapes characters that are special within HTML attributes, so it would turn the output into `return confirm(&quot;Sure?&quot;)`. This two-step runtime escaping ensures that the message is safe for JavaScript and the resulting JavaScript code is safe for embedding within the HTML `onclick` attribute.
+Method `print()` generates the PHP code that will ultimately output the `onclick="..."` HTML attribute during template rendering. Handling nested contexts (JavaScript inside an HTML attribute) requires careful escaping. The `LR\Helpers::escapeJs(%node)` helper is called at runtime and escapes the message correctly for use inside JavaScript (the output would be like `"Sure?"`). Then the `LR\HtmlHelpers::escapeAttr(...)` helper escapes characters that are special within HTML attributes, so it would turn the output into `return confirm(&quot;Sure?&quot;)`. This two-step runtime escaping ensures that the message is safe for JavaScript and the resulting JavaScript code is safe for embedding within the HTML `onclick` attribute.
 
 
 Registration and Usage
@@ -931,6 +935,8 @@ When the user clicks the link, the browser will execute the `onclick` code, disp
 
 This example demonstrates how a pure n:attribute can be created to modify the behavior or attributes of its host HTML element by generating appropriate PHP code within its `print()` method. Remember the double escaping often required: once for the target context (JavaScript in this case) and again for the HTML attribute context.
 
+Two more members of the `Tag` object come in handy when writing pure n:attributes: `$tag->htmlElement` gives you access to the surrounding HTML element (an `ElementNode`), so you can inspect or adjust it, and `$tag->replaceNAttribute($node)` lets you swap the attribute for a node you build. In fact, the node returned from a pure n:attribute's `create()` automatically replaces the attribute on its element.
+
 
 Advanced Topics
 ===============
@@ -943,11 +949,11 @@ Tag Output Modes
 
 The `Tag` object passed to your `create()` function has a property `outputMode`. This property influences how Latte handles surrounding whitespace and indentation, particularly when the tag is used on its own line. You can modify this property within your `create()` function.
 
-- `Tag::OutputKeepIndentation` (Default for most tags like `{=...}`): Latte tries to preserve the indentation before the tag. Newlines *after* the tag are generally kept. This is suitable for tags that output content inline.
-- `Tag::OutputRemoveIndentation` (Default for block tags like `{if}`, `{foreach}`): Latte removes leading indentation and potentially a single trailing newline. This helps keep the generated PHP code cleaner and avoids extra blank lines in the HTML output caused by the tag itself. Use this for tags that represent control structures or blocks that shouldn't add whitespace themselves.
-- `Tag::OutputNone` (Used by tags like `{var}`, `{default}`): Similar to `RemoveIndentation`, but signals more strongly that the tag itself produces no direct output, potentially influencing whitespace handling around it even more aggressively. Suitable for declaration or setup tags.
+- `Tag::OutputNone` (the **default** for every tag, and what control structures like `{if}` or `{foreach}` keep): the whitespace around the tag is treated exactly as with `OutputRemoveIndentation` – leading indentation and a single trailing newline are removed. The real difference is internal: this mode keeps the template parser in the template's "head" mode. It suits declaration or setup tags such as `{var}` or `{default}` that produce no direct output.
+- `Tag::OutputRemoveIndentation` (set explicitly by the block tags `{block}`, `{embed}`, `{include}` and `{sandbox}`): removes the leading indentation before the tag and a single trailing newline. This helps keep the generated PHP code cleaner and avoids extra blank lines in the HTML output caused by the tag itself.
+- `Tag::OutputKeepIndentation` (set explicitly by output tags such as `{=...}`): Latte tries to preserve the indentation before the tag; newlines *after* the tag are generally kept. This is suitable for tags that output content inline – see the `{datetime}` example above, which sets this mode for exactly that reason.
 
-Choose the mode that best fits your tag's purpose. For most structural or control-flow tags, `OutputRemoveIndentation` is usually appropriate.
+Choose the mode that best fits your tag's purpose. Since the default is `OutputNone`, control-flow and declaration tags need no change; set `OutputKeepIndentation` for tags that print content on their own line.
 
 
 Accessing Parent/Closest Tags
@@ -955,9 +961,9 @@ Accessing Parent/Closest Tags
 
 Sometimes, a tag's behavior needs to depend on the context it's used in, specifically which parent tag(s) it resides within. The `Tag` object passed to your `create()` function provides the `closestTag(array $classes, ?callable $condition = null): ?Tag` method precisely for this purpose.
 
-This method searches upwards through the hierarchy of currently open tags (including HTML elements represented internally during parsing) and returns the `Tag` object of the nearest ancestor that matches specific criteria. If no matching ancestor is found, it returns `null`.
+This method searches upwards through the hierarchy of currently open Latte tags (the chain of `$tag->parent`; surrounding HTML elements are not part of it) and returns the `Tag` object of the nearest ancestor that matches specific criteria. If no matching ancestor is found, it returns `null`.
 
-The `$classes` array specifies what kind of ancestor tags you are looking for. It checks if the ancestor tag's associated node (`$ancestorTag->node`) is an instance of this class.
+The `$classes` array specifies what kind of ancestor tags you are looking for. It checks whether the class of the ancestor tag's associated node (`$ancestorTag->node`) is exactly one of the listed classes; subclasses are not matched.
 
 ```php
 function create(Tag $tag)
@@ -1003,8 +1009,8 @@ We've frequently used `PrintContext::format()` to generate PHP code in the `prin
 - **`%args`**: Argument must be an `Expression\ArrayNode`. It prints the array items formatted as arguments for a function or method call (comma-separated, handling named arguments if present).
 	- `$argsNode = new ArrayNode([...]);`
 	- `$context->format('myFunc(%args);', $argsNode)` -> `myFunc(1, name: 'Joe');`
-- **`%line`**: Argument must be a `Position` (or `Range`) object (usually `$this->position`). It inserts a PHP comment `/* line X */` indicating the source line number.
-	- `$context->format('echo "Hi" %line;', $this->position)` -> `echo "Hi" /* line 42:1 */;`
+- **`%line`**: Argument must be a `Position` (or `Range`) object (usually `$this->position`). It inserts a PHP comment `/* pos X:Y */` indicating the source line and column.
+	- `$context->format('echo "Hi" %line;', $this->position)` -> `echo "Hi" /* pos 42:1 */;`
 - **`%escape(...)`**: It generates PHP code that, *at runtime*, will escape the inner expression using the current context-aware escaping rules.
 	- `$context->format('echo %escape(%node);', $variableNode)`
 - **`%modify(...)`**: Argument must be a `ModifierNode`. It generates PHP code that applies the filters specified in the `ModifierNode` to the inner content, including context-aware escaping if not disabled by `|noescape`.
@@ -1024,6 +1030,12 @@ While `parseExpression()`, `parseArguments()`, etc., cover many cases, sometimes
 ```php
 <?php
 namespace App\Templating;
+
+use Latte\CompileException;
+use Latte\Compiler\Nodes\Php\ExpressionNode;
+use Latte\Compiler\Nodes\StatementNode;
+use Latte\Compiler\Tag;
+use Latte\Compiler\Token;
 
 class YoutubeNode extends StatementNode
 {
@@ -1060,6 +1072,8 @@ class YoutubeNode extends StatementNode
 
 		return $node;
 	}
+
+	// ... print() and getIterator() ...
 }
 ```
 

@@ -1,0 +1,398 @@
+Process: Dış Programları Çalıştırma .{data-version:4.1.4}
+*********************************************************
+
+.[perex]
+[api:Nette\Utils\Process], PHP'den dış programları çalıştırmanızı sağlar: onlara girdi verir, çıktılarını okur ve nasıl sonlandıklarına göre tepki verirsiniz. PHP'nin `proc_open()` fonksiyonunun, hataları `false` döndürerek değil istisna fırlatarak bildiren dost canlısı bir sargısıdır.
+
+
+Kurulum:
+
+```shell
+composer require nette/utils
+```
+
+Tüm örnekler, aşağıdaki takma adın tanımlandığını varsayar:
+
+```php
+use Nette\Utils\Process;
+```
+
+
+En Basit Kullanım
+=================
+
+Bir programı çalıştırıp ne yazdırdığını okumak mı istiyorsunuz? Tek gereken bu:
+
+```php
+$process = Process::runExecutable('git', ['log', '-1', '--format=%H']);
+echo $process->getStdOutput();
+```
+
+İlk argüman çalıştırılacak program, ikincisi ise argümanlarının listesidir: komut satırına yazacağınız şeylerin aynısı, yalnızca bir diziye bölünmüş hâli. `getStdOutput()` metodu programın bitmesini bekler ve standart çıktısına yazdığı her şeyi döndürür.
+
+Bütün fikir bu: bir süreç başlatırsınız, sonra ona sorular sorarsınız: hâlâ çalışıyor mu, ne yazdırdı, nasıl bitti. Bu sayfanın geri kalanı bu soruları tek tek ele alıyor.
+
+
+Süreç Başlatma
+==============
+
+Süreç başlatmanın iki yolu var ve aradaki farkı anlamak önemli.
+
+
+static runExecutable(string $executable, array $arguments=[], ?array $env=null, array $options=[], mixed $stdin='', mixed $stdout=null, mixed $stderr=null, ?string $directory=null, ?float $timeout=60): Process .[method]
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+**Belirli bir programı** argüman listesiyle çalıştırır. Argümanlar programa doğrudan aktarılır, dolayısıyla boşlukları, tırnakları ya da başka özel karakterleri asla kaçışlamanız gerekmez. Araya kabuk girmediğinden *shell injection* riski de yoktur. Özellikle komutun herhangi bir parçası kullanıcı girdisinden geliyorsa güvenli seçim budur:
+
+```php
+$file = $_GET['file']; // her şey olabilir, hatta '; rm -rf /'
+$process = Process::runExecutable('wc', ['-l', $file]); // tümüyle güvenli
+```
+
+Tam yol vermezseniz program sistemin `PATH` değişkeninde aranır. Bir PHP betiği çalıştırmak için `PHP_BINARY` sabiti işe yarar:
+
+```php
+$process = Process::runExecutable(PHP_BINARY, ['-v']);
+```
+
+
+static runCommand(string $command, ?array $env=null, array $options=[], mixed $stdin='', mixed $stdout=null, mixed $stderr=null, ?string $directory=null, ?float $timeout=60): Process .[method]
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+**Bir komut dizesini sistem kabuğu üzerinden** çalıştırır (Linux ve macOS'ta `/bin/sh`, Windows'ta `cmd.exe`). Bu size kabuğun olanaklarını verir: borular `|`, yönlendirmeler `>`, değişken genişletme, `&&` ile komut zincirleme vb.:
+
+```php
+$process = Process::runCommand('git log --oneline | head -n 20');
+```
+
+Ama kabuk dizenin tamamını ayrıştırdığından, **bir `runCommand()` dizesini asla güvenilmeyen girdiden kurmayın**; bu klasik bir güvenlik açığıdır. Kuşkuya düştüğünüzde `runExecutable()` kullanın.
+
+.[note]
+Bu kadar çok parametre olduğundan bunları adlandırılmış argüman olarak verin, örneğin `Process::runExecutable('git', ['pull'], timeout: 30)`. `$options` dizisi, Windows'taki `bypass_shell` gibi ileri düzey ihtiyaçlar için `proc_open()` fonksiyonuna aktarılır.
+
+
+Süreç Arka Planda Çalışır
+=========================
+
+Başlatıldıktan sonra süreç, PHP betiğinizle **yan yana** çalışır: `runExecutable()` ve `runCommand()` hemen geri döner, sürecin bitmesini beklemez. Ne zaman (ve beklenip beklenmeyeceğine) siz karar verirsiniz:
+
+```php
+$process = Process::runExecutable('npm', ['install']);
+
+// ... npm çalışırken burada başka işler yapın ...
+
+$process->wait(); // şimdi bitene kadar bekle
+```
+
+Uygulamada `wait()` metodunu kendiniz nadiren çağırırsınız; çünkü `getStdOutput()`, `getExitCode()`, `isSuccess()` ve `ensureSuccess()` size yanıt vermeden önce süreci zaten otomatik olarak bekler. `wait()` metodunu, ona bir [callback |#Çıktıyı Canlı İzleme] vermek istediğinizde açıkça çağırın.
+
+
+isRunning(): bool .[method]
+---------------------------
+
+Süreç hâlâ çalışıyorken `true`, bittiğinde ya da sonlandırıldığında `false` döndürür. Bu arada başka işler yapmak için kullanışlıdır:
+
+```php
+while ($process->isRunning()) {
+	// bir süre başka bir şey yap
+	usleep(100_000); // 100 ms
+}
+```
+
+
+Nasıl Bitti?
+============
+
+Biten her sürecin bir *çıkış kodu* vardır: geleneksel olarak `0` başarıyı, başka herhangi bir sayı ise bir tür başarısızlığı gösterir (tam olarak neyi, programa bağlıdır).
+
+
+getExitCode(): int .[method]
+----------------------------
+
+Çıkış kodunu döndürür; gerekiyorsa önce sürecin bitmesini bekler:
+
+```php
+$code = Process::runExecutable('git', ['pull'])->getExitCode(); // örneğin 0
+```
+
+
+isSuccess(): bool .[method]
+---------------------------
+
+"Çıkış kodu `0` mıydı?" sorusunun kısayolu:
+
+```php
+$process = Process::runExecutable('git', ['pull']);
+if (!$process->isSuccess()) {
+	echo 'git failed: ' . $process->getStdError();
+}
+```
+
+
+ensureSuccess(): void .[method]
+-------------------------------
+
+Çoğu zaman programın yalnızca başarılı olmasını, aksi hâlde gürültülü biçimde başarısız olmasını istersiniz. `ensureSuccess()` süreci bekler ve çıkış kodu `0` değilse `Nette\Utils\ProcessFailedException` fırlatır:
+
+```php
+Process::runExecutable('git', ['pull'])->ensureSuccess();
+// yürütme yalnızca git başarılı olduysa sürer
+```
+
+
+Çıktıyı Okuma
+=============
+
+Bir sürecin iki ayrı çıktı akışı vardır: **standart çıktı** (normal sonuçlar) ve **standart hata** (programların genellikle sorunları ve tanılama bilgilerini bildirdiği yer). Nette Utils bu ikisini ayrı tutar ve varsayılan olarak ikisini de belleğe yakalar; böylece dilediğiniz zaman okuyabilirsiniz.
+
+
+getStdOutput(): string .[method]
+--------------------------------
+
+Sürecin bitmesini bekler ve standart çıktıya yazdığı her şeyi döndürür:
+
+```php
+$process = Process::runExecutable('date');
+echo $process->getStdOutput();
+```
+
+
+getStdError(): string .[method]
+-------------------------------
+
+Aynısı, ama standart hata için:
+
+```php
+$process = Process::runExecutable('some-tool', ['--do-stuff']);
+if (!$process->isSuccess()) {
+	throw new RuntimeException('The tool failed: ' . $process->getStdError());
+}
+```
+
+.[note]
+Bir çıktı akışını [başka yere yönlendirirseniz |#Çıktıyı Başka Yere Yönlendirme] (bir dosyaya, bir resource'a ya da `false`'a), bellekte döndürülecek bir şey kalmaz ve ilgili getter `Nette\InvalidStateException` fırlatır.
+
+
+consumeStdOutput(): string .[method]
+------------------------------------
+
+Bazen çıktıyı, sürecin bitmesini beklemeden **geldikçe** görmek istersiniz; örneğin ilerlemeyi göstermek için. Her çağrı, standart çıktının bir önceki çağrıdan bu yana ortaya çıkan parçasını döndürür:
+
+```php
+$process = Process::runExecutable('long-running-tool');
+
+while ($process->isRunning()) {
+	echo $process->consumeStdOutput(); // yeni olan neyse yazdırır
+	usleep(100_000); // 100 ms
+}
+echo $process->consumeStdOutput(); // bitmeden hemen önce üretilen son parça
+```
+
+Döngüden sonraki `consumeStdOutput()` önemlidir: süreç son çıktısını, döngü içindeki son çağrıdan sonra ama döngü onun çıktığını fark etmeden önceki `usleep()` sırasında yazmış olabilir. (Bunun yerine döngü içindeki bir çağrı sırasında bittiyse, o çağrı zaten her şeyi döndürmüştür ve bu çağrı boş bir dize döndürür.) Standart hata için de `consumeStdError()` vardır.
+
+
+Çıktıyı Canlı İzleme
+====================
+
+`consumeStdOutput()` ile yoklama yapmak yerine `wait()` metoduna bir callback verebilirsiniz. Yeni çıktı geldikçe her seferinde çağrılır; bu da canlı günlükleme ya da çıktıyı bir yere iletmek için harikadır:
+
+```php
+$process = Process::runExecutable('npm', ['install']);
+
+$process->wait(function (string $stdOut, string $stdErr) {
+	echo $stdOut;            // standart çıktıyı ilet
+	fwrite(STDERR, $stdErr); // ve standart hatayı
+});
+```
+
+Callback iki dize alır: bir önceki çağrıdan bu yana gelen yeni standart çıktı verisi ve yeni standart hata verisi (ikisi de boş olabilir). `wait()` geri döndüğünde süreç bitmiştir ve `getExitCode()`, `getStdOutput()` ve diğerlerini yine de çağırabilirsiniz.
+
+
+Girdi Gönderme
+==============
+
+`$stdin` parametresi, sürecin standart girdisinde ne okuyacağını belirtir. Birkaç farklı şey kabul eder.
+
+**Bir dize** sürecin girdisinin tamamı olur:
+
+```php
+$process = Process::runExecutable('wc', ['-c'], stdin: 'hello world');
+echo $process->getStdOutput(); // 11
+```
+
+**Okunabilir bir resource** (açık bir dosya, bir akış) girdiye kopyalanır:
+
+```php
+$file = fopen('data.csv', 'r');
+$process = Process::runExecutable('sort', stdin: $file);
+```
+
+**`null`**, girdiyi açık tutar; böylece ona kademeli olarak yazabilirsiniz (aşağıya bakın).
+
+Varsayılan boş bir dizedir; bu da sürecin boş ve hemen kapatılmış bir girdi almasını sağlar. Mantıklı varsayılan budur: girdi okuyan programların asla gelmeyecek bir şeyi sonsuza dek beklemesini engeller.
+
+
+writeStdInput(string $string): void .[method]
+---------------------------------------------
+
+Süreci `stdin: null` ile başlattığınızda girdi açık kalır ve onu parça parça beslersiniz. İşiniz bittiğinde `closeStdInput()` çağırın. Bu, programa artık girdi gelmeyeceğini bildirir (dosya sonu gönderir):
+
+```php
+$process = Process::runExecutable('some-repl', stdin: null);
+$process->writeStdInput("first command\n");
+$process->writeStdInput("second command\n");
+$process->closeStdInput();
+echo $process->getStdOutput();
+```
+
+.[note]
+`$stdin` olarak verilen bir dize ya da akış, süreç asıl işine başlamadan önce tek seferde yazılır. Bu girdi büyükse *ve* program girdisini okumadan önce bol miktarda çıktı üretiyorsa, iki taraf da birbirini bekleyerek takılabilir. Bu (ender) durumda `stdin: null` ile `writeStdInput()` kullanıp yazmayla okumayı birbirine geçirin.
+
+
+Süreçleri Zincirleme (Boru)
+===========================
+
+Tıpkı kabuktaki `|` borusu gibi, bir sürecin standart çıktısını doğrudan bir başkasının standart girdisine bağlayabilirsiniz. `$stdin` olarak bir `Process` vermeniz yeterli:
+
+```php
+$producer = Process::runExecutable('cat', ['big.log']);
+$consumer = Process::runExecutable('grep', ['error'], stdin: $producer);
+
+echo $consumer->getStdOutput();
+```
+
+İstediğiniz kadar süreci zincirleyebilirsiniz (`a | b | c`).
+
+.[note]
+Süreçleri boruyla birbirine bağlamak **Windows'ta desteklenmez** (`Nette\NotSupportedException` fırlatır). Windows'ta ilk sürecin çıktısını `getStdOutput()` ile yakalayın ve bir sonrakine dize olarak verin.
+
+
+Çıktıyı Başka Yere Yönlendirme
+==============================
+
+Varsayılan olarak standart çıktı ve standart hata belleğe yakalanır. `$stdout` ve `$stderr` parametreleri bunları bunun yerine başka bir yere göndermenizi sağlar.
+
+**Bir dosya adı** çıktıyı o dosyaya gönderir:
+
+```php
+Process::runExecutable('mysqldump', ['mydb'], stdout: 'backup.sql')
+	->ensureSuccess();
+```
+
+**Yazılabilir bir resource** çıktıyı o akışa gönderir. Gerçek bir dosyaya dayanmalıdır (`php://memory` ve benzerleri olmaz):
+
+```php
+$log = fopen('build.log', 'a');
+Process::runExecutable('make', stdout: $log, stderr: $log);
+```
+
+**`false`** çıktıyı tümüyle atar (`/dev/null`'a, Windows'ta `NUL`'a gider):
+
+```php
+Process::runExecutable('noisy-tool', stderr: false);
+```
+
+Yönlendirme bellek kullanımını da düşük tutar: belleğe yakalamak elverişlidir, ama gigabaytlarca yazdıran bir süreç gigabaytlarca RAM kullanır; bu yüzden böyle çıktıları bir dosyaya yazın.
+
+
+Ortam Değişkenleri
+==================
+
+`$env` parametresi, sürecin göreceği ortam değişkenlerini belirler. Geçerli sürecin ortamını devralmak için `null` (varsayılan) bırakın ya da kendiniz ayarlamak için bir dizi verin:
+
+```php
+// geçerli ortam artı fazladan bir değişken
+$process = Process::runExecutable('printenv', ['MY_VAR'], env: ['MY_VAR' => '123'] + getenv());
+
+// tümüyle boş bir ortam
+$process = Process::runExecutable('some-tool', env: []);
+```
+
+
+Çalışma Dizini
+==============
+
+`$directory` parametresi, sürecin başlayacağı dizini belirler (varsayılan olarak geçerli dizindir):
+
+```php
+$process = Process::runExecutable('git', ['status'], directory: '/path/to/repo');
+```
+
+
+Zaman Sınırı
+============
+
+`$timeout` parametresi (saniye cinsinden, varsayılan `60`), süreci ne kadar bekleyeceğinizi sınırlar. Siz onu beklerken ya da çıktısını okurken sınıra ulaşılırsa süreç sonlandırılır ve `Nette\Utils\ProcessTimeoutException` fırlatılır. Sınırı kaldırmak için `null` verin:
+
+```php
+$process = Process::runExecutable('slow-tool', timeout: 5.0);
+try {
+	$process->wait();
+} catch (Nette\Utils\ProcessTimeoutException $e) {
+	echo 'The tool took too long and was terminated.';
+}
+```
+
+Sınır yalnızca `wait()`, `getExitCode()`, çıktı getter'ları ya da `consume*()` içindeyken denetlenir. Başlatıp hiç beklemediğiniz bir süreç bu sınır yüzünden sonlandırılmaz.
+
+
+Süreci Durdurma
+===============
+
+
+terminate(): void .[method]
+---------------------------
+
+Süreç hâlâ çalışıyorsa onu hemen sonlandırır; zaten bitmişse hiçbir şey yapmaz:
+
+```php
+$process = Process::runExecutable('server');
+// ...
+$process->terminate();
+```
+
+Bir süreç, `Process` nesnesi bitmeden yok edildiğinde (örneğin kapsamın dışına çıktığında) da otomatik olarak sonlandırılır. İstediğiniz bu değilse süreci nesneden ayırın:
+
+
+detach(): void .[method]{data-version:4.1.5}
+--------------------------------------------
+
+Süreci nesneden ayırır: arka planda çalışmayı sürdürür ve nesne yok edildiğinde artık sonlandırılmaz. Bir daemon'u ya da PHP betiğinin kendisinden bile uzun yaşayan bir arka plan işini böyle başlatırsınız:
+
+```php
+$process = Process::runExecutable('worker', stdout: 'worker.log', stderr: false);
+$process->detach();
+// süreç, $process yok edildikten sonra da çalışmayı sürdürür
+```
+
+Ayırdıktan sonra çıktıyı kimse okumayacağı için çıktı bellekte yakalanmamalıdır: onu bir dosyaya, bir resource'a ya da `false`'a [yönlendirin |#Çıktıyı Başka Yere Yönlendirme], aksi hâlde `detach()` `Nette\InvalidStateException` fırlatır. Ayırma sırasında standart girdi ve çıktı boruları kapatılır.
+
+Yalnızca yıkıcının davranışı değişir. `wait()` ve `getExitCode()` yine sürecin bitmesini bekler (ve `$timeout` yine geçerlidir, aşıldığında süreci sonlandırır), `terminate()` de onu yine sonlandırır.
+
+.[note]
+POSIX sistemlerinde, betiğiniz çalışırken biten ayrılmış bir süreç, betik sonlanana dek süreç listesinde *zombi* olarak görünür. Zararsızdır ve kendiliğinden kaybolur.
+
+
+getPid(): ?int .[method]
+------------------------
+
+Süreç çalışırken işletim sistemi süreç kimliğini (PID) döndürür, bittiğinde `null` döndürür:
+
+```php
+$pid = $process->getPid();
+```
+
+
+Bir Şeyler Ters Gittiğinde
+==========================
+
+Hatalar her zaman istisna fırlatılarak bildirilir, asla dönüş değeriyle değil:
+
+| `Nette\Utils\ProcessFailedException` | süreç başlatılamadı ya da `ensureSuccess()` çağrıldı ve çıkış kodu `0` değildi
+| `Nette\Utils\ProcessTimeoutException` | `$timeout` sınırı aşıldı
+| `Nette\InvalidArgumentException` | `$stdin`, `$stdout` ya da `$stderr` olarak geçersiz bir değer verildi
+| `Nette\IOException` | `$stdout` ya da `$stderr` olarak verilen bir dosya açılamadı
+| `Nette\InvalidStateException` | yakalanmamış çıktının okunması, zaten kapatılmış bir STDIN'e yazılması ya da çıktısı bellekte yakalanan bir sürecin ayrılması
+| `Nette\NotSupportedException` | Windows'ta süreç borulaması denendi
+
+`ProcessFailedException` ve `ProcessTimeoutException`, PHP'nin `RuntimeException` sınıfını genişletir.

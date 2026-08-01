@@ -1,0 +1,204 @@
+Slug'larla Güzel URL'ler
+************************
+
+.[perex]
+`/article/123-ekmek-nasil-pisirilir` gibi URL'ler `/article/123` adresinden daha iyi görünür ve hem kullanıcıların hem de arama motorlarının sayfada ne olduğunu anlamasına yardım eder. Bu kılavuz, bunları tümüyle router içinde, tek bir şablona bile dokunmadan nasıl üreteceğinizi ve her ziyaretçinin kurallı (canonical) URL'ye ulaşmasını nasıl sağlayacağınızı gösteriyor.
+
+
+URL'lerde Slug Neden Kullanılır
+===============================
+
+Şu iki adresi karşılaştırın:
+
+```
+/article/123
+/article/123-ekmek-nasil-pisirilir
+```
+
+İkincisi, tıklamadan sonra kullanıcıyı (ve Google'ı) neyin beklediğini söyler. SEO için iyidir, bağlantıları sohbette ya da e-postada okunur kılar ve adres çubuğuna bir anlam katar.
+
+Yine de slug gerçek bir tanımlayıcı değildir. Sayfayı ID belirler. Slug ise uygulamanın başlıktan ürettiği bir süstür. Başlık değişirse slug da değişmelidir. Ve biri URL'yi elle düzenlerse ya da eski bir bağlantıyı izlerse, uygulama yine de doğru sayfayı bulmalıdır.
+
+
+Hedef
+=====
+
+Bunların hepsini karşılayan bir rota istiyoruz:
+
+```
+/article/123                              → 123 numaralı makaleyi açar, kurallı URL'ye yönlendirir
+/article/123-ekmek-nasil-pisirilir        → 123 numaralı makaleyi doğrudan açar
+/article/123-biri-ne-yazdiysa             → 123 numaralı makaleyi açar, kurallı URL'ye yönlendirir
+/article/                                 → 404 (ID yok)
+```
+
+Ve uygulamadaki her `n:href` ile `link()` çağrısının otomatik olarak `/article/123-ekmek-nasil-pisirilir` üretmesini istiyoruz; **tek bir şablonu bile yeniden yazmadan**.
+
+
+Rota Maskesi
+============
+
+Numara, maskede slug'ı köşeli parantezlerle **isteğe bağlı** işaretlemektir:
+
+```php
+$router->addRoute('article/<id [0-9]+>[-<slug>]', 'Article:detail');
+```
+
+`[-<slug>]` maskesi şunu söyler: ID'den sonra bir tire ve bir slug gelebilir, ama zorunlu değildir. Rota hem `/article/123` hem de `/article/123-herhangibirsey` adreslerini kabul eder.
+
+`<slug>` parametresine dair bir not: varsayılan olarak **eğik çizgi dışındaki** her karakterle eşleşir; tam da istediğimiz şey. `<slug .+>` yazarsanız parametre eğik çizgilerle de eşleşir, yani `/article/123-birsey/baska` adresi içinde `/` geçen tek bir slug olarak ayrıştırılır. Gerçekten ihtiyacınız yoksa varsayılan `<slug>` ile kalın.
+
+Buraya kadar URL doğru ayrıştırılıyor, ama üretilen bağlantılar slug içermeyecek. Sıradaki adım, rotaya slug'ı nasıl dolduracağını öğretmek.
+
+
+Şablonlara Dokunmadan Slug Üretme
+=================================
+
+Asıl marifet bu. Var olan `n:href="Article:detail, $id"` çağrıları uygulamanın tamamında değişmeden çalışmayı sürdürür; başlığı router kendisi arar.
+
+Bunu, boş dize anahtarı altındaki bir **genel filtreyle** yaparız; bu filtre tüm parametreleri bir arada görür ve slug'ı ekleyebilir:
+
+```php
+use Nette\Routing\Route;
+use Nette\Utils\Strings;
+
+$router->addRoute('article/<id [0-9]+>[-<slug>]', [
+	'presenter' => 'Article',
+	'action' => 'detail',
+	'' => [
+		Route::FilterOut => function (array $params) use ($slugProvider): array {
+			if (isset($params['id']) && empty($params['slug'])) {
+				$params['slug'] = $slugProvider->getSlug((int) $params['id']);
+			}
+			return $params;
+		},
+	],
+]);
+```
+
+`FilterOut`, router bir URL **ürettiği** her seferde çalışır. Slug verilmemişse filtre başlığı arar ve ekler.
+
+Slug'ları tüm uygulamaya tek bir değişiklikle, yalnızca bir rota tanımıyla yayabilirsiniz. Her şablondaki her bağlantı otomatik olarak `/article/123-ekmek-nasil-pisirilir` üretmeye başlar. Ne grep, ne şablon avı, ne de gözden kaçan bir köşe durumu.
+
+
+Aramayı Önbelleğe Alın
+======================
+
+Bir bağlantı bir veritabanı sorgusu üretir, ama tipik bir sayfada bunlardan bolca vardır: listeler, gezinme yolu, "son görüntülenenler", ilgili makaleler. Aynı makale ID'si tek bir istek sırasında sık sık birkaç bağlantıda görünür ve her seferinde veritabanına gitmek istemezsiniz.
+
+Küçük bir istek başına önbellek bunu çözer. Veritabanı çağrısını küçük bir servisin içine alın:
+
+```php
+final class SlugProvider
+{
+	/** @var array<int, string> */
+	private array $cache = [];
+
+	public function __construct(
+		private Nette\Database\Explorer $db,
+	) {
+	}
+
+	public function getSlug(int $id): string
+	{
+		return $this->cache[$id] ??= Strings::webalize(Strings::truncate(
+			(string) $this->db->fetchField('SELECT title FROM article WHERE id = ?', $id),
+			100, ''
+		));
+	}
+}
+```
+
+Bu kadarı yeter: istek başına, benzersiz ID başına bir veritabanı sorgusu.
+
+
+Başlığı Şablondan Aktarma (İsteğe Bağlı Hızlı Yol)
+==================================================
+
+Başlık zaten şablonda elinizin altındaysa veritabanı aramasını tümüyle atlayabilirsiniz. Başlığı adlandırılmış parametre olarak aktarın:
+
+```latte
+<a n:href="Article:detail, $article->id, slug => $article->title">{$article->title}</a>
+```
+
+…ve başlığı URL için güvenli bir dizeye çeviren, parametre başına bir `FilterOut` ekleyin:
+
+```php
+$router->addRoute('article/<id [0-9]+>[-<slug>]', [
+	'presenter' => 'Article',
+	'action' => 'detail',
+	'slug' => [
+		Route::FilterOut => fn($title) => Strings::webalize(Strings::truncate($title, 100, '')),
+	],
+	'' => [/* yukarıdaki arama yedeği */],
+]);
+```
+
+İki filtre birlikte çalışır. Önce genel filtre çalışır; slug'ın verilen başlıkla zaten dolu olduğunu görünce veritabanı aramasını atlar. Ardından parametre başına `FilterOut` o başlığı düzgün bir slug'a çevirir. Başlığı aktarmayan şablonlar da çalışmayı sürdürür; genel filtre slug'ı boş bulur ve arama yolundan gider.
+
+Bunu yalnızca gerçekten önemli olduğu yerlerde kullanın (istek başına yüzlerce kez render edilen büyük listeler). Uygulamanın çoğu için önbellekli arama yeterince hızlıdır.
+
+
+Kurallılaştırma: Doğru URL'ye Yönlendirme
+=========================================
+
+Artık `/article/123-ekmek-nasil-pisirilir` üretebiliyoruz, ama rota hâlâ `/article/123` ve `/article/123-biri-ne-yazdiysa` adreslerini kabul ediyor. Bu bilinçli bir tercih: kısa URL'ler istiyoruz (aşağıda ayrıntısı var) ve eski ya da elle yazılmış bağlantıların çalışmayı sürdürmesini istiyoruz. Ama arama motorlarının aynı makaleyi birden çok adres altında indekslemesini istemiyoruz.
+
+Çözüm [kurallılaştırmadır |application:presenters#Kanonikleştirme]: kullanıcı kurallı olmayan bir URL üzerinden geldiğinde uygulama onu 301 ile doğru adrese yönlendirir. Bunu `canonicalize()` metodu halleder:
+
+```php
+public function actionDetail(int $id, ?string $slug = null): void
+{
+	$article = $this->facade->getArticle($id);
+	if (!$article) {
+		$this->error();
+	}
+
+	// aynı FilterOut üzerinden kurallı URL'yi üretir
+	// ve geçerli URL'den farklıysa HTTP 301 ile yönlendirir
+	$this->canonicalize('detail', ['id' => $id]);
+
+	$this->template->article = $article;
+}
+```
+
+`canonicalize()`, kurallı URL'yi `link()` ile aynı şekilde üretir (yani aynı `FilterOut` üzerinden geçer) ve onu geçerli URL ile karşılaştırır. Farklılarsa HTTP 301 ile yönlendirir. Ziyaretçiler doğru URL'ye ulaşır, arama motorları yalnızca tek bir kurallı sürüm görür.
+
+
+Slug'ın Nasıl Görüneceğine Karar Veren Tek Bir Yer
+==================================================
+
+`Strings::webalize(Strings::truncate(..., 100, ''))` çağrısının tek bir yerde, `SlugProvider` içinde (ya da parametre başına `FilterOut` içinde) durduğuna dikkat edin. Aynı mantık, şablondaki bağlantıyı, `redirect()` içindeki URL'yi ve `canonicalize()` içindeki kurallı biçimi üretir.
+
+Kuralları sonradan değiştirmek isterseniz (farklı uzunluk sınırı, farklı harf çevirisi, fazladan karakterlerin atılması), tek bir satırı değiştirirsiniz. Bu olmadan, `redirect()` metodunun `/article/123-ekmek-nasil-pisirilir` üretirken `canonicalize()` metodunun `/article/123-ekmek-nasil-pisiri` beklemesi (çünkü biri başka bir yerde farklı bir `truncate` uzunluğu kullanmıştır) riskini alır ve uygulama sonsuz döngüde yönlendirirdi.
+
+
+Bonus: Kısa URL'ler de Çalışmayı Sürdürür
+=========================================
+
+Slug isteğe bağlı olduğundan, onsuz adresler de çalışır:
+
+```
+/article/123
+```
+
+Bu şunlar için yararlıdır:
+- **QR kodları** - daha kısa URL, daha seyrek ve daha kolay taranan bir kod demektir
+- **SMS ve sohbet** - bir tweet'e sığar, derli toplu görünür
+- **Basılı malzemeler** - kısa URL daha hızlı yazılır
+
+Kullanıcı böyle bir URL'yi açtığında `canonicalize()` onu 301 ile slug'lı tam sürüme yönlendirir; böylece arama motorları yine yalnızca kurallı biçimi görür. Kısalık ve SEO'yu aynı anda elde edebilirsiniz.
+
+
+Özet
+====
+
+- `<id>[-<slug>]` maskesi slug'ı isteğe bağlı yapar. Varsayılan `<slug>`, `/` ile eşleşmez; slug'ın içinde eğik çizgi gerçekten istiyorsanız `<slug .+>` kullanın.
+- `''` anahtarı altındaki genel bir `FilterOut` başlığı ID'ye göre arar; **uygulamanın hiçbir yerinde şablon değişikliği gerekmez**.
+- Aramayı küçük bir istek başına önbelleğin içine alın; benzersiz ID başına bir veritabanı sorgusu fazlasıyla yeter.
+- İsteğe bağlı olarak, parametre başına bir `FilterOut` şablonların başlığı doğrudan aktarıp aramayı atlamasını sağlar.
+- Eylemdeki `$this->canonicalize()` çağrısı, kurallı olmayan URL'leri HTTP 301 ile doğru adrese yönlendirir.
+- Slug formülü (`webalize` + `truncate`) tek bir yerde durur; bir kez değiştirin, her yerde geçerli olsun.
+- Yalnızca ID içeren kısa URL'ler çalışmayı sürdürür; bu da QR kodları ve SMS için kullanışlıdır.
+
+Filtreler ve kurallılaştırma hakkında daha fazlasını [yönlendirme |application:routing#Genel filtreler] ve [presenter'lar |application:presenters#Kanonikleştirme] belgelerinde bulabilirsiniz.

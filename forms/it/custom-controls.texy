@@ -1,0 +1,268 @@
+Controlli personalizzati dei form
+*********************************
+
+.[perex]
+Nette offre un'ampia gamma di [controlli integrati |controls]. Ma quando vi imbattete in un requisito che non è tra questi, non dovete aggirare nulla né incollare pezzi insieme: scrivete un vostro controllo. Saprà fare tutto quello che sanno fare quelli integrati (validare, tradursi, disegnarsi) e si userà esattamente allo stesso modo.
+
+Lo mostreremo con un esempio pratico: un controllo per inserire una data con tre campi, giorno, mese e anno. Strada facendo imparerete tutto ciò che serve sapere per scrivere controlli.
+
+
+Quando scrivere un controllo personalizzato e quando no
+=======================================================
+
+Un controllo personalizzato è lo strumento più potente offerto dai form. E come ogni strumento potente, dovrebbe essere l'ultima scelta, non la prima. Molte situazioni si risolvono con mezzi più semplici:
+
+- **Modificare un valore** è compito di [addFilter() |validation#Modificare i valori inseriti]. Volete tollerare gli spazi in un CAP o le lettere minuscole in un codice? Un filtro sono poche righe.
+- **La configurazione ripetuta** si racchiude in un metodo di aggiunta personalizzato. Aggiungete in dieci punti un campo CAP con la stessa validazione? Createne una scorciatoia con un nome, [lo mostriamo alla fine |#Metodo di aggiunta personalizzato].
+- **Un gruppo di campi collegati** è servito da un [container |controls#addContainer()]. Un indirizzo composto da via, città e CAP non ha bisogno di un controllo personalizzato: basta un container con tre campi di testo.
+- **Un aspetto diverso** si ottiene con [setHtmlType() |controls#addText()] e gli attributi HTML, oppure con i [prototipi |rendering#Prototipi].
+
+Un controllo personalizzato ha senso nel momento in cui vi serve un **valore personalizzato**: un controllo che all'esterno si comporta come un unico campo con un unico valore, ma che internamente è composto da più input o conserva il valore in modo diverso da come lo mostra. Una data da tre campi. Delle coordinate scelte cliccando su una mappa. Un campo per i tag con completamento automatico.
+
+
+Anatomia di un controllo
+========================
+
+Ogni controllo personalizzato eredita dalla classe astratta [api:Nette\Forms\Controls\BaseControl]. Da essa eredita un'enorme quantità di funzionalità già pronte: la conservazione del valore, le regole e le condizioni di validazione, i messaggi di errore, le traduzioni, gli attributi HTML, l'etichetta e il collegamento al rendering. Voi scrivete solo ciò che rende diverso il vostro controllo.
+
+Un controllo minimo funzionante è sorprendentemente breve:
+
+```php
+use Nette\Forms\Form;
+use Nette\Forms\Helpers;
+use Nette\Utils\Html;
+
+class SimpleInput extends Nette\Forms\Controls\BaseControl
+{
+	public function loadHttpData(): void
+	{
+		$this->setValue($this->getHttpData(Form::DataLine));
+	}
+
+	public function getControl(): Html
+	{
+		return Html::el('input', [
+			'type' => 'text',
+			'name' => $this->getHtmlName(),
+			'id' => $this->getHtmlId(),
+			'value' => $this->getValue(),
+			'data-nette-rules' => Helpers::exportRules($this->getRules()) ?: null,
+		]);
+	}
+}
+```
+
+Due metodi: uno dice come ottenere il valore dai dati inviati, l'altro come disegnare il controllo. Li esamineremo entrambi da vicino tra poco. Tutto il resto (`setRequired()`, `addRule()`, `setDefaultValue()`, le traduzioni) funziona già da sé.
+
+Il controllo si aggiunge al form con il metodo `addComponent()` oppure, più concisamente, con le parentesi quadre:
+
+```php
+$form['nickname'] = new SimpleInput('Nickname:');
+```
+
+
+Ciclo di vita di un controllo
+=============================
+
+Prima di passare a un controllo più interessante, è bene sapere cosa succede a un controllo e quando. Il form e i suoi controlli sono [componenti |component-model:] che formano un albero. Questo ha una gradevole conseguenza: il controllo non deve scoprire nulla da solo, il framework si occupa di tutto ciò che conta al momento giusto:
+
+1) Nel momento in cui agganciate il controllo a un form inviato, il form stesso vi chiama sopra `loadHttpData()`. Lì il controllo legge il proprio valore inviato, come mostreremo tra poco. Non lavora mai direttamente con `$_POST` e non deve preoccuparsi affatto di essere annidato in dei container.
+
+2) Quando il form viene inviato, avviene la validazione: vengono valutate le regole aggiunte con `addRule()`, che lavorano con il valore restituito da `getValue()`.
+
+3) Chi poi chiama `$form->getValues()` oppure `getValue()` sul controllo ottiene un valore pulito e tipizzato, per esempio un oggetto `DateTimeImmutable`, non una terna di stringhe provenienti dal form.
+
+E durante il rendering viene chiamato `getControl()`, oppure `getLabel()` per l'etichetta.
+
+
+Leggere il valore inviato
+=========================
+
+Nel metodo `loadHttpData()` il controllo chiede il proprio valore inviato con il metodo `getHttpData()`. Il suo parametro è un tipo che determina come il valore va ripulito:
+
+| tipo | significato
+|-------
+| `Form::DataLine` | testo su una riga: sostituisce gli a capo con spazi, elimina gli spazi ai bordi
+| `Form::DataText` | testo su più righe: normalizza i fine riga in `\n`
+| `Form::DataFile` | upload, un'istanza di `Nette\Http\FileUpload`
+
+Per quanto ci provi un aggressore, il risultato è sempre una stringa UTF-8 valida senza caratteri di controllo (oppure un oggetto di upload o `null`). È esattamente per questo che non leggiamo mai il valore direttamente da `$_POST`: perderemmo tutte queste garanzie.
+
+Un controllo composto da più input, come la nostra data, passa come secondo parametro una parte del nome HTML e legge così i propri sotto-valori. Li conserva nelle proprie proprietà `$day`, `$month` e `$year` di tipo string:
+
+```php
+public function loadHttpData(): void
+{
+	$this->day = $this->getHttpData(Form::DataLine, '[day]') ?? '';
+	$this->month = $this->getHttpData(Form::DataLine, '[month]') ?? '';
+	$this->year = $this->getHttpData(Form::DataLine, '[year]') ?? '';
+}
+```
+
+Se il nome HTML termina con `[]`, viene restituito un array di valori. Combinandolo con il tipo `Form::DataKeys` (cioè `Form::DataLine | Form::DataKeys`) ne conservate anche le chiavi:
+
+```php
+$tags = $this->getHttpData(Form::DataLine, '[tags][]');
+```
+
+Un valore mancante è `null` (un array vuoto per gli array). La richiesta può non contenere affatto i dati del controllo, e nulla impedisce a un aggressore di inviare quello che vuole: ecco perché nell'esempio aggiungiamo `?? ''` e perché dovreste sempre tenere conto di questa possibilità.
+
+
+Valore del controllo
+====================
+
+Il controllo conserva il proprio valore e lo espone attraverso tre metodi, il cui contratto vale la pena rispettare.
+
+Il metodo `setValue()` accetta un valore dal programmatore: è anche la strada percorsa da `setDefaultValue()` e da `$form->setDefaults()`. Dovrebbe accettare tutto ciò che ha senso, convertire il valore nella propria forma interna e sollevare un'eccezione per input assurdi, così che l'errore compaia subito e non attraverso comportamenti misteriosi del form. La nostra data accetta un `DateTimeInterface`, una stringa, un timestamp oppure `null`, e li divide nei tre campi:
+
+```php
+public function setValue(mixed $value): static
+{
+	if ($value === null) {
+		$this->day = $this->month = $this->year = '';
+	} else {
+		$date = Nette\Utils\DateTime::from($value); // un valore assurdo solleva un'eccezione
+		$this->day = $date->format('j');
+		$this->month = $date->format('n');
+		$this->year = $date->format('Y');
+	}
+	return $this;
+}
+```
+
+Il metodo `getValue()`, al contrario, compone un valore pulito e tipizzato, l'unica cosa che vedrà chi usa il vostro controllo. Se il valore non è valido, restituisce `null`. Il metodo statico `validateDate()` si limita a controllare che i tre campi formino una data esistente:
+
+```php
+public function getValue(): ?DateTimeImmutable
+{
+	return self::validateDate($this)
+		? (new DateTimeImmutable)->setDate((int) $this->year, (int) $this->month, (int) $this->day)->setTime(0, 0)
+		: null;
+}
+```
+
+E il metodo `isFilled()` dice se l'utente ha compilato il controllo: lo usa la regola `setRequired()`. L'implementazione predefinita (un valore non vuoto) spesso basta, ma per un controllo composito sovrascrivetela secondo la sua logica:
+
+```php
+public function isFilled(): bool
+{
+	return $this->day !== '' || $this->year !== '';
+}
+```
+
+
+Rendering
+=========
+
+Il metodo `getControl()` restituisce la forma HTML del controllo, di norma come oggetto [Html |utils:html-elements], ma va bene anche una semplice stringa: non fa differenza. Ricorriamo all'oggetto Html soprattutto per comporre il codice, perché ci permette di costruire il markup risultante in sicurezza e con un'API gradevole. Avete a disposizione diversi aiuti:
+
+- `getHtmlName()` restituisce l'attributo HTML `name`, compreso l'eventuale annidamento nei container (per esempio `invoice[date]`). Per un controllo composito vi aggiungete le parti del nome dei singoli input: `$name . '[day]'`.
+- `getHtmlId()` restituisce l'attributo `id` collegato all'etichetta.
+- `Helpers::exportRules($this->getRules())` esporta le regole di validazione per l'attributo `data-nette-rules`, grazie al quale la [validazione JavaScript |validation#Validazione JavaScript] funzionerà anche per il vostro controllo. L'attributo va sul primo input del controllo.
+- `Helpers::createSelectBox($items, $optionAttrs, $selected)` compone un elemento `<select>` a partire da un array di elementi (gli array annidati vengono disegnati come `<optgroup>`) e lo restituisce come `Html`: comodo per il campo del mese della nostra data.
+- `Helpers::createInputList($items, $inputAttrs, $labelAttrs)` genera un elenco di elementi `<input>` racchiusi in `<label>` (radio button o checkbox) e lo restituisce come stringa.
+
+Il primo campo della nostra data si crea quindi così:
+
+```php
+public function getControl(): Html
+{
+	$name = $this->getHtmlName();
+	return Html::el()
+		->addHtml(Html::el('input', [
+			'name' => $name . '[day]',
+			'id' => $this->getHtmlId(),
+			'value' => $this->day,
+			'type' => 'number',
+			'data-nette-rules' => Helpers::exportRules($this->getRules()) ?: null,
+		]))
+		->addHtml(/* ... select per il mese e input per l'anno ... */);
+}
+```
+
+L'etichetta viene disegnata da `getLabel()` e la sua implementazione predefinita di norma va bene. Attenzione però: per un controllo composito il suo attributo `for` punta a `getHtmlId()`, quindi date questo id al primo input, esattamente come nell'esempio.
+
+Per far disegnare il controllo composito pezzo per pezzo in un template (per esempio `{input birthdate:day}`), sovrascrivete i metodi `getControlPart($key)` e `getLabelPart($key)`, che restituiscono l'elemento `Html` della parte indicata, allo stesso modo di `CheckboxList` e `RadioList`.
+
+.[note]
+Se sovrascrivete `getControl()`, tenete presente che `BaseControl::getControl()` contrassegna anche il controllo come disegnato, con `setOption('rendered', true)`. Chiamatelo anche voi (oppure chiamate `parent::getControl()`) quando combinate il rendering manuale e quello automatico dello stesso form, così che il controllo non venga disegnato due volte. (L'esempio `DateInput` qui sopra lo omette per brevità.)
+
+
+Esempio completo: DateInput
+===========================
+
+Tutti i pezzi descritti messi insieme, integrati da un select box per scegliere il mese, si trovano nel controllo `DateInput` già pronto, tra gli [esempi presenti nel repository |https://github.com/nette/forms/blob/master/examples/custom-control.php].
+
+Notate che nel costruttore il controllo si aggiunge una regola di validazione che controlla che la data abbia senso. Un input assurdo, come il 31 febbraio, compare così come un normale errore di validazione del form:
+
+```php
+public function __construct($label = null)
+{
+	parent::__construct($label);
+	$this->addRule(self::validateDate(...), 'The date is invalid.');
+}
+```
+
+E l'uso? Esattamente come per i controlli integrati:
+
+```php
+$form['birthdate'] = (new DateInput('Data di nascita:'))
+	->setDefaultValue(new DateTime('2000-01-01'))
+	->setRequired('Quando siete nati?');
+
+$date = $form->getValues()->birthdate; // ?DateTimeImmutable
+```
+
+In un template Latte lo disegnate con il consueto tag `{input birthdate}` o `{label birthdate /}`, come qualsiasi altro controllo.
+
+
+Validazione
+===========
+
+Le regole di validazione integrate funzionano subito con un controllo personalizzato: lavorano sul valore restituito da `getValue()`. Il nostro `DateInput` può quindi usare, per esempio, `Form::Min` per la data più antica ammessa. Come scrivere regole proprie, compresa la loro controparte JavaScript, è descritto nel capitolo [Regole e condizioni personalizzate |validation#Regole e condizioni personalizzate].
+
+
+Metodo di aggiunta personalizzato
+=================================
+
+I controlli integrati si aggiungono con i comodi metodi `$form->addText()` e simili. Un controllo personalizzato non ha un metodo del genere, quindi lo aggiungete con una semplice assegnazione: funziona allo stesso modo in un form e in un container, e gli editor e l'analisi statica lo capiscono:
+
+```php
+$form['birthdate'] = new DateInput('Data di nascita:');
+```
+
+Se volete accorciare l'aggiunta mantenendo il completamento automatico, torna comodo un metodo factory statico sul controllo stesso. Funziona anche nei container annidati, cosa che un metodo su un discendente della classe `Form` non potrebbe fare: i container annidati non ne sanno nulla.
+
+```php
+class DateInput extends Nette\Forms\Controls\BaseControl
+{
+	public static function addTo(
+		Nette\Forms\Container $container,
+		string $name,
+		?string $label = null,
+	): self {
+		return $container[$name] = new self($label);
+	}
+}
+
+// funziona in un form e in qualsiasi container:
+DateInput::addTo($form, 'birthdate', 'Data di nascita:');
+```
+
+Lo stesso approccio funziona anche come scorciatoia con un nome per la configurazione ripetuta di un controllo integrato:
+
+```php
+final class ZipInput
+{
+	public static function addTo(
+		Nette\Forms\Container $container,
+		string $name,
+		?string $label = null,
+	): Nette\Forms\Controls\TextInput {
+		return $container->addText($name, $label)
+			->addRule(Nette\Forms\Form::Pattern, 'Il CAP deve essere di esattamente 5 cifre', '[0-9]{5}');
+	}
+}
+
+ZipInput::addTo($form, 'zip', 'CAP:');
+```

@@ -1,0 +1,268 @@
+Özel Form Öğeleri
+*****************
+
+.[perex]
+Nette geniş bir [yerleşik form öğesi |controls] paleti sunar. Ama aralarında bulunmayan bir gereksinimle karşılaştığınızda hiçbir şeyi dolambaçlı yollarla çözmeniz ya da bir şeyleri birbirine yapıştırmanız gerekmez: kendi öğenizi yazarsınız. O da yerleşik olanların yapabildiği her şeyi yapabilecek: doğrulama, kendini çevirme, render; ve tam olarak aynı biçimde kullanılacak.
+
+Bunu pratik bir örnekle göstereceğiz: üç alan (gün, ay ve yıl) kullanarak tarih girmeye yarayan bir öğe. Yol boyunca, öğe yazmak hakkında bilmeniz gereken her şeyi öğreneceksiniz.
+
+
+Ne Zaman Özel Öğe Yazmalı, Ne Zaman Yazmamalı
+=============================================
+
+Özel öğe, formların sunduğu en güçlü araçtır. Ve her güçlü araç gibi, ilk değil son seçenek olmalıdır. Pek çok durum daha basit yollarla çözülebilir:
+
+- **Bir değeri değiştirmeyi** [addFilter() |validation#Girdi Değerlerini Değiştirme] üstlenir. Posta kodunda boşluklara ya da bir kodda küçük harflere göz yummak mı istiyorsunuz? Bir filtre birkaç satırdır.
+- **Yinelenen yapılandırmayı** özel bir ekleme metodu sarmalar. On yerde aynı doğrulamayla posta kodu alanı mı ekliyorsunuz? Onlar için adlandırılmış bir kısayol oluşturun, [sonunda göstereceğiz |#Özel Ekleme Metodu].
+- **Birbiriyle ilişkili bir alan grubuna** bir [container |controls#addContainer()] hizmet eder. Sokak, şehir ve posta kodundan oluşan bir adres için özel öğe gerekmez, üç metin alanlı bir container yeter.
+- **Farklı bir görünüm** [setHtmlType() |controls#addText()] ve HTML nitelikleriyle ya da [prototiplerle |rendering#Prototipler] elde edilir.
+
+Özel bir öğe, **özel bir değere** ihtiyaç duyduğunuz anda anlam kazanır: dışarıdan tek değerli tek bir alan gibi davranan, ama içeride birkaç input'tan oluşan ya da değeri gösterdiğinden farklı biçimde saklayan bir öğe. Üç alandan oluşan bir tarih. Haritaya tıklanarak seçilen koordinatlar. Otomatik tamamlamalı bir etiket girişi.
+
+
+Bir Öğenin Anatomisi
+====================
+
+Her özel öğe, soyut [api:Nette\Forms\Controls\BaseControl] sınıfından türer. Ondan çok büyük miktarda hazır işlev miras alır: değer saklama, doğrulama kuralları ve koşulları, hata mesajları, çeviriler, HTML nitelikleri, etiket ve render bağlantısı. Siz yalnızca öğenizi farklı kılan şeyi yazarsınız.
+
+Çalışan en küçük öğe şaşırtıcı derecede kısadır:
+
+```php
+use Nette\Forms\Form;
+use Nette\Forms\Helpers;
+use Nette\Utils\Html;
+
+class SimpleInput extends Nette\Forms\Controls\BaseControl
+{
+	public function loadHttpData(): void
+	{
+		$this->setValue($this->getHttpData(Form::DataLine));
+	}
+
+	public function getControl(): Html
+	{
+		return Html::el('input', [
+			'type' => 'text',
+			'name' => $this->getHtmlName(),
+			'id' => $this->getHtmlId(),
+			'value' => $this->getValue(),
+			'data-nette-rules' => Helpers::exportRules($this->getRules()) ?: null,
+		]);
+	}
+}
+```
+
+İki metot: biri değerin gönderilen veriden nasıl alınacağını, öteki öğenin nasıl render edileceğini söyler. Birazdan ikisine de yakından bakacağız. Geri kalan her şey (`setRequired()`, `addRule()`, `setDefaultValue()`, çeviriler) kendiliğinden çalışır.
+
+Öğeyi forma `addComponent()` metoduyla ya da daha kısaca köşeli parantezlerle eklersiniz:
+
+```php
+$form['nickname'] = new SimpleInput('Takma ad:');
+```
+
+
+Bir Öğenin Yaşam Döngüsü
+========================
+
+Daha ilginç bir öğeye geçmeden önce, bir öğeye ne zaman ne olduğunu bilmek iyidir. Form ve öğeleri, bir ağaç oluşturan [bileşenlerdir |component-model:]. Bunun hoş bir sonucu var: öğenin hiçbir şeyi kendi başına bulması gerekmez, önemli olan her şeyi framework doğru anda halleder:
+
+1) Öğeyi gönderilmiş bir forma eklediğiniz anda, formun kendisi onda `loadHttpData()` metodunu çağırır. Öğe orada, birazdan göstereceğimiz gibi, gönderilen değerini okur. Asla doğrudan `$_POST` ile çalışmaz ve container'ların içinde iç içe olup olmadığını hiç dert etmez.
+
+2) Form gönderildiğinde doğrulama gerçekleşir: `addRule()` ile eklenen kurallar, `getValue()` metodundan gelen değerle çalışarak değerlendirilir.
+
+3) Sonra `$form->getValues()` ya da öğede `getValue()` çağıran kişi, temiz ve türlenmiş bir değer alır; örneğin formdan gelen üçlü dize değil, bir `DateTimeImmutable` nesnesi.
+
+Render sırasında ise `getControl()`, etiket içinse `getLabel()` çağrılır.
+
+
+Gönderilen Değeri Okuma
+=======================
+
+`loadHttpData()` metodunda öğe, gönderilen değerini `getHttpData()` metoduyla ister. Parametresi, değerin nasıl temizleneceğini belirleyen bir türdür:
+
+| tür | anlamı
+|-------
+| `Form::DataLine` | tek satırlı metin: satır sonlarını boşlukla değiştirir, boşlukları kırpar
+| `Form::DataText` | çok satırlı metin: satır sonlarını `\n` biçimine normalleştirir
+| `Form::DataFile` | yükleme, bir `Nette\Http\FileUpload` örneği
+
+Bir saldırgan ne kadar uğraşırsa uğraşsın, sonuç her zaman denetim karakterleri olmayan geçerli bir UTF-8 dizesidir (ya da bir yükleme nesnesi veya `null`). Değeri doğrudan `$_POST` içinden okumamamızın nedeni tam da budur; tüm bu güvenceleri yitirirdik.
+
+Bizim tarihimiz gibi birkaç input'tan oluşan bir öğe, HTML adının bir parçasını ikinci parametre olarak verir ve tek tek alt değerlerini böyle okur. Onları kendi `$day`, `$month` ve `$year` dize özelliklerinde saklar:
+
+```php
+public function loadHttpData(): void
+{
+	$this->day = $this->getHttpData(Form::DataLine, '[day]') ?? '';
+	$this->month = $this->getHttpData(Form::DataLine, '[month]') ?? '';
+	$this->year = $this->getHttpData(Form::DataLine, '[year]') ?? '';
+}
+```
+
+HTML adı `[]` ile biterse bir değer dizisi döndürülür. `Form::DataKeys` türüyle birleştirerek (yani `Form::DataLine | Form::DataKeys`) anahtarlarını da korursunuz:
+
+```php
+$tags = $this->getHttpData(Form::DataLine, '[tags][]');
+```
+
+Eksik bir değer `null` olur (dizilerde boş dizi). İstek, öğenin verisini hiç içermek zorunda değildir; hiçbir şey bir saldırganın canının istediğini göndermesini engellemez. Örnekte `?? ''` eklememizin ve bu olasılığı her zaman hesaba katmanız gerektiğinin nedeni budur.
+
+
+Öğenin Değeri
+=============
+
+Öğe değerini tutar ve onu, sözleşmesine uyulması gereken üç metotla dışa açar.
+
+`setValue()` metodu programcıdan bir değer alır; `setDefaultValue()` ve `$form->setDefaults()` de bu yolu izler. Anlamlı olan her şeyi kabul etmeli, değeri iç biçimine dönüştürmeli ve anlamsız girdide istisna fırlatmalıdır; böylece hata, formun gizemli davranışlarıyla değil hemen ortaya çıkar. Bizim tarihimiz bir `DateTimeInterface`, bir dize, bir zaman damgası ya da `null` kabul eder ve bunları üç alana böler:
+
+```php
+public function setValue(mixed $value): static
+{
+	if ($value === null) {
+		$this->day = $this->month = $this->year = '';
+	} else {
+		$date = Nette\Utils\DateTime::from($value); // saçmalık istisna fırlatır
+		$this->day = $date->format('j');
+		$this->month = $date->format('n');
+		$this->year = $date->format('Y');
+	}
+	return $this;
+}
+```
+
+`getValue()` metodu ise temiz, türlenmiş bir değer kurar; öğenizin kullanıcısının göreceği tek şey budur. Değer geçerli değilse `null` döndürür. Statik `validateDate()` metodu yalnızca üç alanın var olan bir tarih oluşturup oluşturmadığını denetler:
+
+```php
+public function getValue(): ?DateTimeImmutable
+{
+	return self::validateDate($this)
+		? (new DateTimeImmutable)->setDate((int) $this->year, (int) $this->month, (int) $this->day)->setTime(0, 0)
+		: null;
+}
+```
+
+`isFilled()` metodu ise kullanıcının öğeyi doldurup doldurmadığını söyler; onu `setRequired()` kuralı kullanır. Varsayılan gerçekleştirim (boş olmayan bir değer) çoğu zaman yeter, ama bileşik bir öğede onu kendi mantığına göre geçersiz kılın:
+
+```php
+public function isFilled(): bool
+{
+	return $this->day !== '' || $this->year !== '';
+}
+```
+
+
+Render
+======
+
+`getControl()` metodu, öğenin HTML biçimini genellikle bir [Html |utils:html-elements] nesnesi olarak döndürür, ama düz bir dize de olur, fark etmez. Html nesnesine başlıca kodu kurarken başvururuz; çünkü ortaya çıkan işaretlemeyi güvenli ve keyifli bir API ile kurmamızı sağlar. Elinizin altında çeşitli yardımcılar var:
+
+- `getHtmlName()`, container'lardaki olası iç içe geçme de dahil olmak üzere HTML `name` niteliğini döndürür (örneğin `invoice[date]`). Bileşik bir öğede tek tek input'ların ad parçalarını buna eklersiniz: `$name . '[day]'`.
+- `getHtmlId()`, etiketle bağlanan `id` niteliğini döndürür.
+- `Helpers::exportRules($this->getRules())`, doğrulama kurallarını `data-nette-rules` niteliği için dışa aktarır; bu sayede [JavaScript doğrulaması |validation#JavaScript Doğrulaması] sizin öğenizde de çalışır. Nitelik, öğenin ilk input'una konur.
+- `Helpers::createSelectBox($items, $optionAttrs, $selected)`, bir öğe dizisinden `<select>` elemanı kurar (iç içe diziler `<optgroup>` olarak render edilir) ve onu `Html` olarak döndürür; tarihimizin ay alanı için kullanışlıdır.
+- `Helpers::createInputList($items, $inputAttrs, $labelAttrs)`, `<label>` içine sarılmış `<input>` elemanlarından oluşan bir liste (radyo düğmeleri ya da onay kutuları) üretir ve onu dize olarak döndürür.
+
+Tarihimizin ilk alanı böylece şöyle oluşturulur:
+
+```php
+public function getControl(): Html
+{
+	$name = $this->getHtmlName();
+	return Html::el()
+		->addHtml(Html::el('input', [
+			'name' => $name . '[day]',
+			'id' => $this->getHtmlId(),
+			'value' => $this->day,
+			'type' => 'number',
+			'data-nette-rules' => Helpers::exportRules($this->getRules()) ?: null,
+		]))
+		->addHtml(/* ... ay için select ve yıl için input ... */);
+}
+```
+
+Etiket `getLabel()` ile render edilir ve varsayılan gerçekleştirimi genellikle uygundur. Yalnızca dikkat: bileşik bir öğede onun `for` niteliği `getHtmlId()` değerine işaret eder, bu yüzden bu id'yi ilk input'a verin; tam da örnekteki gibi.
+
+Bileşik öğenin şablonda parça parça render edilebilmesi için (örneğin `{input birthdate:day}`), ilgili parça için `Html` elemanını döndüren `getControlPart($key)` ve `getLabelPart($key)` metotlarını geçersiz kılın; `CheckboxList` ve `RadioList` de böyle yapar.
+
+.[note]
+`getControl()` metodunu geçersiz kılarsanız, `BaseControl::getControl()` metodunun aynı zamanda `setOption('rendered', true)` ile öğeyi render edilmiş olarak işaretlediğini unutmayın. Aynı formda elle ve otomatik render'ı birleştirdiğinizde onu da çağırın (ya da `parent::getControl()` çağırın); böylece öğe iki kez render edilmez. (Yukarıdaki `DateInput` örneği bunu kısalık için atlıyor.)
+
+
+Eksiksiz Örnek: DateInput
+=========================
+
+Anlatılan tüm parçalar bir arada, ayın seçilmesi için bir select box'la da tamamlanmış hâlde, bitmiş `DateInput` öğesinde, [doğrudan depodaki örnekler |https://github.com/nette/forms/blob/master/examples/custom-control.php] arasında bulunabilir.
+
+Öğenin yapıcıda kendisine, tarihin anlamlı olup olmadığını denetleyen bir doğrulama kuralı eklediğine dikkat edin. Böylece 31 Şubat gibi anlamsız bir girdi, sıradan bir form doğrulama hatası olarak ortaya çıkar:
+
+```php
+public function __construct($label = null)
+{
+	parent::__construct($label);
+	$this->addRule(self::validateDate(...), 'Tarih geçersiz.');
+}
+```
+
+Peki kullanımı? Tam olarak yerleşik öğelerdeki gibi:
+
+```php
+$form['birthdate'] = (new DateInput('Doğum tarihi:'))
+	->setDefaultValue(new DateTime('2000-01-01'))
+	->setRequired('Ne zaman doğdunuz?');
+
+$date = $form->getValues()->birthdate; // ?DateTimeImmutable
+```
+
+Latte şablonunda onu, başka herhangi bir öğe gibi, alışıldık `{input birthdate}` ya da `{label birthdate /}` etiketiyle render edersiniz.
+
+
+Doğrulama
+=========
+
+Yerleşik doğrulama kuralları özel bir öğeyle hemen çalışır; `getValue()` metodundan gelen değer üzerinde işlem yaparlar. Böylece `DateInput` öğemiz örneğin izin verilen en eski tarih için `Form::Min` kullanabilir. JavaScript karşılığı da dahil olmak üzere kendi kurallarınızı nasıl yazacağınız [Özel kurallar ve koşullar |validation#Özel Kurallar ve Koşullar] bölümünde anlatılıyor.
+
+
+Özel Ekleme Metodu
+==================
+
+Yerleşik öğeleri `$form->addText()` ve benzeri elverişli metotlarla ekleriz. Özel bir öğenin böyle bir metodu yoktur, bu yüzden onu düz atamayla eklersiniz; hem formda hem container'da aynı şekilde çalışır ve düzenleyiciler ile statik çözümleme bunu anlar:
+
+```php
+$form['birthdate'] = new DateInput('Doğum tarihi:');
+```
+
+Otomatik tamamlamayı korurken eklemeyi kısaltmak isterseniz, doğrudan öğenin üzerindeki statik bir factory metodu işe yarar. `Form` sınıfının bir torunundaki metodun yapamayacağı şeyi, iç içe container'larda bile çalışmayı başarır; iç içe container'lar ondan habersizdir:
+
+```php
+class DateInput extends Nette\Forms\Controls\BaseControl
+{
+	public static function addTo(
+		Nette\Forms\Container $container,
+		string $name,
+		?string $label = null,
+	): self {
+		return $container[$name] = new self($label);
+	}
+}
+
+// formda ve herhangi bir container'da çalışır:
+DateInput::addTo($form, 'birthdate', 'Doğum tarihi:');
+```
+
+Aynı yaklaşım, yerleşik bir öğenin yinelenen yapılandırması için adlandırılmış bir kısayol olarak da işe yarar:
+
+```php
+final class ZipInput
+{
+	public static function addTo(
+		Nette\Forms\Container $container,
+		string $name,
+		?string $label = null,
+	): Nette\Forms\Controls\TextInput {
+		return $container->addText($name, $label)
+			->addRule(Nette\Forms\Form::Pattern, 'Posta kodu tam olarak 5 rakam olmalıdır', '[0-9]{5}');
+	}
+}
+
+ZipInput::addTo($form, 'zip', 'Posta kodu:');
+```

@@ -1,0 +1,204 @@
+Przyjazne adresy URL ze slugami
+*******************************
+
+.[perex]
+URL takie jak `/artykul/123-jak-upiec-chleb` wygląda lepiej niż `/artykul/123` i pomaga zarówno użytkownikom, jak i wyszukiwarkom zrozumieć, co czeka na stronie. Ten poradnik pokazuje, jak generować je wyłącznie w routerze, bez ingerencji w ani jeden szablon, i jak zadbać o to, żeby każdy odwiedzający wylądował na kanonicznym URL.
+
+
+Dlaczego slug w URL
+===================
+
+Porównaj te dwa adresy:
+
+```
+/artykul/123
+/artykul/123-jak-upiec-chleb
+```
+
+Drugi zdradza użytkownikowi (i Google'owi), co czeka go po kliknięciu. To dobre dla SEO, sprawia, że odnośniki są czytelne w czacie albo e-mailu, i nadaje sens także paskowi adresu.
+
+Slug nie jest jednak prawdziwym identyfikatorem. Stronę określa ID. Slug to tylko dekoracja, którą aplikacja generuje z tytułu. Gdy tytuł się zmieni, slug też powinien się zmienić. A gdy ktoś ręcznie zmodyfikuje URL albo trafi ze starego odnośnika, aplikacja i tak powinna znaleźć właściwą stronę.
+
+
+Cel
+===
+
+Chcemy trasę, która obsłuży to wszystko:
+
+```
+/artykul/123                              → otwiera artykuł 123, przekierowuje na kanoniczny URL
+/artykul/123-jak-upiec-chleb              → otwiera artykuł 123 bezpośrednio
+/artykul/123-cokolwiek-ktos-wpisal        → otwiera artykuł 123, przekierowuje na kanoniczny URL
+/artykul/                                 → 404 (brak ID)
+```
+
+I chcemy, żeby każde `n:href` i każde wywołanie `link()` w całej aplikacji automatycznie tworzyło `/artykul/123-jak-upiec-chleb`, **bez przepisywania ani jednego szablonu**.
+
+
+Maska trasy
+===========
+
+Sztuczka polega na oznaczeniu sluga w masce jako **opcjonalnego** za pomocą nawiasów kwadratowych:
+
+```php
+$router->addRoute('artykul/<id [0-9]+>[-<slug>]', 'Article:detail');
+```
+
+Maska `[-<slug>]` mówi: po ID może być myślnik i slug, ale nie musi. Trasa akceptuje zarówno `/artykul/123`, jak i `/artykul/123-cokolwiek`.
+
+Uwaga do parametru `<slug>`: domyślnie dopasowuje dowolne znaki **z wyjątkiem ukośnika**, czyli dokładnie to, czego chcemy. Jeśli napiszesz `<slug .+>`, parametr będzie dopasowywał także ukośniki, więc `/artykul/123-cos/jeszcze` zostanie sparsowane jako jeden slug zawierający `/`. Zostań przy domyślnym `<slug>`, chyba że naprawdę tego potrzebujesz.
+
+Na razie URL jest parsowany poprawnie, ale generowane odnośniki nie będą zawierać sluga. Kolejnym krokiem jest nauczenie trasy, jak sluga uzupełnić.
+
+
+Generowanie sluga bez ingerencji w szablony
+===========================================
+
+To jest ten zabójczy wariant. Istniejące wywołania `n:href="Article:detail, $id"` działają dalej bez zmian w całej aplikacji, bo router sam wyszuka tytuł.
+
+Zrobimy to za pomocą **ogólnego filtra** pod kluczem pustego ciągu: widzi on wszystkie parametry naraz i może dodać sluga:
+
+```php
+use Nette\Routing\Route;
+use Nette\Utils\Strings;
+
+$router->addRoute('artykul/<id [0-9]+>[-<slug>]', [
+	'presenter' => 'Article',
+	'action' => 'detail',
+	'' => [
+		Route::FilterOut => function (array $params) use ($slugProvider): array {
+			if (isset($params['id']) && empty($params['slug'])) {
+				$params['slug'] = $slugProvider->getSlug((int) $params['id']);
+			}
+			return $params;
+		},
+	],
+]);
+```
+
+`FilterOut` uruchamia się za każdym razem, gdy router **generuje** URL. Jeśli slug nie został przekazany, filtr wyszuka tytuł i go doda.
+
+Slugi możesz wdrożyć w całej aplikacji jedną zmianą: wystarczy jedna definicja trasy. Każdy odnośnik w każdym szablonie zacznie automatycznie tworzyć `/artykul/123-jak-upiec-chleb`. Bez grepowania, bez przeszukiwania szablonów, bez przeoczonych zakamarków.
+
+
+Zapamiętaj wynik wyszukiwania
+=============================
+
+Jeden odnośnik generuje jedno zapytanie do bazy, a typowa strona ma ich wiele: listingi, okruszki, "ostatnio oglądane", artykuły powiązane. To samo ID artykułu pojawia się często w kilku odnośnikach w ramach jednego żądania, a nie chcesz odpytywać bazy za każdym razem.
+
+Rozwiązuje to maleńki cache w obrębie żądania. Zamknij wywołanie bazy w małej usłudze:
+
+```php
+final class SlugProvider
+{
+	/** @var array<int, string> */
+	private array $cache = [];
+
+	public function __construct(
+		private Nette\Database\Explorer $db,
+	) {
+	}
+
+	public function getSlug(int $id): string
+	{
+		return $this->cache[$id] ??= Strings::webalize(Strings::truncate(
+			(string) $this->db->fetchField('SELECT title FROM article WHERE id = ?', $id),
+			100, ''
+		));
+	}
+}
+```
+
+To wystarczy: jedno odpytanie bazy na unikalne ID w ramach żądania.
+
+
+Przekazanie tytułu z szablonu (opcjonalna szybka ścieżka)
+=========================================================
+
+Gdy tytuł jest w szablonie już pod ręką, możesz wyszukiwanie w bazie całkowicie pominąć. Przekaż tytuł jako parametr nazwany:
+
+```latte
+<a n:href="Article:detail, $article->id, slug => $article->title">{$article->title}</a>
+```
+
+…i dodaj `FilterOut` dla pojedynczego parametru, który zamieni tytuł na ciąg bezpieczny dla URL:
+
+```php
+$router->addRoute('artykul/<id [0-9]+>[-<slug>]', [
+	'presenter' => 'Article',
+	'action' => 'detail',
+	'slug' => [
+		Route::FilterOut => fn($title) => Strings::webalize(Strings::truncate($title, 100, '')),
+	],
+	'' => [/* fallback z wyszukiwaniem z góry */],
+]);
+```
+
+Oba filtry współpracują. Najpierw uruchamia się filtr ogólny; widząc, że slug jest już wypełniony przekazanym tytułem, pomija odpytanie bazy. Filtr `FilterOut` przy parametrze zamienia potem ten tytuł na właściwego sluga. Szablony, które tytułu nie przekazują, działają dalej: filtr ogólny znajdzie pustego sluga i pójdzie ścieżką z wyszukiwaniem.
+
+Używaj tego tylko tam, gdzie ma to znaczenie (duże listingi renderowane setki razy na żądanie). Dla większości aplikacji wyszukiwanie z cache jest wystarczająco szybkie.
+
+
+Kanonizacja: przekierowanie na właściwy URL
+===========================================
+
+Potrafimy już generować `/artykul/123-jak-upiec-chleb`, ale trasa nadal akceptuje `/artykul/123` oraz `/artykul/123-cokolwiek-ktos-napisal`. To zamierzone: chcemy krótkich URL-i (więcej o tym niżej) i chcemy, żeby stare albo ręcznie wpisane odnośniki dalej działały. Nie chcemy jednak, żeby wyszukiwarki indeksowały ten sam artykuł pod kilkoma adresami.
+
+Rozwiązaniem jest [kanonizacja |application:presenters#Kanonizacja]: gdy użytkownik przyjdzie przez niekanoniczny URL, aplikacja przekieruje go kodem 301 na właściwy. Zajmuje się tym metoda `canonicalize()`:
+
+```php
+public function actionDetail(int $id, ?string $slug = null): void
+{
+	$article = $this->facade->getArticle($id);
+	if (!$article) {
+		$this->error();
+	}
+
+	// generuje kanoniczny URL przez ten sam FilterOut
+	// i przekierowuje z HTTP 301, jeśli różni się od bieżącego URL
+	$this->canonicalize('detail', ['id' => $id]);
+
+	$this->template->article = $article;
+}
+```
+
+`canonicalize()` generuje kanoniczny URL tak samo, jak zrobiłoby to `link()` (czyli przechodzi przez ten sam `FilterOut`), i porównuje go z bieżącym URL. Jeśli się różnią, przekierowuje z HTTP 301. Odwiedzający lądują na właściwym URL, a wyszukiwarki widzą tylko jedną kanoniczną wersję.
+
+
+Jedno miejsce decydujące o wyglądzie sluga
+==========================================
+
+Zauważ, że wywołanie `Strings::webalize(Strings::truncate(..., 100, ''))` żyje w jednym miejscu: wewnątrz `SlugProvider` (albo w `FilterOut` przy parametrze). Ta sama logika tworzy odnośnik w szablonie, URL w `redirect()` i postać kanoniczną w `canonicalize()`.
+
+Jeśli zechcesz później zmienić reguły (inny limit długości, inna transliteracja, usuwanie dodatkowych znaków), zmieniasz jedną linię. Bez tego ryzykowałbyś, że `redirect()` wygeneruje `/artykul/123-jak-upiec-chleb`, podczas gdy `canonicalize()` oczekuje `/artykul/123-jak-upiec-chl` (bo ktoś gdzie indziej zastosował inną długość `truncate`), a aplikacja przekierowywałaby w kółko.
+
+
+Bonus: krótkie URL-e nadal działają
+===================================
+
+Ponieważ slug jest opcjonalny, adresy bez niego dalej działają:
+
+```
+/artykul/123
+```
+
+Przydaje się to przy:
+- **kodach QR** - krótszy URL oznacza mniej gęsty, łatwiejszy do zeskanowania kod
+- **SMS-ach i czacie** - mieści się w tweecie, wygląda schludnie
+- **materiałach drukowanych** - krótki URL szybciej się przepisuje
+
+Gdy użytkownik otworzy taki URL, `canonicalize()` przekieruje go kodem 301 na pełną wersję ze slugiem, więc wyszukiwarki i tak zobaczą tylko postać kanoniczną. Możesz mieć jednocześnie zwięzłość i SEO.
+
+
+Podsumowanie
+============
+
+- Maska `<id>[-<slug>]` czyni sluga opcjonalnym. Domyślne `<slug>` nie dopasowuje `/`; użyj `<slug .+>` tylko wtedy, gdy naprawdę chcesz ukośników w slugu.
+- Ogólny `FilterOut` pod kluczem `''` wyszukuje tytuł po ID - **bez zmian w szablonach w całej aplikacji**.
+- Zamknij wyszukiwanie w maleńkim cache w obrębie żądania; jedno zapytanie do bazy na unikalne ID w zupełności wystarczy.
+- Opcjonalnie `FilterOut` przy parametrze pozwala szablonom przekazać tytuł bezpośrednio i pominąć wyszukiwanie.
+- `$this->canonicalize()` w akcji przekierowuje niekanoniczne URL-e na właściwy z HTTP 301.
+- Wzór na sluga (`webalize` + `truncate`) żyje w jednym miejscu - zmienisz go raz, zadziała wszędzie.
+- Krótkie URL-e z samym ID działają dalej, co przydaje się przy kodach QR i SMS-ach.
+
+Więcej o filtrach i kanonizacji znajdziesz w dokumentacji [routingu |application:routing#Filtry ogólne] i [presenterów |application:presenters#Kanonizacja].

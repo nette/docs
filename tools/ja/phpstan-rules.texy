@@ -1,0 +1,296 @@
+Nette PHPStan Rules
+*******************
+
+.[perex]
+[PHPStan Rules |https://github.com/nette/phpstan-rules]は PHPStan に Nette のコードを理解させるので、静的な解析が型を正確に推し量り、誤検知が減ります。
+
+この拡張を入れるだけで、[PHPStan |https://phpstan.org]はたとえば、前はエラーしか見えなかった場所でコンポーネントの型を見分けられるようになります。
+
+```php
+class HomePresenter extends Presenter
+{
+	protected function createComponentMenu(): MenuControl
+	{
+		return new MenuControl;
+	}
+
+	public function renderDefault(): void
+	{
+		$menu = $this['menu'];      // PHPStan は MenuControl と推し量ります
+		$menu->setActive('home');   // 未知のメソッドの警告は出ません
+	}
+}
+```
+
+
+インストール
+======
+
+この拡張は、コードを走らせる前に論理的な誤りを見つける静的な解析器 PHPStan の上に建っています。まだ使っていないなら、Composer で入れてください。
+
+```shell
+composer require --dev phpstan/phpstan
+```
+
+解析するディレクトリと決まりの水準を指定する `phpstan.neon` の設定ファイルを作ります。
+
+```neon
+parameters:
+	paths:
+		- app
+
+	level: 8
+```
+
+そして PHPStan は次のコマンドで走らせます。
+
+```shell
+vendor/bin/phpstan analyse
+```
+
+行き届いたドキュメントは [PHPStan のウェブサイト |https://phpstan.org]にあります。
+
+そのあと拡張そのものを入れます。
+
+```shell
+composer require --dev nette/phpstan-rules
+```
+
+要件は PHP 8.1 以上と PHPStan 2.2 以上です。
+
+PHPStan にこの拡張を使わせるには、有効にする必要があります。それをやってくれる [phpstan/extension-installer |https://github.com/phpstan/extension-installer]を入れるか、`phpstan.neon` に手で拡張を足します。
+
+```neon
+includes:
+	- vendor/nette/phpstan-rules/extension.neon
+```
+
+ほとんどの検査はそれ以上の準備なしに働きます。[#Assets]の節だけは `phpstan.neon` に小さな設定のかたまりが要ります（下で説明します）。このページに出てくる設定はすべて `phpstan.neon` に書くもので、アプリケーションの `common.neon` などの Nette の DI の設定ファイルに書くものではないことに注意してください。
+
+
+PHP のネイティブの関数
+==============
+
+PHP のネイティブの関数の多くは `string|false` や `array|null` のような戻り値の型を宣言しています。エラーの値が起こるのは、今どきのコードでは実際にはまず起こりえない条件のときだけなのにです。まともなファイルシステムで `getcwd()` が失敗する、`JSON_THROW_ON_ERROR` なしで `json_encode()` が失敗する、コンパイル時の定数のパターンで `preg_split()` が失敗する、といった具合です。この拡張はこれらの戻り値の型からありえない部分を取り除くので、PHPStan は起こりえないエラーの処理を求めなくなります。
+
+一覧は [extension-php.neon |https://github.com/nette/phpstan-rules/blob/master/extension-php.neon]にあります。
+
+
+実行時の型を確かめるクロージャ
+---------------
+
+配列が宣言した型の要素を含むことを実行時に確かめる、PHP でよくある書き方は、型付きの可変長引数のクロージャをスプレッド演算子で呼ぶものです。
+
+```php
+/** @param string[] $items */
+public function setItems(array $items): void
+{
+	(function (string ...$items) {})(...$items);
+}
+```
+
+PHP はスプレッドされた引数それぞれに `string` の型を強い、どれかが文字列でなければ `TypeError` を投げます。クロージャの中身は空で、この式はその副作用のためだけにあります。PHPStan はふつう `expr.resultUnused` を報告しますが、この決まりはこの書き方を見分けて黙っています。
+
+
+Application
+===========
+
+プレゼンターでは、`redirect()`、`forward()`、`sendJson()` のようなメソッドが `Nette\Application\AbortException` を投げて実行を終わらせます。そうした呼び出しを `try` で包んで、広い `catch (\Throwable)` や `catch (\Exception)` で捕まえると、うっかりリダイレクトを飲み込んでしまいます。この拡張はそれを知らせます。
+
+```php
+try {
+	$this->redirect('Homepage:');
+} catch (\Throwable $e) {   // error: AbortException を飲み込んでいます
+	Debugger::log($e);
+}
+```
+
+直し方は、その例外を投げ直すか、広い catch の前に別の分岐として切り出すことです。
+
+```php
+try {
+	$this->redirect('Homepage:');
+} catch (Nette\Application\AbortException $e) {
+	throw $e;
+} catch (\Throwable $e) {
+	Debugger::log($e);
+}
+```
+
+
+Assets
+======
+
+`phpstan.neon`（Nette の DI の設定ではありません）で、マッパーの ID とマッパーのクラスの対応づけを設定すると、PHPStan は汎用の `Asset` の型を具体的なアセットのクラスに絞れます。
+
+```neon
+parameters:
+	nette:
+		assets:
+			mapping:
+				default: file              # Nette\Assets\FilesystemMapper
+				images: file
+				vite: vite                 # Nette\Assets\ViteMapper
+				custom: App\MyMapper       # 任意の FQCN
+```
+
+`file` と `vite` の値は、組み込みの `FilesystemMapper` と `ViteMapper` の近道です。そのほかの値は、独自のマッパーの完全修飾のクラス名として扱われます。
+
+設定のあとは次のようになります。
+
+- `Registry::getMapper('vite')` は `Mapper` ではなく `ViteMapper` を返します。
+- `Registry::getAsset('default:logo.png')` は `ImageAsset` を返します。`tryGetAsset()` は `ImageAsset|null` を返します。
+- `FilesystemMapper::getAsset('button.js')` と `ViteMapper::getAsset()` も同じように絞られます。
+
+
+Component Model
+===============
+
+同じクラスで宣言された `createComponent<Name>()` のファクトリメソッドをもとに、`Container::getComponent()` と `Container::offsetGet()`（つまり `$this['name']`）の戻り値の型を絞ります。
+
+```php
+class HomePresenter extends Presenter
+{
+	protected function createComponentMenu(): MenuControl
+	{
+		return new MenuControl;
+	}
+
+	public function renderDefault(): void
+	{
+		$menu = $this->getComponent('menu');   // MenuControl
+		$menu = $this['menu'];                 // MenuControl
+	}
+}
+```
+
+合うファクトリがないか、コンポーネントの名前がコンパイル時の文字列でない場合、`getComponent()` と `$this['name']` の戻り値の型は変わらず、汎用の `IComponent` のままです。
+
+
+Dependency Injection
+====================
+
+`#[Nette\DI\Attributes\Inject]` のアトリビュートで印を付けたプロパティは、オブジェクトが作られたあとに dependency injection が埋めます。ですから PHPStan はそれを未初期化と報告してしまいますが、この拡張は代わりに書き込まれて初期化されたものとして扱います。
+
+```php
+class HomePresenter extends Presenter
+{
+	#[Inject]
+	public CartFacade $cart;   // 未初期化のプロパティのエラーは出ません
+}
+```
+
+
+Forms
+=====
+
+`$form->addText('name', …)`、`$form->addSelect(…)` などが、`$form['name']`（や `$form->getComponent('name')`）へのアクセスと同じ関数やメソッドの中で呼ばれている場合、この拡張は対応する `addXxx()` の呼び出しからアクセスの型を推し量ります。
+
+```php
+public function createComponentSignInForm(): Form
+{
+	$form = new Form;
+	$form->addText('username', 'Username');
+	$form->addPassword('password', 'Password');
+
+	$form['username'];           // TextInput
+	$form['password'];           // TextInput（Password は下位のクラスです）
+	return $form;
+}
+```
+
+フォームが作られたのとは別のメソッドからのアクセスも働きます。`createComponentSignInForm()` のファクトリで組み立てて、その要素によそから触れる場合、この拡張は代入をファクトリまでたどって、合う `addXxx()` の呼び出しを見つけます。
+
+```php
+public function renderDefault(): void
+{
+	$form = $this['signInForm'];      // createComponentSignInForm() を解決します
+	$form['username'];                // TextInput
+
+	// つなげた直接のアクセスも働きます
+	$this['signInForm']['username'];  // TextInput
+	$this['signInForm-username'];     // TextInput
+}
+```
+
+合う `addXxx()` の呼び出しが見つからなければ、この拡張は Component Model の拡張と同じように `createComponent<Name>()` のファクトリを探しにいきます。
+
+
+イベントのハンドラのプロパティ
+---------------
+
+フォームはデータを、コールバックのパラメータで宣言された型（`stdClass`、`array`、独自の DTO など）に合わせます。ですからデータのパラメータが宣言された `array|object` の合併より狭いコールバックも、実行時には正しく働きます。
+
+```php
+$form->onSuccess[] = function (Form $form, MyDto $data): void {
+	// …
+};
+```
+
+PHPStan はふつう、`MyDto` が `array|object` より狭いので `assign.propertyType` を報告します。この決まりは `Form::$onSuccess`、`$onError`、`$onSubmit`、`$onRender`、`Container::$onValidate`、`SubmitButton::$onClick`、`$onInvalidClick` でそのエラーを抑えます。
+
+
+Schema
+======
+
+引数をもとに、`Expect::array()` の戻り値の型を宣言された `Structure|Type` の合併から絞ります。
+
+```php
+Expect::array();                                   // Type
+Expect::array(['name' => Expect::string()]);       // Structure（すべての値が Schema）
+Expect::array(['name' => Expect::string(), 'x']);  // Structure|Type（Schema と Schema でないものが混ざっています）
+```
+
+引数に Schema と Schema でない値が混ざっている場合、宣言された合併がそのまま保たれます。
+
+
+Tester
+======
+
+PHPStan は `Tester\Assert` の呼び出しのあとの型の絞り込みを理解します。対応するメソッドは `null()`、`notNull()`、`true()`、`false()`、`truthy()`、`falsey()`、`same()`、`notSame()`、`type()` です。
+
+```php
+function process(?User $user): void
+{
+	Assert::notNull($user);
+	$user->getName();          // 「null に対して呼ばれた」の警告は出ません
+}
+```
+
+
+void のコールバックとしてのアロー関数
+--------------------
+
+Tester の `test()` と `Assert::exception()` は `Closure(): void` と型付けられたコールバックを受け取りますが、`fn () => throw new MyException` のようなアロー関数を渡すのはよくあることです。アロー関数はいつも戻り値を持つので、PHPStan はふつうそれを型の食い違いとして印を付けます。この決まりは、次の関数とメソッドでそのエラーを抑えます。`test()`、`testException()`、`testNoError()`、`Tester\Assert::exception()`、`Tester\Assert::throws()`、`Tester\Assert::error()`、`Tester\Assert::noError()`。
+
+
+Utils
+=====
+
+**`Strings::match()` と `matchAll()`**: 定数のパターンなら、戻り値の型は正規表現そのもの、つまりその捕獲グループ（名前付きや省略できるものも含みます）から直接推し量られます。`captureOffset`、`unmatchedAsNull` のフラグ、そして `matchAll()` では `patternOrder` と `lazy` も、できあがる形に映されます。
+
+```php
+Strings::match($s, '#(\d+)-(\w+)#');  // array{non-falsy-string, decimal-int-string, non-empty-string}|null
+Strings::match($s, '#(?<id>\d+)#');   // array{0: non-empty-string, id: decimal-int-string, 1: decimal-int-string}|null
+Strings::matchAll($s, '#(\w+)#');     // list<array{string, non-empty-string}>
+```
+
+定数でないパターン（と `split()` メソッド）では、形はフラグからだけ推し量られます。
+
+**`Strings::replace()`**: 置き換えがコールバックの場合、その `$matches` パラメータの型が同じ正規表現から推し量られます。
+
+```php
+Strings::replace($s, '#(\d+)#', function (array $m) {
+	return $m[1];   // $m は array{non-empty-string, decimal-int-string} の型です
+});
+```
+
+**`match()` のあとの対象の絞り込み**: `if (Strings::match($s, …))` の中では、探された文字列 `$s` もパターンをもとに、たとえば `non-empty-string` に絞られます。
+
+**パターンの検証**: `match()`、`matchAll()`、`split()`、`replace()` に渡された正しくない正規表現は、実行時ではなく解析のときに報告されます。
+
+**`Arrays::invoke()`** と **`Arrays::invokeMethod()`** は、宣言された `array` ではなく、その callable やメソッドの戻り値の型の配列を返します。
+
+**`Helpers::falseToNull()`** は戻り値の型から `false` を取り除き `null` を足して絞ります。ですから `string|false` は `string|null` になります。
+
+**`Html` のマジックメソッド**: `$el->setClass(…)`、`$el->addData(…)`、`$el->getHref()` などが `@method` のアノテーションなしで解決されます。`setXxx()` と `addXxx()` は `static` を返し（fluent な API）、`getXxx()` は `mixed` を返します。

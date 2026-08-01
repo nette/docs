@@ -1,0 +1,296 @@
+Reguły PHPStan dla Nette
+************************
+
+.[perex]
+[Reguły PHPStan |https://github.com/nette/phpstan-rules] uczą PHPStan rozumieć kod Nette, dzięki czemu analiza statyczna wywodzi precyzyjne typy i zgłasza mniej fałszywych alarmów.
+
+Wystarczy zainstalować rozszerzenie, a [PHPStan |https://phpstan.org] rozpozna na przykład typ komponentu tam, gdzie wcześniej widział tylko błąd:
+
+```php
+class HomePresenter extends Presenter
+{
+	protected function createComponentMenu(): MenuControl
+	{
+		return new MenuControl;
+	}
+
+	public function renderDefault(): void
+	{
+		$menu = $this['menu'];      // PHPStan wywodzi teraz MenuControl
+		$menu->setActive('home');   // żadnego ostrzeżenia o nieznanej metodzie
+	}
+}
+```
+
+
+Instalacja
+==========
+
+Rozszerzenie to bazuje na analizatorze statycznym PHPStan, który wykrywa błędy logiczne w Twoim kodzie, zanim go w ogóle uruchomisz. Jeśli jeszcze go nie używasz, zainstaluj go przez Composera:
+
+```shell
+composer require --dev phpstan/phpstan
+```
+
+Utwórz plik konfiguracyjny `phpstan.neon` podający katalogi do analizy i poziom reguł:
+
+```neon
+parameters:
+	paths:
+		- app
+
+	level: 8
+```
+
+PHPStan uruchamia się potem poleceniem:
+
+```shell
+vendor/bin/phpstan analyse
+```
+
+Wyczerpującą dokumentację znajdziesz na [stronie PHPStan |https://phpstan.org].
+
+Następnie zainstaluj samo rozszerzenie:
+
+```shell
+composer require --dev nette/phpstan-rules
+```
+
+Wymagania: PHP 8.1 albo wyższe i PHPStan 2.2+.
+
+Żeby PHPStan używał rozszerzenia, trzeba je aktywować. Albo zainstaluj [phpstan/extension-installer |https://github.com/phpstan/extension-installer], który zrobi to za Ciebie, albo dodaj rozszerzenie ręcznie do swojego `phpstan.neon`:
+
+```neon
+includes:
+	- vendor/nette/phpstan-rules/extension.neon
+```
+
+Większość kontroli działa bez dalszego ustawiania. Tylko sekcja [#Assets] potrzebuje w `phpstan.neon` małego bloku konfiguracyjnego (opisanego niżej). Zwróć uwagę, że cała konfiguracja pokazana na tej stronie należy do `phpstan.neon`, a nie do `common.neon` czy innych plików konfiguracyjnych Nette DI Twojej aplikacji.
+
+
+Natywne funkcje PHP
+===================
+
+Wiele natywnych funkcji PHP deklaruje typ zwracany w rodzaju `string|false` albo `array|null`, choć wartość błędu występuje tylko w warunkach, które w nowoczesnym kodzie praktycznie nie mogą nastąpić: `getcwd()` zawodzące na rozsądnym systemie plików, `json_encode()` zawodzące bez `JSON_THROW_ON_ERROR`, `preg_split()` zawodzące na wzorcu będącym stałą kompilacji i tak dalej. Rozszerzenie usuwa z tych typów zwracanych niemożliwe części, więc PHPStan przestaje prosić Cię o obsługę błędów, które nie mogą wystąpić.
+
+Pełna lista jest w [extension-php.neon |https://github.com/nette/phpstan-rules/blob/master/extension-php.neon].
+
+
+Domknięcia walidujące typy w czasie działania
+---------------------------------------------
+
+Powszechny idiom PHP do sprawdzania w czasie działania, że tablica zawiera elementy zadeklarowanego typu, używa otypowanego domknięcia wariadycznego wywoływanego operatorem spread:
+
+```php
+/** @param string[] $items */
+public function setItems(array $items): void
+{
+	(function (string ...$items) {})(...$items);
+}
+```
+
+PHP wymusza typ `string` na każdym argumencie spread i rzuca `TypeError`, jeśli któryś element nie jest ciągiem. Ciało domknięcia jest puste, wyrażenie istnieje tylko dla swojego efektu ubocznego. PHPStan normalnie zgłosiłby `expr.resultUnused`; ta reguła rozpoznaje wzorzec i milczy.
+
+
+Application
+===========
+
+W presenterach metody takie jak `redirect()`, `forward()` czy `sendJson()` kończą działanie, rzucając `Nette\Application\AbortException`. Jeśli opakujesz takie wywołanie w `try` i przechwycisz je szerokim `catch (\Throwable)` albo `catch (\Exception)`, przypadkiem połkniesz przekierowanie. Rozszerzenie Cię o tym ostrzeże:
+
+```php
+try {
+	$this->redirect('Homepage:');
+} catch (\Throwable $e) {   // błąd: połyka AbortException
+	Debugger::log($e);
+}
+```
+
+Rozwiązaniem jest ponowne rzucenie wyjątku albo wydzielenie go do osobnej gałęzi przed szerokim catchem:
+
+```php
+try {
+	$this->redirect('Homepage:');
+} catch (Nette\Application\AbortException $e) {
+	throw $e;
+} catch (\Throwable $e) {
+	Debugger::log($e);
+}
+```
+
+
+Assets
+======
+
+W `phpstan.neon` (nie w konfiguracji Nette DI) skonfiguruj mapowanie ID mapperów na klasy mapperów, żeby PHPStan mógł zawęzić generyczny typ `Asset` do konkretnej klasy zasobu:
+
+```neon
+parameters:
+	nette:
+		assets:
+			mapping:
+				default: file              # Nette\Assets\FilesystemMapper
+				images: file
+				vite: vite                 # Nette\Assets\ViteMapper
+				custom: App\MyMapper       # dowolne FQCN
+```
+
+Wartości `file` i `vite` to skróty dla wbudowanych `FilesystemMapper` i `ViteMapper`. Każda inna wartość traktowana jest jako w pełni kwalifikowana nazwa klasy własnego mappera.
+
+Po skonfigurowaniu:
+
+- `Registry::getMapper('vite')` zwraca `ViteMapper` zamiast `Mapper`.
+- `Registry::getAsset('default:logo.png')` zwraca `ImageAsset`. `tryGetAsset()` zwraca `ImageAsset|null`.
+- `FilesystemMapper::getAsset('button.js')` i `ViteMapper::getAsset()` są zawężane w ten sam sposób.
+
+
+Component Model
+===============
+
+Zawęża typ zwracany `Container::getComponent()` i `Container::offsetGet()` (czyli `$this['name']`) na podstawie metod fabrykujących `createComponent<Name>()` zadeklarowanych w tej samej klasie.
+
+```php
+class HomePresenter extends Presenter
+{
+	protected function createComponentMenu(): MenuControl
+	{
+		return new MenuControl;
+	}
+
+	public function renderDefault(): void
+	{
+		$menu = $this->getComponent('menu');   // MenuControl
+		$menu = $this['menu'];                 // MenuControl
+	}
+}
+```
+
+Gdy nie istnieje pasująca fabryka albo nazwa komponentu nie jest ciągiem znanym w czasie kompilacji, typ zwracany `getComponent()` i `$this['name']` pozostaje bez zmian, czyli generyczny `IComponent`.
+
+
+Dependency Injection
+====================
+
+Właściwości oznaczone atrybutem `#[Nette\DI\Attributes\Inject]` wypełniane są przez dependency injection po utworzeniu obiektu. PHPStan zgłosiłby je więc jako niezainicjalizowane; rozszerzenie traktuje je zamiast tego jako zapisane i zainicjalizowane:
+
+```php
+class HomePresenter extends Presenter
+{
+	#[Inject]
+	public CartFacade $cart;   // żadnego błędu o niezainicjalizowanej właściwości
+}
+```
+
+
+Forms
+=====
+
+Gdy `$form->addText('name', …)`, `$form->addSelect(…)` i podobne wywoływane są w tej samej funkcji albo metodzie co dostęp do `$form['name']` (albo `$form->getComponent('name')`), rozszerzenie wywodzi typ dostępu z odpowiadającego wywołania `addXxx()`:
+
+```php
+public function createComponentSignInForm(): Form
+{
+	$form = new Form;
+	$form->addText('username', 'Username');
+	$form->addPassword('password', 'Password');
+
+	$form['username'];           // TextInput
+	$form['password'];           // TextInput (Password to podklasa)
+	return $form;
+}
+```
+
+Dostęp działa też z metody innej niż ta, w której formularz został utworzony. Gdy budujesz go w fabryce `createComponentSignInForm()` i sięgasz po jego elementy gdzie indziej, rozszerzenie śledzi przypisanie wstecz do fabryki i znajduje pasujące wywołanie `addXxx()`:
+
+```php
+public function renderDefault(): void
+{
+	$form = $this['signInForm'];      // rozwiązuje createComponentSignInForm()
+	$form['username'];                // TextInput
+
+	// bezpośredni dostęp w łańcuchu też działa
+	$this['signInForm']['username'];  // TextInput
+	$this['signInForm-username'];     // TextInput
+}
+```
+
+Jeśli nie znajdzie pasującego wywołania `addXxx()`, rozszerzenie wraca do szukania fabryki `createComponent<Name>()`, tak samo jak rozszerzenie Component Model.
+
+
+Właściwości handlerów zdarzeń
+-----------------------------
+
+Formularze konwertują dane na typ zadeklarowany w parametrze callbacku, czy to `stdClass`, `array`, czy własne DTO. Callback, którego parametr danych jest węższy niż zadeklarowana unia `array|object`, jest więc w czasie działania poprawny:
+
+```php
+$form->onSuccess[] = function (Form $form, MyDto $data): void {
+	// …
+};
+```
+
+PHPStan normalnie zgłosiłby `assign.propertyType`, bo `MyDto` jest węższe niż `array|object`. Reguła tłumi ten błąd na `Form::$onSuccess`, `$onError`, `$onSubmit`, `$onRender`, `Container::$onValidate`, `SubmitButton::$onClick` i `$onInvalidClick`.
+
+
+Schema
+======
+
+Zawęża typ zwracany `Expect::array()` z zadeklarowanej unii `Structure|Type` na podstawie argumentu:
+
+```php
+Expect::array();                                   // Type
+Expect::array(['name' => Expect::string()]);       // Structure (wszystkie wartości to Schema)
+Expect::array(['name' => Expect::string(), 'x']);  // Structure|Type (mieszanka Schema i nie-Schema)
+```
+
+Gdy argument miesza wartości Schema i nie-Schema, zadeklarowana unia zostaje zachowana.
+
+
+Tester
+======
+
+PHPStan rozumie zawężanie typów po wywołaniach `Tester\Assert`. Wspierane metody: `null()`, `notNull()`, `true()`, `false()`, `truthy()`, `falsey()`, `same()`, `notSame()`, `type()`.
+
+```php
+function process(?User $user): void
+{
+	Assert::notNull($user);
+	$user->getName();          // żadnego ostrzeżenia "called on null"
+}
+```
+
+
+Funkcje strzałkowe jako callbacki void
+--------------------------------------
+
+`test()` i `Assert::exception()` Testera przyjmują callbacki otypowane jako `Closure(): void`, ale często przekazuje się funkcje strzałkowe w rodzaju `fn () => throw new MyException`. Funkcja strzałkowa zawsze ma wartość zwracaną, co PHPStan normalnie oznaczyłby jako niezgodność typów. Reguła tłumi ten błąd dla następujących funkcji i metod: `test()`, `testException()`, `testNoError()`, `Tester\Assert::exception()`, `Tester\Assert::throws()`, `Tester\Assert::error()`, `Tester\Assert::noError()`.
+
+
+Utils
+=====
+
+**`Strings::match()` i `matchAll()`**: dla stałego wzorca typ zwracany wywodzony jest bezpośrednio z wyrażenia regularnego, czyli z jego grup przechwytujących (wraz z nazwanymi i opcjonalnymi). Flagi `captureOffset`, `unmatchedAsNull`, a dla `matchAll()` także `patternOrder` i `lazy`, odzwierciedlane są w wynikowym kształcie:
+
+```php
+Strings::match($s, '#(\d+)-(\w+)#');  // array{non-falsy-string, decimal-int-string, non-empty-string}|null
+Strings::match($s, '#(?<id>\d+)#');   // array{0: non-empty-string, id: decimal-int-string, 1: decimal-int-string}|null
+Strings::matchAll($s, '#(\w+)#');     // list<array{string, non-empty-string}>
+```
+
+Dla wzorca niebędącego stałą (i dla metody `split()`) kształt wywodzony jest wyłącznie z flag.
+
+**`Strings::replace()`**: gdy zamiennikiem jest callback, typ jego parametru `$matches` wywodzony jest z tego samego wyrażenia regularnego:
+
+```php
+Strings::replace($s, '#(\d+)#', function (array $m) {
+	return $m[1];   // $m jest typu array{non-empty-string, decimal-int-string}
+});
+```
+
+**Zawężanie badanego ciągu po `match()`**: wewnątrz `if (Strings::match($s, …))` badany ciąg `$s` również zawężany jest na podstawie wzorca, na przykład do `non-empty-string`.
+
+**Walidacja wzorca**: nieprawidłowe wyrażenie regularne przekazane do `match()`, `matchAll()`, `split()` albo `replace()` zgłaszane jest podczas analizy zamiast w czasie działania.
+
+**`Arrays::invoke()`** i **`Arrays::invokeMethod()`** zwracają tablicę typu zwracanego callable / metody zamiast zadeklarowanego `array`.
+
+**`Helpers::falseToNull()`** zawęża typ zwracany, usuwając `false` i dodając `null`. `string|false` staje się więc `string|null`.
+
+**Magiczne metody `Html`**: `$el->setClass(…)`, `$el->addData(…)`, `$el->getHref()` i podobne rozwiązywane są bez adnotacji `@method`. `setXxx()` i `addXxx()` zwracają `static` (fluent API), `getXxx()` zwraca `mixed`.

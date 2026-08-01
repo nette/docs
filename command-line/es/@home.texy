@@ -1,0 +1,445 @@
+Nette Command-Line
+******************
+
+.[perex]
+Una biblioteca ligera para construir aplicaciones de línea de comandos en PHP. Analiza los conmutadores, las opciones y los argumentos posicionales, y le ayuda a producir una salida de terminal con colores y soporte de ANSI.
+
+Instalación:
+
+```shell
+composer require nette/command-line
+```
+
+Requiere PHP en la versión 8.2 y soporta PHP hasta la 8.5.
+
+
+Analizar los argumentos de la línea de comandos
+===============================================
+
+Todo script de CLI necesita tratar argumentos como `--verbose`, `-o output.txt` o simples nombres de archivo. La clase [api:Nette\CommandLine\Parser] ofrece la forma más rápida de empezar: basta con escribir su texto de ayuda y dejar que el parser extraiga de él las definiciones de las opciones:
+
+```php
+use Nette\CommandLine\Parser;
+
+$parser = new Parser;
+$parser->addFromHelp('
+	-h, --help              Show this help
+	-v, --verbose           Enable verbose mode
+	-o, --output <file>     Output file
+	-f, --format [type]     Output format (default: json)
+	-I, --include <path>... Include paths
+	--dry-run               Show what would be done
+');
+
+$args = $parser->parse();
+```
+
+Eso es todo. El parser entiende que `--verbose` es un conmutador, que `--output` requiere un valor y que `--format` tiene un valor opcional con `json` como valor de reserva. Su texto de ayuda se mantiene sincronizado con las definiciones reales de las opciones.
+
+El método `parse()` devuelve un array asociativo. Las claves coinciden exactamente con los nombres de las opciones tal como se definieron, guiones incluidos:
+
+```php
+[
+	'--help' => true,         // o null si no se usó
+	'--verbose' => null,
+	'--output' => 'file.txt', // o null si no se usó
+	'--format' => 'json',     // valor de reserva de (default: json)
+	'--include' => ['src', 'lib'],
+	'--dry-run' => null,
+]
+```
+
+De forma predeterminada, `parse()` lee de `$_SERVER['argv']`. Puede pasarle un array propio, lo que resulta práctico para las pruebas:
+
+```php
+$args = $parser->parse(['--verbose', '-o', 'out.txt']);
+```
+
+
+Sintaxis del texto de ayuda
+---------------------------
+
+El parser extrae las definiciones de las opciones del texto de ayuda formateado según estas reglas:
+
+| `--verbose`      | Conmutador (sin valor)
+| `-v, --verbose`  | Conmutador con alias corto
+| `--output <file>`| Opción con valor obligatorio
+| `--format [type]`| Opción con valor opcional
+| `(default: json)`| Establece el valor de reserva
+| `<path>...`      | Opción repetible
+
+Cada línea define una opción. Los nombres de las opciones tienen que estar separados de sus descripciones por al menos dos espacios.
+
+
+Configuración adicional
+-----------------------
+
+Algunos ajustes no se pueden expresar en el texto de ayuda. Pase un array como segundo parámetro, con los nombres de las opciones como claves:
+
+```php
+$parser->addFromHelp('
+	-c, --config <file>   Configuration file
+	-I, --include <path>  Include path
+	-n, --count <num>     Number of iterations
+', [
+	'--config' => [
+		Parser::RealPath => true,
+	],
+	'--include' => [
+		Parser::Repeatable => true,
+	],
+	'--count' => [
+		Parser::Normalizer => fn($v) => (int) $v,
+	],
+]);
+```
+
+Claves disponibles:
+
+| `Parser::Repeatable` | Recoge varios valores en un array
+| `Parser::RealPath`   | Verifica que el archivo existe y lo resuelve a una ruta absoluta
+| `Parser::Normalizer` | Función de transformación `fn($value) => ...`
+| `Parser::Default`    | Valor de reserva (lo mismo que `(default: x)` en el texto de ayuda)
+| `Parser::Enum`       | Array de valores permitidos
+
+
+API fluida
+==========
+
+Cuando necesite más control sobre las definiciones de las opciones, use la API fluida con los métodos `addSwitch()`, `addOption()` y `addArgument()`. Este enfoque le da acceso a todas las funciones, incluidos los normalizadores, los enums y el control preciso de cada parámetro:
+
+```php
+use Nette\CommandLine\Parser;
+
+$parser = new Parser;
+$parser
+	->addSwitch('--verbose', '-v')
+	->addOption('--output', '-o')
+	->addArgument('file');
+
+$args = $parser->parse();
+```
+
+Igual que con `addFromHelp()`, puede pasarle a `parse()` un array propio para hacer pruebas:
+
+```php
+$args = $parser->parse(['--verbose', '-o', 'out.txt', 'input.txt']);
+```
+
+
+Conmutadores, opciones y argumentos
+-----------------------------------
+
+Hay tres tipos de entradas de línea de comandos:
+
+Los **conmutadores** son banderas sin valor, como `--verbose` o `-v`. Se analizan como `true` cuando están presentes y como `null` cuando faltan:
+
+```php
+$parser->addSwitch('--verbose', '-v');
+// --verbose  → true
+// -v         → true
+// (sin usar) → null
+```
+
+Las **opciones** aceptan valores, como `--output file.txt`. El valor se puede separar con un espacio o con `=`:
+
+```php
+$parser->addOption('--output', '-o');
+// --output file.txt    → 'file.txt'
+// --output=file.txt    → 'file.txt'
+// -o file.txt          → 'file.txt'
+// --output             → lanza una excepción (valor obligatorio)
+// (sin usar)           → null
+```
+
+Tenga en cuenta que la propia opción siempre es opcional: si no se usa, devuelve `null`. Pero, cuando se usa, el valor es obligatorio de forma predeterminada. Establezca `optionalValue: true` para permitir la opción sin valor (entonces se analiza como `true`):
+
+```php
+$parser->addOption('--format', '-f', optionalValue: true);
+// --format json        → 'json'
+// --format             → true
+// (sin usar)           → null
+```
+
+Cuando la misma opción se usa varias veces sin `repeatable: true`, gana el último valor:
+
+```php
+$parser->addOption('--output', '-o');
+// -o first.txt -o second.txt  → 'second.txt'
+```
+
+Los **argumentos** son valores posicionales sin guiones. De forma predeterminada son obligatorios. Establezca `optional: true` para hacerlos opcionales:
+
+```php
+$parser->addArgument('input');
+// script.php file.txt  → 'file.txt'
+// (sin usar)           → lanza una excepción
+
+$parser->addArgument('output', optional: true);
+// (sin usar)           → null
+
+$parser->addArgument('output', optional: true, fallback: 'out.txt');
+// (sin usar)           → 'out.txt'
+```
+
+Use `fallback` para indicar el valor que se usa cuando no se proporciona una opción o un argumento opcionales. En las opciones con `optionalValue: true`, tenga en cuenta que usar la opción sin valor sigue analizándose como `true`, mientras que el valor de reserva se usa solo cuando la opción no aparece en absoluto:
+
+```php
+$parser->addOption('--format', '-f', optionalValue: true, fallback: 'json');
+// --format xml  → 'xml'
+// --format      → true (opción usada sin valor)
+// (sin usar)    → 'json' (valor de reserva)
+```
+
+Los argumentos pueden aparecer en cualquier sitio de la línea de comandos, no tienen por qué ir detrás de las opciones:
+
+```php
+// todas estas formas son equivalentes:
+// script.php --verbose input.txt
+// script.php input.txt --verbose
+```
+
+
+Restringir los valores con enum
+-------------------------------
+
+Limite los valores aceptados a un conjunto concreto:
+
+```php
+$parser->addOption('--format', '-f', enum: ['json', 'xml', 'csv']);
+// --format yaml  → lanza "Value of option --format must be json, or xml, or csv."
+```
+
+
+Opciones repetibles
+-------------------
+
+Establezca `repeatable: true` para recoger varios valores en un array:
+
+```php
+$parser->addOption('--include', '-I', repeatable: true);
+// -I src -I lib  → ['src', 'lib']
+// (sin usar)     → []
+
+$parser->addArgument('files', optional: true, repeatable: true);
+// a.txt b.txt    → ['a.txt', 'b.txt']
+```
+
+
+Transformar los valores
+-----------------------
+
+Use un `normalizer` para transformar el valor analizado:
+
+```php
+$parser->addOption('--count', normalizer: fn($v) => (int) $v);
+// --count 42  → 42 (entero)
+```
+
+Para verificar rutas de archivo, use el `normalizeRealPath` integrado:
+
+```php
+$parser->addOption('--config', normalizer: Parser::normalizeRealPath(...));
+// --config app.ini     → '/full/path/to/app.ini'
+// --config missing.ini → lanza "File path 'missing.ini' not found."
+```
+
+
+Combinar los dos enfoques
+-------------------------
+
+Puede combinar `addFromHelp()` con los métodos fluidos cuando necesite normalizadores solo para algunas de las opciones:
+
+```php
+$parser
+	->addFromHelp('
+		-v, --verbose  Enable verbose mode
+		-q, --quiet    Suppress output
+	')
+	->addOption('--config', '-c', normalizer: Parser::normalizeRealPath(...))
+	->addArgument('input');
+```
+
+
+Tratamiento de los errores
+--------------------------
+
+El parser lanza `\Exception` cuando la entrada no es válida:
+
+```php
+use Nette\CommandLine\Parser;
+
+$parser = new Parser;
+$parser
+	->addOption('--output', '-o')
+	->addArgument('file');
+
+try {
+	$args = $parser->parse();
+} catch (\Exception $e) {
+	fwrite(STDERR, "Error: {$e->getMessage()}\n");
+	exit(1);
+}
+```
+
+Mensajes de error habituales:
+
+| `Option --output requires argument.`          | Opción usada sin su valor obligatorio
+| `Unknown option --foo.`                       | Opción no reconocida
+| `Missing required argument <file>.`           | Argumento obligatorio no proporcionado
+| `Unexpected parameter foo.`                   | Argumento posicional de más
+| `Value of option --format must be json, or xml.` | Valor que no está en el enum
+
+Use `isEmpty()` para comprobar si no se proporcionó ningún argumento de línea de comandos (es decir, si el usuario ejecutó solo `script.php` sin nada detrás):
+
+```php
+if ($parser->isEmpty()) {
+	$parser->help();
+	exit;
+}
+```
+
+
+Tratar --help y --version
+-------------------------
+
+Cuando su script tiene argumentos obligatorios, ejecutar `script.php --help` fallaría normalmente porque falta el argumento obligatorio. Use `parseOnly()` para comprobar antes las opciones informativas:
+
+```php
+$parser = new Parser;
+$parser
+	->addSwitch('--help', '-h')
+	->addSwitch('--version', '-V')
+	->addArgument('input');  // obligatorio
+
+// Primero comprueba las opciones informativas (sin validación, sin excepciones)
+$info = $parser->parseOnly(['--help', '--version']);
+
+if ($info['--help']) {
+	$parser->help();
+	exit;
+}
+
+if ($info['--version']) {
+	echo "1.0.0\n";
+	exit;
+}
+
+// Ahora hace el análisis completo con validación
+$args = $parser->parse();
+```
+
+El método `parseOnly()`:
+- analiza solo las opciones indicadas e ignora todo lo demás,
+- respeta los alias (`-h` → `--help`),
+- nunca lanza excepciones,
+- devuelve `null` para las opciones que no se usaron.
+
+
+Salida con colores
+==================
+
+La clase [api:Nette\CommandLine\Console] envuelve el texto en códigos de color ANSI para que su salida destaque en la terminal:
+
+```php
+use Nette\CommandLine\Console;
+
+$console = new Console;
+echo $console->color('red', 'Error!') . "\n";
+echo $console->color('white/blue', 'White text on blue background') . "\n";
+```
+
+El color se indica como `'primer plano'` o `'primer plano/fondo'`. Los colores disponibles son: `black`, `gray`, `silver`, `white`, `navy`, `blue`, `green`, `lime`, `teal`, `aqua`, `maroon`, `red`, `purple`, `fuchsia`, `olive` y `yellow`.
+
+Los colores se activan automáticamente solo cuando la salida los soporta. El método `color()` devuelve una cadena simple cuando los colores están desactivados, así que llamarlo siempre es seguro. Puede forzar el comportamiento a mano:
+
+```php
+$console->useColors(false); // desactiva los colores
+$console->useColors(true);  // fuerza los colores
+```
+
+
+Detectar la terminal
+--------------------
+
+Dos métodos estáticos le ayudan a decidir si usar funciones exclusivas de la terminal. `detectColors()` devuelve `false` cuando está establecida la variable de entorno [NO_COLOR |https://no-color.org], o cuando la salida no es una terminal de CLI; la variable `FORCE_COLOR` anula la comprobación de la terminal:
+
+```php
+if (Console::detectColors()) {
+	// la terminal soporta colores ANSI
+}
+```
+
+`detectTerminal()` le dice si la salida es una terminal interactiva (una TTY). Es útil para desactivar automáticamente las funciones que solo tienen sentido en una terminal, como los indicadores de progreso, la salida que reescribe líneas o las preguntas interactivas:
+
+```php
+if (Console::detectTerminal()) {
+	// la salida va a una terminal interactiva, no a un archivo ni a una tubería
+}
+```
+
+
+Ejemplo completo
+================
+
+Aquí tiene un script real de conversión de archivos que combina `Parser` y `Console`:
+
+```php
+#!/usr/bin/env php
+<?php
+use Nette\CommandLine\Parser;
+
+require __DIR__ . '/vendor/autoload.php';
+
+$parser = new Parser;
+$parser
+	->addFromHelp('
+		-h, --help           Show this help
+		-v, --verbose        Show detailed output
+		-n, --dry-run        Show what would be done
+		-f, --format [type]  Output format (default: json)
+		-o, --output <file>  Output file
+	', [
+		'--format' => [
+			Parser::Enum => ['json', 'xml', 'csv'],
+		],
+	])
+	->addArgument('input', normalizer: Parser::normalizeRealPath(...));
+
+// Trata --help antes de la validación (evita el error de "falta el argumento")
+if ($parser->isEmpty() || $parser->parseOnly(['--help'])['--help']) {
+	echo "Usage: convert [options] <input>\n\n";
+	$parser->help();
+	exit;
+}
+
+try {
+	$args = $parser->parse();
+} catch (\Exception $e) {
+	fwrite(STDERR, "Error: {$e->getMessage()}\n");
+	exit(1);
+}
+
+if ($args['--verbose']) {
+	echo "Converting {$args['input']} to {$args['--format']}...\n";
+}
+
+if ($args['--dry-run']) {
+	echo "Dry run: no changes made.\n";
+	exit;
+}
+
+// ... aquí va la lógica de conversión ...
+
+echo "Done!\n";
+```
+
+El script acepta comandos como:
+
+- `convert input.txt`: convierte con los valores predeterminados
+- `convert -v --format xml input.txt`: modo detallado, formato XML
+- `convert -o result.txt input.txt`: indica el archivo de salida
+- `convert --help`: muestra la ayuda (funciona incluso sin el archivo de entrada)
+
+
+{{sitename: Documentación de Nette}}

@@ -1,0 +1,222 @@
+Kompilierung im Detail
+**********************
+
+.[perex]
+Diese Seite öffnet die Kompilierung des Containers: die Phasen, die sie durchläuft, wann die Parameter der Konfiguration aufgelöst werden, wann aus `@service`-Strings echte Referenzen werden und - die Frage, die Autoren von Extensions am häufigsten stellen - in welcher Phase Sie gefahrlos nach Services nach Typ suchen können. Sie ist die tiefergehende Ergänzung zu [Extensions erstellen |extensions].
+
+Für eine gewöhnliche Anwendung, ja selbst für eine gewöhnliche Extension brauchen Sie nichts davon. Sobald Ihre Extension aber anfängt, den Graphen der Services zu untersuchen oder umzuformen, wird das Timing entscheidend: Derselbe Aufruf von `getByType()` liefert in der einen Phase eine verlässliche Antwort und in der anderen eine irreführende. Diese Seite erklärt, warum, damit Sie immer wissen, wohin Ihr Code gehört.
+
+
+Zwei Welten: Kompilierung vs. Laufzeit
+======================================
+
+Am wichtigsten ist zu verstehen, dass ein Nette-Container **nicht bei jedem Request zusammengebaut wird**. Er wird einmal zu einer optimierten PHP-Klasse gebaut, diese Klasse wird auf der Festplatte abgelegt, und jeder weitere Request bindet die fertige Datei bloß per `include` ein. Die gesamte unten beschriebene Maschinerie - Extensions, Resolver, der Code-Generator - läuft **nur während der (Neu-)Kompilierung**.
+
+Das teilt die Welt in zwei Darstellungen, die nie gleichzeitig existieren:
+
+| | während der Kompilierung | zur Laufzeit
+|---|---|---
+| Was existiert | **Definitionen** (Rezepte) im `ContainerBuilder` | **Instanzen** der Services im `Container`
+| Zentrale Klassen | `Compiler`, `ContainerBuilder`, `Resolver`, `PhpGenerator` | `Container` (Elternklasse der erzeugten Klasse)
+| `%param%`, `@service` | textuelle Markierungen, die noch übersetzt werden | bereits übersetzt / in den Code eingebacken
+
+Die erzeugte Klasse erweitert `Nette\DI\Container` und hat für jeden Service eine Methode `createServiceXxx()`. Ihre Parameter und die Metadaten für das Autowiring sind vorberechnet, zur Laufzeit bleibt also nichts mehr aufzulösen - nur noch, Services bei Bedarf zu instanziieren.
+
+.[note]
+Im Entwicklermodus wird der Container automatisch neu gebaut, sobald sich eine Konfigurationsdatei oder die Klasse einer Extension ändert; beides wird als Abhängigkeit verfolgt. In der Produktion wird er einmal kompiliert und nie wieder geprüft, daher kommt die Geschwindigkeit.
+
+
+Die Phasen auf einen Blick
+==========================
+
+Die Kompilierung steuert `Compiler::compile()`, und sie läuft auf drei Schritte hinaus:
+
+```php
+public function compile(): string
+{
+	$this->processExtensions();     // PHASE A: Schemas + loadConfiguration()
+	$this->processBeforeCompile();  // PHASE B: resolve + beforeCompile() + complete
+	return $this->generateCode();   // PHASE C: Code-Erzeugung + afterCompile()
+}
+```
+
+Das ganze Denkmodell passt in eine einzige Idee - **jede Phase weiß mehr als die vorherige:**
+
+- **Phase A** füllt den Graphen mit Definitionen. Die Typen der Services **sind noch nicht verlässlich bekannt**, denn ein Typ kann aus dem Rückgabewert einer Factory stammen, den sich noch niemand angesehen hat.
+- **Phase B** löst zuerst alle Typen auf (`resolve`), lässt dann die Extensions den Graphen umformen (`beforeCompile`) und [autowiret |autowiring] zum Schluss die Argumente (`complete`).
+- **Phase C** verwandelt den fertigen Graphen in PHP und lässt die Extensions den erzeugten Code anfassen.
+
+Genau dieses wachsende Wissen ist der Grund, warum dieselbe Operation in der einen Phase sicher und in der anderen unzuverlässig ist. Der Rest dieser Seite geht die Phasen mit dieser Idee im Hinterkopf durch.
+
+
+Phase A: Registrieren der Definitionen
+======================================
+
+In dieser Phase ruft Nette auf jeder Extension drei Methoden auf - `getConfigSchema()`, dann `setConfig()`, dann `loadConfiguration()` -, und zwar in einer **sorgfältig gesteuerten Reihenfolge**, denn hier zählt die Reihenfolge wirklich.
+
+
+Warum die Reihenfolge zählt
+---------------------------
+
+- **`ParametersExtension` und `ExtensionsExtension` kommen zuerst.** Die erste muss vor allem anderen laufen, damit sie `%param%` in der gesamten Konfiguration auflösen kann - jede andere Extension bekommt ihren Abschnitt dann bereits mit eingesetzten Werten. Die zweite registriert weitere Extensions, die im Abschnitt `extensions:` aufgeführt sind, muss also ebenfalls existieren, bevor die übrigen verarbeitet werden.
+- **`ServicesExtension` kommt zuletzt.** Der Abschnitt `services:` des Nutzers hat deshalb immer das letzte Wort und kann alles überschreiben, was die Extensions eingerichtet haben.
+- **`InjectExtension` wird ganz ans Ende verschoben**, damit ihre Arbeit die Setups sieht, die alle anderen Extensions ergänzt haben.
+
+Was das für Sie bedeutet: Wenn `loadConfiguration()` Ihrer Extension läuft, sind die Parameter bereits aufgelöst, die Services des Nutzers aber noch nicht da. Diese einzige Tatsache erklärt die meisten der folgenden Timing-Regeln.
+
+
+Von services: zu Definitionen
+-----------------------------
+
+Der Abschnitt `services:` des Nutzers wird hier, im letzten Schritt von Phase A, in [Objekte von Definitionen |extensions#Typen von Definitionen] verwandelt. Jeder NEON-Eintrag wird normalisiert (Kurzschreibweisen werden vereinheitlicht), seine Art wird erkannt (gewöhnlicher Service, Factory, Accessor, ...) und im Builder eine passende Definition angelegt. Das ist auch der erste Moment, in dem einfache Argumente `@name` / `@Type` zu Referenzen werden - siehe [unten |#Referenzen: wann aus @service eine Referenz wird].
+
+Am Ende von Phase A liegen alle Definitionen vor - jede Extension und der Nutzer haben registriert, was sie wollten -, aber das Bild ist noch nicht scharf:
+
+- **Typen sind nicht aufgelöst** bei Definitionen, deren Typ aus dem Rückgabewert einer Factory stammt,
+- **Argumente sind nicht autowiret**,
+- manche `@service`-Referenzen sind noch schlichte Strings.
+
+Genau deshalb ist die Suche nach Typ hier unzuverlässig - mehr dazu [unten |#Den ContainerBuilder untersuchen: wann es sicher ist].
+
+
+Parameter: wann %param% aufgelöst wird
+======================================
+
+Eine der beiden Hauptfragen. Die Antwort ist kurz: **einmal, ganz am Anfang von Phase A, über den gesamten Baum der Konfiguration.**
+
+`ParametersExtension` läuft als Erste, und zu ihren ersten Handlungen gehört das Auflösen der Platzhalter `%param%` - zuerst innerhalb der Parameter selbst (ein Parameter kann auf einen anderen verweisen), dann im gesamten Rest der Konfiguration. Wenn also irgendeine andere Extension, einschließlich `ServicesExtension`, ihren Abschnitt bekommt, sind die Platzhalter bereits verschwunden. Extensions arbeiten mit konkreten Werten, nie mit `%...%`.
+
+Ist ein Platzhalter der gesamte String, wird sein Wert *unverändert* zurückgegeben - auch Arrays und Objekte -, `%mailer%` kann sich also zu einem ganzen Array auflösen. Überall sonst wird er in einen String eingefügt, und die Punktschreibweise `%foo.bar%` greift in verschachtelte Arrays hinein.
+
+
+Statische vs. dynamische Parameter
+----------------------------------
+
+Nicht jeder Wert lässt sich in den Code einbacken. Ein Parameter, dessen Wert sich je nach Umgebung unterscheidet - eine Umgebungsvariable, die aus dem Request abgeleitete `baseUrl` -, muss **dynamisch** bleiben. Solche Parameter deklarieren Sie über `setDynamicParameterNames()` oder `Expect::...->dynamic()` in einem Schema; mehr dazu unter [dynamische Parameter |application:bootstrapping#Dynamische Parameter].
+
+Ein dynamischer Parameter wird nicht durch einen Wert ersetzt, sondern durch einen Ausdruck, der ihn *zur Laufzeit* liest. `%env.DB_HOST%` friert also nicht zu einem String ein, sondern wird zu einer Abfrage zur Laufzeit im erzeugten Container. Alles andere ist statisch und wird zur Kompilierzeit eingefroren - daher rührt die übliche Überraschung "mein Wert aus `getenv()` ist in jeder Umgebung derselbe": Der Parameter war schlicht statisch.
+
+Die umgekehrte Operation ist das **Escapen**: Damit ein wörtliches `%` oder `@` nicht interpretiert wird, verdoppelt man es (`%%`, `@@`). Nette macht das bei den Parametern, die es Ihnen bereitstellt, automatisch, sodass ihre Werte nie mit Platzhaltern oder Referenzen verwechselt werden.
+
+
+Referenzen: wann aus @service eine Referenz wird
+================================================
+
+Die zweite Hauptfrage. Die Übersetzung von `@service` geschieht **in mehreren Schritten über verschiedene Phasen hinweg**, je nachdem, wie komplex der String ist. Sie müssen das selten von Hand nachvollziehen, aber die Schritte zu kennen erklärt, warum manche Referenzen früher aufgelöst werden als andere.
+
+- **Parsen (Laden der Konfiguration).** Ein `@service`, das *als Entity* verwendet wird - also als das, was einen Service erzeugt, wie in `Foo(@bar)` -, wird sofort zu einer Referenz. Ein `@service`, das *als Argument* verwendet wird, bleibt vorerst ein schlichter String. Ein in Anführungszeichen stehendes `@` wird zu `@@` escapt und gilt damit als wörtlicher Text, nicht als Referenz.
+- **Phase A (`loadConfiguration`).** Beim Verarbeiten der Definitionen wird ein sauberes Argument `@name` oder `@Type` in ein `Reference`-Objekt verwandelt. Das erfasst nur die einfachen Formen; `@service::CONST` oder ein `@` innerhalb eines größeren Ausdrucks bleibt für später.
+- **Phase B (`complete`).** Hier geschieht die eigentliche "kluge" Übersetzung: `@service` → Referenz, `@service::CONSTANT` → eine wörtliche Klassenkonstante, `@service::property` → das Lesen dieser Property, `@@x` → der wörtliche Text `@x`.
+
+Im Wort *Referenz* selbst steckt noch eine zweite Übersetzung. Eine `Reference` kann entweder über den **Namen** oder über den **Typ** (`@Namespace\Type`) zeigen. Eine Referenz über den Typ ist **noch kein Name eines Services** - sie wird durch das Autowiring zu einem konkreten Namen aufgelöst, und das geschieht erst im Schritt **complete**, sobald der Index des Autowirings gebaut ist. Das ist die Brücke zum nächsten Abschnitt: Abfragen des Autowirings werden absichtlich aufgeschoben, bis der Index bereitsteht.
+
+| Form | Wird zur Referenz/zum Ausdruck in | Wird zu einem konkreten Service aufgelöst in
+|---|---|---
+| Entity (`@foo` als Factory) | Parsen | complete
+| Argument `@foo`, `@Type` | Phase A | complete
+| `@foo::CONST`, `@foo::prop` | Phase B | complete
+| Referenz über den Typ `@Type` | Phase A/B | complete (Autowiring)
+
+
+Den ContainerBuilder untersuchen: wann es sicher ist
+====================================================
+
+Nun die Frage, die Autoren von Extensions am häufigsten stellen: **In welcher Methode kann ich nach Services nach Typ suchen?** Die Antwort ergibt sich aus einer einfachen Regel darüber, wie der Builder seinen eigenen Zustand verfolgt.
+
+Die Suche **nach Typ** (`getByType()`, `getDefinitionByType()`, `findByType()`) verlangt, dass der Graph der Services *aufgelöst* ist - jeder Typ bekannt, der Index des Autowirings gebaut. Sobald Sie also eine dieser Methoden aufrufen und sich der Graph seit dem letzten Auflösen geändert hat, **löst der Builder den gesamten bekannten Graphen an Ort und Stelle auf**. Während des Auflösens selbst ist jede Suche nach Typ verboten und wirft eine `NotAllowedDuringResolvingException`.
+
+Die Suche **nach Tag** (`findByTag()`) hat diese Voraussetzung nicht - Tags hängen nicht von Typen ab, sie funktioniert also in **jeder Phase**.
+
+Phase für Phase:
+
+- **`loadConfiguration()` (Phase A) - die Suche nach Typ ist unzuverlässig.** Der Graph ist unvollständig: Extensions, die später laufen, haben ihre Services noch nicht registriert, und vor allem fehlt der Abschnitt `services:` des Nutzers (der zuletzt läuft). Ein Aufruf von `getByType()` funktioniert zwar - er löst einen vorzeitigen Resolve eines Teilgraphen aus -, aber die Antwort stammt aus einem unvollständigen Bild, und der vorzeitige Resolve ist verschwendete Arbeit. Faustregel: **In `loadConfiguration()` nur Definitionen registrieren, nicht nach Typ suchen.** `findByTag()` ist in Ordnung.
+- **`beforeCompile()` (Phase B) - der richtige Ort zum Untersuchen.** Inzwischen existieren **alle** Definitionen (auch die des Nutzers), die **Typen sind aufgelöst** und der **Index des Autowirings ist gebaut**, `getByType()`, `findByType()` und `findByTag()` liefern also **verlässliche** Antworten. Die Argumente sind *noch nicht* autowiret - das ist der unmittelbar nächste Schritt (`complete`), nach allen Aufrufen von `beforeCompile()`. Wenn Sie hier eine Definition ändern, löst das nächste `getByType()` den Graphen transparent neu auf, Sie können also frei zwischen Änderungen und Abfragen wechseln.
+- **`afterCompile()` (Phase C) - nur Code.** Sie arbeitet über der erzeugten Klasse, nicht über dem Builder. Der Graph ist fertig; hier formen Sie das entstehende PHP.
+
+| Ich möchte ... | Phase
+|---|---
+| einen Service registrieren | `loadConfiguration()`
+| nach **Tag** suchen und Definitionen ändern | `loadConfiguration()` oder `beforeCompile()`
+| nach **Typ** suchen (`getByType`/`findByType`) | **`beforeCompile()`**
+| davon abhängen, welche Services das Autowiring für Argumente gewählt hat | nicht zur Kompilierzeit - prüfen Sie es zur Laufzeit
+| den erzeugten Code anfassen | `afterCompile()`
+| Code ausführen, nachdem der Container gestartet ist | [Initialisierungscode |extensions#Initialisierungscode]
+
+
+Innerhalb von Phase B: resolve und complete
+===========================================
+
+Phase B besteht aus zwei Durchläufen, zwischen die die Aufrufe von `beforeCompile()` eingeschoben sind:
+
+```php
+$this->builder->resolve();     // Typen aufgelöst, Index des Autowirings gebaut
+foreach ($this->extensions as $extension) {
+	$extension->beforeCompile();
+}
+$this->builder->complete();    // ERST JETZT werden die Argumente autowiret
+```
+
+**`resolve()`** bestimmt den Typ jedes Services - entweder aus seinem deklarierten `type` oder abgeleitet aus seiner Factory: dem Rückgabetyp einer Factory-Methode, der Klasse, die sie instanziiert, oder dem Service, auf den eine Referenz zeigt - und baut anschließend den Index des Autowirings, der jeden Typ (die Klasse samt ihren Eltern und Interfaces) auf einen Namen eines Services abbildet. Ein Service mit `autowired: false` bleibt aus dem Index heraus; `autowired: [A, B]` schränkt die Typen ein, unter denen er sichtbar ist. Entscheidend ist: resolve klärt *Typen*, nicht *Argumente* - das Autowiring der Argumente bräuchte den fertigen Index, den es erst nach diesem Durchlauf gibt.
+
+**`complete()`** ist der Ort, an dem das Autowiring der Argumente tatsächlich geschieht. Für jede Definition füllt es die fehlenden Argumente des Konstruktors und des Setups, indem es ihre Typen im nun vollständigen Index nachschlägt. Deshalb blieben die Referenzen über den Typ während resolve unaufgelöst: Das Nachschlagen gehört hierher, sobald es einen verlässlichen Index gibt, in dem sich nachschlagen lässt.
+
+
+Phase C: Erzeugen des Codes
+===========================
+
+`generateCode()` übergibt den fertigen Graphen an den `PhpGenerator`, der eine Klasse erzeugt, die `Container` erweitert und pro Service eine Methode `createServiceXxx()` hat, dazu die vorberechneten Metadaten `aliases`, `tags` und `wiring`. Jedes `Statement` wird zu PHP-Text (`new Foo(...)`, Methodenaufrufe, Zugriff auf Properties), und jede `Reference` wird zu einem Aufruf `$this->getService(...)`.
+
+Die Extensions bekommen dann einen abschließenden Durchlauf `afterCompile()` über der erzeugten Klasse - hier werden zum Beispiel die Getter für statische und dynamische Parameter ausgegeben - und dazu die Gelegenheit, [Initialisierungscode |extensions#Initialisierungscode] zu ergänzen, der bei jedem Request läuft.
+
+
+Der Ablauf in einem Bild
+========================
+
+```
+KOMPILIERUNG (einmal, in den Cache)
+│
+├─ Konfigurationsdateien laden     NEON -> Statement/Array; Dateien zusammenführen
+│                                  @ in Anführungszeichen -> @@ ; Entities -> Statement
+│
+▼ Compiler::compile()
+│
+├─ PHASE A  processExtensions()
+│   ├─ ParametersExtension (ERSTE) ── %param% AUFGELÖST in der gesamten Konfiguration
+│   │                                 dynamische -> Ausdruck zur Laufzeit
+│   ├─ ExtensionsExtension (ERSTE)  ── registriert weitere Extensions
+│   ├─ ...weitere Extensions...     ── loadConfiguration(): nur Definitionen registrieren
+│   └─ ServicesExtension (LETZTE)   ── services: -> Objekte vom Typ Definition
+│                                      @name/@Type -> Reference
+│   [Graph der Anzahl nach vollständig; TYPEN und ARGUMENTE noch nicht; Suche nach Typ unzuverlässig]
+│
+├─ PHASE B  processBeforeCompile()
+│   ├─ builder.resolve()          ── alle Typen auflösen; Index des Autowirings bauen
+│   │                                [Typen bereit; Index bereit]
+│   ├─ beforeCompile() Extensions ── hier ist getByType/findByType/findByTag SICHER
+│   │                                (Argumente noch nicht autowiret)
+│   └─ builder.complete()         ── ARGUMENTE autowiren; Übersetzung der Referenzen abschließen
+│                                    Referenzen über den Typ -> Namen von Services
+│
+└─ PHASE C  generateCode()
+    ├─ PhpGenerator.generate()    ── Statement -> PHP; Methoden createServiceXxx()
+    ├─ afterCompile() Extensions  ── Code anpassen; Getter für Parameter ausgeben
+    └─ toString()                 ── endgültiger PHP-Code -> Cache
+
+────────────────────────────────────────────────────────────
+
+LAUFZEIT (jeder Request)
+│
+├─ new Container($dynamicParams)
+├─ initialize()                   ── Boot-Code der Extensions (Session, Header, Validierung)
+└─ getService()/getByType()       ── lazy Instanzen aus vorberechneten Metadaten
+```
+
+
+Verbreitete Irrtümer
+====================
+
+- "In `loadConfiguration()` suche ich Services nach Typ." Nein - der Graph ist unvollständig (der Abschnitt `services:` des Nutzers läuft nach Ihnen) und `getByType()` löst einen vorzeitigen Resolve eines Teilgraphen aus. Verschieben Sie es nach `beforeCompile()`. `findByTag()` ist auch hier in Ordnung.
+- "Ein Wert aus `getenv()` in einem Parameter unterscheidet sich je nach Umgebung." Nur wenn der Parameter dynamisch ist. Sonst wird er zur Kompilierzeit eingebacken und bleibt überall gleich.
+- "Eine Referenz `@Type` ist bereits der Name eines Services." Ist sie nicht - sie ist eine Referenz über den Typ, die das Autowiring erst im Schritt complete zu einem konkreten Namen auflöst.
+- "Meine Extension liest eine Hilfsdatei, aber Änderungen zeigen sich nicht." Melden Sie sie mit `$builder->addDependency($file)` an, sonst weiß der Cache nichts davon und baut nicht neu.
+- "Während `resolve()` kann ich `getByType()` aufrufen." Nein - das wirft eine `NotAllowedDuringResolvingException`. Die Suche nach Typ gehört in `beforeCompile()` oder später, nie mitten ins Auflösen.

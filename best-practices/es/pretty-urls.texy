@@ -1,0 +1,204 @@
+URLs amigables con slugs
+************************
+
+.[perex]
+Las URL como `/article/123-how-to-bake-bread` quedan mejor que `/article/123` y ayudan tanto a los usuarios como a los buscadores a entender qué hay en la página. Esta guía muestra cómo generarlas enteramente en el router, sin tocar ni una sola plantilla, y cómo asegurarse de que todos los visitantes acaben en la URL canónica.
+
+
+Por qué usar slugs en las URL
+=============================
+
+Compare estas dos direcciones:
+
+```
+/article/123
+/article/123-how-to-bake-bread
+```
+
+La segunda le dice al usuario (y a Google) qué le espera tras el clic. Es buena para el SEO, hace que los enlaces sean legibles en un chat o un correo y da algún sentido a la barra de direcciones.
+
+El slug, sin embargo, no es un identificador real. La página la determina el ID. El slug es un adorno que la aplicación genera a partir del título. Si el título cambia, el slug debería cambiar también. Y si alguien edita la URL a mano o sigue un enlace antiguo, la aplicación debería encontrar igualmente la página correcta.
+
+
+El objetivo
+===========
+
+Queremos una ruta que gestione todo esto:
+
+```
+/article/123                              → opens article 123, redirects to canonical URL
+/article/123-how-to-bake-bread            → opens article 123 directly
+/article/123-anything-someone-typed       → opens article 123, redirects to canonical URL
+/article/                                 → 404 (no ID)
+```
+
+Y queremos que cada `n:href` y cada llamada a `link()` de la aplicación produzcan automáticamente `/article/123-how-to-bake-bread`, **sin reescribir ni una sola plantilla**.
+
+
+La máscara de la ruta
+=====================
+
+El truco está en marcar el slug como **opcional** en la máscara mediante corchetes:
+
+```php
+$router->addRoute('article/<id [0-9]+>[-<slug>]', 'Article:detail');
+```
+
+La máscara `[-<slug>]` dice: tras el ID puede haber un guion y un slug, pero no es obligatorio. La ruta acepta tanto `/article/123` como `/article/123-anything`.
+
+Una nota sobre el parámetro `<slug>`: de forma predeterminada acepta cualquier carácter **salvo la barra**, que es justo lo que queremos. Si escribe `<slug .+>`, el parámetro aceptará también barras, así que `/article/123-something/else` se interpretaría como un único slug que contiene `/`. Quédese con el `<slug>` predeterminado a no ser que realmente necesite lo otro.
+
+Hasta aquí la URL se interpreta correctamente, pero los enlaces generados no contendrán el slug. El siguiente paso es enseñar a la ruta cómo rellenarlo.
+
+
+Generar el slug sin tocar las plantillas
+========================================
+
+Esta es la variante estrella. Las llamadas `n:href="Article:detail, $id"` existentes siguen funcionando sin cambios en toda la aplicación: el router busca el título por su cuenta.
+
+Lo hacemos con un **filtro general** bajo la clave de cadena vacía: ve todos los parámetros a la vez y puede añadir el slug:
+
+```php
+use Nette\Routing\Route;
+use Nette\Utils\Strings;
+
+$router->addRoute('article/<id [0-9]+>[-<slug>]', [
+	'presenter' => 'Article',
+	'action' => 'detail',
+	'' => [
+		Route::FilterOut => function (array $params) use ($slugProvider): array {
+			if (isset($params['id']) && empty($params['slug'])) {
+				$params['slug'] = $slugProvider->getSlug((int) $params['id']);
+			}
+			return $params;
+		},
+	],
+]);
+```
+
+`FilterOut` se ejecuta cada vez que el router **genera** una URL. Si no se le pasó el slug, el filtro busca el título y lo añade.
+
+Puede desplegar los slugs por toda una aplicación con un único cambio: una sola definición de ruta. Todos los enlaces de todas las plantillas empiezan a producir `/article/123-how-to-bake-bread` automáticamente. Sin greps, sin buscar por las plantillas, sin ningún caso olvidado.
+
+
+Guardar la búsqueda en caché
+============================
+
+Un enlace genera una consulta a la base de datos, pero una página típica tiene muchos: listados, migas de pan, "vistos recientemente", artículos relacionados. El mismo ID de artículo aparece a menudo en varios enlaces durante una única petición, y no quiere ir a la base de datos cada vez.
+
+Una pequeña caché por petición lo resuelve. Envuelva la llamada a la base de datos en un pequeño servicio:
+
+```php
+final class SlugProvider
+{
+	/** @var array<int, string> */
+	private array $cache = [];
+
+	public function __construct(
+		private Nette\Database\Explorer $db,
+	) {
+	}
+
+	public function getSlug(int $id): string
+	{
+		return $this->cache[$id] ??= Strings::webalize(Strings::truncate(
+			(string) $this->db->fetchField('SELECT title FROM article WHERE id = ?', $id),
+			100, ''
+		));
+	}
+}
+```
+
+Con esto basta: una consulta a la base de datos por cada ID distinto y petición.
+
+
+Pasar el título desde la plantilla (atajo opcional)
+===================================================
+
+Cuando el título ya está a mano en la plantilla, puede saltarse por completo la consulta a la base de datos. Pase el título como parámetro con nombre:
+
+```latte
+<a n:href="Article:detail, $article->id, slug => $article->title">{$article->title}</a>
+```
+
+…y añada un `FilterOut` para ese parámetro que convierta el título en una cadena apta para la URL:
+
+```php
+$router->addRoute('article/<id [0-9]+>[-<slug>]', [
+	'presenter' => 'Article',
+	'action' => 'detail',
+	'slug' => [
+		Route::FilterOut => fn($title) => Strings::webalize(Strings::truncate($title, 100, '')),
+	],
+	'' => [/* el plan B de búsqueda de arriba */],
+]);
+```
+
+Los dos filtros colaboran. El filtro general se ejecuta primero; al ver que el slug ya está relleno con el título indicado, se salta la consulta. El `FilterOut` del parámetro convierte después ese título en un slug como es debido. Las plantillas que no pasan el título siguen funcionando: el filtro general encuentra el slug vacío y recurre a la búsqueda.
+
+Use esto solo donde importe (listados grandes que se renderizan cientos de veces por petición). Para la mayor parte de la aplicación, la búsqueda con caché es lo bastante rápida.
+
+
+Canonización: redirigir a la URL correcta
+=========================================
+
+Ya sabemos generar `/article/123-how-to-bake-bread`, pero la ruta sigue aceptando `/article/123` y `/article/123-anything-someone-wrote`. Es intencionado: queremos URL cortas (más sobre esto abajo) y queremos que los enlaces antiguos o escritos a mano sigan funcionando. Pero no queremos que los buscadores indexen el mismo artículo bajo varias direcciones.
+
+La solución es la [canonización |application:presenters#Canonización]: cuando el usuario llega por una URL no canónica, la aplicación lo redirige con un 301 a la correcta. De esto se encarga el método `canonicalize()`:
+
+```php
+public function actionDetail(int $id, ?string $slug = null): void
+{
+	$article = $this->facade->getArticle($id);
+	if (!$article) {
+		$this->error();
+	}
+
+	// genera la URL canónica mediante el mismo FilterOut
+	// y redirige con un HTTP 301 si difiere de la URL actual
+	$this->canonicalize('detail', ['id' => $id]);
+
+	$this->template->article = $article;
+}
+```
+
+`canonicalize()` genera la URL canónica igual que lo haría `link()` (así que pasa por el mismo `FilterOut`) y la compara con la URL actual. Si difieren, redirige con un HTTP 301. Los visitantes acaban en la URL correcta y los buscadores ven una única versión canónica.
+
+
+Un único lugar que decide cómo es el slug
+=========================================
+
+Fíjese en que la llamada `Strings::webalize(Strings::truncate(..., 100, ''))` vive en un único lugar, dentro de `SlugProvider` (o del `FilterOut` del parámetro). La misma lógica produce el enlace de la plantilla, la URL de `redirect()` y la forma canónica de `canonicalize()`.
+
+Si más adelante quiere cambiar las reglas (otro límite de longitud, otra transliteración, eliminar caracteres adicionales), cambia una línea. Sin esto correría el riesgo de que `redirect()` generara `/article/123-how-to-bake-bread` mientras `canonicalize()` espera `/article/123-how-to-bake-bre` (porque alguien aplicó en otro sitio una longitud distinta en `truncate`), y la aplicación redirigiría en bucle.
+
+
+Extra: las URL cortas siguen funcionando
+========================================
+
+Como el slug es opcional, las direcciones sin él siguen funcionando:
+
+```
+/article/123
+```
+
+Esto es útil para:
+- **códigos QR**: una URL más corta significa un código menos denso y más fácil de escanear
+- **SMS y chats**: cabe en un tuit y queda ordenado
+- **materiales impresos**: una URL corta se teclea antes
+
+Cuando un usuario abre una URL así, `canonicalize()` lo redirige con un 301 a la versión completa con el slug, de modo que los buscadores siguen viendo solo la forma canónica. Puede tener brevedad y SEO al mismo tiempo.
+
+
+Resumen
+=======
+
+- La máscara `<id>[-<slug>]` hace opcional el slug. El `<slug>` predeterminado no acepta `/`; use `<slug .+>` solo si de verdad quiere barras en el slug.
+- Un `FilterOut` general bajo la clave `''` busca el título por el ID: **ningún cambio en las plantillas de toda la aplicación**.
+- Envuelva la búsqueda en una pequeña caché por petición; una consulta a la base de datos por ID distinto es más que suficiente.
+- Opcionalmente, un `FilterOut` para el parámetro permite que las plantillas pasen el título directamente y se salten la búsqueda.
+- `$this->canonicalize()` en la acción redirige las URL no canónicas a la correcta con un HTTP 301.
+- La fórmula del slug (`webalize` + `truncate`) vive en un único lugar: cámbiela una vez y surtirá efecto en todas partes.
+- Las URL cortas solo con el ID siguen funcionando, lo que viene bien para códigos QR y SMS.
+
+Encontrará más sobre los filtros y la canonización en la documentación del [enrutamiento |application:routing#Filtros generales] y de los [presenters |application:presenters#Canonización].

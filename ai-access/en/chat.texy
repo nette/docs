@@ -1,0 +1,154 @@
+Conversation with an AI Model
+*****************************
+
+.[perex]
+A conversation is a sequence of messages that the library keeps for you. You will learn how to hold a multi-turn dialogue, give the model a role through a system instruction, read more than the text out of a response, and assemble the history by hand when you need to resume an earlier conversation.
+
+
+The Model Remembers Nothing
+===========================
+
+This is the first thing that surprises almost everyone: a language model has no memory. Every API call stands alone and the model knows nothing about the previous question. The illusion of a conversation comes from sending the entire history again with every request.
+
+That is exactly what the conversation object is for. It keeps the history for you:
+
+```php
+$chat = $client->createChat('gpt-5.6-luna');
+
+$chat->sendMessage('What is the capital of France?');
+$response = $chat->sendMessage('And what is a famous landmark there?');
+
+echo $response->getText();
+```
+
+The second question does not mention Paris at all, yet the model answers correctly, because the first exchange traveled along with it. Ask through two separate calls and the second answer is nonsense.
+
+There is one consequence worth planning for: **a long conversation is expensive**. Every turn grows the input, and input is billed. So it is sometimes worth trimming the history or starting over. And when you send the same question over hundreds of inputs and are in no hurry, [batch processing |batch] comes out cheaper:
+
+```php
+$chat->clearMessages();
+```
+
+
+The System Instruction
+======================
+
+The system instruction tells the model what role to play and which rules to follow. It applies to the whole conversation and models weigh it more heavily than an ordinary message, so this is where instructions belong that must still hold ten turns later.
+
+```php
+$chat->setSystemInstruction('You are an experienced PHP developer. Answer briefly and use Nette in examples.');
+```
+
+A good system instruction is specific. Instead of "be brief" write "answer in at most three sentences"; instead of "be accurate" write "when you are not sure, say so instead of guessing". The model has no way of knowing what you picture behind a vague instruction.
+
+The system instruction is sent with every request, so you pay for it every time. When it is long and the conversation has many turns, reach for the provider's cache; how much came from it is reported by `cacheReadTokens` in the [usage |#What Is in the Response].
+
+
+The Model Can Be Swapped Mid-Conversation
+=========================================
+
+A model is not a property of the conversation but a parameter of the individual request, just like the temperature or the token limit. It travels on the wire with every call, and the library keeps it that way:
+
+```php
+$chat->setModel('gpt-5.6-luna-mini');
+```
+
+**The history stays.** The next turn continues where the previous one left off, only a different model answers it. This comes up more often than you would think: after a 429 you switch to a cheaper model instead of waiting, for a hard question you reach for a stronger one, or you simply leave the choice to the user, the way every chat interface does.
+
+Switching works **within one provider**. Message parts that carry a provider's own payload, typically a reasoning model's chain of thought, are replayed only to whoever produced them, so you cannot move from Claude to GPT; from one Claude model to another you can.
+
+When the client has a [default model configured |getting-started#Where the Key Belongs in Production], `createChat()` needs no argument at all:
+
+```php
+$chat = $client->createChat();
+```
+
+
+History Assembled by Hand
+=========================
+
+Sometimes you need to hand the model a conversation that never happened that way. Typically when you restore a conversation stored in a database, or when you want to show a few examples of correct answers, a technique known as few-shot prompting.
+
+```php
+use AIAccess\Chat\Role;
+
+$chat = $client->createChat('gpt-5.6-luna');
+$chat->addMessage('What is the capital of France?', Role::User);
+$chat->addMessage('Paris.', Role::Model);
+$chat->addMessage('And what is a famous landmark there?', Role::User);
+
+$response = $chat->sendMessage(); // no argument: continue from history
+```
+
+`addMessage()` only appends a message to the history and sends nothing. `sendMessage()` without an argument then sends the conversation as it stands.
+
+There are three roles. `Role::User` is the user, `Role::Model` is the model, and `Role::Tool` carries the results of [tool calls |tools]. The library uses its own naming here: Gemini calls the same role `model` while the others call it `assistant`, and the library translates it to whichever name the provider expects.
+
+You can ask for the whole history back at any time:
+
+```php
+foreach ($chat->getMessages() as $message) {
+	echo $message->getRole()->value, ': ', $message->getText(), "\n";
+}
+```
+
+
+What Is in the Response
+=======================
+
+`sendMessage()` does not return a string but an object, because the text alone is only part of what happened.
+
+```php
+$response = $chat->sendMessage('Write me a short story about PHP.');
+
+echo $response->getText();
+```
+
+An empty text is not necessarily an error. The model may have declined to answer, it may have hit a limit before writing the first word, or it may have asked for a tool instead of answering. Which of those happened is revealed by the finish reason.
+
+
+Why the Model Stopped Writing
+-----------------------------
+
+An answer does not always end because the model had said everything. Sometimes a token limit stops it, sometimes a safety filter, and sometimes it is waiting for you to supply something. You need to tell these apart, because each one calls for a different reaction. That is what `getFinishReason()` is for, returning one of the values of the `FinishReason` enum:
+
+| Value             | What happened                                               | What to do about it                                                                       |
+|-------------------|-------------------------------------------------------------|-------------------------------------------------------------------------------------------|
+| `Complete`        | The model said all it wanted and stopped on its own.        | Nothing, this is the good case.                                                           |
+| `TokenLimit`      | The answer is cut off mid-way, the token allowance ran out. | Raise the limit in [options |options], or ask for a shorter answer.                       |
+| `ContentFiltered` | The model refused to answer.                                | The text will be empty. Rephrase the question; on OpenAI `getRefusal()` gives the reason. |
+| `ToolCall`        | The model asked for a [tool |tools] to be called.           | Call it and send the result back.                                                         |
+| `Cancelled`       | You interrupted the [stream |streaming] yourself.           | You have only part of the answer, which is fine.                                          |
+| `Unknown`         | A reason outside this scale, or no reason at all.           | The original value is in `getRawFinishReason()`.                                          |
+
+A missing reason is most often the mark of a transfer that never finished, which is why it is not passed off as `Complete`. With an [interrupted stream |streaming] it is your clue that the text is not whole.
+
+In code it looks like this:
+
+```php
+use AIAccess\Chat\FinishReason;
+
+if ($response->getFinishReason() === FinishReason::TokenLimit) {
+	echo 'The answer is cut off, the model hit the limit.';
+}
+```
+
+Reasoning models may also return their chain of thought. It is never part of `getText()`, because it does not belong in your application's output, but you can read it:
+
+```php
+if ($reasoning = $response->getReasoning()) {
+	echo "The model reasoned like this:\n", $reasoning;
+}
+```
+
+And when the abstraction is not enough, `getRawResponse()` hands you the provider's complete decoded answer exactly as it arrived. The unified interface is a convenience, never a cage.
+
+
+Where to Go Next
+================
+
+- [Options and reasoning effort |options] - how much thinking you ask the model for
+- [Streaming |streaming] - read the answer while the model is still writing it
+- [Tool calling |tools] - when the model should reach into your application
+- [Structured output |structured-output] - when you need data, not prose
+- [Embeddings |embeddings] - when the model should answer over your own texts

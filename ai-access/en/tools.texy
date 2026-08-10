@@ -1,0 +1,130 @@
+Tool Calling (Function Calling)
+*******************************
+
+.[perex]
+The model knows nothing about your database or about today's weather. It can, however, ask for a function that will find out, and wait until you send it the result. We will look at how you describe a function to the model, how the library handles the whole exchange on its own, and what to do when the model makes things up.
+
+
+The Model Does Not Know, So It Asks
+===================================
+
+A language model knows only what it learned during training. It does not know the state of an order in your e-shop, it has no access to your database, and it does not know what time it is. Ask it anyway and it will either admit it does not know or invent an answer; the second is worse, because it sounds every bit as convincing. (When you want to give it your own texts, documentation or a knowledge base, [search through embeddings |embeddings] fits better; tools are for making the model **do** something.)
+
+Tool calling solves this by swapping the roles for a moment. You describe up front the functions your application can perform. The model can then say, instead of answering: "call `getWeather` for Brno". You run the function, send the result back, and it composes the answer out of that.
+
+The technique goes by two names, **tool calling** and **function calling**; they mean the same thing and differ only in which provider happens to promote which. This documentation says tools, because that is what the library's own methods are called.
+
+The important part is that **the model does not run your code**. It only says what it would like called and with which arguments; whether that happens is your application's decision. In this arrangement the model is the one asking, not the one commanding.
+
+
+The Simplest Case: the Library Does It for You
+==============================================
+
+You describe a tool with a `Tool` object: a name, a description of what it is for, a JSON schema of the arguments, and the function that performs it.
+
+```php
+use AIAccess\Chat\Tool;
+
+$chat = $client->createChat('gpt-5.6-luna');
+
+$chat->addTool(new Tool(
+	name: 'getWeather',
+	description: 'Returns the current weather for the given city.',
+	parameters: [
+		'type' => 'object',
+		'properties' => [
+			'city' => ['type' => 'string', 'description' => 'City name'],
+		],
+		'required' => ['city'],
+	],
+	handler: function (array $args): string {
+		// here you would call your API or database
+		return 'In ' . $args['city'] . ' it is 12 °C and raining.';
+	},
+));
+
+echo $chat->sendMessage('What is the weather in Brno, and should I take a coat?')->getText();
+```
+
+That is all of it. A single `sendMessage()` covers the whole exchange: the model asks for a tool, the library calls your handler, sends the result back and waits for the model's answer. One such there-and-back is called a **round**, and several of them can happen in a row when the model needs more information; the whole series is the **tool loop**.
+
+The description matters more than it looks. The model decides whether to call the tool at all based on it, and has no other clue. "Returns the current weather for the given city" is a good description; "weather" is a bad one.
+
+Several rounds are nothing exotic. Ask about the weather in Brno and in Prague and the model asks for the tool twice. And when it has more tools, it commonly calls one, looks at the result and only then reaches for the second: first it finds the customer by e-mail, then it looks up their orders.
+
+You set the cap on the number of rounds with `setToolLoop()`. The default of eight is enough for ordinary tasks and at the same time stops the model from looping at your expense:
+
+```php
+$chat->setToolLoop(maxRounds: 3);
+```
+
+What the whole exchange cost is reported by `getTotalUsage()`, because `getUsage()` on the response speaks only about the last round.
+
+
+When You Want to Handle the Calls Yourself
+==========================================
+
+The automatic loop starts only when every tool being called has a handler. As soon as one does not, the library stops and hands control back to you. That is deliberate: a missing handler is how you say "I want to deal with this myself".
+
+```php
+$chat->addTool(new Tool(
+	name: 'deleteAccount',
+	description: 'Deletes a user account.',
+	parameters: ['type' => 'object', 'properties' => ['id' => ['type' => 'integer']]],
+	// the handler is deliberately missing
+));
+
+$response = $chat->sendMessage('Cancel account number 42.');
+
+foreach ($response->getToolCalls() as $call) {
+	echo "The model wants to call $call->name with arguments ", json_encode($call->arguments);
+
+	// here you ask the user, check permissions, whatever you need
+	$chat->addToolResult($call, 'The account has been deleted.');
+}
+
+echo $chat->sendMessage()->getText(); // continue with the results filled in
+```
+
+This mode fits anywhere an action must not happen without human consent, and also when you want to log or restrict the calls.
+
+When you want the opposite, telling the model to reach for one particular tool, use `setToolChoice('toolName')`. To forbid tools entirely, register none.
+
+
+When the Model Makes Things Up
+==============================
+
+Now and then the model asks for a tool that does not exist, or sends arguments that do not match the schema. This is not exceptional, and above all it is not your application's fault, so it is not treated as an exception either.
+
+The library **sends such a mistake back to the model** as an error result and lets it correct itself. Models are surprisingly good at this: they read what was wrong and call the tool again properly. Had an exception been thrown instead, you would lose the whole answer over a mistake the model can fix on its own.
+
+This covers an invented tool name, unreadable arguments, and arguments that do not fit the schema. The library checks the required keys and basic types; it is not a full JSON schema validator, because the model gets the error message either way.
+
+A failure of **your own handler** is a different matter. By default the exception propagates to you, which is right, because a broken database is not something the model should be dealing with. When you do want the model to learn about the failure and try another route, you turn it on:
+
+```php
+$chat->setToolLoop(catchErrors: true);
+```
+
+Even then one exception to the exceptions holds: errors of the `Error` kind, meaning bugs in your own code such as calling a method that does not exist, always propagate. Were they sent to the model as a tool result, your bug would hide inside the conversation and you would never hear about it.
+
+
+What Happens Underneath
+=======================
+
+Tools are one of those areas where the providers agree on nothing at all, and two traps are worth knowing about in case you ever look into raw responses.
+
+**Gemini does not announce a tool call in the finish reason.** It stays `STOP`, as if the model had finished normally, and the call itself is found among the parts of the answer. The library therefore derives the finish reason from the content, so you get `FinishReason::ToolCall` from all five alike.
+
+**Reasoning has to come back unchanged.** Models that think before answering want their reasoning back in the next round exactly as they sent it. Claude rejects a modified signature with an error, Gemini answers `MISSING_THOUGHT_SIGNATURE`. The library carries these parts in the history and returns them only to the provider that issued them.
+
+And one property that surprises people: **the loop commits every completed round**. When the seventh round fails, the history and the side effects of the tools from the first six remain. Throwing them away would mean paying for six rounds for nothing, and possibly sending twice an e-mail that one of the tools had already sent.
+
+
+Where to Go Next
+================
+
+- [Structured output |structured-output] - when you want data, not a call
+- [Streaming |streaming] - tool rounds stream as well
+- [Conversation |chat] - the history that calls and results are written into
+- [Error handling |errors] - what to do when the provider says no

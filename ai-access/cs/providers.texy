@@ -1,0 +1,183 @@
+Provideři a modely
+******************
+
+.[perex]
+Referenční přehled šesti klientů: jak se který vytváří, co umí, čím se liší a na co si u něj dát pozor. Na konci se podíváme, jak si vyžádat seznam modelů, které provider právě nabízí, a proč je to užitečnější, než se zdá.
+
+
+Šest klientů, jedno rozhraní
+============================
+
+Pět klientů mluví s konkrétním providerem, šestý s čímkoli, co mluví stejným dialektem jako OpenAI. Všechny se vytvářejí stejně, klíčem v konstruktoru:
+
+```php
+$client = new AIAccess\Provider\OpenAI\Client($apiKey);
+$client = new AIAccess\Provider\Claude\Client($apiKey);
+$client = new AIAccess\Provider\Gemini\Client($apiKey);
+$client = new AIAccess\Provider\DeepSeek\Client($apiKey);
+$client = new AIAccess\Provider\Grok\Client($apiKey);
+```
+
+Čím se liší, je sada rozhraní, kterou každý klient implementuje. Právě podle ní poznáš, co od něj můžeš čekat, a PHP ti to pohlídá dřív, než skript spustíš:
+
+| Klient    | `Chat\Service` | `Embedding\Service` | `Batch\Service` | `Image\Service` |
+|-----------|----------------|---------------------|-----------------|-----------------|
+| OpenAI    | ✅             | ✅                  | ✅              | ✅              |
+| Gemini    | ✅             | ✅                  | ✅              | ✅              |
+| Claude    | ✅             | ➖                  | ✅              | ➖              |
+| Grok      | ✅             | ➖                  | ➖              | ✅              |
+| DeepSeek  | ✅             | ➖                  | ➖              | ➖              |
+| Generický | ✅             | ➖                  | ➖              | ➖              |
+
+Když píšeš kód, který má fungovat s libovolným providerem, typuj si parametr na rozhraní, ne na konkrétní třídu:
+
+```php
+public function __construct(
+	private AIAccess\Chat\Service $client,
+) {
+}
+```
+
+Aplikace pak o volbě providera neví vůbec nic a přepnutí je změna v [konfiguraci |dependency-injection:].
+
+
+Výchozí modely
+==============
+
+Aby to platilo doopravdy, musí klient znát i model. Jméno modelu je totiž řetězec vlastní jednomu provideru, takže kdyby si o něj muselo říct volání, aplikace by o provideru věděla to hlavní.
+
+Modely se proto předávají konstruktorem, hned vedle klíče:
+
+```php
+$client = new AIAccess\Provider\OpenAI\Client(
+	$apiKey,
+	chatModel: 'gpt-5.6-luna',
+	imageModel: 'gpt-image-2',
+	embeddingModel: 'text-embedding-3-small',
+);
+
+$chat = $client->createChat();          // model doplní klient
+$image = $client->generateImage('Maják na útesu');
+```
+
+Každý klient bere jen ty modely, které umí použít: Claude a DeepSeek jenom `chatModel`, Grok `chatModel` a `imageModel`, OpenAI a Gemini všechny tři. Neexistující parametr ohlásí PHP samo.
+
+Model uvedený ve volání má vždycky přednost, takže výchozí hodnota nikomu nebrání sáhnout jinam. A klient, který výchozí model nemá a nedostane ho ani ve volání, ohlásí `AIAccess\LogicException`; je to chyba konfigurace, ne provozu.
+
+Dávka si výchozí modely bere od klienta, který ji vytvořil, takže `addChat('id')` a `addImageRequest('id', $popis)` se obejdou bez nich taky.
+
+V Nette aplikaci se tak celá volba providera vejde do konfigurace a je to jediné místo v projektu, kde se jeho jméno objeví:
+
+```neon
+services:
+	- AIAccess\Provider\OpenAI\Client(%openaiApiKey%, chatModel: 'gpt-5.6-luna')
+```
+
+Přechod k jinému providerovi je pak otázka toho jednoho řádku a třídy typované na `AIAccess\Chat\Service` si toho ani nevšimnou:
+
+```neon
+services:
+	- AIAccess\Provider\Claude\Client(%anthropicApiKey%, chatModel: 'claude-sonnet-5')
+```
+
+Klient, který umí víc věcí, dostane model pro každou z nich:
+
+```neon
+services:
+	- AIAccess\Provider\OpenAI\Client(
+		%openaiApiKey%,
+		chatModel: 'gpt-5.6-luna',
+		imageModel: 'gpt-image-2',
+		embeddingModel: 'text-embedding-3-small',
+	)
+```
+
+Modely piš vždycky jménem, jako je tomu tady. Druhý parametr konstruktoru je totiž [HTTP klient |http], ne model, takže model předaný jako druhý v pořadí by se bral za něj.
+
+
+Čím se který liší
+=================
+
+Sada rozhraní je jen půlka příběhu. Tohle jsou vlastnosti, na které narazíš v praxi.
+
+**OpenAI** má nejširší záběr a jako jediný umí nahrávat soubory (`uploadFile()`, `uploadContent()`), což využívá dávkové zpracování. Odmítnutí odpovědi hlásí zvlášť, takže se k němu dostaneš přes `getRefusal()`. Přes `setOptions()` mu můžeš nastavit i organizaci.
+
+**Claude** vyžaduje strop na délku odpovědi u každého požadavku; knihovna proto sama doplňuje `maxOutputTokens` na 4096, pokud si ho nenastavíš jinak. Embeddingy Anthropic nenabízí vůbec, takže na vyhledávání budeš potřebovat jiného providera. Umí spočítat tokeny předem přes `countTokens()`.
+
+**Gemini** nemá na generování obrázků samostatný endpoint: obrázkové modely se volají přes obyčejný chat, jen se řekne, že odpověď má být obrázek. Taky umí `countTokens()`. **Dávkové zpracování a generování obrázků ale vyžadují projekt s aktivní fakturací**; na volném tarifu dávka skončí chybou a obrázkové modely mají denní kvótu nula. Vygenerovaný obrázek přichází jako JPEG, ne PNG.
+
+**Grok** přijímá obrázky na vstupu, ale dokumenty ne. Obrázky umí i generovat, zato bez referenčních předloh. Odmítnutí hlásí vlastním polem zprávy místo důvodu ukončení, což knihovna překládá na `FinishReason::ContentFiltered`.
+
+**DeepSeek** je z pětice nejužší: jen chat, žádné vidění, embeddingy ani dávky. Za zmínku stojí, že **přemýšlení má zapnuté ve výchozím stavu**, takže platíš tokeny navíc, dokud ho [nevypneš |options].
+
+
+Generický klient pro všechno ostatní
+====================================
+
+Spousta služeb dnes mluví stejným dialektem jako OpenAI. Na ty je tu `OpenAICompatible\Client`, kterému kromě klíče řekneš i adresu:
+
+```php
+$client = new AIAccess\Provider\OpenAICompatible\Client($apiKey, 'https://api.mistral.ai/v1/');
+$response = $client->createChat('mistral-large-latest')->sendMessage('Ahoj!');
+```
+
+**Ollama** běžící lokálně žádný klíč nechce, tak mu pošli prázdný řetězec:
+
+```php
+$client = new AIAccess\Provider\OpenAICompatible\Client('', 'http://localhost:11434/v1/');
+echo $client->createChat('llama3.2')->sendMessage('Ahoj!')->getText();
+```
+
+**OpenRouter** zprostředkovává modely desítek výrobců a rád vidí hlavičky s identifikací aplikace:
+
+```php
+$client = new AIAccess\Provider\OpenAICompatible\Client($apiKey, 'https://openrouter.ai/api/v1/');
+$client->setOptions(extraHeaders: ['HTTP-Referer' => 'https://example.com', 'X-Title' => 'Moje aplikace']);
+```
+
+**Azure OpenAI** posílá klíč ve vlastní hlavičce a bez prefixu:
+
+```php
+$client = new AIAccess\Provider\OpenAICompatible\Client($apiKey, 'https://mojeinstance.openai.azure.com/openai/v1/');
+$client->setOptions(authHeader: 'api-key', authPrefix: '');
+```
+
+U generického klienta platí jedno omezení, které stojí za zmínku: **knihovna posílá, co umí, ale co s tím endpoint udělá, nezaručí**. Volání nástrojů, strukturovaný výstup i obrázky na vstupu odešle, jenže jestli je model zvládne, rozhoduje služba. Když endpoint zná nějaký parametr navíc, protlačíš ho argumentem `custom` v [nastavení |options].
+
+Streamování z generického klienta neposílá `stream_options`, protože je to vynález OpenAI a neznámý dialekt kvůli němu může odmítnout celý požadavek. Když ho tvůj endpoint zná a chceš z proudu i spotřebu tokenů, přidej si ho přes `custom`.
+
+
+Jaké modely provider právě nabízí
+=================================
+
+Protože je jméno modelu obyčejný řetězec, nikdo ti ho nezkontroluje: překlep i vyřazený model se ozvou až za běhu, a jak uvidíš za chvíli, někdy ani to ne. Aktuální nabídku si proto vyžádej přímo u providera:
+
+```php
+foreach ($client->listModels() as $model) {
+	echo $model->id, "\n";
+}
+```
+
+Metodu má všech šest klientů a stránkování řeší uvnitř, takže dostaneš rovnou celý seznam. Kromě `id` nese každý model v `raw` i všechna metadata tak, jak je provider poslal; sjednocené nejsou, protože každý posílá něco jiného.
+
+Nejužitečnější je to jako kontrola v nasazení. **Vyřazený model se totiž nemusí ozvat chybou:** xAI například u starých jmen tiše přesměruje na novější model, takže aplikace běží dál, jen mluví s něčím jiným, než sis myslel. Ověření proti `listModels()` je jediný způsob, jak se to dozvíš.
+
+Claude a Gemini navíc umí spočítat, na kolik tokenů vyjde konverzace, **než ji odešleš**:
+
+```php
+$chat = $client->createChat('claude-sonnet-5');
+$chat->addMessage($dlouhyText, AIAccess\Chat\Role::User);
+
+echo 'Tenhle dotaz bude stát ', $chat->countTokens(), " vstupních tokenů.\n";
+```
+
+Hodí se to, když skládáš dlouhý kontext a potřebuješ vědět, jestli se vejde do limitu modelu, nebo kolik to bude stát, dřív než za to zaplatíš.
+
+
+Kam dál
+=======
+
+- [Konverzace |chat] - historie, systémová instrukce a čtení odpovědi
+- [Nastavení a reasoning effort |options] - kolik přemýšlení si od modelu vyžádáš
+- [Ošetření chyb |errors] - co dělat, když provider řekne ne
+- [HTTP vrstva |http] - opakování, logování a cachování požadavků

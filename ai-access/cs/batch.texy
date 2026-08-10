@@ -1,0 +1,185 @@
+Dávkové zpracování (batch)
+**************************
+
+.[perex]
+Když nepotřebuješ odpověď hned, ušetříš zhruba polovinu peněz. Provideři tomu říkají dávkové zpracování, anglicky batch: pošleš jim spoustu požadavků najednou a výsledky si vyzvedneš později. Ukážeme si, jak takovou dávku sestavit a odeslat, jak si po čase vyzvednout výsledky a co si ohlídat, než to pustíš do provozu.
+
+
+K čemu to je
+============
+
+Představ si, že máš pět tisíc produktů a ke každému chceš od modelu krátký popis. Když je pošleš jeden po druhém, platíš plnou cenu a čekáš, než se pět tisíc dotazů a odpovědí vystřídá.
+
+Provideři na tenhle případ mají zvláštní režim, kterému se říká **dávkové zpracování**. Předáš jim celý balík požadavků najednou, oni si ho zpracují, až budou mít volnou kapacitu, a ty si výsledky vyzvedneš později. Za to, že nespěcháš, zaplatíš **zhruba polovinu**.
+
+Nehodí se to všude. Odpověď nepřijde hned a v krajním případě může trvat i hodiny, takže dávkou nikdy neobsloužíš uživatele, který kouká do obrazovky. Zato je ideální na věci, které běží na pozadí: hromadné překlady, klasifikaci fronty, generování popisků, předzpracování dat na noc.
+
+
+Dávka konverzací
+================
+
+Postup má tři kroky: nejdřív si vytvoříš prázdnou dávku, pak do ní jeden po druhém přidáváš úkoly a nakonec ji celou odešleš. Každý úkol je samostatná konverzace a dostane vlastní identifikátor, podle kterého ho pak spáruješ s odpovědí:
+
+```php
+use AIAccess\Chat\Role;
+
+$batch = $client->createBatch();
+
+foreach ($produkty as $produkt) {
+	$chat = $batch->addChat('produkt-' . $produkt->id, 'gpt-5.6-luna');
+	$chat->setSystemInstruction('Piš krátké popisy produktů, nejvýš dvě věty.');
+	$chat->addMessage($produkt->nazev . ': ' . $produkt->parametry, Role::User);
+}
+
+$response = $batch->submit();
+echo $response->getId();
+```
+
+`addChat()` vrací obyčejný objekt konverzace, takže s ním pracuješ přesně tak, jak [už umíš |chat]: nastavíš systémovou instrukci, přidáš zprávy, můžeš zapnout [strukturovaný výstup |structured-output]. Jediný rozdíl je, že místo `sendMessage()` na konci zavoláš `submit()` nad celou dávkou.
+
+**To identifikační číslo si ulož.** Bez něj se k výsledkům nedostaneš a provider ti dávku znovu nepošle.
+
+
+Vyzvednutí výsledků
+===================
+
+Výsledky si vyzvedneš kdykoli později, klidně z úplně jiného skriptu:
+
+```php
+use AIAccess\Batch\Status;
+
+$batch = $client->retrieveBatch($batchId);
+
+if ($batch->getStatus() === Status::InProgress) {
+	echo 'Ještě se pracuje, stav: ', $batch->getStatus()->name;
+	return;
+}
+
+foreach ($batch->getResults() as $customId => $result) {
+	echo $customId, ': ', $result->message?->getText() ?? "selhalo, $result->error", "\n";
+}
+```
+
+Pod týmiž klíči, které jsi zadal při vkládání, dostáváš objekty `AIAccess\Batch\Result`. Každý nese **buď odpověď, nebo důvod, proč ten jeden požadavek selhal**: když se nepovede jeden, nespadne kvůli němu celá dávka, jen dorazí s vyplněným `$result->error` místo `$result->message`.
+
+Ta odpověď je obyčejný `AIAccess\Chat\Message`, přesně totéž, co nese [živá konverzace |chat]. Text z ní vytáhneš metodou `getText()`, obrázky metodou `getMedia()` a všechno ostatní, třeba uvažování modelu nebo volání nástrojů, najdeš mezi částmi zprávy v `getParts()`.
+
+Podstatné je, **jak** ty výsledky chodí: čtou se po jedné položce, jak přitékají ze sítě, ne že by se nejdřív celé stáhly a pak ti podaly. Dávka libovolné velikosti tak stojí paměť jedné odpovědi, což je rozdíl mezi "funguje to" a "stovka obrázků ti sežere gigabajt". Plyne z toho několik věcí, které stojí za zapamatování:
+
+- **Než začneš iterovat, neodešle se nic.** Sestavit si `getResults()` do proměnné je zadarmo.
+- **Když smyčku opustíš přes `break`, přenos se ukončí** a zbytek souboru se nestahuje ani neplatí.
+- **Nic se nepamatuje.** Druhé projití stahuje znovu; kdo chce data dvakrát, ať si je uloží.
+- Chceš-li přece jen všechno naráz jako pole, je to `iterator_to_array($batch->getResults())`. Je to tvoje rozhodnutí a tvoje paměť.
+
+
+Dávka obrázků
+=============
+
+Obrázky se dávkují stejným způsobem a ze stejného důvodu: jsou [řádově dražší než text |images], takže poloviční cena je u nich znát mnohem víc.
+
+```php
+$batch = $client->createBatch();
+
+$batch->addImageRequest('majak', 'Maják na útesu za bouřky, malířský styl', 'gpt-image-2');
+$batch->addImageRequest('pristav', 'Přístav za svítání, tentýž malířský styl', 'gpt-image-2');
+
+$response = $batch->submit();
+echo $response->getId();
+```
+
+`addImageRequest()` vrací objekt požadavku, který si můžeš dál nastavit. Přidáš mu předlohu nebo změníš parametry, každý provider ty svoje:
+
+```php
+use AIAccess\Media;
+
+$batch->addImageRequest('varianta', 'Tentýž maják za slunečného rána', 'gpt-image-2')
+	->addReference(Media::fromFile('/cesta/k/majaku.png'))
+	->setOptions(size: '1024x1024', quality: 'low');
+```
+
+Je to tatáž dávka jako u konverzací, žádná zvláštní. Mimo dávku se jeden obrázek pořád generuje metodou [`generateImage()` |images], která má všechny volby jako pojmenované argumenty; druhá cesta k témuž tu schválně není.
+
+Předloha putuje ke každému požadavku ve vlastní kopii, což u velkého obrázku opakovaného přes celou dávku není zadarmo: OpenAI bere na celou úlohu 200 MB a base64 objem ještě o třetinu nafoukne. Když se blížíš ke stropu, rozděl dávku na víc menších.
+
+Výsledky se vyzvedávají úplně stejně jako u konverzací, jen v odpovědích nehledáš text, ale obrázky:
+
+```php
+foreach ($batch->getResults() as $customId => $result) {
+	foreach ($result->message?->getMedia() ?? [] as $i => $media) {
+		$extension = explode('/', $media->getMimeType())[1];
+		$media->save("/cesta/k/$customId-$i.$extension");
+	}
+}
+```
+
+Tady se to čtení po jedné položce vyplatí nejvíc: obrázky jsou megabajty a dávka jich klidně nese stovku, takže rozdíl mezi "drž jeden" a "drž všechny" je rozdíl mezi během a pádem na `memory_limit`.
+
+U OpenAI platí, že požadavek, který skončil bez obrázku, přijde jako selhání s vyplněným `$result->error`, ne jako prázdná zpráva.
+
+Co smí být v jedné úloze pohromadě, určuje provider, ne knihovna. **OpenAI jede jednu úlohu jedním endpointem**, takže tam obrázky nemůžou sdílet dávku s konverzacemi a generování nemůže sdílet dávku s úpravami; smíchané požadavky knihovna ohlásí dřív, než cokoli odešle. **Gemini žádné takové pravidlo nemá**, protože kreslí tímtéž endpointem, kterým mluví, takže u něj v jedné dávce klidně poletí text i obrázky.
+
+
+Sledování a zrušení úlohy
+=========================
+
+Stav úlohy nabývá čtyř hodnot: `InProgress`, dokud se pracuje (i když se úloha právě ruší), `Completed` po úspěšném dokončení, `Failed`, když úloha skončila neúspěchem, vypršela nebo byla zrušena, a `Other` pro stavy, které do téhle škály nezapadají.
+
+Za výsledky si ale nechoď jen při `Completed`. Zrušená i vypršelá úloha ti vydá požadavky, které stihla dokončit, a ty už jsou zaplacené; nic nemá jen ta, která pořád běží.
+
+```php
+$batch = $client->retrieveBatch($batchId);
+
+echo 'stav:     ', $batch->getStatus()->name, "\n";
+echo 'zadáno:   ', $batch->getCreatedAt()?->format('j.n. H:i'), "\n";
+echo 'hotovo:   ', $batch->getCompletedAt()?->format('j.n. H:i') ?? 'zatím ne', "\n";
+```
+
+Rozpracovanou úlohu jde zrušit metodou `cancelBatch($id)`. Přehled svých úloh dostaneš z `listBatches()`, které se prochází `foreach`em a **další stránky si dotahuje samo, jak na ně dojdeš**, takže se stovka úloh čte stejně jako jedna a přerušený cyklus další požadavky nepošle. Seznam nese jen hlavičky úloh; **výsledky si knihovna dotáhne až ve chvíli, kdy je začneš číst** přes `getResults()`.
+
+```php
+foreach ($client->listBatches() as $batch) {
+	echo $batch->getId(), ': ', $batch->getStatus()->name, "
+";
+}
+```
+
+Sledovat průběh ale nemusíš jen z kódu. Každý provider ukazuje odeslané úlohy i ve své webové konzoli, té samé, kde sis vydával [API klíč |getting-started], včetně stavu a času dokončení. Při ladění je to nejrychlejší způsob, jak zjistit, jestli už je hotovo, aniž bys kvůli tomu psal jediný řádek.
+
+
+Tři mechanismy, jedno rozhraní
+==============================
+
+Tady je vidět, co knihovna dělá, protože každý z providerů řeší dávky úplně jinak:
+
+| Provider | Jak dávka funguje u něj                                                              |
+|----------|--------------------------------------------------------------------------------------|
+| OpenAI   | požadavky se serializují do souboru JSONL, ten se nahraje a teprve pak vznikne úloha |
+| Claude   | požadavky se posílají rovnou v těle jednoho volání                                   |
+| Gemini   | dávka je takzvaná long-running operation a výsledky chodí uvnitř ní                  |
+
+Tvého kódu se to nedotkne, ať zvolíš kteréhokoli. Dávkové zpracování nabízejí OpenAI, Claude a Gemini; dávku obrázků pak OpenAI a Gemini.
+
+
+Než to pustíš do provozu
+========================
+
+**U OpenAI a Gemini je jedna dávka jeden model.** Gemini má model v adrese úlohy, OpenAI ho váže na nahraný soubor, takže smíchat dva nejde. Knihovna to ohlídá a ohlásí `AIAccess\LogicException` hned při vkládání, ne až po odeslání. Claude to má jinak: model si nese každý požadavek zvlášť, takže tam můžeš klidně porovnávat dva modely vedle sebe v jedné dávce.
+
+**Nespoléhej na to, že to bude rychlé.** Provideři obvykle slibují dokončení do 24 hodin. V praxi bývají dávky hotové v řádu minut, ale je to slib horní meze, ne dolní; podle toho navrhni, co se stane, když výsledky ještě nejsou.
+
+**Identifikátor úlohy patří do databáze**, ne do proměnné. Skript, který dávku odeslal, dávno skončí, než budou výsledky k dispozici, takže si je obvykle vyzvedne až naplánovaná úloha spuštěná třeba po hodině.
+
+**U Gemini potřebuješ placený projekt.** Na free tieru dávkový endpoint odmítne pracovat.
+
+**U Gemini je paměťová úspora jen zdánlivá.** Jeho výsledky jezdí uvnitř samotné úlohy, takže než se k nim `getResults()` dostane, jsou v paměti celé; čtení po jedné položce je tam jednotnost, ne úspora. Ze stejného důvodu tam ani druhé projití nic nestojí, není co stahovat znovu. OpenAI a Claude posílají výsledky souborem, a ten se opravdu proudí.
+
+A drobnost, která ušetří zmatek: dokud dávka neskončí, `getResults()` prostě nic nevydá. Není to chyba, jen ještě není co číst, takže se nejdřív zeptej na stav.
+
+
+Kam dál
+=======
+
+- [Konverzace |chat] - jak vypadá tatáž práce v přímém režimu
+- [Generování obrázků |images] - jednotlivé obrázky a jejich předlohy
+- [Ošetření chyb |errors] - co znamenají jednotlivé výjimky
+- [Provideři |providers] - co který umí a čím se liší

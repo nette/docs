@@ -1,0 +1,135 @@
+Streaming Responses
+*******************
+
+.[perex]
+The model writes its answer word by word and that takes tens of seconds. Streaming means reading it as it arrives instead of waiting for the whole thing. We will look at how one `foreach` does it, how to stop generating half way, and why it makes more sense in PHP than you would think.
+
+
+Ten Seconds of Silence
+======================
+
+Without streaming this is what happens: the user submits a question, the page freezes and for ten seconds absolutely nothing happens. Then the whole text appears at once. Ten seconds of silence is an eternity in a browser, and the user has time to click again or leave.
+
+A streamed answer is read with a loop, just like an array:
+
+```php
+$stream = $chat->sendMessageStream('Explain in three sentences why PHP is still everywhere.');
+
+foreach ($stream as $delta) {
+	echo $delta;
+	flush();
+}
+```
+
+Each `$delta` is the piece of text that has just arrived, typically a word or part of one. `flush()` is there so that PHP really sends the pieces out instead of holding them in its output buffer.
+
+The answer does not arrive any sooner. What changes is the waiting: instead of a blank page the user watches the text grow, and that is the difference between an application that looks broken and one that looks fast.
+
+One property is worth remembering: **nothing is sent until you start reading**. Calling `sendMessageStream()` triggers no request at all; that happens on the first pass of the loop. So you can prepare a stream in advance and read it when it suits you.
+
+When a callback fits you better than a loop, there is a second route:
+
+```php
+$chat->sendMessage(
+	'Explain in three sentences why PHP is still everywhere.',
+	onStream: function (string $delta) {
+		echo $delta;
+		flush();
+	},
+);
+```
+
+
+Why It Makes More Sense in PHP Than You Would Think
+===================================================
+
+In a browser the benefit is obvious, in a server script less so. There are three reasons and they are worth spelling out, because they are easy to forget.
+
+**You can forward the stream straight to the browser.** When the frontend listens to Server-Sent Events, you pass on the individual pieces as they arrive. Collecting them all and sending them at once would defeat the whole point.
+
+**You can stop paying half way.** The moment you know the answer is wrong, or that what has arrived is enough, you stop the generation and the rest is never produced or billed.
+
+**Time to the first word matters more than the total.** For anything a human is watching, perceived speed beats measured speed.
+
+
+When the Stream Ends It Is an Ordinary Response
+===============================================
+
+Once you have read it, you have everything you would have got without streaming: the usage, the finish reason and any tool calls.
+
+```php
+foreach ($stream as $delta) {
+	echo $delta;
+}
+
+$response = $stream->getResponse();
+
+echo 'finished as ', $response->getFinishReason()->value, "\n";
+echo 'output tokens: ', $response->getUsage()?->outputTokens, "\n";
+```
+
+`getResponse()` **does not send a second request**. If you have read the stream, it just hands you the finished result; if you have not, it quietly reads the rest and returns the whole thing. So you never pay for the same answer twice.
+
+And if the individual pieces do not really interest you and the point was only that the user sees something happening, there is a shortcut:
+
+```php
+echo $stream->getText();
+```
+
+A streamed answer goes into the [conversation history |chat] like any other, so the next message follows on without any work from you.
+
+
+Stopping Half Way
+=================
+
+Streaming gives you an option you do not otherwise have: stopping once you know enough. In a loop that is what the `cancel()` method is for:
+
+```php
+foreach ($stream as $delta) {
+	echo $delta;
+	if (str_contains($delta, 'END')) {
+		$stream->cancel();
+		break;
+	}
+}
+```
+
+In the callback form you do the same with a `false` return value:
+
+```php
+$chat->sendMessage($question, onStream: function (string $delta) {
+	echo $delta;
+	return !str_contains($delta, 'END'); // false ends the generation
+});
+```
+
+How is that communicated to the model? It is not, and that is the trick. The library **aborts the HTTP transfer in progress**, which closes the connection to the provider. The provider sees that the client has stopped listening and ends the generation; the rest of the answer is therefore never produced and never billed. The response then reports `FinishReason::Cancelled`, so even further down in the code you can tell the text is incomplete. It also stops the [tool loop |tools], because a half-read answer is no basis for the application to go and do something. That holds for a call cut off mid-arguments as well: the library drops such a fragment rather than running your tool with whatever managed to arrive.
+
+**A bare `break`, on the other hand, does not stop the generation.** It ends only your reading, while the request stays open and the model keeps writing. That is deliberate rather than an oversight: it lets you come back to the stream with another `foreach`, which picks up where you left off, or call `getResponse()`, which reads the rest without a second request. So `break` is a pause, while `cancel()` is an end.
+
+
+Five Providers, Five Ways a Stream Ends
+=======================================
+
+You do not need this for everyday use, but it shows nicely how much work hides under that one `foreach`. It was established by measuring real responses rather than by reading documentation.
+
+| Provider | Names its events | Sends a `[DONE]` marker |
+|----------|------------------|-------------------------|
+| Claude   | ✅               | ➖                      |
+| OpenAI   | ✅               | ➖                      |
+| Gemini   | ➖               | ➖                      |
+| DeepSeek | ➖               | ✅                      |
+| Grok     | ➖               | ✅                      |
+
+So no general "the end" signal exists. Claude finishes with a `message_stop` event, OpenAI with a terminal event carrying the whole response, Gemini simply stops sending, and the DeepSeek and Grok pair use the marker. On top of that the pieces arrive split wherever the network happened to cut them, so a single event routinely turns up in two halves. The library rebuilds exactly the shape of response you would have got without streaming, so the two routes cannot drift apart on you.
+
+One more measured property, this one practical: **a stream is bounded by silence, not by total time**. An ordinary request is capped on how long it may take as a whole, but a long answer legitimately flows for minutes, so such a cap would cut it off mid-way. For a stream the library therefore watches only whether data keeps coming, and gives up only when the provider stops talking altogether.
+
+
+Where to Go Next
+================
+
+- [Tool calling |tools] - when the model should reach into your application
+- [Structured output |structured-output] - when you need data, not prose
+- [HTTP layer |http] - retrying, logging and time limits
+- [Error handling |errors] - what to do when the provider says no

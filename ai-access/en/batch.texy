@@ -1,0 +1,185 @@
+Batch Processing
+****************
+
+.[perex]
+When you do not need the answer now, you save roughly half the money. Providers call it batch processing: you send them a pile of requests at once and collect the results later. We will look at how to assemble and submit such a batch, how to collect the results afterwards, and what to watch out for before it goes into production.
+
+
+What It Is For
+==============
+
+Imagine you have five thousand products and want a short description of each from the model. Send them one by one and you pay full price and wait while five thousand questions and answers take their turn.
+
+Providers have a special mode for exactly this case, called **batch processing**. You hand them the whole pile of requests at once, they process it when they have spare capacity, and you collect the results later. In return for not being in a hurry you pay **roughly half**.
+
+It does not suit everything. The answer does not come immediately and in the worst case it can take hours, so a batch will never serve a user staring at the screen. It is ideal for work that runs in the background: bulk translations, classifying a queue, generating descriptions, preparing data overnight.
+
+
+A Batch of Conversations
+========================
+
+It goes in three steps: first you create an empty batch, then you add tasks to it one by one, and finally you submit the whole thing. Each task is a conversation of its own and gets an identifier of your choosing, which is how you later pair the answer with your record:
+
+```php
+use AIAccess\Chat\Role;
+
+$batch = $client->createBatch();
+
+foreach ($products as $product) {
+	$chat = $batch->addChat('product-' . $product->id, 'gpt-5.6-luna');
+	$chat->setSystemInstruction('Write short product descriptions, two sentences at most.');
+	$chat->addMessage($product->name . ': ' . $product->specs, Role::User);
+}
+
+$response = $batch->submit();
+echo $response->getId();
+```
+
+`addChat()` returns an ordinary conversation object, so you work with it exactly as [you already know |chat]: set the system instruction, add messages, turn on [structured output |structured-output] if you like. The only difference is that instead of `sendMessage()` at the end you call `submit()` on the whole batch.
+
+**Store that job id.** Without it you cannot reach the results, and the provider will not send the batch to you again.
+
+
+Collecting the Results
+======================
+
+You collect the results whenever you like afterwards, from a completely different script if you want:
+
+```php
+use AIAccess\Batch\Status;
+
+$batch = $client->retrieveBatch($batchId);
+
+if ($batch->getStatus() === Status::InProgress) {
+	echo 'Still working, status: ', $batch->getStatus()->name;
+	return;
+}
+
+foreach ($batch->getResults() as $customId => $result) {
+	echo $customId, ': ', $result->message?->getText() ?? "failed, $result->error", "\n";
+}
+```
+
+Under the same keys you used when adding them you get `AIAccess\Batch\Result` objects. Each carries **either the answer or the reason that one request failed**: when one goes wrong, the whole batch does not fall over because of it; that item simply arrives with `$result->error` filled in instead of `$result->message`.
+
+The answer itself is an ordinary `AIAccess\Chat\Message`, exactly what a [live conversation |chat] carries. You pull the text out with `getText()`, the pictures with `getMedia()`, and everything else, such as the model's reasoning or its tool calls, is among the message parts in `getParts()`.
+
+What matters is **how** the results arrive: they are read one item at a time as they come off the network, rather than downloaded whole and handed to you afterwards. A batch of any size therefore costs the memory of a single answer, which is the difference between "it works" and "a hundred images eat a gigabyte". A few things follow that are worth remembering:
+
+- **Nothing is sent until you start iterating.** Putting `getResults()` in a variable is free.
+- **Leaving the loop with `break` ends the transfer**, so the rest of the file is neither downloaded nor paid for.
+- **Nothing is remembered.** Iterating a second time downloads again; if you need the data twice, keep it.
+- If you do want everything at once as an array, that is `iterator_to_array($batch->getResults())`. Your decision, your memory.
+
+
+A Batch of Images
+=================
+
+Images are batched the same way and for the same reason: they are [an order of magnitude more expensive than text |images], so half price shows up far more.
+
+```php
+$batch = $client->createBatch();
+
+$batch->addImageRequest('lighthouse', 'A lighthouse on a cliff in a storm, painterly style', 'gpt-image-2');
+$batch->addImageRequest('harbour', 'A harbour at dawn, the same painterly style', 'gpt-image-2');
+
+$response = $batch->submit();
+echo $response->getId();
+```
+
+`addImageRequest()` returns a request object you can configure further. Add a reference image to it or change the parameters, each provider its own:
+
+```php
+use AIAccess\Media;
+
+$batch->addImageRequest('variant', 'The same lighthouse on a sunny morning', 'gpt-image-2')
+	->addReference(Media::fromFile('/path/to/lighthouse.png'))
+	->setOptions(size: '1024x1024', quality: 'low');
+```
+
+It is the same batch as for conversations, not a special one. Outside a batch a single picture is still made with [`generateImage()` |images], which takes every option as a named argument; a second way of asking for the same thing is deliberately not there.
+
+A reference travels to every request as its own copy, which is not free for a large image repeated across a whole batch: OpenAI takes 200 MB for a whole job and base64 inflates the bytes by another third. If you are approaching that ceiling, split the batch into several smaller ones.
+
+The results are collected exactly as with conversations, except that you look for pictures in the answers rather than text:
+
+```php
+foreach ($batch->getResults() as $customId => $result) {
+	foreach ($result->message?->getMedia() ?? [] as $i => $media) {
+		$extension = explode('/', $media->getMimeType())[1];
+		$media->save("/path/to/$customId-$i.$extension");
+	}
+}
+```
+
+This is where reading item by item pays off most: pictures are megabytes and a batch happily holds a hundred of them, so the difference between "hold one" and "hold all" is the difference between running and hitting `memory_limit`.
+
+With OpenAI, a request that ended without a picture arrives as a failure with `$result->error` filled in, rather than as an empty message.
+
+What may share one job is decided by the provider, not by the library. **OpenAI runs one job on one endpoint**, so there images cannot share a batch with conversations and generating cannot share one with editing; mixed requests are reported before anything is submitted. **Gemini has no such rule**, because it draws through the same endpoint it talks through, so one batch of its own can carry both text and pictures.
+
+
+Watching and Cancelling a Job
+=============================
+
+A job's status takes one of four values: `InProgress` while the work goes on (a job being cancelled included), `Completed` after a successful finish, `Failed` when the job failed, expired or was cancelled, and `Other` for states that do not fit this scale.
+
+Do not go for the results only on `Completed`, though. A cancelled or expired job hands over the requests it managed to finish, and you have paid for those; only one that is still running has nothing.
+
+```php
+$batch = $client->retrieveBatch($batchId);
+
+echo 'status:  ', $batch->getStatus()->name, "\n";
+echo 'created: ', $batch->getCreatedAt()?->format('j M H:i'), "\n";
+echo 'done:    ', $batch->getCompletedAt()?->format('j M H:i') ?? 'not yet', "\n";
+```
+
+A job in progress can be cancelled with `cancelBatch($id)`. You get an overview of your jobs from `listBatches()`, which is read with a `foreach` and **fetches further pages as you reach them**, so a hundred jobs read like one and a loop you break out of sends no more requests. The listing carries only the job headers; **the library fetches the results only at the moment you start reading them** through `getResults()`.
+
+```php
+foreach ($client->listBatches() as $batch) {
+	echo $batch->getId(), ': ', $batch->getStatus()->name, "
+";
+}
+```
+
+You do not have to follow the progress from code alone. Every provider also shows submitted jobs in its web console, the same one where you issued the [API key |getting-started], including the status and the time it finished. While debugging that is the fastest way to find out whether it is done, without writing a single line for it.
+
+
+Three Mechanisms, One Interface
+===============================
+
+Here you can see what the library does for you, because each provider solves batches completely differently:
+
+| Provider | How a batch works there                                                                         |
+|----------|-------------------------------------------------------------------------------------------------|
+| OpenAI   | the requests are serialized into a JSONL file, that is uploaded and only then does a job appear |
+| Claude   | the requests are sent straight in the body of a single call                                     |
+| Gemini   | the batch is a so-called long-running operation and the results travel inside it                |
+
+None of it touches your code, whichever you choose. Batch processing is offered by OpenAI, Claude and Gemini; a batch of images by OpenAI and Gemini.
+
+
+Before It Goes Into Production
+==============================
+
+**With OpenAI and Gemini, one batch is one model.** Gemini has the model in the job's address, OpenAI ties it to the uploaded file, so mixing two is not possible. The library watches for that and reports `AIAccess\LogicException` right when you add the request, not after submitting. Claude works differently: every request carries its own model, so there you can compare two models side by side within a single batch.
+
+**Do not rely on it being fast.** Providers usually promise completion within 24 hours. In practice batches tend to be done within minutes, but that is a promise of the upper bound, not the lower one; design accordingly for the case where the results are not there yet.
+
+**The job id belongs in a database**, not in a variable. The script that submitted the batch will be long gone before the results are available, so they are usually collected by a scheduled task running an hour or so later.
+
+**Gemini needs a paid project.** On the free tier the batch endpoint refuses to work.
+
+**With Gemini the memory saving is only apparent.** Its results travel inside the job itself, so by the time `getResults()` sees them they are in memory whole; reading item by item is uniformity there, not economy. For the same reason a second reading costs nothing there, as there is nothing left to download. OpenAI and Claude deliver results as a file, and that one really does stream.
+
+And one detail that saves confusion: until the batch finishes, `getResults()` simply yields nothing. That is not an error; there is just nothing to read yet, so ask about the status first.
+
+
+Where to Go Next
+================
+
+- [Conversation |chat] - what the same work looks like in direct mode
+- [Image generation |images] - single images and their references
+- [Error handling |errors] - what the individual exceptions mean
+- [Providers |providers] - what each one can do and how they differ

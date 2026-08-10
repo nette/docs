@@ -1,0 +1,140 @@
+Embeddings and Semantic Search
+******************************
+
+.[perex]
+Search that finds what the user named with completely different words. Suggestions of related articles. Sorting questions into categories. Answering over your own documentation. All of these rest on one technique: embeddings let a model work out the meaning of a text and turn it into numbers that even an ordinary database can compute with.
+
+
+What an Embedding Is
+====================
+
+You have a search box on your site. A user types "how to speed up a website" and finds nothing, even though you have an article called "Optimizing application performance". Not a single word matches, so `LIKE` and full-text both stay silent. And yet that is exactly the article they wanted.
+
+You can write lists of synonyms that will never be complete. Or you can stop comparing words and start comparing meaning. That is exactly what embeddings make possible.
+
+Imagine scoring every article in a questionnaire. How much is it about technology? How much about cooking? How much does it solve some problem? How much of a tutorial is it? Your scores form a row of numbers, and two articles with similar scores are clearly about the same thing, even when each uses different words.
+
+**And that is exactly what an embedding does, only on a far larger scale.** The model invents the questions itself, there are several hundred to several thousand of them, and nobody ever spelled them out; we never learn them and do not need to. All we get are the scores, a row of decimal numbers. So there is no point looking at an individual number for meaning; meaning appears only when two such rows are compared. A row of numbers like this is called a **vector**, which is where the library class gets its name.
+
+One more property comes in handy: **the computation is deterministic**. The same text sent to the same model returns the same vector every time. Unlike a conversation with a model, there is no risk of getting a different result today than yesterday, so you can store the vectors and never compute them again.
+
+
+The First Vectors
+=================
+
+Embeddings can be computed by OpenAI and Gemini. You can run this script as it stands:
+
+```php
+require __DIR__ . '/vendor/autoload.php';
+
+$client = new AIAccess\Provider\OpenAI\Client('paste-your-key-here');
+
+$vectors = $client->calculateEmbeddings([
+	'How to speed up a website',
+	'Optimizing application performance',
+	'A recipe for beef sirloin',
+], 'text-embedding-3-small');
+
+echo 'website vs. performance: ', $vectors[0]->cosineSimilarity($vectors[1]), "\n";
+echo 'website vs. recipe:      ', $vectors[0]->cosineSimilarity($vectors[2]), "\n";
+```
+
+You get an array of `AIAccess\Embedding\Vector` objects in the same order in which you sent the texts.
+
+
+How to Read the Similarity
+--------------------------
+
+The `cosineSimilarity()` method compares two such rows of scores and sums their agreement into a single number from -1 to 1. The handy part is that the length of the text does not matter: a short question and a long article about the same thing come out close together, even when one is ten times longer.
+
+- **1** is the highest possible agreement, so practically identical meaning.
+- **0** means the texts have nothing in common.
+- **-1** would mean the exact opposite. With text embeddings this practically never happens, so you can ignore the lower half of the scale.
+
+Do not expect the numbers to spread across the whole scale, though. In practice they sit in a much narrower band: unrelated texts do not come out at zero and a perfect hit does not come out at one. Every model spreads the scale differently as well, so you have to measure your own threshold for "similar enough" on your own data.
+
+Working with the ordering is the most reliable approach anyway. Sort the candidates by similarity and take the top few; that works no matter how the model scales.
+
+
+Semantic Search Step by Step
+============================
+
+Search over your own data has two phases and it pays to separate them, because each happens at a different time.
+
+**Once, during indexing**, you compute an embedding for every document and store it. This is the paid and slower part, but it only happens when a document is created or changed.
+
+**On every query** you compute an embedding of the question, which is one quick call, and compare it against the stored vectors. The most similar documents are the search result.
+
+In short, whatever database layer you use:
+
+```php
+use AIAccess\Embedding\Vector;
+
+// once, during indexing: store the vector with the document
+[$vector] = $client->calculateEmbeddings([$text], 'text-embedding-3-small');
+$binary = $vector->serialize();
+
+// when searching: compute the question's vector and compare with the stored ones
+[$query] = $client->calculateEmbeddings([$question], 'text-embedding-3-small');
+
+$scores = [];
+foreach ($storedArticles as $id => $storedBinary) {
+	$scores[$id] = $query->cosineSimilarity(Vector::deserialize($storedBinary));
+}
+arsort($scores);
+$best = array_slice($scores, 0, 5, preserve_keys: true);
+```
+
+And now the best part: the excerpts you found do not have to be the goal; they can be the raw material. Send them together with the original question to the model in a [conversation |chat] and instead of a list of links you get a coherent answer built on your own data, which the model never saw during training. This combination of search and answering is called RAG, and it is today the most common way to give a model knowledge it does not have.
+
+
+Where to Store the Vectors
+==========================
+
+The `Vector::serialize()` method turns a vector into a binary string suited to a `BLOB` or `VARBINARY` column. The static `Vector::deserialize()` converts it back. The numbers are stored as 32-bit values in a fixed byte order.
+
+You may have heard the term **vector database**. It is a store that can find the most similar vectors without walking through all of them; it builds an index over them much as an ordinary database builds an index over a column. Examples include PostgreSQL with the pgvector extension, SQLite with sqlite-vec, or standalone services such as Qdrant.
+
+As long as you are in the thousands of documents, though, **you need none of them**. A few thousand vectors take a few tens of megabytes in memory and walking them linearly takes single-digit milliseconds, so a plain array and the `foreach` above are a full solution. Start considering dedicated storage once you have hundreds of thousands of records, or once the walk starts slowing you down.
+
+
+What It Costs
+=============
+
+Embeddings are cheap compared with a conversation with a model. You pay only for the input, because no output text is produced, and it is billed by [tokens |getting-started#What It Costs] just like chat.
+
+In practice that means indexing a few thousand articles usually costs less than you expect, and a single user query is negligible. The one item that can surprise you is **recomputing the whole database** after a model change, because you pay for absolutely everything again.
+
+
+What to Watch Out For
+=====================
+
+**Indexing and querying must use the same model.** Every model has its own space, so vectors from different models cannot be compared. The tricky part is how that shows up: when they have a different number of values, `cosineSimilarity()` throws `AIAccess\LogicException` and you find out immediately. When they happen to have the same number, **nothing fails** and you merely get nonsensical ordering. So after changing a model, always recompute the whole database.
+
+The rest is smaller:
+
+- **Empty input ends in an exception.** An empty array, or an empty string inside it, throws `AIAccess\LogicException` before anything is sent, which beats paying for a request that yields nothing.
+- **One call handles many texts at once** and is markedly faster and cheaper than calling them one by one. OpenAI accepts up to 2048 inputs per request.
+- **Split long documents into parts.** Models cap the input length, and more importantly, the longer the text, the blurrier its meaning. Shorter excerpts are found more precisely.
+
+
+Differences Between Providers
+=============================
+
+Only two of the five providers offer embeddings; Claude, DeepSeek and Grok have no embedding API of their own.
+
+| Provider | Optional extras                                                                         |
+|----------|-----------------------------------------------------------------------------------------|
+| OpenAI   | `dimensions` shortens the vector and saves database space, on `text-embedding-3` models |
+| Gemini   | `taskType` says what the vector is for, for example `RETRIEVAL_DOCUMENT`                |
+
+Gemini distinguishes whether you are storing a text in the index or asking with it, and adjusts the vector slightly. If you use `title` there, you must also set `taskType` to `RETRIEVAL_DOCUMENT`, otherwise you get `AIAccess\LogicException`; it is a document that can be titled, not a query.
+
+
+Where to Go Next
+================
+
+- [Conversation |chat] - how to hand the excerpts you found to the model
+- [Batch processing |batch] - when you need to index a really large amount of text
+- [Error handling |errors] - what to do when a call fails
+- [Providers |providers] - what each one can do and how they differ

@@ -1,0 +1,135 @@
+Streamování odpovědí
+********************
+
+.[perex]
+Model píše odpověď slovo po slovu a trvá to i několik desítek sekund. Streamování znamená, že ji čteš průběžně, místo abys čekal na celou. Ukážeme si, jak se to dělá jedním `foreach`, jak generování zastavit v půlce a proč to v PHP dává smysl víc, než by se zdálo.
+
+
+Deset sekund ticha
+==================
+
+Bez streamování se stane tohle: uživatel odešle dotaz, stránka zamrzne a deset sekund se neděje vůbec nic. Pak najednou naskočí celý text. Deset sekund ticha je v prohlížeči věčnost a uživatel mezitím stihne kliknout znovu nebo odejít.
+
+Streamovaná odpověď se čte cyklem, přesně jako pole:
+
+```php
+$stream = $chat->sendMessageStream('Vysvětli třemi větami, proč je PHP pořád všude.');
+
+foreach ($stream as $delta) {
+	echo $delta;
+	flush();
+}
+```
+
+Do `$delta` přichází pokaždé kousek textu, který právě dorazil, typicky slovo nebo jeho část. `flush()` je tam proto, aby PHP kousky opravdu poslalo ven a nedrželo si je ve výstupní vyrovnávací paměti.
+
+Odpověď tím nepřijde dřív. Změní se ale čekání: místo prázdné stránky uživatel sleduje, jak text přibývá, a to je rozdíl mezi aplikací, která vypadá rozbitě, a aplikací, která vypadá rychle.
+
+Jedna vlastnost stojí za zapamatování: **dokud nezačneš číst, neodešle se nic**. Samotné zavolání `sendMessageStream()` žádný požadavek nevyvolá, ten se rozjede až prvním průchodem cyklu. Stream si tedy můžeš připravit dopředu a přečíst ho, až se to hodí.
+
+Když se ti víc hodí callback než cyklus, existuje i druhá cesta:
+
+```php
+$chat->sendMessage(
+	'Vysvětli třemi větami, proč je PHP pořád všude.',
+	onStream: function (string $delta) {
+		echo $delta;
+		flush();
+	},
+);
+```
+
+
+Proč to v PHP dává smysl víc, než by se zdálo
+=============================================
+
+V prohlížeči je přínos zřejmý, u serverového skriptu už méně. Důvody jsou tři a stojí za vyjmenování, protože se na ně snadno zapomene.
+
+**Můžeš stream posílat rovnou do prohlížeče.** Když frontend poslouchá Server-Sent Events, předáváš mu jednotlivé kousky, jak přicházejí. Kdybys je nejdřív celé posbíral a odeslal naráz, celý smysl by se ztratil.
+
+**Můžeš přestat platit v půlce.** Jakmile víš, že odpověď je špatná nebo že ti stačí, co už přišlo, generování zastavíš a zbytek nevznikne ani se nenaúčtuje.
+
+**Rozhoduje doba do prvního slova, ne celková.** U všeho, na co se dívá člověk, je vnímaná rychlost důležitější než změřená.
+
+
+Když stream skončí, je to obyčejná odpověď
+==========================================
+
+Po dočtení máš k dispozici všechno, co bys dostal i bez streamování: spotřebu, důvod ukončení i případná volání nástrojů.
+
+```php
+foreach ($stream as $delta) {
+	echo $delta;
+}
+
+$response = $stream->getResponse();
+
+echo 'skončilo jako ', $response->getFinishReason()->value, "\n";
+echo 'výstupních tokenů: ', $response->getUsage()?->outputTokens, "\n";
+```
+
+`getResponse()` **neposílá druhý požadavek**. Když jsi stream dočetl, jen ti vrátí hotový výsledek; když jsi ho nedočetl, potichu dočte zbytek a vrátí ho celý. Nikdy se tedy nestane, že bys tutéž odpověď zaplatil dvakrát.
+
+A pokud tě průběžné kousky vlastně nezajímají a šlo ti jen o to, aby uživatel viděl, že se něco děje, máš zkratku:
+
+```php
+echo $stream->getText();
+```
+
+Streamovaná odpověď se stejně jako každá jiná zapíše do [historie konverzace |chat], takže na ni další zpráva navazuje bez tvého přičinění.
+
+
+Zastavení uprostřed
+===================
+
+Streamování ti dává možnost, kterou jinak nemáš: přestat, když už víš dost. V cyklu k tomu slouží metoda `cancel()`:
+
+```php
+foreach ($stream as $delta) {
+	echo $delta;
+	if (str_contains($delta, 'KONEC')) {
+		$stream->cancel();
+		break;
+	}
+}
+```
+
+V callbackové variantě uděláš totéž návratovou hodnotou `false`:
+
+```php
+$chat->sendMessage($otazka, onStream: function (string $delta) {
+	echo $delta;
+	return !str_contains($delta, 'KONEC'); // false generování ukončí
+});
+```
+
+Jak se to řekne modelu? Nijak, a právě v tom je ta finta. Knihovna **přeruší probíhající HTTP přenos**, čímž se spojení k providerovi zavře. Provider zjistí, že klient už neposlouchá, a generování ukončí; zbytek odpovědi tedy nevznikne a nenaúčtuje se. Odpověď pak hlásí `FinishReason::Cancelled`, takže i o kus dál v kódu poznáš, že text není úplný. Zastaví to i [smyčku volání nástrojů |tools], protože nedočtená odpověď není podklad k tomu, aby aplikace něco vykonala. Platí to i pro volání, které se přeruší uprostřed argumentů: takový úlomek knihovna zahodí, místo aby ti nástroj spustila s tím, co stihlo dorazit.
+
+**Samotný `break` naproti tomu generování nezastaví.** Ukončí jen tvoje čtení, ale požadavek zůstává otevřený a model píše dál. To je záměr, ne opomenutí: díky tomu se k proudu můžeš vrátit dalším `foreach`, který naváže tam, kde jsi přestal, nebo si zavolat `getResponse()`, který zbytek dočte bez druhého požadavku. `break` je tedy pauza, kdežto `cancel()` je konec.
+
+
+Pět providerů, pět způsobů, jak stream skončí
+=============================================
+
+Tohle při běžném používání vědět nepotřebuješ, ale hezky ukazuje, kolik práce se pod jedním `foreach` skrývá. Zjišťovalo se to měřením na skutečných odpovědích, ne čtením dokumentace.
+
+| Provider | Pojmenovává události | Posílá značku `[DONE]` |
+|----------|----------------------|------------------------|
+| Claude   | ✅                   | ➖                     |
+| OpenAI   | ✅                   | ➖                     |
+| Gemini   | ➖                   | ➖                     |
+| DeepSeek | ➖                   | ✅                     |
+| Grok     | ➖                   | ✅                     |
+
+Žádný obecný signál "konec" tedy neexistuje. Claude končí událostí `message_stop`, OpenAI závěrečnou událostí, která nese celou odpověď, Gemini prostě přestane posílat a dvojice DeepSeek s Grokem použije značku. Kousky k tomu přicházejí rozdělené tak, jak je zrovna rozsekala síť, takže jedna událost běžně dorazí na dvakrát. Knihovna z toho poskládá přesně tentýž tvar odpovědi, jaký by přišel bez streamování, takže se ti obě cesty nemůžou rozejít.
+
+Ještě jedna změřená vlastnost, tentokrát praktická: **stream není omezený celkovým časem, ale tichem**. Běžný požadavek má strop na celkovou dobu, jenže dlouhá odpověď legitimně teče minuty, takže by ji takový strop uťal uprostřed. Knihovna proto u streamu hlídá jen to, jestli data pořád chodí, a vzdá se, teprve když provider přestane mluvit úplně.
+
+
+Kam dál
+=======
+
+- [Volání nástrojů |tools] - když má model sáhnout do tvé aplikace
+- [Strukturovaný výstup |structured-output] - když potřebuješ data, ne prózu
+- [HTTP vrstva |http] - opakování, logování a časové limity
+- [Ošetření chyb |errors] - co dělat, když provider řekne ne

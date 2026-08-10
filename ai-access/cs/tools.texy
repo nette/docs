@@ -1,0 +1,130 @@
+Volání nástrojů (function calling)
+**********************************
+
+.[perex]
+Model neví nic o tvé databázi ani o dnešním počasí. Umí si ale říct o funkci, která to zjistí, a počkat, než mu výsledek pošleš. Ukážeme si, jak se modelu funkce popíše, jak knihovna celou výměnu obslouží sama a co dělat, když si model vymýšlí.
+
+
+Model neví, tak se zeptá
+========================
+
+Jazykový model zná jen to, co se naučil při trénování. Nezná stav objednávky ve tvém e-shopu, nemá přístup k databázi a neví, kolik je hodin. Když se ho na to zeptáš, buď přizná, že neví, nebo si odpověď vymyslí; to druhé je horší, protože zní stejně přesvědčivě. (Když mu chceš zpřístupnit vlastní texty, třeba dokumentaci nebo znalostní bázi, hodí se spíš [vyhledávání přes embeddingy |embeddings]; nástroje jsou od toho, aby model něco **udělal**.)
+
+Volání nástrojů to řeší tím, že se role na chvíli prohodí. Ty modelu předem popíšeš funkce, které tvoje aplikace umí. Model pak místo odpovědi může říct: "zavolej mi `zjistiPocasi` pro Brno". Ty funkci vykonáš, výsledek mu pošleš zpátky a on z něj složí odpověď.
+
+Anglicky se téhle technice říká **tool calling** nebo **function calling**; oba názvy znamenají totéž a liší se jen tím, který provider je zrovna prosazuje. Česky jim tady říkáme nástroje, protože tak se jmenují i metody knihovny.
+
+Podstatné je, že **model tvůj kód nespouští**. Jen řekne, co by chtěl zavolat a s jakými argumenty; jestli to uděláš, rozhodne tvoje aplikace. Model je v tomhle uspořádání ten, kdo prosí, ne ten, kdo velí.
+
+
+Nejjednodušší případ: knihovna to zařídí za tebe
+================================================
+
+Nástroj popíšeš objektem `Tool`: jméno, popis, k čemu je, JSON schéma argumentů a funkci, která ho vykoná:
+
+```php
+use AIAccess\Chat\Tool;
+
+$chat = $client->createChat('gpt-5.6-luna');
+
+$chat->addTool(new Tool(
+	name: 'zjistiPocasi',
+	description: 'Vrátí aktuální počasí pro zadané město.',
+	parameters: [
+		'type' => 'object',
+		'properties' => [
+			'mesto' => ['type' => 'string', 'description' => 'Název města'],
+		],
+		'required' => ['mesto'],
+	],
+	handler: function (array $args): string {
+		// tady zavoláš svoje API nebo databázi
+		return 'Ve městě ' . $args['mesto'] . ' je 12 °C a prší.';
+	},
+));
+
+echo $chat->sendMessage('Jaké je počasí v Brně a mám si vzít bundu?')->getText();
+```
+
+A to je celé. Jedno `sendMessage()` obslouží celou výměnu: model si řekne o nástroj, knihovna zavolá tvůj handler, výsledek pošle zpátky a počká, co model odpoví. Jednomu takovému pohybu tam a zpátky se říká **kolo** a může jich proběhnout několik za sebou, když model potřebuje víc informací; celé té sérii pak **smyčka volání nástrojů**, anglicky tool loop.
+
+Na popisu záleží víc, než se zdá. Model se podle něj rozhoduje, jestli nástroj vůbec zavolat, a jiné vodítko nemá. "Vrátí aktuální počasí pro zadané město" je dobrý popis; "počasí" je špatný.
+
+Víc kol není žádná exotika. Když se zeptáš na počasí v Brně a v Praze, model si o nástroj řekne dvakrát. A když má nástrojů víc, běžně zavolá jeden, podívá se na výsledek a teprve podle něj sáhne po druhém: nejdřív si najde zákazníka podle e-mailu, pak k němu dohledá objednávky.
+
+Strop na počet kol proto nastavíš metodou `setToolLoop()`. Výchozích osm stačí na běžné úlohy a zároveň brání tomu, aby se model zacyklil na tvůj účet:
+
+```php
+$chat->setToolLoop(maxRounds: 3);
+```
+
+Kolik celá výměna stála, se dozvíš z `getTotalUsage()`, protože `getUsage()` na odpovědi mluví jen o posledním kole.
+
+
+Když chceš volání vyřídit sám
+=============================
+
+Automatická smyčka se spustí jen tehdy, když mají všechny volané nástroje handler. Jakmile ho některý nemá, knihovna se zastaví a předá řízení tobě. To je záměr: absence handleru je způsob, jak říct "tohle chci vyřídit sám".
+
+```php
+$chat->addTool(new Tool(
+	name: 'smazUcet',
+	description: 'Smaže uživatelský účet.',
+	parameters: ['type' => 'object', 'properties' => ['id' => ['type' => 'integer']]],
+	// handler schválně chybí
+));
+
+$response = $chat->sendMessage('Zruš účet číslo 42.');
+
+foreach ($response->getToolCalls() as $call) {
+	echo "Model chce zavolat $call->name s argumenty ", json_encode($call->arguments);
+
+	// tady se zeptáš uživatele, zkontroluješ oprávnění, cokoli potřebuješ
+	$chat->addToolResult($call, 'Účet byl smazán.');
+}
+
+echo $chat->sendMessage()->getText(); // pokračuj s doplněnými výsledky
+```
+
+Tenhle režim se hodí všude, kde nechceš, aby akce proběhla bez lidského souhlasu, a taky když chceš volání zaznamenat nebo omezit.
+
+Když chceš modelu naopak nařídit, že má sáhnout po konkrétním nástroji, použij `setToolChoice('jmenoNastroje')`. Zakázat nástroje úplně se dá tím, že žádný nezaregistruješ.
+
+
+Když si model vymýšlí
+=====================
+
+Model občas požádá o nástroj, který neexistuje, nebo pošle argumenty, které neodpovídají schématu. Není to výjimečné a hlavně to není chyba tvé aplikace, takže se to ani neřeší výjimkou.
+
+Knihovna takový omyl **pošle modelu zpátky jako chybový výsledek** a nechá ho, ať se opraví. Modely to zvládají překvapivě dobře: přečtou si, co bylo špatně, a zavolají nástroj znovu správně. Kdyby místo toho vyletěla výjimka, přišel bys o celou odpověď kvůli chybě, kterou si model umí opravit sám.
+
+Sem patří vymyšlené jméno nástroje, nečitelné argumenty i argumenty, které nesedí na schéma. Knihovna kontroluje povinné klíče a základní typy; plnohodnotný validátor JSON schématu to není, protože model dostane chybovou zprávu tak jako tak.
+
+Jiná věc je, když selže **tvůj vlastní handler**. Ve výchozím nastavení výjimka propadne k tobě, což je správně, protože rozbitá databáze není nic, co má model řešit. Když ale chceš, aby se model o selhání dozvěděl a mohl zkusit jinou cestu, zapneš si to:
+
+```php
+$chat->setToolLoop(catchErrors: true);
+```
+
+I tehdy platí jedna výjimka z výjimek: chyby úrovně `Error`, tedy chyby ve tvém vlastním kódu, jako je volání neexistující metody, propadnou vždycky. Kdyby se posílaly modelu jako výsledek nástroje, tvoje chyba by se schovala do konverzace a ty by ses o ní nedozvěděl.
+
+
+Co se děje na pozadí
+====================
+
+U nástrojů se provideři neshodnou skoro na ničem. Stojí za to vědět aspoň o dvou pastech, na které narazíš, kdyby ses někdy díval na nezpracované odpovědi z API.
+
+**Gemini neohlásí volání nástroje v důvodu ukončení.** Zůstane tam `STOP`, jako by odpověď normálně dopověděl, a samotné volání najdeš až mezi částmi odpovědi. Knihovna proto důvod ukončení dopočítává z obsahu, takže `FinishReason::ToolCall` dostaneš u všech pěti stejně.
+
+**Uvažování se musí vrátit beze změny.** Modely, které před odpovědí přemýšlejí, chtějí v dalším kole svoje uvažování zpátky přesně tak, jak ho poslaly. Claude odmítne pozměněný podpis chybou, Gemini odpoví `MISSING_THOUGHT_SIGNATURE`. Knihovna si tyhle části nese v historii a vrací je vždy jen tomu providerovi, který je vydal.
+
+A jedna vlastnost, která překvapí: **smyčka si každé dokončené kolo započítá**. Když sedmé kolo selže, historie i vedlejší účinky nástrojů z prvních šesti zůstanou. Zahodit je by znamenalo zaplatit šest kol za nic a případně dvakrát odeslat e-mail, který už jeden z nástrojů poslal.
+
+
+Kam dál
+=======
+
+- [Strukturovaný výstup |structured-output] - když chceš data, ne volání
+- [Streamování |streaming] - kola nástrojů se streamují taky
+- [Konverzace |chat] - historie, do které se volání i výsledky zapisují
+- [Ošetření chyb |errors] - co dělat, když provider řekne ne

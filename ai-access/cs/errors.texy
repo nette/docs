@@ -1,0 +1,135 @@
+Ošetření chyb a výjimky
+***********************
+
+.[perex]
+Volání cizího API selže dřív nebo později vždycky. Zajímavé není, že selhalo, ale jestli má cenu to zkusit znovu. Přesně kolem téhle otázky jsou postavené výjimky v AI�Access. Podíváme se, které existují, jak je odchytit a proč odmítnutí modelu mezi chyby nepatří.
+
+
+Jediná otázka, která v produkci dává smysl
+==========================================
+
+Když ti volání spadne, můžeš se ptát na spoustu věcí. V běžící aplikaci ale rozhoduje jen jedna: **mám to zopakovat, nebo je to marné?**
+
+Vypadlá síť je něco jiného než špatný klíč. To první se za vteřinu spraví samo, to druhé nespraví ani sto pokusů. Kdyby knihovna házela jeden typ výjimky pro obojí, musel bys rozhodovat podle textu zprávy, a to je nejkřehčí kód, jaký můžeš napsat.
+
+Proto jsou výjimky rozdělené podle toho, co s nimi můžeš udělat:
+
+| Výjimka                       | Co se stalo                                              | Zopakovat?                      |
+|-------------------------------|----------------------------------------------------------|---------------------------------|
+| `ApiException`                | Provider odpověděl chybou. `getCode()` nese HTTP status. | Podle stavu, viz níže.          |
+| `CommunicationException`      | Nespojili jsme se, nebo přišla nečitelná odpověď.        | Ano, skoro vždycky má smysl.    |
+| `UnexpectedResponseException` | Odpověď dorazila, ale nemá očekávanou strukturu.         | Ne. Zaloguj a podívej se na to. |
+| `TooManyRoundsException`      | [Smyčka nástrojů |tools] vyčerpala limit kol.            | Ne. Zvyš limit, nebo to vzdej.  |
+| `LogicException`              | Chyba ve tvém vlastním kódu.                             | Ne. Má spadnout.                |
+| `IOException`                 | Soubor nejde přečíst nebo zapsat.                        | Podle příčiny.                  |
+
+První čtyři mají společného předka `AIAccess\ServiceException`, takže se dají odchytit jedním `catch`, když ti stačí vědět, že služba selhala. `TooManyRoundsException` navíc nese poslední odpověď ve vlastnosti `$lastResponse` a historie zůstává celá, takže konverzace jde po zvýšení limitu rozjet dál. `AIAccess\LogicException` naopak dědí od stejnojmenné třídy z PHP, takže zapadne do ošetření, které už třeba máš.
+
+`AIAccess\IOException` stojí stranou úplně, protože se netýká providera: potkáš ji u `Media::fromFile()` a `Media::save()`, tedy když se nepovede přečíst předlohu nebo uložit vygenerovaný obrázek, a u [cachovacího klienta |http], když nejde založit adresář s cache.
+
+
+Jak to odchytit
+===============
+
+Od nejkonkrétnějšího po nejobecnější, jak je v PHP zvykem:
+
+```php
+try {
+	$response = $chat->sendMessage('Ahoj!');
+	echo $response->getText();
+
+} catch (AIAccess\ApiException $e) {
+	// provider odpověděl chybou, $e->getCode() je HTTP status
+	if ($e->getCode() === 429) {
+		// překročený limit, zkus to za chvíli
+	}
+
+} catch (AIAccess\CommunicationException $e) {
+	// nespojili jsme se; opakování má smysl
+
+} catch (AIAccess\ServiceException $e) {
+	// cokoli dalšího, co služba dokáže pokazit
+}
+```
+
+Pokud ti na rozlišení nezáleží, stačí jediný `catch (AIAccess\ServiceException $e)`. Rozhodně to ale nedělej tak, že odchytíš `\Throwable`: spolkl bys tím i `LogicException`, tedy vlastní chybu, kterou chceš vidět.
+
+
+Co znamenají jednotlivé stavy
+=============================
+
+`ApiException` je jediná, u které se vyplatí dívat na `getCode()`, protože HTTP status pod ní říká hodně:
+
+- **401 a 403** - klíč je špatně, chybí, vypršel, nebo nemá na tenhle model právo. Opakování nepomůže.
+- **404** - model tohoto jména neexistuje. Nejčastěji překlep nebo model, který provider vyřadil.
+- **429** - vyčerpaný limit požadavků nebo prázdný kredit. Počkej a zkus to znovu; provider často pošle hlavičku `Retry-After` s údajem, jak dlouho čekat.
+- **400** - požadavek se providerovi nelíbí. Typicky parametr, který ten model nezná; zpráva výjimky obvykle řekne který.
+- **500 a výš** - problém na jejich straně. Opakování má smysl.
+
+Zvláštní případ je OpenAI, které umí selhat **uvnitř úspěšné odpovědi**: HTTP je 200, ale uvnitř je stav `failed`. Knihovna to pozná a hodí `ApiException` stejně, jako by přišel chybový stav, takže se tím nemusíš zabývat.
+
+
+Odmítnutí není chyba
+====================
+
+Tohle je nejčastější nedorozumění. Když model odmítne odpovědět, protože se mu dotaz nelíbí, **není to výjimka**. Požadavek proběhl v pořádku, provider odpověděl a naúčtoval si to; jen v odpovědi není text.
+
+Poznáš to podle [důvodu ukončení |chat#Proč model přestal psát]:
+
+```php
+use AIAccess\Chat\FinishReason;
+
+$response = $chat->sendMessage($dotaz);
+
+if ($response->getFinishReason() === FinishReason::ContentFiltered) {
+	// model odmítl; u OpenAI ti důvod řekne $response->getRefusal()
+}
+```
+
+Stejnou logikou nejsou chybou ani useknutá odpověď při vyčerpaném limitu tokenů, ani kolo, ve kterém si model místo odpovědi řekl o nástroj. Ve všech třech případech je odpověď platná, jen jiná, než jsi čekal.
+
+
+Chyby, které se nehází vůbec
+============================
+
+Na dvou místech by výjimka nedávala smysl, tak se tam nepoužívá.
+
+**[Dávkové zpracování |batch] může selhat jen zčásti.** Ze sta požadavků jich devadesát devět projde a jeden ne. Kvůli tomu jednomu by nemělo padat celé čtení výsledků, takže se chyby jednotlivých položek sbírají zvlášť:
+
+```php
+foreach ($batch->getResults() as $customId => $result) {
+	if ($result->message === null) {
+		echo $customId, ' selhalo: ', $result->error, "\n";
+	} else {
+		echo $customId, ': ', $result->message->getText(), "\n";
+	}
+}
+```
+
+**Chyba při [volání nástroje |tools] může patřit modelu, ne tobě.** Když si model vymyslí neexistující nástroj nebo pošle argumenty, které neodpovídají schématu, dostane chybovou zprávu jako výsledek a může se opravit; tvůj kód o tom vůbec nemusí vědět. Když ale selže **tvůj vlastní** nástroj, výjimka propadne k tobě, dokud si nezapneš `setToolLoop(catchErrors: true)`. Ani potom ti ale nezmizí překlep v handleru: `TypeError` a jemu podobné propadají vždycky, protože to není chyba, kterou má řešit model.
+
+Knihovna nikde nepoužívá `trigger_error()`, takže se žádný problém neztratí jen proto, že má aplikace vypnuté `display_errors`. Jediné varování, které zůstalo, upozorňuje na střídání rolí u Gemini.
+
+
+Opakování nemusíš psát ručně
+============================
+
+Pokud jsi po přečtení tabulky nahoře přemýšlel, že si napíšeš `for` cyklus s čekáním, nemusíš. Knihovna má [dekorátor |http], který to umí, respektuje `Retry-After` a neopakuje nic, co by dopadlo stejně:
+
+```php
+$client = new AIAccess\Provider\OpenAI\Client(
+	$apiKey,
+	new AIAccess\Http\RetryClient(new AIAccess\Http\CurlClient),
+);
+```
+
+Od téhle chvíle se limity a výpadky řeší samy a ke tvému `catch` se dostane jen to, co opravdu neprošlo.
+
+
+Kam dál
+=======
+
+- [HTTP vrstva |http] - opakování, logování a cachování požadavků
+- [Konverzace |chat] - důvody ukončení a co z odpovědi vyčteš
+- [Dávkové zpracování |batch] - když část požadavků selže
+- [Volání nástrojů |tools] - chyby, které se vracejí modelu

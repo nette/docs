@@ -1,0 +1,150 @@
+HTTP vrstva a opakování požadavků
+*********************************
+
+.[perex]
+Každé volání providera prochází jedinou tenkou vrstvou, kterou můžeš vyměnit nebo obalit. Díky tomu se opakování po chybách, logování požadavků i cachování odpovědí řeší jednou pro celou aplikaci, aniž bys sáhl na kód, který s modelem mluví.
+
+
+Tři problémy, jedno místo
+=========================
+
+Až budeš mít aplikaci chvíli v provozu, narazíš na tohle:
+
+- Provider ti občas odpoví, že mu chodí požadavky příliš rychle za sebou, a volání spadne, přestože by za dvě vteřiny prošlo.
+- Potřebuješ vidět, co se vlastně posílá ven a jak dlouho to trvá, protože něco odpovídá pomalu a ty nevíš co.
+- Při vývoji spouštíš tentýž skript popadesáté a pokaždé za něj platíš, i když se vstup nezměnil.
+
+Všechny tři se řeší na jednom místě, a to výměnou toho, co posílá HTTP požadavky. Klient providera totiž neposílá nic sám. Postará se o to objekt, který mu předáš druhým argumentem konstruktoru:
+
+```php
+use AIAccess\Http;
+
+$client = new AIAccess\Provider\OpenAI\Client(
+	$apiKey,
+	new Http\RetryClient(new Http\CurlClient),
+);
+```
+
+Když druhý argument vynecháš, použije se `AIAccess\Http\CurlClient`. Knihovna má tři obaly, které se dají libovolně skládat, protože každý z nich je sám o sobě zase HTTP klient.
+
+
+RetryClient: Opakování po limitech a výpadcích
+==============================================
+
+`RetryClient` zkouší neúspěšné požadavky znovu, ale jen když to má smysl:
+
+```php
+$http = new Http\RetryClient(
+	new Http\CurlClient,
+	maxAttempts: 3,
+	initialDelay: 1.0,
+	maxDelay: 30.0,
+);
+```
+
+Opakují se stavy **408 a 429** a serverové chyby **od 500 výš**, plus výpadky sítě, které nastaly dřív, než dorazila odpověď. Mezi pokusy se čeká, doba se pokaždé zdvojnásobí a navíc se náhodně rozkolísá, aby ti tisíc paralelních procesů nezaútočilo na providera v jednu chvíli. Když provider pošle hlavičku `Retry-After`, řídí se podle ní.
+
+Stejně poučné je, co se neopakuje. Chyby ve čtyřstovkách kromě 408 a 429 dopadnou podruhé úplně stejně, takže by opakování jen zdrželo. A ze serverových chyb jsou vyňaté **501 a 505**, protože ty neříkají "teď ne", ale "tohle neumím a nikdy umět nebudu".
+
+Nejzajímavější pravidlo se týká [streamování |streaming]: jakmile dorazil první kousek odpovědi, opakování se zakáže. Model už začal psát a ty už za to platíš; kdyby se požadavek přehrál, dostal bys odpověď dvakrát a zaplatil ji dvakrát.
+
+
+ObservableClient: Vidět, co se děje
+===================================
+
+`ObservableClient` ohlásí každý požadavek a každou odpověď i s tím, jak dlouho trvala. Hodí se do logu, do [Tracy|tracy:] nebo do vlastního přehledu útraty.
+
+```php
+$http = new Http\ObservableClient(
+	new Http\CurlClient,
+	onRequest: function (string $url, $payload): void {
+		Debugger::log("-> $url");
+	},
+	onResponse: function (Http\Response $response, float $elapsed): void {
+		Debugger::log(sprintf('<- %d za %.1f s', $response->getStatusCode(), $elapsed));
+	},
+	onError: function (Throwable $e, float $elapsed): void {
+		Debugger::log(sprintf('!! %s po %.1f s', $e->getMessage(), $elapsed));
+	},
+);
+```
+
+Požadavek, ze kterého žádná odpověď nevznikla, jde do `onError`: typicky timeout nebo zavřené spojení, ale taky cokoli vyhodí tvůj vlastní streamovací callback, protože odtud se to nedá rozeznat. Právě tyhle požadavky přitom chceš v logu vidět nejvíc, a `onResponse` je nemá jak ohlásit. Výjimka pak putuje dál k tobě nezměněná.
+
+Všimni si, že do `onRequest` nedostáváš hlavičky. Není to opomenutí: hlavičky nesou API klíč a ten se nesmí dostat do logu, kde ho uvidí každý, kdo má přístup k souborům.
+
+U streamované odpovědi měří `$elapsed` celý přenos, tedy dobu, než model dopsal, ne dobu do prvního slova.
+
+
+CachingClient: Neplatit dvakrát za totéž
+========================================
+
+`CachingClient` si ukládá odpovědi na disk a stejný požadavek podruhé už neposílá. Je to nástroj **pro vývoj a testy**, ne pro produkci. Model, který na tutéž otázku odpovídá pořád stejně, není v ostrém provozu vlastnost, ale chyba.
+
+```php
+$http = new Http\CachingClient(new Http\CurlClient, __DIR__ . '/temp/ai-cache', ttl: 3600);
+```
+
+Kešovací klíč se počítá z metody, URL, těla požadavku a hlaviček, přičemž **autentizační hlavičky se z klíče vynechávají**. Díky tomu tě přepnutí na jiný klíč nepřipraví o cache, ale hlavička, která mění chování API, ano. Ukládají se jen úspěšné odpovědi, takže si chybu nezapamatuje, a streamy ani nahrávání souborů cache nechává projít beze změny.
+
+
+Na pořadí obalů záleží
+======================
+
+Obaly se skládají do sebe a výsledek se liší podle toho, který je zvenku:
+
+```php
+// loguje jen konečný výsledek: opakování proběhne uvnitř a ven se dostane až ono
+$http = new Http\ObservableClient(new Http\RetryClient(new Http\CurlClient), onResponse: $log);
+
+// loguje každý pokus včetně neúspěšných: logování je uvnitř smyčky opakování
+$http = new Http\RetryClient(new Http\ObservableClient(new Http\CurlClient, onResponse: $log));
+```
+
+Ani jedno není špatně, jen je dobré vědět, kterou z těch dvou variant jsi napsal. Při ladění limitů chceš to druhé, v provozním logu spíš to první.
+
+
+Timeouty a spojení
+==================
+
+Samotný `CurlClient` má dvě nastavení času a jedno pro proxy:
+
+```php
+$http = (new Http\CurlClient)->setOptions(connectTimeout: 10, requestTimeout: 180);
+```
+
+Výchozí tři minuty stačí na běžnou konverzaci, ale ne vždycky. Generování obrázku ve vysoké kvalitě s referencemi trvá klidně několik minut, takže tam si `requestTimeout` zvedni; poznáš to podle `CommunicationException`, která přijde přesně po vypršení limitu.
+
+U [streamované |streaming] odpovědi platí něco jiného a stojí to za zapamatování: **celkový časový strop se nepoužívá vůbec**. Dlouhá odpověď legitimně teče minuty a useknout ji uprostřed by zahodilo text, který uživatel právě čte. Místo toho se hlídá ticho: když delší dobu nic nepřijde, spojení se vzdá. Mez je tedy "přestalo to téct", ne "trvá to dlouho".
+
+Spojení navíc zůstává otevřené mezi požadavky. Nejvíc se to pozná u [smyčky nástrojů |tools], která je vlastně dávkou volání na tentýž server rychle po sobě; bez toho by se pro každé kolo znovu navazovalo TLS.
+
+
+Vlastní implementace
+====================
+
+Rozhraní `Http\Client` má jedinou metodu:
+
+```php
+interface Client
+{
+	function fetch(
+		string $url,
+		string|array|FormData|null $payload = null,
+		array $headers = [],
+		?string $method = null,
+		?\Closure $onChunk = null,
+	): Response;
+}
+```
+
+Streamování se nepozná podle zvláštní metody, ale podle toho, jestli je zadaný `$onChunk`. Vlastní implementaci oceníš hlavně v testech, kde chceš odpovědi předepsat místo volat API, ale i tehdy, když musíš požadavky protáhnout něčím netypickým.
+
+
+Kam dál
+=======
+
+- [Ošetření chyb |errors] - které chyby má smysl opakovat a proč
+- [Streamování |streaming] - proč se u streamu měří ticho místo času
+- [Generování obrázků |images] - kde se výchozí timeout nemusí vejít
+- [Provideři |providers] - co který umí a čím se liší

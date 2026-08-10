@@ -1,0 +1,135 @@
+Error Handling and Exceptions
+*****************************
+
+.[perex]
+A call to someone else's API fails sooner or later, always. What matters is not that it failed but whether it is worth trying again. The exceptions in AI Access are built around exactly that question. We will look at which ones exist, how to catch them, and why a model's refusal is not among them.
+
+
+The Only Question That Matters in Production
+============================================
+
+When a call fails you could ask plenty of things. In a running application only one decides what happens next: **should I repeat it, or is it hopeless?**
+
+A dropped network is a different thing from a wrong key. The first fixes itself in a second, the second will not be fixed by a hundred attempts. If the library threw one type of exception for both, you would have to decide by the text of the message, and that is the most brittle code you can write.
+
+So the exceptions are split by what you can do about them:
+
+| Exception                     | What happened                                                         | Repeat?                           |
+|-------------------------------|-----------------------------------------------------------------------|-----------------------------------|
+| `ApiException`                | The provider answered with an error. `getCode()` has the HTTP status. | Depends on the status, see below. |
+| `CommunicationException`      | We did not get through, or the response was unreadable.               | Yes, it almost always helps.      |
+| `UnexpectedResponseException` | A response arrived but does not have the expected shape.              | No. Log it and look into it.      |
+| `TooManyRoundsException`      | The [tool loop |tools] ran out of rounds.                             | No. Raise the limit, or give up.  |
+| `LogicException`              | A mistake in your own code.                                           | No. It is meant to crash.         |
+| `IOException`                 | A file cannot be read or written.                                     | Depends on the cause.             |
+
+The first four share the ancestor `AIAccess\ServiceException`, so a single `catch` covers them when all you need to know is that the service failed. `TooManyRoundsException` also carries the last response in its `$lastResponse` property, and the history stays whole, so the conversation can go on once you raise the limit. `AIAccess\LogicException`, on the other hand, extends PHP's class of the same name, so it fits into handling you may already have.
+
+`AIAccess\IOException` stands apart entirely, because it has nothing to do with the provider: you meet it at `Media::fromFile()` and `Media::save()`, that is when a reference cannot be read or a generated image cannot be saved, and at the [caching client |http] when the cache directory cannot be created.
+
+
+How to Catch It
+===============
+
+From the most specific to the most general, as is the custom in PHP:
+
+```php
+try {
+	$response = $chat->sendMessage('Hello!');
+	echo $response->getText();
+
+} catch (AIAccess\ApiException $e) {
+	// the provider answered with an error, $e->getCode() is the HTTP status
+	if ($e->getCode() === 429) {
+		// rate limited, try again shortly
+	}
+
+} catch (AIAccess\CommunicationException $e) {
+	// we did not get through; repeating makes sense
+
+} catch (AIAccess\ServiceException $e) {
+	// anything else the service can get wrong
+}
+```
+
+If the distinction does not matter to you, a single `catch (AIAccess\ServiceException $e)` will do. What you should definitely not do is catch `\Throwable`: that would swallow `LogicException` too, the very bug you want to see.
+
+
+What the Individual Statuses Mean
+=================================
+
+`ApiException` is the only one where looking at `getCode()` pays off, because the HTTP status underneath says a lot:
+
+- **401 and 403** - the key is wrong, missing, expired, or has no right to this model. Repeating will not help.
+- **404** - no model of that name exists. Usually a typo or a model the provider retired.
+- **429** - the rate limit is exhausted or the credit is empty. Wait and try again; the provider often sends a `Retry-After` header saying how long.
+- **400** - the provider does not like the request. Typically a parameter that the model does not know; the exception message usually says which.
+- **500 and above** - a problem on their side. Repeating makes sense.
+
+A special case is OpenAI, which can fail **inside a successful response**: the HTTP status is 200 but the state inside is `failed`. The library spots this and throws `ApiException` just as if an error status had arrived, so you do not have to deal with it.
+
+
+A Refusal Is Not an Error
+=========================
+
+This is the most common misunderstanding. When a model declines to answer because it does not like the question, **that is not an exception**. The request went through fine, the provider answered and billed it; there is just no text in the answer.
+
+You recognize it by the [finish reason |chat#Why the Model Stopped Writing]:
+
+```php
+use AIAccess\Chat\FinishReason;
+
+$response = $chat->sendMessage($question);
+
+if ($response->getFinishReason() === FinishReason::ContentFiltered) {
+	// the model refused; on OpenAI $response->getRefusal() tells you why
+}
+```
+
+By the same logic, neither an answer cut off by an exhausted token limit nor a round in which the model asked for a tool instead of answering is an error. In all three cases the response is valid, just different from what you expected.
+
+
+Errors That Are Never Thrown
+============================
+
+In two places an exception would make no sense, so it is not used there.
+
+**[Batch processing |batch] can fail only partially.** Out of a hundred requests, ninety-nine go through and one does not. Reading the results should not blow up because of that one, so per-item errors are collected separately:
+
+```php
+foreach ($batch->getResults() as $customId => $result) {
+	if ($result->message === null) {
+		echo $customId, ' failed: ', $result->error, "\n";
+	} else {
+		echo $customId, ': ', $result->message->getText(), "\n";
+	}
+}
+```
+
+**An error in a [tool call |tools] may belong to the model, not to you.** When the model invents a tool that does not exist, or sends arguments that do not match the schema, it receives an error message as the result and can correct itself; your code need not know at all. But when **your own** tool fails, the exception reaches you unless you turn on `setToolLoop(catchErrors: true)`. Even then a typo in the handler will not disappear: a `TypeError` and its kin always propagate, because that is not a mistake for the model to solve.
+
+The library never uses `trigger_error()`, so no problem gets lost merely because the application has `display_errors` off. The one warning that remains points out alternating roles on Gemini.
+
+
+You Do Not Have to Write the Retrying
+=====================================
+
+If reading the table above made you think about writing a `for` loop with a delay, you do not have to. The library ships a [decorator |http] that does it, honors `Retry-After` and repeats nothing that would fail identically:
+
+```php
+$client = new AIAccess\Provider\OpenAI\Client(
+	$apiKey,
+	new AIAccess\Http\RetryClient(new AIAccess\Http\CurlClient),
+);
+```
+
+From then on rate limits and outages take care of themselves, and only what genuinely did not go through reaches your `catch`.
+
+
+Where to Go Next
+================
+
+- [HTTP layer |http] - retrying, logging and caching of requests
+- [Conversation |chat] - finish reasons and what you read out of a response
+- [Batch processing |batch] - when some of the requests fail
+- [Tool calling |tools] - errors that go back to the model

@@ -1,0 +1,183 @@
+Providers and Models
+********************
+
+.[perex]
+A reference tour of the six clients: how each is created, what it can do, how they differ and what to watch out for. At the end we look at how to ask for the list of models a provider currently offers, and why that is more useful than it sounds.
+
+
+Six Clients, One Interface
+==========================
+
+Five clients talk to a specific provider, the sixth to anything that speaks the same dialect as OpenAI. They are all created the same way, with a key in the constructor:
+
+```php
+$client = new AIAccess\Provider\OpenAI\Client($apiKey);
+$client = new AIAccess\Provider\Claude\Client($apiKey);
+$client = new AIAccess\Provider\Gemini\Client($apiKey);
+$client = new AIAccess\Provider\DeepSeek\Client($apiKey);
+$client = new AIAccess\Provider\Grok\Client($apiKey);
+```
+
+What differs is the set of interfaces each client implements. That is how you tell what to expect from it, and PHP checks it for you before the script even runs:
+
+| Client   | `Chat\Service` | `Embedding\Service` | `Batch\Service` | `Image\Service` |
+|----------|----------------|---------------------|-----------------|-----------------|
+| OpenAI   | ✅             | ✅                  | ✅              | ✅              |
+| Gemini   | ✅             | ✅                  | ✅              | ✅              |
+| Claude   | ✅             | ➖                  | ✅              | ➖              |
+| Grok     | ✅             | ➖                  | ➖              | ✅              |
+| DeepSeek | ✅             | ➖                  | ➖              | ➖              |
+| Generic  | ✅             | ➖                  | ➖              | ➖              |
+
+When you write code that should work with any provider, type the parameter against the interface rather than the concrete class:
+
+```php
+public function __construct(
+	private AIAccess\Chat\Service $client,
+) {
+}
+```
+
+Your application then knows nothing at all about the choice of provider, and switching is a change in [configuration |dependency-injection:].
+
+
+Default Models
+==============
+
+For that to be true in earnest, the client has to know the model too. A model name is a string belonging wholly to one provider, so if the call had to supply it, the application would know the main thing about the provider after all.
+
+Models are therefore passed to the constructor, right next to the key:
+
+```php
+$client = new AIAccess\Provider\OpenAI\Client(
+	$apiKey,
+	chatModel: 'gpt-5.6-luna',
+	imageModel: 'gpt-image-2',
+	embeddingModel: 'text-embedding-3-small',
+);
+
+$chat = $client->createChat();          // the client fills the model in
+$image = $client->generateImage('A lighthouse on a cliff');
+```
+
+Each client takes only the models it can put to use: Claude and DeepSeek just `chatModel`, Grok `chatModel` and `imageModel`, OpenAI and Gemini all three. A parameter that does not exist is reported by PHP itself.
+
+A model given in the call always takes precedence, so a default never stops anyone from reaching elsewhere. And a client with no default that is given none in the call reports an `AIAccess\LogicException`; it is a configuration error, not a runtime one.
+
+A batch takes the defaults from the client that created it, so `addChat('id')` and `addImageRequest('id', $prompt)` go without them as well.
+
+In a Nette application the whole choice of provider therefore fits into the configuration, and that is the only place in the project where its name shows up:
+
+```neon
+services:
+	- AIAccess\Provider\OpenAI\Client(%openaiApiKey%, chatModel: 'gpt-5.6-luna')
+```
+
+Switching to another provider is then a matter of that one line, and classes typed against `AIAccess\Chat\Service` will not even notice:
+
+```neon
+services:
+	- AIAccess\Provider\Claude\Client(%anthropicApiKey%, chatModel: 'claude-sonnet-5')
+```
+
+A client that can do more gets a model for each of those things:
+
+```neon
+services:
+	- AIAccess\Provider\OpenAI\Client(
+		%openaiApiKey%,
+		chatModel: 'gpt-5.6-luna',
+		imageModel: 'gpt-image-2',
+		embeddingModel: 'text-embedding-3-small',
+	)
+```
+
+Always write the models by name, as we do here. The constructor's second parameter is the [HTTP client |http], not a model, so a model passed second in order would be taken for it.
+
+
+How They Differ
+===============
+
+The set of interfaces is only half the story. These are the traits you meet in practice.
+
+**OpenAI** has the widest reach and is the only one that can upload files (`uploadFile()`, `uploadContent()`), which batch processing uses. It reports a refusal separately, so you reach it through `getRefusal()`. Through `setOptions()` you can also set the organization.
+
+**Claude** requires a cap on the answer's length with every request, so the library fills in `maxOutputTokens` as 4096 unless you set it otherwise. Anthropic offers no embeddings at all, so search will need a different provider. It can count tokens in advance with `countTokens()`.
+
+**Gemini** has no separate endpoint for image generation: image models are called through ordinary chat; you merely say the answer should be a picture. It also has `countTokens()`. **Batch processing and image generation, however, require a project with active billing**; on the free tier a batch ends in an error and image models have a daily quota of zero. A generated image arrives as JPEG, not PNG.
+
+**Grok** accepts images as input but not documents. It can generate images too, though without reference pictures. It reports a refusal in a message field of its own rather than as a finish reason, which the library translates into `FinishReason::ContentFiltered`.
+
+**DeepSeek** is the narrowest of the five: chat only, no vision, embeddings or batches. It is worth knowing that **thinking is on by default**, so you pay extra tokens until you [turn it off |options].
+
+
+The Generic Client for Everything Else
+======================================
+
+Plenty of services today speak the same dialect as OpenAI. `OpenAICompatible\Client` is there for those, and besides the key you also give it an address:
+
+```php
+$client = new AIAccess\Provider\OpenAICompatible\Client($apiKey, 'https://api.mistral.ai/v1/');
+$response = $client->createChat('mistral-large-latest')->sendMessage('Hello!');
+```
+
+**Ollama** running locally wants no key, so send it an empty string:
+
+```php
+$client = new AIAccess\Provider\OpenAICompatible\Client('', 'http://localhost:11434/v1/');
+echo $client->createChat('llama3.2')->sendMessage('Hello!')->getText();
+```
+
+**OpenRouter** brokers models from dozens of vendors and likes headers identifying the application:
+
+```php
+$client = new AIAccess\Provider\OpenAICompatible\Client($apiKey, 'https://openrouter.ai/api/v1/');
+$client->setOptions(extraHeaders: ['HTTP-Referer' => 'https://example.com', 'X-Title' => 'My application']);
+```
+
+**Azure OpenAI** sends the key in a header of its own and without a prefix:
+
+```php
+$client = new AIAccess\Provider\OpenAICompatible\Client($apiKey, 'https://myinstance.openai.azure.com/openai/v1/');
+$client->setOptions(authHeader: 'api-key', authPrefix: '');
+```
+
+With the generic client one limitation deserves saying out loud: **the library sends what it knows how to send, but what the endpoint does with it is not guaranteed**. Tool calls, structured output and images as input all go out, yet whether the model behind that address handles them is decided by that service, not by us. When the endpoint knows an extra parameter, you push it through with the `custom` argument in [options |options].
+
+Streaming from the generic client sends no `stream_options`, because that is an OpenAI invention and an unknown dialect may refuse the whole request over it. If your endpoint knows it and you want token usage from the stream, add it through `custom`.
+
+
+Which Models a Provider Currently Offers
+========================================
+
+Because a model name is an ordinary string, nothing checks it for you: a typo or a retired model shows up only at runtime, and as you will see in a moment, sometimes not even then. So ask the provider for the current offering:
+
+```php
+foreach ($client->listModels() as $model) {
+	echo $model->id, "\n";
+}
+```
+
+All six clients have the method and handle pagination internally, so you get the whole list at once. Besides `id`, every model carries all the metadata in `raw` exactly as the provider sent it; those are not unified, because each one sends something different.
+
+It is most useful as a deployment check. **A retired model need not announce itself with an error:** xAI, for instance, quietly redirects old names to a newer model, so the application keeps running and merely talks to something other than you thought. Checking against `listModels()` is the only way you find out.
+
+Claude and Gemini can additionally count how many tokens a conversation will cost **before you send it**:
+
+```php
+$chat = $client->createChat('claude-sonnet-5');
+$chat->addMessage($longText, AIAccess\Chat\Role::User);
+
+echo 'This question will cost ', $chat->countTokens(), " input tokens.\n";
+```
+
+It comes in handy when you assemble a long context and need to know whether it fits the model's limit, or what it will cost, before you pay for it.
+
+
+Where to Go Next
+================
+
+- [Conversation |chat] - history, the system instruction and reading the answer
+- [Options and reasoning effort |options] - how much thinking you ask the model for
+- [Error handling |errors] - what to do when the provider says no
+- [HTTP layer |http] - retrying, logging and caching requests

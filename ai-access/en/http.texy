@@ -1,0 +1,150 @@
+HTTP Layer and Retrying Requests
+********************************
+
+.[perex]
+Every call to a provider passes through a single thin layer that you can replace or wrap. That is why retrying after errors, logging requests and caching responses are solved once for the whole application, without touching the code that talks to the model.
+
+
+Three Problems, One Place
+=========================
+
+Once your application has been running for a while, you will meet these:
+
+- The provider occasionally answers "too fast, slow down" and the call fails, even though it would go through two seconds later.
+- You need to see what is actually being sent out and how long it takes, because something is slow and you do not know what.
+- During development you run the same script for the fiftieth time and pay for it every time, even though the input has not changed.
+
+All three are solved in one place, by replacing whatever sends the HTTP requests. The provider's client sends nothing on its own; it gets that from an object you hand it as the second constructor argument:
+
+```php
+use AIAccess\Http;
+
+$client = new AIAccess\Provider\OpenAI\Client(
+	$apiKey,
+	new Http\RetryClient(new Http\CurlClient),
+);
+```
+
+Leave the second argument out and `AIAccess\Http\CurlClient` is used. The library ships three wrappers that compose freely, because each of them is itself just an HTTP client.
+
+
+RetryClient: Retrying After Rate Limits and Outages
+===================================================
+
+`RetryClient` retries failed requests, but only when there is a point:
+
+```php
+$http = new Http\RetryClient(
+	new Http\CurlClient,
+	maxAttempts: 3,
+	initialDelay: 1.0,
+	maxDelay: 30.0,
+);
+```
+
+Statuses **408 and 429** are repeated, as are server errors **from 500 up**, plus network failures that happened before a response arrived. Between attempts it waits, doubling the delay each time and scattering it slightly at random, so that a thousand parallel processes do not hit the provider at the same instant. When the provider sends a `Retry-After` header, that wins.
+
+What is not repeated is just as instructive. Errors in the four hundreds other than 408 and 429 would fail identically the second time, so repeating would only add delay. And among the server errors, **501 and 505** are excluded, because they do not say "not now" but "I cannot do this and never will".
+
+The most interesting rule concerns [streaming |streaming]: once the first piece of the answer has arrived, retrying is disabled. The model has started writing and you are already paying for it; replaying the request would give you the answer twice and bill it twice.
+
+
+ObservableClient: Seeing What Happens
+=====================================
+
+`ObservableClient` reports every request and every response along with how long it took. It fits a log, [Tracy|tracy:], or your own spending overview.
+
+```php
+$http = new Http\ObservableClient(
+	new Http\CurlClient,
+	onRequest: function (string $url, $payload): void {
+		Debugger::log("-> $url");
+	},
+	onResponse: function (Http\Response $response, float $elapsed): void {
+		Debugger::log(sprintf('<- %d in %.1f s', $response->getStatusCode(), $elapsed));
+	},
+	onError: function (Throwable $e, float $elapsed): void {
+		Debugger::log(sprintf('!! %s after %.1f s', $e->getMessage(), $elapsed));
+	},
+);
+```
+
+A request that produced no response at all goes to `onError`: a timeout or a closed connection, but also anything your own streaming callback throws, because from here the two are indistinguishable. Those are exactly the requests you want in the log most, and `onResponse` has no way to report them. The exception then travels on to you unchanged.
+
+Notice that `onRequest` does not receive the headers. That is not an omission: headers carry the API key, and it must not reach a log where anyone with access to the files can read it.
+
+For a streamed response, `$elapsed` measures the whole transfer, meaning the time until the model finished writing, not the time to the first word.
+
+
+CachingClient: Not Paying Twice for the Same Thing
+==================================================
+
+`CachingClient` stores responses on disk and does not send the same request twice. It is a tool **for development and tests**, not for production. A model that answers the same question identically forever is not a feature in a live application; it is a bug.
+
+```php
+$http = new Http\CachingClient(new Http\CurlClient, __DIR__ . '/temp/ai-cache', ttl: 3600);
+```
+
+The cache key is computed from the method, the URL, the request body and the headers, except that **authentication headers are left out of it**. Thanks to that, switching to another key does not cost you the cache, while a header that changes how the API behaves does. Only successful responses are stored, so an error is never remembered, and streams and file uploads pass through untouched.
+
+
+The Order of Wrappers Matters
+=============================
+
+Wrappers nest, and the result differs depending on which one is on the outside:
+
+```php
+// logs only the final outcome: the retrying happens inside, and only the result comes out
+$http = new Http\ObservableClient(new Http\RetryClient(new Http\CurlClient), onResponse: $log);
+
+// logs every attempt including the failed ones: the logging sits inside the retry loop
+$http = new Http\RetryClient(new Http\ObservableClient(new Http\CurlClient, onResponse: $log));
+```
+
+Neither is wrong, just know which one you wrote. While debugging rate limits you want the second, in a production log rather the first.
+
+
+Timeouts and the Connection
+===========================
+
+`CurlClient` itself has two time settings and one for a proxy:
+
+```php
+$http = (new Http\CurlClient)->setOptions(connectTimeout: 10, requestTimeout: 180);
+```
+
+The default three minutes are enough for an ordinary conversation, but not always. Generating a high-quality image with reference pictures easily takes several minutes, so raise `requestTimeout` there; you recognize the problem by a `CommunicationException` arriving exactly when the limit expires.
+
+For a [streamed |streaming] response something else applies and it is worth remembering: **no total time cap is used at all**. A long answer legitimately flows for minutes, and cutting it off midway would throw away text the user is reading right now. Silence is watched instead: when nothing arrives for a while, the connection gives up. The limit is therefore "it stopped flowing", not "it is taking long".
+
+The connection also stays open between requests. You notice it most in a [tool loop |tools], which is really a burst of calls to the same server in quick succession; without it, every round would negotiate TLS again.
+
+
+Your Own Implementation
+=======================
+
+The `Http\Client` interface has a single method:
+
+```php
+interface Client
+{
+	function fetch(
+		string $url,
+		string|array|FormData|null $payload = null,
+		array $headers = [],
+		?string $method = null,
+		?\Closure $onChunk = null,
+	): Response;
+}
+```
+
+Streaming is not marked by a separate method but by whether `$onChunk` is given. You will appreciate your own implementation mostly in tests, where you want to prescribe responses instead of calling the API, but also when requests have to travel through something unusual.
+
+
+Where to Go Next
+================
+
+- [Error handling |errors] - which errors are worth repeating and why
+- [Streaming |streaming] - why silence rather than time is measured on a stream
+- [Image generation |images] - where the default timeout may not be enough
+- [Providers |providers] - what each one can do and how they differ

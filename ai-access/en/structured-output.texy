@@ -1,0 +1,158 @@
+Structured Output and JSON Schema
+*********************************
+
+.[perex]
+Sometimes you do not want a sentence from the model but data: a name, an amount, a date, a list of categories. Asking nicely in the prompt is not enough, because the model occasionally adds an introduction or wraps the answer in markdown. The fix is to prescribe the shape of the answer with a schema that the provider enforces. The source does not have to be text either: a schema works just as well on [a photographed receipt or an attached PDF |multimodal].
+
+
+Asking Nicely Is Not Enough
+===========================
+
+Say you need the customer's name and the amount out of an e-mail. The first idea is to ask:
+
+```php
+$chat->sendMessage('Return the name and amount from this e-mail as JSON: ...');
+```
+
+Nine times out of ten it works. The tenth time you get this:
+
+/--
+Certainly! Here is the requested data:
+
+```json
+{"name": "John Smith", "amount": 1500}
+```
+\--
+
+The answer is factually right, but `json_decode()` fails on it, because there is a sentence and a markdown block around it. Another time the model names the key `customer` instead of `name`, or returns the amount as the string `"1500 USD"`. You will not catch this in testing, because most of the time it passes; you catch it in production, usually on data nobody expected.
+
+A prompt is a request, not a guarantee. And a request is not what you build unattended processing on.
+
+
+A Schema Instead of a Request
+=============================
+
+Rather than asking, you prescribe the shape. You hand `setResponseSchema()` a [JSON schema |https://json-schema.org] and the provider makes sure the model sticks to it:
+
+```php
+$chat = $client->createChat('gpt-5.6-luna');
+
+$chat->setResponseSchema([
+	'type' => 'object',
+	'properties' => [
+		'name' => ['type' => 'string', 'description' => 'Name of the customer'],
+		'amount' => ['type' => 'number', 'description' => 'Amount without the currency'],
+	],
+	'required' => ['name', 'amount'],
+	'additionalProperties' => false,
+]);
+
+$response = $chat->sendMessage('Extract the data from this e-mail: ...');
+$data = $response->getJson();
+
+echo $data['name'], ' pays ', $data['amount'], "\n";
+```
+
+`getJson()` returns the decoded array directly, so there is no stripping of markdown and no extra `json_decode()`. Nothing surrounds the answer, because the model has nowhere to put it.
+
+The difference from a prompt is not that the model suddenly respects the instruction better. It is that **the schema is enforced by the provider**, not by the model's good will.
+
+
+How to Write a Schema
+=====================
+
+A JSON schema describes the shape of data in JSON, and for ordinary use three things are enough.
+
+`type` says what it is: `object` for a structure with keys, `array` for a list, plus `string`, `number`, `integer` and `boolean`. `properties` lists the individual keys of an object, each with its own `type`. `required` is the list of keys that must always arrive; anything not in it the model may omit.
+
+Three pieces of advice that pay off:
+
+- **Describe the fields.** The model reads the `description` of each key and follows it. The difference between "amount" and "amount without the currency and without spaces" is the difference between `"1 500 USD"` and `1500`.
+- **Use `enum` for closed lists.** When the category must be one of three, write `['type' => 'string', 'enum' => ['complaint', 'question', 'spam']]`. The model then cannot invent a fourth.
+- **Expect strict mode.** OpenAI, Grok and the generic client receive the schema with `strict` turned on, which demands `additionalProperties: false` and **every key in `required`**; anything else ends as an `ApiException`. Claude and Gemini are more relaxed and tolerate optional keys. When a value should be optional across providers, keep it in `required` and let it be empty or null via `'type' => ['string', 'null']`, so the model does not have to invent it.
+
+Nesting is unlimited, so a list of objects looks like this:
+
+```php
+$chat->setResponseSchema([
+	'type' => 'object',
+	'properties' => [
+		'items' => [
+			'type' => 'array',
+			'items' => [
+				'type' => 'object',
+				'properties' => [
+					'title' => ['type' => 'string'],
+					'count' => ['type' => 'integer'],
+				],
+				'required' => ['title', 'count'],
+				'additionalProperties' => false,
+			],
+		],
+	],
+	'required' => ['items'],
+	'additionalProperties' => false,
+]);
+```
+
+
+When the Answer Does Not Go to Plan
+===================================
+
+A schema guarantees the shape of the answer, not that an answer arrives at all. Two situations deserve handling.
+
+**The model may refuse to answer.** A safety filter does not disappear because you prescribed a shape; the text will then be empty and `getJson()` returns `null`. You recognize it by the [finish reason |chat#Why the Model Stopped Writing]:
+
+```php
+use AIAccess\Chat\FinishReason;
+
+if ($response->getFinishReason() !== FinishReason::Complete) {
+	// a refusal or a truncated answer, do not expect data
+}
+```
+
+**The answer may not be valid JSON.** It happens rarely, typically when the token limit runs out mid-way and the JSON is left unclosed. `getJson()` then throws `AIAccess\UnexpectedResponseException`, so you do not discover it two layers further on:
+
+```php
+try {
+	$data = $response->getJson();
+} catch (AIAccess\UnexpectedResponseException $e) {
+	// the answer could not be decoded, the raw text is in getText()
+}
+```
+
+
+Who Supports It, and What About DeepSeek
+========================================
+
+Schemas work on **OpenAI, Claude, Gemini and Grok** and on the [generic client |providers]. DeepSeek has no such option, so `setResponseSchema()` throws `AIAccess\LogicException` there and points you at the JSON mode. Were the schema sent, the endpoint would answer "This response_format type is unavailable now".
+
+JSON mode does not guarantee the shape, but it does guarantee that the answer is valid JSON with no markdown around it:
+
+```php
+$chat->setOptions(responseFormat: ['type' => 'json_object']);
+```
+
+Mind one trap: DeepSeek insists the word "json" appears somewhere in the conversation, and refuses the request otherwise. Mentioning it in the instruction or the question is enough.
+
+You then have to describe the shape in the prompt and check the result yourself. Grok and the generic client have the same setting, but there you are better off with a schema.
+
+
+A Schema, or a Tool?
+====================
+
+Both make the model produce JSON following a schema, which is why they get confused. The difference is in who hands what to whom.
+
+- **Structured output is the shape of the answer.** The model finishes and you receive data. Use it when you want a result from the model: extracting values from text, sorting into a category, splitting an address into parts.
+- **A [tool call |tools] is a question aimed at you.** The model stops and waits for you to find something out, then carries on. Use it when the model needs information or an action that your application owns.
+
+Put simply: structured output is an answer, a tool is a question.
+
+
+Where to Go Next
+================
+
+- [Tool calling |tools] - when the model needs to ask your application
+- [Conversation |chat] - the finish reason and reading the answer
+- [Error handling |errors] - which exception means what
+- [Providers |providers] - what each one can do and how they differ

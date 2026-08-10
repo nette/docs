@@ -1,0 +1,140 @@
+Embeddingy a vyhledávání podle významu
+**************************************
+
+.[perex]
+Vyhledávání, které najde i to, co uživatel pojmenoval úplně jinými slovy. Nabídka souvisejících článků. Roztřídění dotazů do kategorií. Odpovídání nad vlastní dokumentací. Všechny tyhle úlohy stojí na jedné technice: embeddingy nechají model spočítat význam textu a převedou ho na čísla, se kterými už umí počítat i obyčejná databáze.
+
+
+Co je embedding
+===============
+
+Máš na webu vyhledávání. Uživatel do něj napíše "jak zrychlit web" a nenajde nic, přestože máš článek "Optimalizace výkonu aplikace". Ani jedno slovo se neshoduje, takže `LIKE` i fulltext mlčí. Přitom je to přesně ten článek, který hledal.
+
+Můžeš si psát seznamy synonym, které nikdy nebudou úplné. Anebo přestaň porovnávat slova a začni porovnávat význam. Přesně to embeddingy umožňují.
+
+Představ si, že bys každý článek známkoval v dotazníku. Jak moc je o technice? Jak moc o vaření? Jak moc řeší nějaký problém? Jak moc je to návod? Z tvých známek vznikne řádek čísel, a dva články s podobnými známkami jsou zjevně o tomtéž, i když každý používá jiná slova.
+
+**A přesně tohle dělá embedding, jen v mnohem větším měřítku.** Otázky si model vymyslí sám, je jich několik set až několik tisíc a nikdo je nikdy nevyslovil; my se je nedozvíme a ani je znát nepotřebujeme. Dostaneme jen ty známky, tedy řadu čísel (desetinných). Proto nemá smysl dívat se na jednotlivá čísla a hledat v nich význam; ten dává až porovnání dvou takových řad. Řadě čísel se říká **vektor**, a proto se tak jmenuje i třída v knihovně.
+
+Ještě jedna vlastnost se hodí: **výpočet je deterministický**. Stejný text poslaný stejnému modelu vrátí pokaždé stejný vektor. Na rozdíl od konverzace s modelem tady nehrozí, že dostaneš zítra jiný výsledek než včera, takže si vektory můžeš uložit a už je nikdy nepočítat znovu.
+
+
+První vektory
+=============
+
+Embeddingy umí spočítat OpenAI a Gemini. Tenhle skript můžeš rovnou spustit:
+
+```php
+require __DIR__ . '/vendor/autoload.php';
+
+$client = new AIAccess\Provider\OpenAI\Client('sem-vloz-svuj-klic');
+
+$vectors = $client->calculateEmbeddings([
+	'Jak zrychlit web',
+	'Optimalizace výkonu aplikace',
+	'Recept na svíčkovou',
+], 'text-embedding-3-small');
+
+echo 'web vs. výkon:    ', $vectors[0]->cosineSimilarity($vectors[1]), "\n";
+echo 'web vs. svíčková: ', $vectors[0]->cosineSimilarity($vectors[2]), "\n";
+```
+
+Dostaneš pole objektů `AIAccess\Embedding\Vector` ve stejném pořadí, v jakém jsou texty.
+
+
+Jak číst míru podobnosti
+------------------------
+
+Metoda `cosineSimilarity()` porovná dvě takové řady známek a shrne jejich shodu do jediného čísla od -1 do 1. Šikovné na tom je, že na délce textu nezáleží: krátký dotaz a dlouhý článek o tomtéž si vyjdou blízko, i když je jeden desetkrát delší.
+
+- **1** je nejvyšší možná shoda, tedy prakticky totožný význam.
+- **0** znamená, že spolu texty nemají nic společného.
+- **-1** by znamenalo přesný opak. U textových embeddingů se to prakticky nestává, takže se dolní polovinou škály nemusíš zabývat.
+
+Nečekej ale, že se čísla roztáhnou po celé stupnici. V praxi sedí v mnohem užším pásmu: nesouvisející texty nevyjdou na nule a dokonalý zásah nevyjde na jedničce. Každý model má navíc stupnici rozprostřenou jinak, takže vlastní hranici pro "dost podobné" si musíš naměřit na svých datech.
+
+Nejspolehlivěji se stejně pracuje s pořadím. Seřaď kandidáty podle podobnosti a vezmi několik nejvyšších; to funguje bez ohledu na to, jak model škáluje.
+
+
+Sémantické vyhledávání krok za krokem
+=====================================
+
+Vyhledávání nad vlastními daty má dvě fáze a vyplatí se je oddělit, protože každá probíhá jindy.
+
+**Jednou při indexaci** spočítáš embedding každého dokumentu a uložíš ho. Tohle je ta placená a pomalejší část, ale děje se jen při vzniku nebo změně dokumentu.
+
+**Při každém dotazu** spočítáš embedding otázky, což je jedno rychlé volání, a porovnáš ho s uloženými vektory. Nejpodobnější dokumenty jsou výsledek hledání.
+
+Ve zkratce, nezávisle na tom, jakou databázovou vrstvu používáš:
+
+```php
+use AIAccess\Embedding\Vector;
+
+// jednou při indexaci: ulož vektor k dokumentu
+[$vector] = $client->calculateEmbeddings([$text], 'text-embedding-3-small');
+$binary = $vector->serialize();
+
+// při hledání: spočítej vektor otázky a porovnej s uloženými
+[$query] = $client->calculateEmbeddings([$question], 'text-embedding-3-small');
+
+$scores = [];
+foreach ($storedArticles as $id => $storedBinary) {
+	$scores[$id] = $query->cosineSimilarity(Vector::deserialize($storedBinary));
+}
+arsort($scores);
+$best = array_slice($scores, 0, 5, preserve_keys: true);
+```
+
+A teď to nejlepší: nalezené úryvky nemusí být cíl, ale surovina. Pošli je spolu s původní otázkou modelu do [konverzace |chat] a místo seznamu odkazů dostaneš souvislou odpověď postavenou na tvých vlastních datech, která model při trénování nikdy neviděl. Tomuhle spojení vyhledávání a odpovídání se říká RAG a je to dnes nejčastější způsob, jak modelu dodat znalosti, které nemá.
+
+
+Kam vektory uložit
+==================
+
+Metoda `Vector::serialize()` udělá z vektoru binární řetězec vhodný do sloupce typu `BLOB` nebo `VARBINARY`. Zpátky ho převede statická `Vector::deserialize()`. Čísla se ukládají po 32 bitech v pevném pořadí bajtů.
+
+Možná jsi slyšel pojem **vektorová databáze**. Je to úložiště, které umí najít nejpodobnější vektory, aniž by prošlo všechny; staví si nad nimi index podobně, jako si běžná databáze staví index nad sloupcem. Patří sem třeba PostgreSQL s rozšířením pgvector, SQLite s rozšířením sqlite-vec nebo samostatné služby jako Qdrant.
+
+Dokud jsi ale v řádu tisíců dokumentů, **žádnou nepotřebuješ**. Pár tisíc vektorů zabere pár desítek megabajtů v paměti a lineární projití trvá jednotky milisekund, takže obyčejné pole a `foreach` výše je plnohodnotné řešení. Specializované úložiště začni řešit, až budeš mít statisíce záznamů nebo až tě průchod začne brzdit.
+
+
+Kolik to stojí
+==============
+
+Embeddingy jsou proti konverzaci s modelem levné. Platí se u nich jen vstup, protože žádný výstupní text nevzniká, a účtují se stejně jako u chatu po [tokenech |getting-started#Kolik to stojí].
+
+Prakticky to znamená, že zaindexovat několik tisíc článků stojí obvykle míň, než čekáš, a jeden dotaz uživatele je zanedbatelný. Jediná položka, která umí překvapit, je **přepočet celé databáze** po změně modelu, protože zaplatíš znovu úplně všechno.
+
+
+Na co si dát pozor
+==================
+
+**Indexace i dotaz musí používat stejný model.** Každý model má vlastní prostor, takže vektory z různých modelů se porovnávat nedají. Zrádné je, jak se to projeví: když mají různý počet čísel, `cosineSimilarity()` vyhodí `AIAccess\LogicException` a dozvíš se to hned. Když ho mají shodou okolností stejný, **nespadne nic** a jen dostaneš nesmyslné pořadí výsledků. Po změně modelu proto vždycky přepočítej celou databázi.
+
+Zbytek je drobnější:
+
+- **Prázdný vstup skončí výjimkou.** Prázdné pole i prázdný řetězec v něm vyhodí `AIAccess\LogicException` ještě před odesláním, což je lepší, než platit za dotaz, ze kterého nic nebude.
+- **Jedno volání zvládne víc textů najednou** a je to výrazně rychlejší i levnější než volat je po jednom. OpenAI přijme až 2048 vstupů v jednom požadavku.
+- **Dlouhý dokument rozděl na části.** Modely mají strop na délku vstupu a hlavně platí, že čím delší text, tím rozmazanější význam. Kratší úryvky se hledají přesněji.
+
+
+Rozdíly mezi providery
+======================
+
+Embeddingy nabízejí jen dva z pěti providerů; Claude, DeepSeek ani Grok vlastní embedding API nemají.
+
+| Provider | Volitelné navíc                                                                        |
+|----------|----------------------------------------------------------------------------------------|
+| OpenAI   | `dimensions` zkrátí vektor a ušetří místo v databázi, umí to modely `text-embedding-3` |
+| Gemini   | `taskType` říká, k čemu vektor bude, například `RETRIEVAL_DOCUMENT`                    |
+
+Gemini rozlišuje, jestli text ukládáš do indexu, nebo se jím ptáš, a podle toho vektor mírně upraví. Když u něj použiješ `title`, musíš zároveň nastavit `taskType` na `RETRIEVAL_DOCUMENT`, jinak dostaneš `AIAccess\LogicException`; pojmenovat se dá dokument, ne dotaz.
+
+
+Kam dál
+=======
+
+- [Konverzace |chat] - jak nalezené úryvky předat modelu
+- [Dávkové zpracování |batch] - když potřebuješ zaindexovat opravdu hodně textů
+- [Ošetření chyb |errors] - co dělat, když volání selže
+- [Provideři |providers] - co který umí a čím se liší

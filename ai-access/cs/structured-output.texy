@@ -1,0 +1,158 @@
+Strukturovaný výstup a JSON schéma
+**********************************
+
+.[perex]
+Někdy od modelu nepotřebuješ větu, ale data, se kterými bude aplikace dál pracovat: jméno, částku, datum, kategorii. Říct si o ně v promptu nemusí stačit, protože model občas přidá úvodní větu nebo odpověď obalí do markdownu. Spolehlivé je předepsat tvar odpovědi schématem, které pohlídá provider. Zdrojem přitom nemusí být jen text: schéma se dá stejně dobře nasadit na [vyfocenou účtenku nebo přiložené PDF |multimodal].
+
+
+Co si řekneš v promptu, model dodržet nemusí
+============================================
+
+Řekněme, že z e-mailu potřebuješ vytáhnout jméno objednatele a částku. První nápad je říct si o to rovnou v promptu:
+
+```php
+$chat->sendMessage('Vrať jméno a částku z tohoto e-mailu jako JSON: ...');
+```
+
+Devětkrát z deseti to funguje. Podesáté dostaneš tohle:
+
+/--
+Jistě! Zde jsou požadovaná data:
+
+```json
+{"jmeno": "Jan Novák", "castka": 1500}
+```
+\--
+
+Odpověď je věcně správná, ale `json_decode()` na ní selže, protože kolem je věta a markdownový blok. Jindy model klíč pojmenuje `name` místo `jmeno`, jindy vrátí částku jako řetězec `"1500 Kč"`. V testech to nepoznáš, protože ve větší části případů to projde; poznáš to až v provozu, obvykle na datech, která nikdo nečekal.
+
+Pokyn v promptu je totiž přání, ne záruka. A na procesu, který má běžet bez dozoru, se přání staví špatně.
+
+
+Schéma místo pokynů
+===================
+
+Místo pokynu tvar rovnou předepíšeš. Metodě `setResponseSchema()` předáš [JSON schéma |https://json-schema.org] a provider se postará, aby ho model dodržel:
+
+```php
+$chat = $client->createChat('gpt-5.6-luna');
+
+$chat->setResponseSchema([
+	'type' => 'object',
+	'properties' => [
+		'jmeno' => ['type' => 'string', 'description' => 'Jméno objednatele'],
+		'castka' => ['type' => 'number', 'description' => 'Částka v korunách bez měny'],
+	],
+	'required' => ['jmeno', 'castka'],
+	'additionalProperties' => false,
+]);
+
+$response = $chat->sendMessage('Vytáhni data z tohoto e-mailu: ...');
+$data = $response->getJson();
+
+echo $data['jmeno'], ' zaplatí ', $data['castka'], " Kč\n";
+```
+
+`getJson()` vrátí rovnou dekódované pole, takže žádné odstraňování markdownu ani `json_decode()` navíc. Kolem odpovědi už nic není, protože formát je pevně daný a na úvodní větu v něm není místo.
+
+Rozdíl proti promptu není v tom, že by model pokyn najednou lépe respektoval. Je v tom, že **schéma hlídá provider**, ne dobrá vůle modelu.
+
+
+Jak schéma napsat
+=================
+
+JSON schéma je popis tvaru dat v JSONu a pro běžné použití si vystačíš se třemi věcmi.
+
+`type` říká, o co jde: `object` pro strukturu s klíči, `array` pro seznam, dále `string`, `number`, `integer` a `boolean`. `properties` vyjmenuje jednotlivé klíče objektu a ke každému znovu jeho `type`. `required` je seznam klíčů, které musí přijít vždycky; co v něm není, model vynechat může.
+
+Tři rady, které se vyplatí:
+
+- **Popisuj pole.** `description` u každého klíče model čte a řídí se jím. Rozdíl mezi "částka" a "částka v korunách bez měny a bez mezer" je rozdíl mezi `"1 500 Kč"` a `1500`.
+- **Uzavřené seznamy dělej přes `enum`.** Když má být kategorie jedna ze tří, napiš `['type' => 'string', 'enum' => ['reklamace', 'dotaz', 'spam']]`. Model pak nevymyslí čtvrtou.
+- **Počítej s přísným režimem.** OpenAI, Grok i generický klient dostávají schéma se zapnutým `strict`, a ten vyžaduje `additionalProperties: false` a **všechny klíče v `required`**; jinak požadavek skončí `ApiException`. Claude a Gemini jsou v tomhle volnější a nepovinné klíče snesou. Když má být údaj volitelný napříč providery, nech ho v `required` a povol mu prázdnou hodnotu nebo `null` přes `'type' => ['string', 'null']`, ať ho model nemusí vymýšlet.
+
+Vnořovat lze libovolně, takže seznam objektů vypadá takhle:
+
+```php
+$chat->setResponseSchema([
+	'type' => 'object',
+	'properties' => [
+		'polozky' => [
+			'type' => 'array',
+			'items' => [
+				'type' => 'object',
+				'properties' => [
+					'nazev' => ['type' => 'string'],
+					'pocet' => ['type' => 'integer'],
+				],
+				'required' => ['nazev', 'pocet'],
+				'additionalProperties' => false,
+			],
+		],
+	],
+	'required' => ['polozky'],
+	'additionalProperties' => false,
+]);
+```
+
+
+Když odpověď nepřijde podle plánu
+=================================
+
+Schéma zaručí tvar odpovědi, ale ne to, že odpověď vůbec přijde. Dvě situace stojí za ošetření.
+
+**Model může odmítnout odpovědět.** Bezpečnostní filtr nezmizí tím, že jsi předepsal tvar; text pak bude prázdný a `getJson()` vrátí `null`. Poznáš to podle [důvodu ukončení |chat#Proč model přestal psát]:
+
+```php
+use AIAccess\Chat\FinishReason;
+
+if ($response->getFinishReason() !== FinishReason::Complete) {
+	// odmítnutí nebo useknutá odpověď, data nečekej
+}
+```
+
+**Odpověď nemusí být platný JSON.** Stane se to zřídka, typicky když dojde limit tokenů uprostřed a JSON zůstane neuzavřený. `getJson()` v takovém případě vyhodí `AIAccess\UnexpectedResponseException`, takže se to nepozná až o dvě vrstvy dál:
+
+```php
+try {
+	$data = $response->getJson();
+} catch (AIAccess\UnexpectedResponseException $e) {
+	// odpověď nešla dekódovat, syrový text je v getText()
+}
+```
+
+
+Kdo to umí a co s DeepSeekem
+============================
+
+Schéma zvládnou **OpenAI, Claude, Gemini a Grok** i [generický klient |providers]. DeepSeek tuhle možnost nemá, a tak u něj `setResponseSchema()` vyhodí `AIAccess\LogicException` a odkáže tě na JSON mód. Kdyby schéma odeslalo, endpoint odpoví chybou "This response_format type is unavailable now".
+
+JSON mód nezaručí tvar, ale aspoň zaručí, že odpověď bude platný JSON bez markdownu kolem:
+
+```php
+$chat->setOptions(responseFormat: ['type' => 'json_object']);
+```
+
+Pozor na jednu past: DeepSeek požaduje, aby se slovo "json" objevilo někde v konverzaci, jinak požadavek odmítne. Stačí ho zmínit v instrukci nebo v dotazu.
+
+Tvar si pak musíš popsat v promptu a výsledek zkontrolovat sám. Totéž nastavení mají i Grok a generický klient, ale tam sáhni radši po schématu.
+
+
+Schéma, nebo nástroj?
+=====================
+
+Obojí modelu předepisuje JSON podle schématu, takže se to plete. Rozdíl je v tom, kdo komu co dává.
+
+- **Strukturovaný výstup je tvar odpovědi.** Model dopoví a ty dostaneš data. Použij ho, když od modelu chceš výsledek: vytáhnout údaje z textu, zařadit do kategorie, rozdělit adresu na části.
+- **[Volání nástroje |tools] je otázka směrem k tobě.** Model se zastaví a čeká, až mu něco zjistíš, pak pokračuje. Použij ho, když model potřebuje informaci nebo akci, kterou má tvoje aplikace.
+
+Zjednodušeně: strukturovaný výstup je odpověď, nástroj je otázka.
+
+
+Kam dál
+=======
+
+- [Volání nástrojů |tools] - když se model potřebuje zeptat tvé aplikace
+- [Konverzace |chat] - důvod ukončení a čtení odpovědi
+- [Ošetření chyb |errors] - která výjimka co znamená
+- [Provideři |providers] - co který umí a čím se liší

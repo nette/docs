@@ -1,0 +1,154 @@
+Konverzace s AI modelem
+***********************
+
+.[perex]
+Konverzace je posloupnost zpráv, kterou si knihovna drží sama. Naučíš se vést vícekolový dialog, nastavit modelu roli systémovou instrukcí, přečíst z odpovědi víc než jen text a poskládat historii ručně, když potřebuješ navázat na dřívější rozhovor.
+
+
+Model si nic nepamatuje
+=======================
+
+Tohle je první věc, která překvapí skoro každého: jazykový model nemá paměť. Každé volání API je samostatné a model o předchozí otázce neví nic. Iluze rozhovoru vzniká tím, že se s každým dotazem posílá celá dosavadní historie znovu.
+
+Právě proto tu je objekt konverzace. Stará se o historii za tebe:
+
+```php
+$chat = $client->createChat('gpt-5.6-luna');
+
+$chat->sendMessage('Jaké je hlavní město Francie?');
+$response = $chat->sendMessage('A jaká je tam známá památka?');
+
+echo $response->getText();
+```
+
+Druhá otázka nezmiňuje Paříž ani slovem, a přesto model odpoví správně, protože spolu s ní odešla i první výměna. Kdyby ses ptal přes dvě samostatná volání, druhá odpověď by byla nesmysl.
+
+Má to jeden důsledek, na který je dobré myslet dopředu: **dlouhá konverzace je drahá**. S každým kolem roste vstup, a vstup se platí. Historii proto někdy stojí za to zkrátit nebo začít znovu. A když stejný dotaz posíláš na stovky vstupů a nespěcháš, vyjde levněji [dávkové zpracování |batch]:
+
+```php
+$chat->clearMessages();
+```
+
+
+Systémová instrukce
+===================
+
+Systémová instrukce říká modelu, jakou roli má hrát a jakých pravidel se držet. Platí pro celou konverzaci a modely jí přikládají větší váhu než běžné zprávě, takže sem patří pokyny, které mají platit i za deset kol.
+
+```php
+$chat->setSystemInstruction('Jsi zkušený PHP vývojář. Odpovídej stručně a v příkladech používej Nette.');
+```
+
+Dobrá systémová instrukce je konkrétní. Místo "buď stručný" napiš "odpovídej nejvýš třemi větami"; místo "buď přesný" napiš "když si nejsi jistý, řekni to místo hádání". Model nemá jak poznat, co si pod obecným pokynem představuješ.
+
+Systémová instrukce se posílá s každým požadavkem, takže se za ni platí pokaždé. Když je dlouhá a konverzace má hodně kol, sáhni po providerově cache; kolik se z ní načetlo, poznáš podle `cacheReadTokens` ve [spotřebě |#Co všechno je v odpovědi].
+
+
+Model se dá vyměnit uprostřed hovoru
+====================================
+
+Model není vlastnost konverzace, ale parametr jednotlivého požadavku, stejně jako teplota nebo limit tokenů. Na drátě se posílá s každým voláním znovu, a knihovna to tak i drží:
+
+```php
+$chat->setModel('gpt-5.6-luna-mini');
+```
+
+**Historie zůstává.** Další kolo pokračuje tam, kde předchozí skončilo, jen na něj odpoví jiný model. Hodí se to častěji, než by se zdálo: po chybě 429 přepneš na levnější model místo čekání, na těžkou otázku sáhneš po silnějším, nebo prostě necháš volbu na uživateli, jak to dělá každé chatovací rozhraní.
+
+Přepínat lze **v rámci jednoho providera**. Části zprávy, které nesou providerův vlastní obsah, typicky myšlenkový postup uvažovacího modelu, se přehrávají jen tomu, kdo je vytvořil, takže z Claude na GPT přejít nejde; z jednoho modelu Claude na druhý ano.
+
+Když má klient [nastavený výchozí model |getting-started#Kam patří klíč v ostrém provozu], obejde se `createChat()` bez argumentu úplně:
+
+```php
+$chat = $client->createChat();
+```
+
+
+Historie sestavená ručně
+========================
+
+Někdy potřebuješ modelu předložit rozhovor, který se takhle neodehrál. Typicky když obnovuješ konverzaci uloženou v databázi, nebo když chceš ukázat pár příkladů správných odpovědí, což je technika známá jako few-shot prompting.
+
+```php
+use AIAccess\Chat\Role;
+
+$chat = $client->createChat('gpt-5.6-luna');
+$chat->addMessage('Jaké je hlavní město Francie?', Role::User);
+$chat->addMessage('Paříž.', Role::Model);
+$chat->addMessage('A jaká je tam známá památka?', Role::User);
+
+$response = $chat->sendMessage(); // bez argumentu: pokračuj z historie
+```
+
+`addMessage()` zprávu jen přidá do historie a nic neodesílá. `sendMessage()` bez argumentu pak odešle konverzaci tak, jak je.
+
+Role jsou tři. `Role::User` je uživatel, `Role::Model` je model a `Role::Tool` nese výsledky [volání nástrojů |tools]. Knihovna přitom používá vlastní pojmenování: Gemini téže roli říká `model`, zatímco ostatní `assistant`, a na jméno, které zrovna ten který provider očekává, si ho knihovna přeloží sama.
+
+Celou historii si kdykoli vyžádáš zpátky:
+
+```php
+foreach ($chat->getMessages() as $message) {
+	echo $message->getRole()->value, ': ', $message->getText(), "\n";
+}
+```
+
+
+Co všechno je v odpovědi
+========================
+
+`sendMessage()` nevrací řetězec, ale objekt, protože samotný text je jen část toho, co se stalo.
+
+```php
+$response = $chat->sendMessage('Napiš mi povídku o PHP.');
+
+echo $response->getText();
+```
+
+Když je text prázdný, nemusí jít o chybu. Model mohl odmítnout odpovědět, mohl narazit na limit dřív, než stihl napsat první slovo, nebo si místo odpovědi řekl o nástroj. Která z těch věcí to byla, prozradí důvod ukončení.
+
+
+Proč model přestal psát
+-----------------------
+
+Odpověď nekončí vždycky proto, že model dopověděl. Někdy ho zastaví limit tokenů, jindy bezpečnostní filtr a jindy čeká, až mu něco doplníš. Rozlišovat to potřebuješ, protože v každém z těch případů se zachováš jinak. Slouží k tomu `getFinishReason()`, který vrací jednu z hodnot výčtu `FinishReason`:
+
+| Hodnota           | Co se stalo                                                 | Jak se zachovat                                                               |
+|-------------------|-------------------------------------------------------------|-------------------------------------------------------------------------------|
+| `Complete`        | Model řekl všechno, co chtěl, a sám skončil.                | Nic, tohle je ten dobrý případ.                                               |
+| `TokenLimit`      | Odpověď je useknutá uprostřed, došel povolený počet tokenů. | Zvyš limit v [nastavení |options], nebo si vyžádej kratší odpověď.            |
+| `ContentFiltered` | Model odpověď odmítl.                                       | Text bude prázdný. Přeformuluj dotaz; u OpenAI důvod prozradí `getRefusal()`. |
+| `ToolCall`        | Model si řekl o zavolání [nástroje |tools].                 | Zavolej ho a výsledek mu pošli zpátky.                                        |
+| `Cancelled`       | [Stream |streaming] jsi přerušil sám.                       | Máš jen část odpovědi, a je to v pořádku.                                     |
+| `Unknown`         | Důvod mimo tuhle škálu, nebo žádný důvod vůbec.             | Původní hodnotu najdeš v `getRawFinishReason()`.                              |
+
+Chybějící důvod je nejčastěji stopa po přenosu, který nedoběhl; proto se nevydává za `Complete`. U [přerušeného streamu |streaming] je to tvoje vodítko, že text není celý.
+
+V kódu to vypadá takhle:
+
+```php
+use AIAccess\Chat\FinishReason;
+
+if ($response->getFinishReason() === FinishReason::TokenLimit) {
+	echo 'Odpověď je useknutá, model narazil na limit.';
+}
+```
+
+Uvažovací modely navíc můžou vrátit svůj myšlenkový postup. Nikdy není součástí `getText()`, protože do výstupu aplikace nepatří, ale přečíst si ho můžeš:
+
+```php
+if ($reasoning = $response->getReasoning()) {
+	echo "Model uvažoval takto:\n", $reasoning;
+}
+```
+
+A když ti abstrakce nestačí, `getRawResponse()` ti vrátí kompletní dekódovanou odpověď providera přesně tak, jak přišla. Sjednocené rozhraní je pohodlí, ne klec.
+
+
+Kam dál
+=======
+
+- [Nastavení a reasoning effort |options] - kolik přemýšlení si od modelu vyžádáš
+- [Streamování |streaming] - odpověď čti, zatímco ji model teprve píše
+- [Volání nástrojů |tools] - když má model sáhnout do tvé aplikace
+- [Strukturovaný výstup |structured-output] - když potřebuješ data, ne prózu
+- [Embeddingy |embeddings] - když má model odpovídat nad tvými vlastními texty

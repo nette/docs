@@ -115,6 +115,8 @@ Expect::type('bool|string|array')
 
 The default value is always `null` with the exception of `array` and `list`, where it is an empty array. (A list is an array indexed by a sequence of numeric keys starting from zero, i.e. a non-associative array).
 
+In 1.x, the type `'?int[]'` means an array whose items are integers or `null`. Version 2.0 will read it the way phpDoc does, as an array of integers or `null` in place of the whole array, so using it raises an `E_USER_DEPRECATED` notice. To keep the current meaning, write `Expect::arrayOf(Expect::type('int')->nullable())`. .{data-version:1.4.0}
+
 
 Array of Values: arrayOf() listOf()
 -----------------------------------
@@ -147,6 +149,15 @@ $processor->process($schema, ['a', 'b']); // OK
 $processor->process($schema, ['a', 123]); // ERROR: 123 is not a string
 $processor->process($schema, ['key' => 'a']); // ERROR: not a list
 $processor->process($schema, [1 => 'a', 0 => 'b']); // ERROR: also not a list
+```
+
+With the `wrap` parameter, a single value is also accepted and wrapped into a one-item list: .{data-version:1.4.0}
+
+```php
+$schema = Expect::listOf('string', wrap: true);
+
+$processor->process($schema, 'hello'); // OK, gives ['hello']
+$processor->process($schema, ['a', 'b']); // OK
 ```
 
 The parameter can also be a schema, so we can write:
@@ -185,12 +196,38 @@ $processor->process($schema, [123]); // ERROR
 
 The `anyOf()` method accepts variants as separate parameters, not as an array. To pass it an array of values, use the unpack operator `anyOf(...$variants)`.
 
+Variants are tried in the order they are written, and the first one that matches wins. The only exception is `null`: when the set accepts it, a `null` input always gives `null`, even if a structure or array variant listed earlier would otherwise turn it into an empty structure or array.
+
 The default value is `null`. Use the `firstIsDefault()` method to make the first item the default:
 
 ```php
 // default is 'hello'
 Expect::anyOf(Expect::string('hello'), true, null)->firstIsDefault();
 ```
+
+
+Enums: enum() .{data-version:1.4.0}
+-----------------------------------
+
+A configuration file can only hold a plain string such as `'hearts'`, but in your code you would much rather work with an enum. `enum()` converts one into the other: give it a backed enum, i.e. one whose cases have values (`enum Suit: string`), and it accepts either the value or the case itself, and always gives you back the case:
+
+```php
+enum Suit: string
+{
+	case Hearts = 'hearts';
+	case Spades = 'spades';
+}
+
+$schema = Expect::enum(Suit::class);
+
+$processor->process($schema, 'hearts');     // OK, returns Suit::Hearts
+$processor->process($schema, Suit::Spades); // OK, returns Suit::Spades
+$processor->process($schema, 'clubs');      // ERROR: expects to be Suit
+```
+
+Enums backed by integers work exactly the same, and so does everything you know from the other elements, such as `Expect::enum(Suit::class)->required()` or `->default(Suit::Hearts)`.
+
+When [generating a schema from a class |#mapping-to-objects-from], a `public Suit $suit` property gives you this very element, so you do not have to reach for `enum()` there. `Expect::type(Suit::class)` is a different thing: like any class name, it accepts only an instance, i.e. the case itself.
 
 
 Structures
@@ -209,7 +246,7 @@ $schema = Expect::structure([
 ]);
 
 $processor->process($schema, ['optional' => '']);
-// ERROR: option 'required' is missing
+// ERROR: the mandatory item 'required' is missing
 
 $processor->process($schema, ['required' => 'foo']);
 // OK, returns {'required' => 'foo', 'optional' => null}
@@ -308,10 +345,14 @@ $schema = Expect::array([
 ]);
 ```
 
-You can also define an indexed array, known as a tuple:
+
+Tuples: tuple() .{data-version:1.4.0}
+-------------------------------------
+
+A tuple is a fixed-size array where each position has its own schema:
 
 ```php
-$schema = Expect::array([
+$schema = Expect::tuple([
 	Expect::int(),
 	Expect::string(),
 	Expect::bool(),
@@ -319,6 +360,12 @@ $schema = Expect::array([
 
 $processor->process($schema, [1, 'hello', true]); // OK
 ```
+
+The input must be a list, so positions given by keys or in a different order are refused. When the input is shorter, the missing positions behave like missing items of a structure: they get their default value, or report an error when they are `required()`. `otherItems()` lets further items follow the defined positions and sets the schema they must match, while `extend()` adds more positions to the end.
+
+When configurations are layered, a later tuple replaces the earlier one as a whole, because mixing the positions of two different tuples would only produce nonsense.
+
+Unlike a structure, a tuple does not accept `null` as an empty value; call `nullable()` when `null` is a valid value.
 
 
 Deprecated Properties
@@ -336,6 +383,19 @@ $processor->getWarnings(); // ["The item 'old' is deprecated"]
 ```
 
 
+Description: description() .{data-version:1.4.0}
+------------------------------------------------
+
+Any element can carry a human-readable description. It has no effect on validation, but the schema is often the only place where the meaning of a configuration option is written down at all, and `description()` lets you write it right there. The description also travels into the [JSON Schema export |#exporting-to-json-schema]:
+
+```php
+$schema = Expect::structure([
+	'host' => Expect::string('localhost')->description('Database server hostname'),
+	'port' => Expect::int(3306)->description('Port the server listens on'),
+])->description('Database connection');
+```
+
+
 Ranges: min() max()
 -------------------
 
@@ -349,9 +409,11 @@ Expect::array()->min(10)->max(20);
 For strings, they limit the length:
 
 ```php
-// string, at least 10 characters long, maximum 20 characters
+// string, at least 10 bytes long, maximum 20 bytes
 Expect::string()->min(10)->max(20);
 ```
+
+The length of a string is measured in bytes. To count characters of a UTF-8 string, use `Expect::unicode()`.
 
 For numbers, they limit the value:
 
@@ -363,8 +425,14 @@ Expect::int()->min(10)->max(20);
 Of course, it is possible to specify just `min()` or just `max()`:
 
 ```php
-// string, maximum 20 characters
+// string, maximum 20 bytes
 Expect::string()->max(20);
+```
+
+On a union such as `Expect::type('int|string')`, it is not clear whether `min()` and `max()` should limit the number or the length of the string, so they raise an `E_USER_DEPRECATED` notice there. Give the limits to each variant of [anyOf() |#enumeration-anyof] instead: .{data-version:1.4.0}
+
+```php
+Expect::anyOf(Expect::int()->min(1), Expect::string()->min(1));
 ```
 
 
@@ -377,6 +445,8 @@ Using `pattern()`, you can specify a regular expression that the **entire** inpu
 // exactly 9 digits
 Expect::string()->pattern('\d{9}');
 ```
+
+A pattern only makes sense for a string. That is why `Expect::string()` returns a `StringType` element, while `Expect::int()` and `Expect::float()` return a `NumberType` and `Expect::listOf()` and the other array schemas an `ArrayType`, each offering the methods of its kind. Calling `pattern()` on a number or an array raises an `E_USER_DEPRECATED` notice, and your editor flags such a call as deprecated as soon as you write it. .{data-version:1.4.0}
 
 
 Custom Assertions: assert()
@@ -495,6 +565,15 @@ Expect::string()->castTo(DateTime::class);
 // creates new DateTime(...)
 ```
 
+A `null` is never turned into an object. When the target is a class or an enum, `null` stays `null`, so an optional item that was left empty stays empty: .{data-version:1.4.0}
+
+```php
+Expect::string()->nullable()->castTo(DateTime::class);
+// '2026-01-01' becomes a DateTime, null stays null
+```
+
+With native types, add a question mark when `null` should pass unchanged: `castTo('?string')` keeps `null`, whereas `castTo('string')` turns it into an empty string. .{data-version:1.4.0}
+
 
 Normalization: before()
 -----------------------
@@ -510,6 +589,10 @@ $schema = Expect::arrayOf('string')
 $normalized = $processor->process($schema, 'a b c');
 // OK and returns ['a', 'b', 'c']
 ```
+
+An element has one handler, so a second call to `before()` replaces the first one. Put all the normalization into one handler instead.
+
+The second call also raises an `E_USER_DEPRECATED` notice, because in version 2.0 the handlers will be chained, each receiving the result of the previous one. .{data-version:1.4.0}
 
 
 Mapping to Objects: from()
@@ -574,7 +657,60 @@ $config = $processor->processMultiple($schema, [$defaults, $userConfig]);
 // $config = {'host' => 'localhost', 'port' => 5432, 'logging' => true}
 ```
 
-The `host` item keeps its default value because the user did not set it, while `port` and `logging` are overwritten by the later dataset. Values stored under string keys are merged this way; numerically indexed items (lists) are appended one after another instead of being overwritten.
+The `host` item keeps its default value because the user did not set it, while `port` and `logging` are overwritten by the later dataset. Values stored under string keys are merged this way; the items of a list (`listOf()`, `arrayOf()`) are appended one after another instead of being overwritten.
+
+When appending or merging by keys is not what you want, arrays and structures can choose another strategy with `mergeMode()`: .{data-version:1.4.0}
+
+```php
+use Nette\Schema\MergeMode;
+
+Expect::arrayOf('string')->mergeMode(MergeMode::Replace); // the later array replaces the earlier one
+```
+
+`MergeMode::AppendKeys` merges by keys and appends list items, `OverwriteKeys` also merges by keys but overwrites list items by their position, and `Replace` keeps only the later value. Without `mergeMode()`, an array whose items are not described, such as `Expect::array()`, is merged deeply.
+
+For anything else, `mergeWith()` takes your own function that combines the later value with the earlier one: .{data-version:1.4.0}
+
+```php
+Expect::bool()->mergeWith(fn($value, $base) => $value || $base); // once enabled, stays enabled
+```
+
+
+Exporting to JSON Schema .{data-version:1.4.0}
+----------------------------------------------
+
+Your schema is already a precise description of what the configuration may contain, and that description is useful outside PHP as well. `JsonSchema::export()` turns it into a "JSON Schema":https://json-schema.org document, the format editors read to offer completion and underline mistakes directly in the JSON or YAML file:
+
+```php
+use Nette\Schema\JsonSchema;
+
+$schema = Expect::structure([
+	'host' => Expect::string('localhost')->description('Database server hostname'),
+	'port' => Expect::int(3306)->min(1)->max(65535),
+	'user' => Expect::string()->required(),
+]);
+
+echo json_encode(JsonSchema::export($schema), JSON_PRETTY_PRINT);
+```
+
+```json
+{
+	"type": "object",
+	"properties": {
+		"host": {"type": "string", "description": "Database server hostname"},
+		"port": {"type": "integer", "minimum": 1, "maximum": 65535},
+		"user": {"type": "string"}
+	},
+	"required": ["user"],
+	"additionalProperties": false
+}
+```
+
+The export describes the **shape** of the data: types, ranges, patterns, required items, enum values and the texts you added with `description()`. Default values, `castTo()` and `transform()` are deliberately left out, because they describe what happens to the data after validation, and JSON Schema has no way to say that.
+
+A type that exists only in PHP, such as a class (`Expect::type(Address::class)`), a callable or a resource, cannot be exported at all. Instead of producing a document that would quietly describe something else, the export throws `Nette\NotSupportedException`.
+
+Two differences remain between the export and the validation. JSON Schema counts the length of a string in characters, while `Expect::string()` counts bytes, so use `Expect::unicode()` for text that is not plain ASCII. And a `pattern()` is exported as it is, but a JSON Schema validator reads it as an ECMAScript regular expression, so constructions specific to PCRE may be understood differently there.
 
 
 Under the Hood: normalize, merge, complete
@@ -608,22 +744,19 @@ interface Schema
 
 Errors are not thrown; instead you report them through the [Context |api:Nette\Schema\Context] object using `$context->addError()` and return `null`. The `Processor` gathers all errors and throws them together at the end.
 
-As an example, let's build a reusable element that accepts the backing value of an enum (e.g. the string `'hearts'`) and returns the enum instance:
+As an example, let's build a reusable element for sizes written the way people like to write them in configuration files, such as `'512kB'` or `'2 MB'`. It validates them and returns the number of bytes:
 
 ```php
 use Nette\Schema\Context;
 use Nette\Schema\Schema;
 
-class EnumSchema implements Schema
+class ByteSizeSchema implements Schema
 {
-	public function __construct(
-		private string $enumClass,
-	) {
-	}
+	private const Units = ['b' => 1, 'kb' => 1024, 'mb' => 1024 ** 2, 'gb' => 1024 ** 3];
 
 	public function normalize(mixed $value, Context $context): mixed
 	{
-		return $value; // no pre-processing needed
+		return is_int($value) ? "$value B" : $value; // unify both notations
 	}
 
 	public function merge(mixed $value, mixed $base): mixed
@@ -633,13 +766,18 @@ class EnumSchema implements Schema
 
 	public function complete(mixed $value, Context $context): mixed
 	{
-		$enum = is_string($value) ? ($this->enumClass)::tryFrom($value) : null;
-		if ($enum === null) {
-			$context->addError('The item %path% is not a valid value.', 'enum.value');
+		if (!is_string($value) || !preg_match('~^(\d+)\s*([a-zA-Z]+)$~', $value, $m)) {
+			$context->addError("The item %path% expects to be a size like '512kB'.", 'size.format');
 			return null;
 		}
 
-		return $enum;
+		$unit = self::Units[strtolower($m[2])] ?? null;
+		if ($unit === null) {
+			$context->addError("The item %path% uses an unknown unit '$m[2]'.", 'size.unit');
+			return null;
+		}
+
+		return (int) $m[1] * $unit;
 	}
 
 	public function completeDefault(Context $context): mixed
@@ -652,18 +790,16 @@ class EnumSchema implements Schema
 You can use it anywhere a built-in element is expected - on its own or as part of a larger structure:
 
 ```php
-enum Suit: string
-{
-	case Hearts = 'hearts';
-	case Spades = 'spades';
-}
-
 $schema = Expect::structure([
-	'suit' => new EnumSchema(Suit::class),
+	'maxUpload' => new ByteSizeSchema,
+	'diskQuota' => new ByteSizeSchema,
 ]);
 
-$processor->process($schema, ['suit' => 'hearts']);
-// OK, returns {'suit' => Suit::Hearts}
+$processor->process($schema, ['maxUpload' => '2 MB', 'diskQuota' => 512]);
+// OK, returns {'maxUpload' => 2097152, 'diskQuota' => 512}
+
+$processor->process($schema, ['maxUpload' => '5 TB']);
+// ERROR: The item 'maxUpload' uses an unknown unit 'TB'.
 ```
 
-Because the element implements the whole interface, it also works automatically inside `processMultiple()` - the `Processor` calls its `merge()` method just like for any other element.
+Because the element implements the whole interface, it also works automatically inside `processMultiple()` - the `Processor` calls its `merge()` method just like for any other element. Only `JsonSchema::export()` cannot know what such an element accepts, so it throws `Nette\NotSupportedException`.

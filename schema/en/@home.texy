@@ -193,6 +193,30 @@ Expect::anyOf(Expect::string('hello'), true, null)->firstIsDefault();
 ```
 
 
+Enums: enum() .{data-version:1.4}
+---------------------------------
+
+A configuration file can only carry a plain string like `'hearts'`, but in your code you would much rather work with an enum. That is the gap `enum()` closes: give it an enum with a backing value (`enum Suit: string`) and it accepts either the backing value or the case itself, always handing you back the case:
+
+```php
+enum Suit: string
+{
+	case Hearts = 'hearts';
+	case Spades = 'spades';
+}
+
+$schema = Expect::enum(Suit::class);
+
+$processor->process($schema, 'hearts');     // OK, returns Suit::Hearts
+$processor->process($schema, Suit::Spades); // OK, returns Suit::Spades
+$processor->process($schema, 'clubs');      // ERROR: expects to be Suit
+```
+
+Enums backed by integers work exactly the same, and so does everything you know from the other elements, such as `Expect::enum(Suit::class)->required()` or `->default(Suit::Hearts)`.
+
+You often do not have to reach for `enum()` explicitly. An enum class name is recognized in a type expression and when [generating a schema from a class |#mapping-to-objects-from], so `Expect::type(Suit::class)` and a `public Suit $suit` property give you the very same element.
+
+
 Structures
 ----------
 
@@ -336,6 +360,19 @@ $processor->getWarnings(); // ["The item 'old' is deprecated"]
 ```
 
 
+Description: description() .{data-version:1.4}
+----------------------------------------------
+
+Any element can carry a human-readable description. It has no effect on validation - the schema is often the only place where the meaning of a configuration option is written down at all, and `description()` is where you write it. It also travels into the [JSON Schema export |#exporting-to-json-schema]:
+
+```php
+$schema = Expect::structure([
+	'host' => Expect::string('localhost')->description('Database server hostname'),
+	'port' => Expect::int(3306)->description('Port the server listens on'),
+])->description('Database connection');
+```
+
+
 Ranges: min() max()
 -------------------
 
@@ -377,6 +414,8 @@ Using `pattern()`, you can specify a regular expression that the **entire** inpu
 // exactly 9 digits
 Expect::string()->pattern('\d{9}');
 ```
+
+A pattern belongs to strings, just like `items()` belongs to arrays. Attach either of them to an element of a different kind and Schema raises a deprecation notice instead of silently ignoring the constraint. .{data-version:1.4}
 
 
 Custom Assertions: assert()
@@ -511,6 +550,19 @@ $normalized = $processor->process($schema, 'a b c');
 // OK and returns ['a', 'b', 'c']
 ```
 
+The method can be called repeatedly. The handlers are then chained, each receiving the result of the previous one: .{data-version:1.4}
+
+```php
+$schema = Expect::arrayOf('string')
+	->before(fn($v) => explode(' ', $v))
+	->before(fn($v) => array_map('strtoupper', $v));
+
+$normalized = $processor->process($schema, 'a b c');
+// OK and returns ['A', 'B', 'C']
+```
+
+Up to version 1.3, a second call to `before()` silently discarded the first one.
+
 
 Mapping to Objects: from()
 --------------------------
@@ -577,6 +629,41 @@ $config = $processor->processMultiple($schema, [$defaults, $userConfig]);
 The `host` item keeps its default value because the user did not set it, while `port` and `logging` are overwritten by the later dataset. Values stored under string keys are merged this way; numerically indexed items (lists) are appended one after another instead of being overwritten.
 
 
+Exporting to JSON Schema .{data-version:1.4}
+--------------------------------------------
+
+Your schema is already a precise description of what the configuration may contain, and that description is useful outside PHP as well. `JsonSchema::export()` turns it into a "JSON Schema":https://json-schema.org document, the format editors read to offer completion and underline mistakes directly in the JSON or YAML file:
+
+```php
+use Nette\Schema\JsonSchema;
+
+$schema = Expect::structure([
+	'host' => Expect::string('localhost')->description('Database server hostname'),
+	'port' => Expect::int(3306)->min(1)->max(65535),
+	'user' => Expect::string()->required(),
+]);
+
+echo json_encode(JsonSchema::export($schema), JSON_PRETTY_PRINT);
+```
+
+```json
+{
+	"type": "object",
+	"properties": {
+		"host": {"type": "string", "description": "Database server hostname"},
+		"port": {"type": "integer", "minimum": 1, "maximum": 65535},
+		"user": {"type": "string"}
+	},
+	"required": ["user"],
+	"additionalProperties": false
+}
+```
+
+The export describes the **shape** of the data: types, ranges, patterns, required items, enum values and the texts you added with `description()`. Default values, `castTo()` and `transform()` are deliberately left out - they describe what happens to the data once it has been validated, and JSON Schema has no way to say that.
+
+For the same reason, a type that exists only in PHP - a class such as `Expect::type(Address::class)`, a callable or a resource - throws `Nette\NotSupportedException` instead of producing a document that would quietly claim something else.
+
+
 Under the Hood: normalize, merge, complete
 ------------------------------------------
 
@@ -608,22 +695,19 @@ interface Schema
 
 Errors are not thrown; instead you report them through the [Context |api:Nette\Schema\Context] object using `$context->addError()` and return `null`. The `Processor` gathers all errors and throws them together at the end.
 
-As an example, let's build a reusable element that accepts the backing value of an enum (e.g. the string `'hearts'`) and returns the enum instance:
+As an example, let's build a reusable element for byte sizes in the friendly notation people use in configuration files - `'512kB'`, `'2 MB'` - which validates them and returns the number of bytes:
 
 ```php
 use Nette\Schema\Context;
 use Nette\Schema\Schema;
 
-class EnumSchema implements Schema
+class ByteSizeSchema implements Schema
 {
-	public function __construct(
-		private string $enumClass,
-	) {
-	}
+	private const Units = ['b' => 1, 'kb' => 1024, 'mb' => 1024 ** 2, 'gb' => 1024 ** 3];
 
 	public function normalize(mixed $value, Context $context): mixed
 	{
-		return $value; // no pre-processing needed
+		return is_int($value) ? "$value B" : $value; // unify both notations
 	}
 
 	public function merge(mixed $value, mixed $base): mixed
@@ -633,13 +717,18 @@ class EnumSchema implements Schema
 
 	public function complete(mixed $value, Context $context): mixed
 	{
-		$enum = is_string($value) ? ($this->enumClass)::tryFrom($value) : null;
-		if ($enum === null) {
-			$context->addError('The item %path% is not a valid value.', 'enum.value');
+		if (!is_string($value) || !preg_match('~^(\d+)\s*([a-zA-Z]+)$~', $value, $m)) {
+			$context->addError("The item %path% expects to be a size like '512kB'.", 'size.format');
 			return null;
 		}
 
-		return $enum;
+		$unit = self::Units[strtolower($m[2])] ?? null;
+		if ($unit === null) {
+			$context->addError("The item %path% uses an unknown unit '$m[2]'.", 'size.unit');
+			return null;
+		}
+
+		return (int) $m[1] * $unit;
 	}
 
 	public function completeDefault(Context $context): mixed
@@ -652,18 +741,16 @@ class EnumSchema implements Schema
 You can use it anywhere a built-in element is expected - on its own or as part of a larger structure:
 
 ```php
-enum Suit: string
-{
-	case Hearts = 'hearts';
-	case Spades = 'spades';
-}
-
 $schema = Expect::structure([
-	'suit' => new EnumSchema(Suit::class),
+	'maxUpload' => new ByteSizeSchema,
+	'diskQuota' => new ByteSizeSchema,
 ]);
 
-$processor->process($schema, ['suit' => 'hearts']);
-// OK, returns {'suit' => Suit::Hearts}
+$processor->process($schema, ['maxUpload' => '2 MB', 'diskQuota' => 512]);
+// OK, returns {'maxUpload' => 2097152, 'diskQuota' => 512}
+
+$processor->process($schema, ['maxUpload' => '5 TB']);
+// ERROR: The item 'maxUpload' uses an unknown unit 'TB'.
 ```
 
 Because the element implements the whole interface, it also works automatically inside `processMultiple()` - the `Processor` calls its `merge()` method just like for any other element.

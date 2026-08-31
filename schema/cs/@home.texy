@@ -193,6 +193,30 @@ Expect::anyOf(Expect::string('hello'), true, null)->firstIsDefault();
 ```
 
 
+Výčtové typy: enum() .{data-version:1.4}
+----------------------------------------
+
+Konfigurační soubor unese jen prostý řetězec jako `'hearts'`, jenže v kódu byste mnohem raději pracovali s enumem. Přesně tuhle mezeru zaceluje `enum()`: předáte mu enum s backing hodnotou (`enum Suit: string`) a on přijme buď tu hodnotu, nebo rovnou case enumu, a vždy vám vrátí case:
+
+```php
+enum Suit: string
+{
+	case Hearts = 'hearts';
+	case Spades = 'spades';
+}
+
+$schema = Expect::enum(Suit::class);
+
+$processor->process($schema, 'hearts');     // OK, vrátí Suit::Hearts
+$processor->process($schema, Suit::Spades); // OK, vrátí Suit::Spades
+$processor->process($schema, 'clubs');      // CHYBA: expects to be Suit
+```
+
+Enumy s celočíselnou backing hodnotou fungují úplně stejně a platí u nich vše, co znáte z ostatních prvků, třeba `Expect::enum(Suit::class)->required()` nebo `->default(Suit::Hearts)`.
+
+Po `enum()` často nemusíte sahat výslovně. Název třídy enumu se rozpozná v typovém výrazu i při [generování schématu ze třídy |#mapovani-na-objekty-from], takže `Expect::type(Suit::class)` i vlastnost `public Suit $suit` vám dají tentýž prvek.
+
+
 Struktury
 ---------
 
@@ -336,6 +360,19 @@ $processor->getWarnings(); // ["The item 'old' is deprecated"]
 ```
 
 
+Popis: description() .{data-version:1.4}
+----------------------------------------
+
+Každému prvku můžete přidat lidsky čitelný popis. Na validaci nemá vliv - schéma bývá jediné místo, kde je význam konfigurační volby vůbec sepsaný, a `description()` je to místo, kam ho napíšete. Propíše se také do [exportu do JSON Schema |#export-do-json-schema]:
+
+```php
+$schema = Expect::structure([
+	'host' => Expect::string('localhost')->description('Database server hostname'),
+	'port' => Expect::int(3306)->description('Port the server listens on'),
+])->description('Database connection');
+```
+
+
 Rozsahy: min() max()
 --------------------
 
@@ -377,6 +414,8 @@ Pomocí `pattern()` lze uvést regulární výraz, kterému musí odpovídat **c
 // právě 9 čísel
 Expect::string()->pattern('\d{9}');
 ```
+
+Regulární výraz patří k řetězcům, tak jako `items()` patří k polím. Když některou z těch metod připojíte k prvku jiného druhu, Schema vyvolá hlášení o zastaralosti, místo aby omezení tiše ignorovalo. .{data-version:1.4}
 
 
 Vlastní omezení: assert()
@@ -511,6 +550,19 @@ $normalized = $processor->process($schema, 'a b c');
 // OK a vrátí ['a', 'b', 'c']
 ```
 
+Metodu lze volat opakovaně. Obslužné funkce se pak řetězí a každá dostane výsledek té předchozí: .{data-version:1.4}
+
+```php
+$schema = Expect::arrayOf('string')
+	->before(fn($v) => explode(' ', $v))
+	->before(fn($v) => array_map('strtoupper', $v));
+
+$normalized = $processor->process($schema, 'a b c');
+// OK a vrátí ['A', 'B', 'C']
+```
+
+Do verze 1.3 druhé volání `before()` to první tiše zahodilo.
+
 
 Mapování na objekty: from()
 ---------------------------
@@ -577,6 +629,41 @@ $config = $processor->processMultiple($schema, [$defaults, $userConfig]);
 Položka `host` si ponechá výchozí hodnotu, protože ji uživatel nenastavil, zatímco `port` a `logging` přepíše pozdější datová sada. Hodnoty pod řetězcovými klíči se slučují tímto způsobem; číselně indexované položky (listy) se místo přepsání připojují jednu za druhou.
 
 
+Export do JSON Schema .{data-version:1.4}
+-----------------------------------------
+
+Vaše schéma už je přesným popisem toho, co smí konfigurace obsahovat, a ten popis se hodí i mimo PHP. Metoda `JsonSchema::export()` z něj vytvoří dokument "JSON Schema":https://json-schema.org, tedy formát, který čtou editory, aby rovnou v JSON nebo YAML souboru nabízely doplňování a podtrhávaly chyby:
+
+```php
+use Nette\Schema\JsonSchema;
+
+$schema = Expect::structure([
+	'host' => Expect::string('localhost')->description('Database server hostname'),
+	'port' => Expect::int(3306)->min(1)->max(65535),
+	'user' => Expect::string()->required(),
+]);
+
+echo json_encode(JsonSchema::export($schema), JSON_PRETTY_PRINT);
+```
+
+```json
+{
+	"type": "object",
+	"properties": {
+		"host": {"type": "string", "description": "Database server hostname"},
+		"port": {"type": "integer", "minimum": 1, "maximum": 65535},
+		"user": {"type": "string"}
+	},
+	"required": ["user"],
+	"additionalProperties": false
+}
+```
+
+Export popisuje **tvar** dat: typy, rozsahy, regulární výrazy, povinné položky, hodnoty výčtů a texty, které jste přidali metodou `description()`. Výchozí hodnoty, `castTo()` a `transform()` v něm záměrně nejsou - popisují, co se s daty děje až po validaci, a to JSON Schema vyjádřit neumí.
+
+Ze stejného důvodu typ, který existuje jen v PHP - třída jako `Expect::type(Address::class)`, callable nebo resource - vyhodí `Nette\NotSupportedException`, místo aby vznikl dokument, který by potichu tvrdil něco jiného.
+
+
 Jak zpracování probíhá
 ----------------------
 
@@ -608,22 +695,19 @@ interface Schema
 
 Chyby se nevyhazují; místo toho je hlásíte přes objekt [Context |api:Nette\Schema\Context] pomocí `$context->addError()` a vrátíte `null`. `Processor` všechny chyby posbírá a vyhodí je na konci najednou.
 
-Jako příklad vytvoříme znovupoužitelný prvek, který přijme backing hodnotu enumu (např. řetězec `'hearts'`) a vrátí instanci enumu:
+Jako příklad vytvoříme znovupoužitelný prvek pro velikosti zapsané přívětivě, jak se do konfigurace píší běžně - `'512kB'`, `'2 MB'` - který je zvaliduje a vrátí počet bajtů:
 
 ```php
 use Nette\Schema\Context;
 use Nette\Schema\Schema;
 
-class EnumSchema implements Schema
+class ByteSizeSchema implements Schema
 {
-	public function __construct(
-		private string $enumClass,
-	) {
-	}
+	private const Units = ['b' => 1, 'kb' => 1024, 'mb' => 1024 ** 2, 'gb' => 1024 ** 3];
 
 	public function normalize(mixed $value, Context $context): mixed
 	{
-		return $value; // není potřeba žádné předzpracování
+		return is_int($value) ? "$value B" : $value; // sjednotíme oba zápisy
 	}
 
 	public function merge(mixed $value, mixed $base): mixed
@@ -633,13 +717,18 @@ class EnumSchema implements Schema
 
 	public function complete(mixed $value, Context $context): mixed
 	{
-		$enum = is_string($value) ? ($this->enumClass)::tryFrom($value) : null;
-		if ($enum === null) {
-			$context->addError('The item %path% is not a valid value.', 'enum.value');
+		if (!is_string($value) || !preg_match('~^(\d+)\s*([a-zA-Z]+)$~', $value, $m)) {
+			$context->addError("The item %path% expects to be a size like '512kB'.", 'size.format');
 			return null;
 		}
 
-		return $enum;
+		$unit = self::Units[strtolower($m[2])] ?? null;
+		if ($unit === null) {
+			$context->addError("The item %path% uses an unknown unit '$m[2]'.", 'size.unit');
+			return null;
+		}
+
+		return (int) $m[1] * $unit;
 	}
 
 	public function completeDefault(Context $context): mixed
@@ -652,18 +741,16 @@ class EnumSchema implements Schema
 Použijete ho kdekoli, kde se očekává vestavěný prvek - samostatně i jako součást větší struktury:
 
 ```php
-enum Suit: string
-{
-	case Hearts = 'hearts';
-	case Spades = 'spades';
-}
-
 $schema = Expect::structure([
-	'suit' => new EnumSchema(Suit::class),
+	'maxUpload' => new ByteSizeSchema,
+	'diskQuota' => new ByteSizeSchema,
 ]);
 
-$processor->process($schema, ['suit' => 'hearts']);
-// OK, vrátí {'suit' => Suit::Hearts}
+$processor->process($schema, ['maxUpload' => '2 MB', 'diskQuota' => 512]);
+// OK, vrátí {'maxUpload' => 2097152, 'diskQuota' => 512}
+
+$processor->process($schema, ['maxUpload' => '5 TB']);
+// CHYBA: The item 'maxUpload' uses an unknown unit 'TB'.
 ```
 
 Protože prvek implementuje celé rozhraní, funguje automaticky i uvnitř `processMultiple()` - `Processor` volá jeho metodu `merge()` stejně jako u kteréhokoli jiného prvku.

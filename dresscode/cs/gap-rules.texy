@@ -3,3 +3,108 @@ Pravidla o mezerách
 
 .[perex]
 Mezeru mezi dvěma tokeny nikdo nepřepisuje procedurou. Pravidlo o mezerách vysloví nárok a engine rozhodne, opraví a ohlásí. Jak takové pravidlo napsat.
+
+
+Proč nárok, ne oprava
+=====================
+
+Kdyby pravidlo o mezeře za čárkou psalo mezeru samo a pravidlo o zalomení dlouhého seznamu psalo konec řádku samo, sešly by se na téže mezeře dvě procedury a výsledek by závisel na tom, která běžela později. Proto pravidla o mezerách v DressCode nic nepíší. Řeknou, co má mezi dvěma tokeny být, a engine, který vidí všechny nároky najednou, rozhodne, opraví a hlášení vypíše pod jménem pravidla, jehož nárok vyhrál. Odtud plyne to, co uživatel vidí: každá mezera má jednoho vlastníka a dvě pravidla, která by chtěla totéž místo, jsou chyba konfigurace, ne loterie.
+
+
+Nárok
+=====
+
+`Claim` má čtyři složky a pravidlo nárokuje jen ty, na kterých mu záleží:
+
+| složka | co říká | hodnoty |
+|---|---|---|
+| `space` | vodorovná mezera, když tokeny sdílejí řádek | `Space::None`, `Single`, `AtLeastSingle`, a varianty `SingleOrTabs`, `AtLeastSingleOrTabs`, které nechají tabulátor zarovnávající sloupce |
+| `line` | stojí druhý token na řádku prvního, nebo na dalším | `Line::Same`, `Line::Next` |
+| `blank` | kolik prázdných řádků, když je tam zalomení | počet, nebo rozsah `[min, max]` s `null` jako otevřeným koncem |
+| `blankBelowComment` | prázdné řádky mezi komentářem v mezeře a tokenem | totéž |
+
+Nejčastější nároky mají továrny, které vracejí sdílené instance: `Claim::none()`, `single()`, `atLeastSingle()`, `sameLine()`, `nextLine()`, `blank(1)`. Nárok na víc složek nebo nárok s odůvodněním se staví konstruktorem: `new Claim(Space::None, line: Line::Same)`, `new Claim(line: Line::Next, because: 'the line is 135 characters long')`; odůvodnění engine připojí za čárku ke zprávě.
+
+Prázdné řádky se počítají nad komentářem, který stojí na vlastních řádcích nad tokenem, protože komentář patří ke kódu pod ním; jen před zavírací závorkou a koncem souboru patří komentář k tomu, co je nad ním. Řádky mezi posledním komentářem a tokenem jsou vlastní složka `blankBelowComment`, kterou nárokuje třeba pravidlo o mezeře mezi dokumentačním komentářem a deklarací.
+
+
+Kde nárok stojí
+===============
+
+Pravidlo implementuje `GapRule` a v `getClaims()` řekne, u kterých slotů kterých uzlů má nárok, před hodnotou slotu a za ní:
+
+```php
+final class BlankLineBeforeReturnRule extends Rule implements GapRule
+{
+	public function getVisitedTypes(): array
+	{
+		return [];
+	}
+
+
+	public function getClaims(): array
+	{
+		return [
+			'*' => [
+				'stmts:item' => [
+					fn(Gap $gap) => $gap->value instanceof ReturnNode && $gap->index > 0 ? Claim::blank(1) : null,
+					null,
+				],
+			],
+		];
+	}
+}
+```
+
+Klíč první úrovně je třída uzlu, nebo `*` pro každý uzel, který slot má. Klíč druhé úrovně je slot, `slot:item` pro každou položku seznamu, `slot:separator` pro jeho oddělovače. Hodnota je dvojice nároků před a za: `Claim`, `null` pro žádný, nebo closure, která dostane `Gap` a vrátí nárok nebo `null`. Nárok u slotu s uzlem platí pro jeho první token (před) nebo poslední (za).
+
+Ukázka výše říká: před každým příkazem seznamu, který je `return` a není první, má být jeden prázdný řádek. Pravidlo nenavštěvuje nic (`getVisitedTypes()` je prázdné), protože všechnu práci dělá engine z nároků. Hlášení zní `Expected 1 blank line before the return, 0 found` a skládá ho engine z toho, u čeho nárok stojí; totéž platí pro `A single space after the comma` nebo `A line break before the opening brace`. Autor pravidla zprávy nepíše.
+
+Closure dostane v `Gap` token na okraji mezery, hodnotu slotu nebo položku, pro kterou se nárok dělá, její index v seznamu a styl souboru. Z toho se rozhoduje podle kódu, třeba jinak pro `.` než pro ostatní operátory:
+
+```php
+public function getClaims(): array
+{
+	$operator = fn(Gap $gap): ?Claim => $gap->token->text === '.' ? null : $this->claim;
+	return [
+		BinaryNode::class => ['operator' => [$operator, $operator]],
+		AssignNode::class => ['operator' => [$this->claim, $this->claim]],
+	];
+}
+```
+
+Pravidlo s volbou si nárok postaví jednou v `configure()` a v closure ho jen vrací, ne staví u každé mezery.
+
+
+Rozhodnutí, které musí být stejné
+=================================
+
+Nárok, který závisí na tvaru kódu (seznam už je rozlomený, řádek je moc dlouhý), musí dát každé mezeře téže konstrukce stejnou odpověď, ať už engine mezitím s předchozími mezerami udělal cokoli. Jinak by první čárka seznam rozlomila a druhá ho zase slepila. Proto se takové rozhodnutí dělá jednou:
+
+```php
+fn(Gap $gap) => $gap->once($list, fn() => $this->isBroken($list)) ? Claim::nextLine() : null
+```
+
+`once()` vyhodnotí closure při první mezeře uzlu a stejnou odpověď vrací u všech dalších do konce průchodu. Seznam se přitom počítá za rozlomený, jakmile některá položka nebo zavírací závorka začíná řádek, aby rozhodnutí rozlomit platilo pro celý zbytek.
+
+
+Kdo vyhraje
+===========
+
+Engine skládá nároky obou stran mezery složku po složce podle pevných pravidel, ne podle pořadí v konfiguraci:
+
+- nárok konkrétní třídy před nárokem `*`,
+- nárok vnitřního slotu před nárokem předka,
+- u mezery přísnější před volnějším (`No whitespace` vyhraje nad `At least one space` u `return;`),
+- u řádku `Line::Next` nad `Line::Same`,
+- u prázdných řádků průnik toho, co obě strany dovolí, nebo užší z rozsahů, které se vylučují.
+
+Dva holé nároky na tutéž složku téže strany téhož slotu jsou `ConfigurationException` už při skládání pravidel; dvě closures smějí slot sdílet, protože každá může tam, kde rozhoduje druhá, vrátit `null`. Vestavěná pravidla se nekříží; plugin, který chce jednu mezeru jinak než vestavěné pravidlo, ho pro tu mezeru dnes musí vypnout a nárok převzít, nebo požádat o volbu.
+
+Požadované zalomení engine udělá hned a prázdné řádky doladí v dalším průchodu; zakázané zalomení odstraní jen tehdy, když v mezeře není nic než bílé znaky. Odsazení řádku, který zalomením vznikl, není věcí nároku: engine mu dá obvyklé odsazení a pravidlo `indentation` ho pak umístí přesně.
+
+
+Testování
+=========
+
+Pravidlo o mezerách se testuje stejně jako každé jiné, `RuleTester`em nad fixturami; vypsané zprávy jsou ty složené enginem. Pravidlo může zároveň navštěvovat uzly a dělat něco navíc; pak `getVisitedTypes()` není prázdné a platí pro něj všechno z [Pravidel hry |rule-contract].

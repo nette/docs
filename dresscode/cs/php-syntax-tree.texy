@@ -3,3 +3,86 @@ Strom
 
 .[perex]
 Uzly a sloty pojmenované rolí, tokeny, seznamy s oddělovači a jména: jak je strom postavený a kde najít, co který uzel nese.
+
+
+Uzly a sloty
+============
+
+Každá konstrukce jazyka má svou třídu uzlu a každý uzel má **sloty** pojmenované podle role, ne podle textu. `IfNode` má `ifKeyword`, `openParen`, `cond`, `closeParen` a `body`; `TernaryNode` má `cond`, `question`, `if`, `colon` a `else`. Párové oddělovače se vždy jmenují `open*` a `close*`, seznamy jsou v množném čísle (`stmts`, `args`, `members`), slot, který může být prázdný, je `?`. Všechny třídy leží v `PhpSyntax\Nodes` a úplný seznam se sloty je v [referenci uzlů |nodes].
+
+```php
+$if = $file->getDescendants(IfNode::class)[0];
+$if->ifKeyword;   // Token 'if'
+$if->cond;        // ExpressionNode, třeba PropertyFetchNode
+$if->body;        // StatementNode, u složených závorek BlockNode
+```
+
+Sloty jsou veřejné vlastnosti ke čtení; zapisuje se do nich přes settery (`setCond()`), aby strom věděl o změně. Proč a jak, říká stránka [Úpravy |php-syntax-mutation].
+
+Děti uzlu vrací `getChildren()` v pořadí zdrojáku, prázdné sloty vynechané. Je to jediná cesta k dětem: uzel není iterovatelný, aby existoval jeden způsob a byl jím obyčejné pole.
+
+```php
+foreach ($class->getChildren() as $child) {
+	// NodeList (attributes), ModifiersNode, Token 'class', IdentifierNode, Token '{', NodeList (members), Token '}'
+}
+```
+
+Tři pravidla, která šetří překvapení:
+
+- **Tělo řídicí struktury je `StatementNode`**, ne nutně blok: `if ($a) return;` má v `body` přímo `ReturnNode`. Se složenými závorkami je to `BlockNode` se seznamem `stmts`.
+- **`else if` je `ElseNode`, jehož tělo je `IfNode`**; `elseif` je `ElseIfNode`. Alternativní syntaxe (`if: … endif;`) používá tytéž třídy se sloty `colon`, `stmts`, `endKeyword` a `semicolon` místo `body`.
+- **Třídy, rozhraní, traity a výčty** jsou různé uzly (`ClassNode`, `InterfaceNode`, `TraitNode`, `EnumNode`), ale všechny i s anonymní třídou implementují `ClassLikeNode`, takže "je to nějaká třída" je jeden `instanceof`.
+
+
+Tokeny
+======
+
+Listy stromu jsou `Token`: druh (`kind`), text a dvě pole trivia, úvodní a koncová. Druh je buď konstanta `TokenKind` (`TokenKind::Variable`, `TokenKind::DoubleArrow`), nebo u jednoznakových tokenů ordinální hodnota znaku; `is()` se ptá pohodlně na obojí a přijme i text operátoru:
+
+```php
+$token->is(TokenKind::Variable);
+$token->is('(', '[');
+$token->is(TokenKind::DoubleArrow);
+```
+
+`is()` s textem nikdy nematchne obsah řetězce, jen operátory a interpunkci, takže `$token->is('(')` je bezpečné i pro token řetězce `'('`. Text tokenu je přesně to, co stálo ve zdrojáku: `IntegerNode` má v tokenu `0x1F`, ne 31, a přetypování `( int )` i s mezerami uvnitř, protože PHP je počítá do tokenu.
+
+
+Seznamy
+=======
+
+`NodeList<T>` je seznam bez oddělovačů (příkazy, členy třídy, skupiny atributů), `SeparatedNodeList<T>` seznam s oddělovači mezi položkami (parametry, argumenty, položky pole, importy), který si pamatuje i oddělovače a případnou koncovou čárku:
+
+```php
+$args->getItems();              // list<ArgumentNode|VariadicPlaceholderNode>
+$args->getSeparators();         // list<Token>, čárky
+$args->hasTrailingSeparator();  // koncová čárka
+count($args);
+$args->indexOf($item);
+```
+
+Mezera mezi dvěma čárkami destrukturace (`[, $b] = …`) je `EmptyArrayItemNode`, aby seznam měl na každém místě položku. Modifikátory (`public static readonly`) drží `ModifiersNode` v pořadí zdrojáku.
+
+
+Jména a identifikátory
+======================
+
+`NameNode` je jméno třídy, funkce, konstanty nebo jmenného prostoru; je to jeden token, včetně klíčových slov, která gramatika na místě jména připouští (`static`, `array`, `readonly`). Umí o sobě říct víc než text:
+
+```php
+$name->getName();   // 'App\Model\Order' bez úvodního zpětného lomítka
+$name->getKind();   // NameKind::Unqualified, Qualified, FullyQualified, Relative
+$name->getParts();  // ['App', 'Model', 'Order']
+$name->getRole();   // NameRole::ClassLike, Function, Constant, Namespace podle místa ve stromu
+$name->isKeyword(); // jméno, které je zároveň klíčové slovo
+```
+
+Role se odvozuje z místa ve stromu: totéž `Foo` je třída za `new`, funkce před `(` a konstanta jinde. Co jméno znamená doopravdy, tedy včetně importů a jmenného prostoru, říká až analýza `NameResolver`, viz [Analýzy |php-syntax-analyses].
+
+`IdentifierNode` je jméno členu, návěští, hooku nebo aliasu (`->name`, `::CONST`, `as Alias`), také jeden token, i když je to rezervované slovo.
+
+
+Kořen
+=====
+
+`FileNode` je kořen: `stmts` se všemi příkazy souboru, přičemž příkazy za `namespace App;` jsou vnořené do `NamespaceNode`, takže každý jmenný prostor má své příkazy jako děti. Poslední token souboru je vždy `EndOfFile` s prázdným textem, na kterém visí, co je za posledním příkazem. `FileNode::$revision` roste s každou změnou stromu; hodí se k tomu poznat, že se něco změnilo, ne k počítání změn.

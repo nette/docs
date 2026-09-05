@@ -3,3 +3,134 @@ Pravidla hry
 
 .[perex]
 Co musí každé pravidlo dodržet: oprava jen po ohlášení, bezstavovost, idempotence, stage, atribut RuleInfo, volby přes schéma a hlášení v bílých znacích.
+
+
+Tvar pravidla
+=============
+
+Pravidlo dědí od `DressCode\Rule` a nese atribut `#[RuleInfo]`:
+
+```php
+#[RuleInfo(
+	'acme/no-var-dump',
+	Stage::Structure,
+	description: 'Reports calls of var_dump()',
+	minPhpVersion: null,
+	modifiesComments: false,
+)]
+final class NoVarDumpRule extends Rule
+{
+	// ...
+}
+```
+
+- **Jméno** `vendor/slug` je identita pravidla: objevuje se ve výpisu, v konfiguraci, v `dresscode:ignore`, v baseline. Dvě třídy se stejným jménem jsou chyba konfigurace.
+- **Stage** říká, ve které ze tří fází průchodu pravidlo běží: `Structure` pro změny kódu (přepis výrazu, odstranění importu), `Formatting` pro mezery a zalomení, `Cleanup` pro závěrečný úklid (bílé znaky na konci řádků, konec souboru, délka řádku). Průchody jdou po fázích v tomhle pořadí, takže formátování vidí kód už po strukturních změnách.
+- **Popis** je jedna anglická věta v oznamovacím tvaru, co pravidlo dělá; vypisuje ji `dresscode rules`.
+- **`minPhpVersion`** uveďte, když pravidlo zapisuje syntaxi, která existuje až od nějaké verze PHP (`0o755` od 8.1). Pod tou verzí se pravidlo samo vynechá a preset ho nemusí hlídat. PHP 8.0 je nejnižší podporované; na nic, co mělo 8.0, se neptejte.
+- **`modifiesComments`** dejte na `true`, jen když pravidlo opravdu mění text komentářů. Jinak `RuleTester` hlídá, že žádný komentář nezmizel ani se nezměnil, což je nejčastější chyba oprav.
+
+
+Které uzly a kdy
+================
+
+```php
+public function getVisitedTypes(): array
+{
+	return [FunctionCallNode::class];
+}
+```
+
+Seznam tříd uzlů (nebo `Token::class`), pro které engine zavolá `enter()` a `leave()`. Porovnává se přes `instanceof`, takže `StatementNode::class` zachytí každý příkaz a `Node::class` všechno; čím užší seznam, tím rychlejší běh. Prázdný seznam znamená, že pravidlo pracuje jen v `beforeFile()` a `afterFile()`, což dělají pravidla nad celým souborem (délka řádku) a pravidla o mezerách, která místo návštěv [vyslovují nároky |gap-rules].
+
+`enter()` se volá při vstupu do uzlu, před jeho dětmi, `leave()` po nich. Když pravidlo v `enter()` uzel nahradí nebo odstraní, engine do něj už nesestoupí a `leave()` pro něj nezavolá.
+
+
+Kontrakt oprav
+==============
+
+Tohle je jádro: **strom se smí změnit jen poté, co `report()` vrátil `true`.**
+
+```php
+if ($context->report($node, 'The var_dump() call must not stay in the code')) {
+	$node->remove();
+}
+```
+
+`report()` vrátí `false`, když je porušení na svém řádku potlačené komentářem, a pak se nesmí nic měnit. Engine to nehlídá z důvěry, ale z čísla: strom počítá své změny a každou změnu spáruje s hlášením v témže volání. Změna bez hlášení, nebo po hlášení, které vrátilo `false`, je porušený kontrakt: za běhu varování, s `--strict-rules` a v `RuleTester`u chyba.
+
+Hlášení stojí na uzlu nebo tokenu. Problém, který leží v bílých znacích nebo v komentáři, ohlaste s příslušnou trivia (`report($token, $message, trivia: $trivia)`), aby porušení mělo řádek té trivia a `dresscode:ignore` na tom řádku ho našel; jinak spadne na řádek tokenu. Závažnost je `Severity::Error` nebo `Severity::Warning`; varování se vypíše, ale exit kód neovlivní.
+
+Zpráva popisuje kód, ne čtenáře, a nikdy nerozkazuje: požadovaný stav (`A single space after the comma`), norma (`The opening brace must be on its own line`), nebo nález (`Function foo() is deprecated`). Konkrétní jména a hodnoty do zprávy patří, jméno pravidla ne, to doplní výpis.
+
+
+Bezstavovost a idempotence
+==========================
+
+Jedna instance pravidla slouží celému běhu a všem souborům. Stav na soubor patří do `$context->getStorage()`, které engine pro každý soubor založí nové; vlastnosti třídy jsou jen pro volby.
+
+Engine pouští pravidla opakovaně, dokud se strom mění. Pravidlo proto musí být **idempotentní**: nad vlastním výstupem už nic neohlásí ani nezmění. A nesmí záviset na pořadí průchodu ani na tom, kolikátý průchod běží; kontext to záměrně neprozradí. Dvě pravidla, která se přetahují, engine pozná a soubor ohlásí jako selhání se jmény obou. `RuleTester` idempotenci ověřuje: pustí pravidlo nad výstupem podruhé a čeká ticho.
+
+
+Co strom dovolí
+===============
+
+Do uzlů se píše výhradně přes settery a mutační metody (`setExpr()`, `replaceWith()`, `remove()`, `append()`), do tokenů přes `setText()`, `setLeadingTrivia()`, `setTrailingTrivia()`. Přímý zápis do slotu index tokenů nepozná a PHPStan pravidlo `TreeWriteRule` ho v pluginu ohlásí. Podrobně o tom, co jde a jak, je stránka [Úpravy |php-syntax-mutation]; pro pravidla platí navíc:
+
+- Sourozence měňte z callbacku jejich vlastníka (`FileNode`, `BlockNode`, `ClassNode`) nebo z `afterFile()`, ne z `enter()` položky, kterou právě procházíte. Engine procházený seznam nepřepočítává.
+- Novou konstrukci nestavějte z tokenů, parsujte ji: `Parser::parseExpression()`, `parseStatement()`, `parseType()`, `parseName()`.
+- Komentář nesmí zmizet, pokud pravidlo neřekne `modifiesComments`. Před zásahem se ptejte `Token::hasComment()`, `Token::hasCommentUpTo()`, `Node::hasComment()`; komentář odstraňujte jen `Token::removeTrivia()`.
+- Konec řádku, který uzavírá řádek tokenu, patří do jeho koncových trivia, ne do úvodních trivia dalšího tokenu. `ensureLeadingNewline()` a `setBlankLinesBefore()` to dělají správně; stavějte na nich.
+- Na "je tenhle výraz stejný jako tamten" a "dá se bezpečně vyhodnotit dvakrát" odpovídá `Node::matches()` a `Node::isRepeatableRead()`. Neimplementujte je znovu.
+
+
+Volby
+=====
+
+Pravidlo s volbami implementuje `ConfigurableRule`: schéma z `nette/schema` a `configure()`, které dostane volby už zvalidované:
+
+```php
+final class ForbiddenFunctionsRule extends Rule implements ConfigurableRule
+{
+	/** @var list<string> */
+	private array $functions = [];
+
+
+	public static function getOptionsSchema(): Schema
+	{
+		return Expect::structure([
+			'functions' => Expect::listOf('string')->default(['var_dump', 'print_r'])
+				->description('Names of the forbidden functions'),
+		]);
+	}
+
+
+	public function configure(array $options): void
+	{
+		$this->functions = $options['functions'];
+	}
+}
+```
+
+Jména voleb jsou camelCase. Seznam zadaný v konfiguraci nahrazuje výchozí celý, nikdy se neslučuje; s tím počítejte v popisu. Popis volby uvádějte jen tam, kde jméno, typ a default neříkají všechno. Pravidlo, kterému rozhoduje verze PHP o tom, co smí zapsat (ne o tom, zda vůbec běží), se zeptá `$context->getPhpVersion()`.
+
+
+Analýzy
+=======
+
+Informace o souboru, kterou potřebuje víc pravidel, patří do analýzy: obyčejné třídy s konstruktorem, který přijme `FileNode` (nebo nic). Pravidlo si ji vyžádá:
+
+```php
+$resolver = $context->getAnalysis(NameResolver::class);
+if ($resolver->isGlobalFunctionCall($node, 'var_dump')) {
+	// ...
+}
+```
+
+Engine analýzu postaví napoprvé a drží ji, dokud se strom nezmění; po každé změně vzniká znovu, takže nikdy nečtete zastaralý stav. Vestavěné jsou `PhpSyntax\Analyses\NameResolver` (jmenný prostor, importy, překlad jmen), `PhpSyntax\Analyses\Scope` (funkce, třída, dostupnost `$this`) a `DressCode\Analyses\PhpDoc` (dokumentační komentáře jako strom phpstan/phpdoc-parser). Vlastní analýza s konstruktorem nad `FileNode` nepotřebuje registraci; jen ta, která potřebuje továrnu, se zapisuje do konfigurace klíčem `analyses`.
+
+
+Testování
+=========
+
+Každé pravidlo má fixtury a `RuleTester`, který na nich ověří výstup, hlášení a všechno výše: [Testování pravidel |testing-rules].

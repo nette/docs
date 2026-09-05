@@ -3,3 +3,72 @@
 
 .[perex]
 Settery slotů, nahrazení a odstranění uzlu, práce se seznamy a nový uzel z fragmentu: jak strom měnit tak, aby zůstal konzistentní a po tisku se změnilo jen to, na co jste sáhli.
+
+
+Jedna cesta k zápisu
+====================
+
+Sloty uzlů jsou veřejné ke čtení, ale zapisuje se do nich jen přes settery: `$if->setCond($expr)`, `$call->setName($name)`, obecně `$node->replaceChild($old, $new)`. Text a trivia tokenu se mění jen přes `setText()`, `setLeadingTrivia()` a `setTrailingTrivia()`. Není to formalita: settery přepojí rodiče a dají vědět indexu tokenů, který drží pořadí, řádky a sloupce, takže po změně jsou pozice hned správně, aniž by se něco přepočítávalo od začátku. Přímé přiřazení do slotu index nepozná a strom o něm neví; v projektu s PHPStanem ho odhalí pravidlo `TreeWriteRule`, které DressCode dodává.
+
+Uzel patří právě jednomu stromu. Vložit uzel, který už rodiče má, je výjimka; `clone` dá hlubokou kopii bez rodiče, kterou vložit lze.
+
+
+Nahradit a odstranit
+====================
+
+```php
+$node->replaceWith($other);
+$node->remove();
+$node->remove(CommentPolicy::Drop);
+```
+
+`replaceWith()` zachová trivia kolem starého uzlu kolem nového, takže výraz nahrazený uprostřed řádku zůstane na svém místě s mezerami, jaké tam byly. `remove()` odstraní položku seznamu: uzel, který stál na řádcích sám, vezme řádky s sebou, jinak zůstane okolní mezera. Komentáře uvnitř odstraňovaného uzlu se podle `CommentPolicy` přesunou k následujícímu tokenu (výchozí), k předchozímu, nebo zahodí; ztratit komentář mlčky nejde.
+
+
+Seznamy
+=======
+
+```php
+$stmts->append($stmt);
+$stmts->insert($index, $stmt);
+$stmts->removeItem($stmt);
+
+$args->append($arg);                  // oddělovač se odvodí z existujících, nebo ', '
+$args->insert(0, $arg);
+$args->setTrailingSeparator(null);    // pryč s koncovou čárkou
+```
+
+`SeparatedNodeList` si oddělovače hlídá sám: při vložení odvodí chybějící čárku z těch, které v seznamu jsou (nebo použije `, ` u jednořádkového seznamu), a ve víceřádkovém seznamu dá položce odsazení souseda; při odstranění vezme čárku za položkou, u poslední tu před ní. `removeItem()` odstraňuje položku ze seznamu, `remove()` na uzlu odstraňuje uzel sám; je to totéž z druhé strany a jmenuje se to jinak jen proto, že PHP nedovolí dvě různé signatury.
+
+`NodeList` příkazů odsazení za vás neřeší, protože příkaz může stát ledaskde. Vložený příkaz proto dostane řádek a odsazení výslovně, a odsazení souseda si přečtěte dřív, než ho vložením připravíte o začátek řádku:
+
+```php
+$stmt = $parser->parseStatement('$this->log("total");');
+$indent = $return->getFirstToken()->getLineIndentation();
+
+$return->parent->insert($return->parent->indexOf($return), $stmt);
+$return->getFirstToken()->ensureLeadingNewline();
+$return->getFirstToken()->setIndentation($indent);
+$stmt->getFirstToken()->setIndentation($indent);
+```
+
+
+Nový uzel
+=========
+
+Nový kód se nestaví z tokenů, parsuje se z řetězce: `Parser::parseExpression()`, `parseStatement()`, `parseType()`, `parseName()` vrátí odpojený uzel s prázdnými trivia na okrajích, připravený k vložení. Kdo chce místo psaní řetězce klonovat existující uzel, musí klonu nejdřív vyčistit okraje: klon si nese úvodní trivia originálu, a u prvního příkazu souboru je v nich i `<?php`, které by se ve výstupu objevilo dvakrát.
+
+Změna textu tokenu je nejmenší možná úprava a často stačí: přejmenovat volání je `$call->name->token->setText('count')`, doplnit tečku do řetězce `$string->token->setText("'…'")`. Token ví, kolik konců řádků text má, takže i změna, která přidá řádek, nechá pozice v pořádku.
+
+
+Co si strom hlídá sám a co ne
+=============================
+
+Sám si hlídá rodiče, index a `FileNode::$revision`, které roste s každou změnou; kdo potřebuje vědět, jestli se něco změnilo, porovná revizi před a po, ale nepočítá s tím, že jedna úprava je jedno zvýšení, protože složená úprava jako `remove()` jich udělá několik.
+
+Nehlídá si dvě věci, které zůstávají na vás:
+
+- **Kanonická trivia.** Konec řádku, který uzavírá řádek tokenu, patří do jeho koncových trivia, ne do úvodních trivia dalšího tokenu. `ensureLeadingNewline()` a `setBlankLinesBefore()` to dělají správně; kdo skládá trivia ručně, ať to dodrží, jinak `getTrailingSpace()` zalomení neuvidí.
+- **Význam.** Strom vám dovolí nahradit podmínku čímkoli a odstranit `return`; jestli to smíte, je otázka na `isRepeatableRead()`, `matches()` a na vás.
+
+Po úpravě se tiskne `Printer::print($file)` nebo `(string) $file` a výstup je původní soubor se změnami přesně tam, kde jste je udělali.

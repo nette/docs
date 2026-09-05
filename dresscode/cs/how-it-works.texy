@@ -3,3 +3,94 @@ Jak DressCode přemýšlí
 
 .[perex]
 Strom místo tokenů, pravidlo jako věta, presety místo vlastního stylu, průchody do ustálení místo priorit a mezera s jedním vlastníkem. Mentální model, bez kterého konfigurace nedává smysl.
+
+
+Strom, ve kterém je všechno
+===========================
+
+Nástroje na styl kódu se v PHP dvacet let stavěly nad `token_get_all()`: nad plochým seznamem, kde je `if`, závorka, proměnná, mezera, a nic neříká, kde `if` končí ani jestli `[` otvírá pole nebo index. Každé pravidlo si pak strukturu domýšlí samo a většina jeho kódu je obrana proti tomu, aby se nespletlo.
+
+DressCode parsuje soubor do **bezztrátového konkrétního syntaktického stromu**. Každý uzel ví, co je: `IfNode` má podmínku a tělo, `TernaryNode` má `cond`, `if` a `else`. A každý token zdrojáku v tom stromu je, včetně mezer a komentářů, které visí na tokenech jako takzvaná trivia. Když strom vytisknete, dostanete původní soubor bajt po bajtu. Tohle je základní smlouva: **pravidlo mění jen to, na co sáhne, a zbytek souboru zůstane, jak byl.** Žádné přetištění podle vlastních představ, žádný ztracený komentář, diff přesně tak velký jako změna.
+
+Pro vás jako uživatele z toho plyne jedna praktická věc: hlášení a opravy jsou přesné. Když pravidlo říká, že u ternáru chybí mezera, myslí tenhle ternár, ne "něco kolem otazníku na řádku 12".
+
+
+Pravidlo je věta
+================
+
+Pravidlo v DressCode je malá třída, která řekne, které uzly ji zajímají, a pro každý z nich položí otázku. Tady je jádro pravidla, které přepisuje `$a ? $a : $b` na `$a ?: $b`:
+
+```php
+public function enter(Node|Token $node, RuleContext $context): void
+{
+	if (
+		$node instanceof TernaryNode
+		&& $node->if !== null
+		&& $node->cond->isRepeatableRead()
+		&& $node->cond->matches($node->if)
+		&& $node->question->getLine() === $node->colon->getLine()
+		&& !$node->question->hasCommentUpTo($node->colon)
+		&& $context->report($node, "A ternary repeating its condition must be written '?:'")
+	) {
+		$node->setIf(null);
+		$node->question->setTrailingTrivia([]);
+	}
+}
+```
+
+Dá se to přečíst nahlas: je to ternár, má prostřední část, podmínku lze bezpečně vyhodnotit dvakrát, prostřední část je stejná jako podmínka, je to na jednom řádku, není uvnitř komentář, a nikdo to nepotlačil. Otázky jako "je tenhle výraz bezpečné číst podruhé" zodpovídá strom; pravidlo si je nemusí odvozovat. Proto má většina pravidel v DressCode pod sto řádků a proto [si vlastní pravidlo napíšete za odpoledne |custom-rule].
+
+
+Oprava jen po ohlášení
+======================
+
+V ukázce výše stojí `report()` v podmínce. Není to náhoda, je to smlouva: **pravidlo smí změnit strom jen poté, co porušení ohlásilo a hlášení nebylo potlačeno.** Engine to hlídá: každou změnu stromu spáruje s hlášením, a pravidlo, které změní něco tiše, poruší kontrakt a dozvíte se to.
+
+Díky tomu má potlačení skutečnou váhu. Když napíšete `// dresscode:ignore` nebo pravidlo pro danou cestu vypnete, nezmizí jen hláška: oprava se opravdu neprovede, a nehlídá to dobrá vůle autora pravidla, ale engine. Pravidlo, které by opravovalo i potlačené místo, neprojde ani vlastním testem.
+
+
+Presety místo vlastního názoru
+==============================
+
+DressCode nemá vlastní styl. Má pravidla a jejich volby, a **preset** je pojmenovaný seznam pravidel s volbami, který dává dohromady jeden styl. Vestavěné jsou tři: `dresscode/psr12` sleduje PSR-12 oddíl po oddílu, `dresscode/per` je jeho potomek podle PER Coding Style a je výchozí, `dresscode/nette` je Nette Coding Standard, tedy PER s tabulátory a několika odchylkami. Kde se pravidlo se specifikací rozchází, dostane volbu, ne výjimku v presetu, takže tytéž volby jsou k dispozici i vám.
+
+Presety se skládají: potomek přebírá rodiče a přepisuje celé položky. Vaše konfigurace je poslední vrstva, která přepisuje presety. O tom, jak přesně se vrstvy skládají, je stránka [Konfigurace |configuration].
+
+
+Průchody do ustálení místo priorit
+==================================
+
+Když dvě pravidla sahají na totéž místo, záleží na pořadí. PHP CS Fixer to řeší ručně udržovanými prioritami: většina jeho fixerů nese číslo od −100 do 100 a v komentáři prózu o tom, po kom musí běžet. Když si píšete vlastní fixer, číslo hádáte.
+
+DressCode priority nemá. Pustí všechna pravidla ve třech fázích (napřed strukturní změny, pak formátování, nakonec úklid bílých znaků), a pokud některé strom změnilo, pustí je znovu, dokud se strom nepřestane měnit. Od pravidel to chce dvě vlastnosti: musí být **idempotentní** (nad vlastním výstupem už nic nemění) a **lokální** (nezávisí na pořadí průchodu). Obojí se dá testovat a `RuleTester` to testuje za vás. A kdyby se dvě pravidla přetahovala, engine to pozná podle toho, že se strom vrátil do stavu, ve kterém už byl, a vypíše, která to byla a v čem se neshodla.
+
+Důsledek, který stojí za zapamatování: co běh ohlásí, závisí na tom, která pravidla jsou zapnutá. Pravidlo, které tvar kódu opraví dřív, sebere hlášení pravidlu, které by na něj narazilo později. Není to chyba, je to definice: hlásí se, co zbylo.
+
+
+Mezera má jednoho vlastníka
+===========================
+
+Bílé znaky mezi dvěma tokeny jsou v každém nástroji na styl zdrojem sporů: jedno pravidlo chce mezeru za čárkou, druhé zarovnává sloupce, třetí láme dlouhý řádek. V DressCode **žádné pravidlo mezeru nepřepisuje**. Pravidlo o mezerách vysloví nárok: mezi tímhle a tamtím tokenem má být jedna mezera, nebo zalomení řádku, nebo dva prázdné řádky. Engine nároky posbírá, rozhodne, opraví a hlášení vypíše pod jménem pravidla, jehož nárok vyhrál.
+
+Pro vás z toho plyne:
+
+- Hlášení o mezeře nese vždy jméno jednoho konkrétního pravidla, i když se místa dotýká víc pravidel. To jméno vypnete nebo nastavíte.
+- Dvě pravidla, která by nárokovala tutéž složku téže mezery, jsou chyba konfigurace, ne tichá loterie. Nastane to jen u pluginů; vestavěná pravidla se nekříží.
+- Odsazení řádků má jediného vlastníka, pravidlo `indentation`, a určuje ho ze stromu, ne z toho, jak byl odsazený řádek nad ním. Špatně odsazený řádek proto nestrhne řádky pod sebou.
+
+Kdo píše vlastní pravidlo o mezerách, najde podrobnosti na stránce [Pravidla o mezerách |gap-rules].
+
+
+Verze PHP je vlastnost projektu
+===============================
+
+Pravidlo, které zapisuje syntaxi novějšího PHP (třeba `0o755` z PHP 8.1), se nesmí zapnout v projektu, který na té verzi ještě neběží. DressCode proto cílovou verzi bere z projektu, ne z interpretu, který ho spouští: z `phpVersion` v konfiguraci, jinak z `require.php` v `composer.json`, jinak PHP 8.0 jako nejnižší podporované. Stejný soubor tak dostane stejný verdikt z jakéhokoli počítače. Pravidlo pro novější syntaxi se pod svou verzí samo vynechá; preset ho hlídat nemusí.
+
+
+Co z toho plyne pro konfiguraci
+===============================
+
+- Zapínáte a nastavujete pravidla jménem, které vidíte ve výpisu. Nic jiného než jméno a volby k nastavení není.
+- Pořadí pravidel v konfiguraci nehraje roli.
+- Když vypnete pravidlo, může se objevit hlášení jiného pravidla, které dosud nedostalo šanci. Je to totéž místo v kódu, jen ho teď hlásí někdo jiný.
+- Výjimka pro cestu nebo řádek opravdu vypne i opravu.

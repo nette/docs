@@ -3,3 +3,146 @@ Vlastní pravidlo
 
 .[perex]
 Od fixtury k hotovému pravidlu za odpoledne: napíšete kód před a po, řeknete, které uzly vás zajímají, napíšete podmínku jako větu a RuleTester pohlídá zbytek.
+
+
+Domácí pravidlo
+===============
+
+Každý tým má pár pravidel, která žádný standard nepokrývá, protože jsou jeho. U nás to je třeba tohle: zpráva výjimky je věta a končí tečkou. `throw new InvalidArgumentException('The name must not be empty')` chceme vidět jako `'The name must not be empty.'`. Roky jsem to hlídal v code review, protože napsat na to sniff bylo víc práce, než kolik ušetřil. Tady to je čtyřicet řádků a napíšeme si je spolu.
+
+
+Napřed fixtura
+==============
+
+Pravidlo se v DressCode testuje nad fixturami: souborem `.code` s kódem před opravou, `.expected` s kódem po ní a `.violations` s řádky a zprávami, které má pravidlo ohlásit. Fixtura je nejlepší zadání, jaké můžete napsat, tak s ní začneme. Do `tests/fixtures/exception-message-period/basic.code`:
+
+```php
+<?php
+
+throw new InvalidArgumentException('The name must not be empty');
+throw new \RuntimeException('Cannot connect to the database.');
+throw new App\NotFoundException("Order $id not found");
+throw new LogicException('Unreachable ');
+$logger->log('Started');
+```
+
+Už tady se rozhoduje, co pravidlo umí a co ne: druhý řádek je v pořádku, třetí má interpolovaný řetězec a ten necháme být (kdo ví, co je v `$id`), čtvrtý má na konci mezeru navíc, kterou spolkne tečka, a pátý není výjimka. Soubor `basic.expected` je totéž s tečkami na řádcích 3 a 6 a `basic.violations` říká, co se má ohlásit:
+
+```
+3: The message of an exception must end with a period
+6: The message of an exception must end with a period
+```
+
+
+Kostra pravidla
+===============
+
+Pravidlo je třída odvozená od `DressCode\Rule` s atributem `#[RuleInfo]`, který nese jméno, fázi a popis. Jméno má tvar `vendor/slug` a je to to, co uvidíte ve výpisu a co napíšete do `dresscode:ignore`. Fáze říká, kdy pravidlo běží: `Structure` pro změny kódu, `Formatting` pro mezery a zalomení, `Cleanup` pro závěrečný úklid. Naše mění text, takže `Structure`.
+
+```php
+namespace App\CodeStyle;
+
+use DressCode\Rule;
+use DressCode\RuleContext;
+use DressCode\RuleInfo;
+use DressCode\Stage;
+use PhpSyntax\Node;
+use PhpSyntax\Nodes\Expression\NewNode;
+use PhpSyntax\Token;
+
+#[RuleInfo('app/exception-message-period', Stage::Structure, description: 'Ends the message of an exception with a period')]
+final class ExceptionMessagePeriodRule extends Rule
+{
+	public function getVisitedTypes(): array
+	{
+		return [NewNode::class];
+	}
+
+
+	public function enter(Node|Token $node, RuleContext $context): void
+	{
+	}
+}
+```
+
+`getVisitedTypes()` říká, které uzly chcete vidět; engine pak volá `enter()` jen pro ně. Nás zajímá `new`, tedy `NewNode`. Které uzly existují a co v nich je, říká [reference uzlů |nodes]: `NewNode` má sloty `newKeyword`, `class` a `args`.
+
+
+Podmínka jako věta
+==================
+
+Teď to podstatné. Do `enter()` napíšeme, kdy je co špatně, jako řadu otázek na strom (k importům přibudou `PhpSyntax\Nodes\NameNode` a `PhpSyntax\Nodes\Scalar\StringNode`):
+
+```php
+public function enter(Node|Token $node, RuleContext $context): void
+{
+	if (
+		!$node instanceof NewNode
+		|| !$node->class instanceof NameNode
+		|| !str_ends_with($node->class->getName(), 'Exception')
+	) {
+		return;
+	}
+
+	$message = $node->args?->args->getItems()[0]->expr ?? null;
+	if (
+		!$message instanceof StringNode
+		|| !preg_match('~^\'(.*)\'$~s', $message->token->text, $m)
+		|| $m[1] === ''
+		|| str_ends_with(rtrim($m[1]), '.')
+		|| !$context->report($message, 'The message of an exception must end with a period')
+	) {
+		return;
+	}
+
+	$message->token->setText("'" . rtrim($m[1]) . ".'");
+}
+```
+
+Čtěte to shora: je to `new` se jménem třídy (ne `new $class` ani anonymní třída) a jméno končí na `Exception`. První argument je řetězec bez interpolace (`StringNode`; interpolovaný řetězec je jiný uzel, takže třetí řádek fixtury odpadne sám), je v jednoduchých uvozovkách, není prázdný a nekončí tečkou. A poslední otázka: **nikdo to nepotlačil.** `report()` vrátí `false`, když na řádku stojí `dresscode:ignore`, a pak se nesmí nic měnit. Proto je v podmínce, ne před ní.
+
+Teprve za tím vším je oprava: jeden `setText()` na tokenu řetězce. Strom si sám srovná, co potřebuje, a zbytek souboru se nezmění ani o bajt.
+
+Všimněte si, co v pravidle není: žádné počítání závorek, žádné hledání, kde končí argument, žádná obrana proti komentáři uprostřed volání. To všechno ví strom. Nad plochým polem tokenů by většina kódu pravidla řešila, co všechno může stát mezi `new` a řetězcem; tady ta otázka nevzniká.
+
+
+Test
+====
+
+`RuleTester` vezme třídu pravidla a adresář s fixturami a ověří všechno, na co byste zapomněli: že výstup odpovídá `.expected`, že hlášení odpovídají `.violations`, že pravidlo nad vlastním výstupem už nic nemění, že nezahodilo žádný komentář, že poslechne `dresscode:ignore-file` a že nic nezměnilo bez ohlášení. Z Nette Testeru:
+
+```php
+use App\CodeStyle\ExceptionMessagePeriodRule;
+use DressCode\Testing\RuleTester;
+
+require __DIR__ . '/../vendor/autoload.php';
+Tester\Environment::setup();
+
+RuleTester::run(ExceptionMessagePeriodRule::class, __DIR__ . '/fixtures/exception-message-period');
+```
+
+Z PHPUnit je to totéž volání uvnitř testovací metody; selhání je výjimka `DressCode\Testing\TestFailure` s diffem, takže ji každý framework ukáže srozumitelně.
+
+Když teď test pustíte, projde. Kdyby ne, diff v hlášení vám řekne, který řádek fixtury pravidlo vidí jinak než vy, a to je přesně ta chvíle, kdy se o kódu něco dozvíte. Já se při psaní tohoto pravidla dozvěděl, že `rtrim()` na mezeru před tečkou tam nebyl od začátku.
+
+
+Zapnutí v projektu
+==================
+
+Třídu dejte kamkoli, kam vede autoload; já mám domácí pravidla v `tools/CodeStyle/` s `autoload-dev`, aby se `DressCode\Rule` nedostal do produkčního autoloadu. V konfiguraci se pravidlo zapíná názvem třídy, jméno z atributu se zaregistruje samo:
+
+```neon
+rules:
+	App\CodeStyle\ExceptionMessagePeriodRule: true
+```
+
+Od téhle chvíle ho `dresscode check` hlásí, `dresscode fix` opravuje, `// dresscode:ignore app/exception-message-period` potlačuje a v editoru se ukazuje jako každé jiné. Když stejné pravidlo potřebuje víc projektů, zabalte ho do [presetu nebo extension |presets-and-extensions].
+
+
+Kam dál
+=======
+
+- Pravidlo, které chce volby (třeba seznam přípon výjimek), přidá rozhraní `ConfigurableRule` se schématem; jak na to a co všechno pravidlo musí dodržet, je na stránce [Pravidla hry |rule-contract].
+- Naše pravidlo poznává výjimku podle jména. Kdo chce víc, sáhne po analýze `NameResolver`, která jméno přeloží podle importů a jmenného prostoru; analýzy popisuje [PhpSyntax |php-syntax-analyses].
+- Pravidlo o mezerách a zalomení se píše jinak, nárokem místo `enter()`: [Pravidla o mezerách |gap-rules].
+- Kdo přepisuje existující sniff nebo fixer, má vlastní návod: [Přepis cizího pravidla |porting-rules].

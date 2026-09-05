@@ -1,0 +1,102 @@
+Parsování a tisk
+****************
+
+.[perex]
+Jak zdrojový kód naparsovat, co dělat se syntaktickou chybou, jak se novější syntaxe PHP čte i na starším běhu, jak naparsovat samotný fragment kódu a jak strom vytisknout zpátky.
+
+
+Parsování souboru
+=================
+
+```php
+use PhpSyntax\Parser;
+
+$parser = new Parser;
+$file = $parser->parse($code);
+```
+
+Výsledkem je `FileNode`, kořen stromu, s příkazy v `$file->stmts`. Jednu instanci parseru můžete použít na libovolný počet souborů po sobě. Zpracuje cokoli, co přijme PHP: soubory s inline HTML, s několika bloky `<?php`, s BOM i hashbangem na začátku, s `__halt_compiler()` a daty za ním.
+
+Kód, který není platné PHP, skončí výjimkou `ParseException`. Ta říká, kde ve zdrojáku problém je, vlastnostmi `sourceLine`, `sourceColumn` a `sourceOffset`; `getLine()` a `getFile()`, které má každá výjimka, ukazují na místo v knihovně, kde vznikla, a to je něco jiného:
+
+```php
+try {
+	$file = $parser->parse($code);
+} catch (PhpSyntax\ParseException $e) {
+	echo "$e->sourceLine:$e->sourceColumn: {$e->getMessage()}";   // 2:8: Unexpected '{'
+}
+```
+
+Částečný strom neexistuje: buď se soubor naparsuje celý, nebo vůbec. Pro nástroj, který má kód měnit, je to správná vlastnost, protože nad neúplným stromem by úpravy nebyly bezpečné. Pro editor, který chce něco ukázat i nad rozepsaným kódem, je to naopak omezení, se kterým je dobré počítat předem.
+
+
+Novější syntaxe na starším PHP
+==============================
+
+Parser rozumí syntaxi PHP 8.5 i tehdy, když sám běží na PHP 8.4. Tokenizér starší verze novou syntaxi nezná, a tak ji lexer napodobí: přepíše tokeny tam, kde by je novější PHP vydalo jinak (operátor `|>`, přetypování `(void)`). Děje se to samo podle verze interpretu a nic se nenastavuje. Obráceně to ale neplatí: kód psaný pro PHP 8.5 zůstane kódem pro PHP 8.5 a parser sám o tom, na které verzi má projekt běžet, neříká nic.
+
+
+Tisk uzlu
+=========
+
+Vedle celého souboru se dá vytisknout i kterýkoli jednotlivý uzel. Slouží k tomu dvě věci, které se snadno pletou:
+
+```php
+Printer::print($node);   // včetně trivií na okrajích, tedy i s odsazením a komentářem nad uzlem
+$node->text;             // jen text uzlu, od prvního tokenu po poslední
+```
+
+`Printer::print()` je to, co drží round trip, tedy zaručenou shodu vytištěného stromu s původním souborem. Proto u prvního příkazu souboru vytiskne i `<?php`, které visí jako trivia před ním. `$node->text` je uzel sám: `return sizeof($this->orders) > 0 ? $sum : 0;` bez odsazení před ním a bez konce řádku za ním. Do hlášek a do porovnávání patří `text`, do zápisu souboru `print()`.
+
+
+Fragmenty
+=========
+
+Když do stromu potřebujete vložit nový uzel, nestavíte ho z tokenů ručně. Napíšete ho jako kód a necháte parser, ať z něj udělá uzel:
+
+```php
+$expr = $parser->parseExpression('$this->items[] = $item');
+$stmt = $parser->parseStatement('return null;');
+$type = $parser->parseType('?array');
+$name = $parser->parseName('Nette\Utils\Strings');
+```
+
+Tyhle čtyři metody jsou zkratky s přesným návratovým typem. Cokoli dalšího, co ve zdrojáku nestojí samo o sobě, naparsujete tak, že řeknete, jaký uzel chcete: knihovna zná obal, do kterého ho musí zasadit, aby dával smysl.
+
+```php
+$param = $parser->parseFragment(ParameterNode::class, 'int $x = 1');
+$arm = $parser->parseFragment(MatchArmNode::class, '1, 2 => true');
+$item = $parser->parseFragment(ArrayItemNode::class, "'key' => \$value");
+```
+
+Funguje to pro parametr, argument, člen třídy, položku pole, import, větev matche, skupinu atributů, `catch`, `elseif`, položku `use` closure, statickou proměnnou, položku konstanty a hook; třída odvozená od některé z nich se parsuje ve stejném obalu.
+
+Fragment je odpojený uzel bez rodiče a bez původních pozic, s prázdnými trivia na okrajích, takže se dá rovnou vložit; kam a jak, říká stránka [Úpravy stromu |mutation]. Vstup, ze kterého by něco přebývalo, parser odmítne a řekne proč: `$a, $b` zadané jako jeden parametr skončí hláškou `The code is not a single parameter.`
+
+Konstruktor uzlu je veřejný a děti si adoptuje sám, takže uzel jde postavit i přímo. Jeho parametry ale kopírují sloty z gramatiky a do těch může minoritní verze přidávat, proto je pište jako pojmenované argumenty. U všeho, co jde zapsat jako kód, je ale parsování fragmentu čitelnější.
+
+
+Tisk
+====
+
+```php
+use PhpSyntax\Printer;
+
+$code = Printer::print($file);
+$code = (string) $file;
+```
+
+Tisk nemá žádnou logiku: projde strom a spojí texty tokenů s jejich trivia. Proto platí, že vytištěný nezměněný strom je původní soubor bajt po bajtu, a proto po úpravě zůstane všechno, na co jste nesáhli, přesně tam, kde bylo. Tisknout lze i jednotlivý uzel, třeba výraz, který jste právě sestavili.
+
+První test, který nad PhpSyntax stojí za to udělat, je round trip nad vlastním kódem:
+
+```php
+foreach ($files as $path) {
+	$code = file_get_contents($path);
+	if (Printer::print($parser->parse($code)) !== $code) {
+		echo "$path\n";
+	}
+}
+```
+
+Nad adresářem `vendor/` běžného projektu nevypíše nic. Kdyby něco vypsal, je to chyba parseru a stojí za nahlášení.

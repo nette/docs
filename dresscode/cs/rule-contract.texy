@@ -1,0 +1,155 @@
+Pravidlo do detailu
+*******************
+
+.[perex]
+Co musí každé pravidlo dodržet: opravovat až po ohlášení, být bez stavu a idempotentní, správně zvolit fázi, vyplnit atribut `RuleInfo`, popsat své volby schématem a hlásit i problémy v bílých znacích.
+
+
+Dvě podoby pravidla
+===================
+
+Základem je třída `DressCode\Rule` a existují dvě podoby, mezi kterými se vybírá podle toho, co pravidlo dělá:
+
+- **`NodeRule`** navštěvuje uzly a tokeny, které si vyžádá, a pracuje s nimi v metodách `enter()` a `leave()`. Takhle je psaná většina pravidel a je o nich celá tahle stránka.
+- **`GapRule`** nenavštěvuje nic. Jen vysloví požadavek na to, co má být v bílých znacích mezi tokeny, a vyhodnotí to za něj jádro nástroje. Píše se jinak a má [vlastní stránku |whitespace-rules].
+
+Třída je vždy jen jedno, nebo druhé. Pravidlo, které by potřebovalo obojí, jsou ve skutečnosti dvě pravidla se dvěma jmény, aby šlo každé vypnout zvlášť a aby bylo z hlášení poznat, které z nich mluví.
+
+
+Tvar pravidla
+=============
+
+Pravidlo dědí od `DressCode\NodeRule` a nese atribut `#[RuleInfo]`:
+
+```php
+#[RuleInfo(
+	'acme/no-var-dump',
+	Stage::Structure,
+	description: 'Reports calls of var_dump()',
+	minPhpVersion: null,
+	modifiesComments: false,
+)]
+final class NoVarDumpRule extends NodeRule
+{
+	// ...
+}
+```
+
+- **Jméno** `vendor/slug` je identita pravidla: objevuje se ve výpisu, v konfiguraci, v komentářích `dresscode:ignore` i v baseline. Dvě třídy se stejným jménem jsou chyba konfigurace.
+- **Fáze** (`Stage`) říká, ve které ze tří fází průchodu pravidlo běží. `Structure` je pro změny kódu (přepis výrazu, odstranění importu), `Formatting` pro bílé znaky a zalomení řádků, `Cleanup` pro závěrečný úklid (mezery na konci řádků, konec souboru, délka řádku). Průchody jdou v tomhle pořadí, takže formátování už vidí kód po strukturních změnách.
+- **Popis** je jedna anglická věta v oznamovacím způsobu o tom, co pravidlo dělá; vypisuje ji `dresscode rules`.
+- **`minPhpVersion`** uveďte tehdy, když pravidlo zapisuje syntaxi, která existuje až od nějaké verze PHP (třeba `0o755` od PHP 8.1). Pod tou verzí se pravidlo samo vynechá a preset ho nemusí hlídat. PHP 8.0 je nejnižší podporovaná verze, takže na nic, co v 8.0 už bylo, se ptát nemusíte.
+- **`modifiesComments`** nastavte na `true` jen tehdy, když pravidlo opravdu mění text komentářů. Jinak `RuleTester` hlídá, že žádný komentář nezmizel ani se nezměnil, což je nejčastější chyba oprav.
+
+
+Které uzly a kdy
+================
+
+```php
+public function getVisitedTypes(): array
+{
+	return [FunctionCallNode::class];
+}
+```
+
+Je to seznam tříd uzlů (nebo `Token::class`), pro které jádro zavolá `enter()` a `leave()`. Porovnává se přes `instanceof`, takže `StatementNode::class` zachytí každý příkaz a `Node::class` úplně všechno; čím užší seznam, tím rychlejší běh. Prázdný seznam znamená, že pravidlo pracuje jen v `beforeFile()` a `afterFile()`, což dělají pravidla nad celým souborem, například to o délce řádku.
+
+`enter()` se volá při vstupu do uzlu, tedy před jeho dětmi, `leave()` až po nich. Když pravidlo uzel v `enter()` nahradí nebo odstraní, jádro do něj už nesestoupí a `leave()` pro něj nezavolá.
+
+
+Nejdřív ohlásit, teprve pak opravit
+===================================
+
+Tohle je nejdůležitější pravidlo celého kontraktu: **strom se smí změnit až poté, co `report()` vrátil `true`.**
+
+```php
+if ($context->report($node, 'The var_dump() call must not stay in the code')) {
+	$node->remove();
+}
+```
+
+`report()` vrátí `false`, pokud je porušení na svém řádku potlačené komentářem, a pak se nesmí nic měnit. Nespoléhá se přitom na dobrou vůli: strom počítá své změny a jádro každou změnu spáruje s hlášením ze stejného volání. Změna bez hlášení, nebo po hlášení, které vrátilo `false`, je porušený kontrakt. Za běhu je z toho varování, s přepínačem `--strict-rules` a v `RuleTester`u chyba.
+
+Hlášení se váže na uzel nebo na token. Problém, který leží v bílých znacích nebo v komentáři, ohlaste s příslušnou trivia (`report($token, $message, trivia: $trivia)`), aby porušení dostalo řádek té trivia a `dresscode:ignore` na tom řádku ho našel; jinak spadne na řádek tokenu. Závažnost je `Severity::Error`, nebo `Severity::Warning`; varování se vypíše, ale exit kód neovlivní.
+
+Zpráva popisuje kód, ne čtenáře, a nikdy nerozkazuje. Má jeden ze tří tvarů: požadovaný stav (`A single space after the comma`), norma (`The opening brace must be on its own line`), nebo nález (`Function foo() is deprecated`). Konkrétní jména a hodnoty do zprávy patří, jméno pravidla ne, to doplní výpis.
+
+
+Bez stavu a idempotentní
+========================
+
+Jedna instance pravidla slouží celému běhu a všem souborům. Stav vztažený k jednomu souboru patří do pole `$context->storage`, které jádro pro každý soubor založí prázdné; vlastnosti třídy jsou jen na volby.
+
+Pravidla se pouštějí opakovaně, dokud se strom mění, takže pravidlo musí být **idempotentní**: nad vlastním výstupem už nesmí nic ohlásit ani změnit. A nesmí záviset na pořadí průchodu ani na tom, kolikátý průchod zrovna běží; kontext to schválně neprozradí. Dvě pravidla, která se přetahují, jádro pozná a soubor ohlásí jako selhání se jmény obou. Idempotenci ověřuje i `RuleTester`: pustí pravidlo nad jeho vlastním výstupem podruhé a čeká ticho.
+
+
+Co strom dovolí
+===============
+
+Slot uzlu se zapisuje přiřazením (`$if->cond = $expr`), uzel se nahrazuje metodou `replaceWith()` a odstraňuje metodou `remove()`, text a trivia tokenu mění jeho vlastní metody. O rodiče a o index tokenů se strom stará sám, a kde na to nemá property hook, hlídá zápis viditelnost vlastnosti; strom tedy nerozbijete ani zápisem mimo API. Podrobnosti jsou na stránce [Úpravy |phpsyntax:mutation]; pro pravidla k tomu platí navíc:
+
+- Sourozence měňte z callbacku jejich vlastníka (`FileNode`, `BlockNode`, `ClassNode`) nebo z `afterFile()`, ne z `enter()` položky, kterou právě procházíte. Jádro procházený seznam nepřepočítává.
+- Novou konstrukci nestavějte z tokenů, ale naparsujte ji: `Parser::parseExpression()`, `parseStatement()`, `parseType()`, `parseName()`.
+- Komentář nesmí zmizet, dokud pravidlo neřekne `modifiesComments`. Před zásahem se ptejte `Token::hasComment()`, `Token::hasCommentUpTo()` nebo `Node::hasComment()`; odstraňujte komentář jen přes `removeTrivia()`.
+- Konec řádku, který uzavírá řádek tokenu, patří do jeho koncových trivia, ne do úvodních trivia dalšího tokenu. Metody `ensureLeadingNewline()` a `setBlankLinesBefore()` to dělají správně, tak na nich stavějte.
+- Na otázky "je tenhle výraz stejný jako tamten" a "dá se bezpečně vyhodnotit dvakrát" odpovídají `Node::matches()` a `Node::isRepeatableRead()`. Neimplementujte je znovu.
+
+
+Volby pravidla
+==============
+
+Pravidlo s volbami implementuje rozhraní `ConfigurableRule`: dodá schéma z knihovny [nette/schema |schema:] a metodu `configure()`, která dostane volby už zvalidované:
+
+```php
+final class ForbiddenFunctionsRule extends NodeRule implements ConfigurableRule
+{
+	/** @var list<string> */
+	private array $functions = [];
+
+
+	public static function getOptionsSchema(): Schema
+	{
+		return Expect::structure([
+			'functions' => Expect::listOf('string')->default(['var_dump', 'print_r'])
+				->description('Names of the forbidden functions'),
+		]);
+	}
+
+
+	public function configure(array $options): void
+	{
+		$this->functions = $options['functions'];
+	}
+}
+```
+
+Jména voleb se píší v camelCase. Seznam zadaný v konfiguraci nahrazuje výchozí hodnotu celou, nikdy se s ní neslučuje; s tím počítejte v popisu volby. Popis vůbec uvádějte jen tam, kde jméno, typ a výchozí hodnota neříkají všechno.
+
+Pravidlo, u kterého verze PHP rozhoduje o tom, co smí zapsat (ne o tom, jestli vůbec poběží), se zeptá `$context->getPhpVersion()`. Vrací řetězec ve tvaru `major.minor`, který se porovnává funkcí, ne operátory, protože `'8.10' > '8.9'` jako řetězec neplatí:
+
+```php
+if (version_compare($context->getPhpVersion(), '8.4', '>=')) {
+	// ...
+}
+```
+
+
+Analýzy
+=======
+
+Informace o souboru, kterou potřebuje víc pravidel, patří do analýzy. Je to obyčejná třída, jejíž konstruktor přijme `FileNode` (nebo nic). Pravidlo si ji vyžádá:
+
+```php
+$resolver = $context->getAnalysis(NameResolver::class);
+if ($resolver->isGlobalFunctionCall($node, 'var_dump')) {
+	// ...
+}
+```
+
+Jádro analýzu vytvoří napoprvé a drží ji, dokud se strom nezmění; po každé změně vzniká znovu, takže nikdy nečtete zastaralý stav. Vestavěné jsou `PhpSyntax\Analyses\NameResolver` (jmenný prostor, importy, překlad jmen), `PhpSyntax\Analyses\Scope` (funkce, třída, dostupnost `$this`) a `DressCode\Analyses\PhpDoc` (dokumentační komentáře jako strom z parseru phpDocu). Vlastní analýza s konstruktorem nad `FileNode` se nikde neregistruje; jen ta, která potřebuje továrnu, se zapisuje do konfigurace klíčem `analyses`.
+
+
+Testování
+=========
+
+Každé pravidlo má fixtury a `RuleTester`, který na nich ověří výstup, hlášení a všechno výše popsané: [Testování pravidel |testing-rules].

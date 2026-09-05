@@ -1,0 +1,121 @@
+Procházení stromu
+*****************
+
+.[perex]
+Hledání uzlů podle třídy, `Traverser` s řízením průchodu, cesta nahoru k rodičům a do stran po tokenech, pozice ve zdrojáku a otázky, na které strom odpoví za vás.
+
+
+Hledání
+=======
+
+Nejkratší cesta k uzlům dané třídy vede přes `find()` a `findFirst()`:
+
+```php
+foreach ($file->find(FunctionCallNode::class) as $call) {
+	// ...
+}
+
+$class = $file->findFirst(ClassNode::class);
+```
+
+Když třída sama nestačí, přidá se za ni podmínka. Třída zůstává na svém místě, takže podmínka i výsledek jsou typované a IDE i PHPStan vědí, s čím pracují:
+
+```php
+$long = $file->find(StringNode::class, fn(StringNode $s) => strlen($s->value) > 80);
+```
+
+Filtrem smí být i rozhraní, takže `find(ClassLikeNode::class)` najde naráz třídy, rozhraní, traity i výčty. Kdo chce úplně všechno a rozhodnout se až v podmínce, napíše `find(Node::class, $condition)`.
+
+`find()` vrací pole, tedy snímek pořízený předem, takže je bezpečné strom během procházení měnit. Prochází uzly, ne tokeny; k tokenu se dostanete přes uzel, ve kterém sedí, přes `getTokens()` celého podstromu, nebo procházením od `getFirstToken()` metodou `getNext()`.
+
+
+Traverser
+=========
+
+Když potřebujete vidět všechno v pořadí zdrojáku, včetně tokenů, nebo reagovat na vstup i výstup z uzlu, je na to `Traverser`:
+
+```php
+use PhpSyntax\Traverser;
+
+(new Traverser)->traverse($file, function (Node|Token $node) {
+	// enter
+}, function (Node|Token $node) {
+	// leave
+});
+```
+
+Callback smí uzel, který dostal, nahradit nebo odstranit; traverser pak do něj ani do jeho náhrady nesestoupí, sourozence odpojené mezitím přeskočí a uzly vložené mezitím nechá dalšímu průchodu. Díky tomu se dá měnit strom přímo během průchodu bez zvláštního režimu.
+
+**Každý `enter` má svůj `leave`**, a to se stejným objektem, i když uzel mezitím ze stromu zmizel. Callback, který si drží hloubku nebo zásobník, tak nemusí řešit chybějící patro. Jedinou výjimkou je `StopTraversal`, který průchod ukončí a nedokončené `leave` už nezavolá. Pozor na to, že `leave` může dostat uzel, který ve stromu už není: `replaceWith()` na něm vyhodí výjimku, takže kdo v `leave` mění strom, ať se nejdřív podívá na `$node->parent`.
+
+Callback může průchod řídit návratovou hodnotou:
+
+```php
+(new Traverser)->traverse($file, function ($node) {
+	if ($node instanceof ClosureNode) {
+		return Traverser::DontTraverseChildren;   // do tělíčka closure nechceme
+	} elseif ($node instanceof HaltCompilerNode) {
+		return Traverser::StopTraversal;          // dál už nic zajímavého není
+	}
+});
+```
+
+Cokoli jiného, co callback vrátí, průchod ignoruje, takže se nemusíte hlídat, co z něj vypadne.
+
+
+Nahoru a do stran
+=================
+
+Každý uzel i token zná svého rodiče (`$node->parent`) a od něj se dá jít výš:
+
+```php
+$method = $call->findAncestor(MethodNode::class);   // nejbližší předek dané třídy, nebo null
+$class = $call->findAncestor(ClassLikeNode::class);
+```
+
+Po tokenech se chodí do stran: `$token->getNext()` a `getPrevious()` je následující a předchozí token v souboru bez ohledu na strukturu. `$node->getFirstToken()` a `getLastToken()` jsou okraje uzlu, takže "token před uzlem" je `$node->getFirstToken()->getPrevious()`.
+
+Text uzlu je vlastnost `$node->text`: všechno od prvního tokenu po poslední, bez trivia na okrajích. Hodí se do hlášek i při ladění a je to totéž, co `$token->text`, jen o patro výš.
+
+
+Pozice
+======
+
+```php
+$token->getLine();       // řádek v aktuálním stavu stromu
+$token->getColumn();     // sloupec
+$token->getOffset();     // bajtový offset
+$token->originalLine;    // řádek v původním souboru, nikdy se nemění
+$node->getStartLine();   // řádky uzlu
+$node->getEndLine();
+```
+
+Rozdíl mezi `getLine()` a `originalLine` je podstatný, jakmile strom měníte: první sleduje změny, druhé je pozice, kterou zná uživatel ze svého souboru, a právě ta patří do hlášení. U uzlu, který vznikl až za běhu, je `originalLine` rovno `null`. Pozice počítá index tokenů, který se staví líně a po změně stromu se opravuje jen tam, kde je to potřeba, takže dotaz hned po změně stojí tolik, jak daleko od té změny leží.
+
+
+Otázky, které si klade každý nástroj
+====================================
+
+Pár otázek si nad kódem položí každý, kdo ho upravuje, a odpovědět na ně pořádně dá práci na dva dny. Strom je proto zodpoví za vás.
+
+```php
+$a->matches($b);            // jsou ty dva uzly stejné, token po tokenu, bez ohledu na mezery?
+$expr->isRepeatableRead();  // dá se výraz vyhodnotit podruhé, aniž by se něco změnilo?
+$expr->isDereferenced();    // sahá rodič na jeho člen nebo prvek?
+$paren->isRedundant();      // můžou tyhle závorky pryč?
+$expr->hasValue();          // je to zapsaná hodnota, ne výpočet?
+$expr->toValue();           // a jaká
+```
+
+`matches()` porovnává texty tokenů, ne trivia, takže `$a->b` a `$a -> b` si odpovídají. `isRepeatableRead()` říká `true` pro proměnné, přístupy k vlastnostem a prvkům, konstanty a literály, a `false` pro volání, `new`, přiřazení, `++` a cokoli, co může mít vedlejší účinek. Dohromady odpovídají na otázku "opakuje tenhle ternár svou podmínku a smím ji vyhodnotit jen jednou".
+
+`isRedundant()` na uzlu `ParenthesizedNode` je z těch otázek nejpracnější a odpovídá se na ni nejčastěji špatně: záleží na prioritě a asociativitě operátoru uvnitř i vně závorek, na tom, jestli se na výsledek přistupuje jako na objekt nebo pole, a na několika zvláštních případech. Každý uzel zapsaný operátorem proto implementuje rozhraní `OperatorNode` s metodou `getPrecedence()`, která vrátí sílu vazby a stranu, ke které se operátor kloní; `isRedundant()` z toho složí odpověď. Kde si jistá není, odpoví `false`.
+
+```php
+$paren = $expr->findFirst(ParenthesizedNode::class);
+if ($paren->isRedundant()) {
+	$paren->replaceWith($paren->expr);   // ($a * $b) + $c  →  $a * $b + $c
+}
+```
+
+`hasValue()` a `toValue()` odpovídají na "co je tu napsáno za hodnotu": skaláry, `null`, `true`, `false`, pole i s vnořením a rozbalením, unární plus a minus u čísla, závorky a heredoc bez interpolace. Jméno konstanty hodnota **není**, ani `PHP_INT_MAX`, ani `self::FOO`: co znamená, závisí na kódu okolo, a to už syntaxe neví. `toValue()` nad výrazem, který hodnotu nemá, vyhodí `LogicException`, protože `null` je platná hodnota a musí jít odlišit od "žádná".

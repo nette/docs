@@ -1,0 +1,120 @@
+Úpravy stromu
+*************
+
+.[perex]
+Zápis do slotu, nahrazení a odstranění uzlu, práce se seznamy a vkládání nově naparsovaného kódu: jak strom měnit tak, aby zůstal konzistentní a aby se po vytištění změnilo jen to, na co jste sáhli.
+
+
+Zápis do slotu
+==============
+
+Slot je vlastnost s property hookem, takže se do něj zapisuje obyčejným přiřazením:
+
+```php
+$if->cond = $parser->parseExpression('$order->isPaid()');
+$node->replaceChild($old, $new);
+$node->setSlot('cond', $expr);     // když jméno slotu znáte až za běhu
+```
+
+Hook se postará o to, co byste jinak museli hlídat sami: odmítne hodnotu, která už má rodiče, novou adoptuje, starou pustí a ohlásí změnu indexu tokenů, který drží pořadí, řádky a sloupce. Hodnotu, která do slotu nepatří vůbec, odmítne ještě dřív typ vlastnosti.
+
+Uzel patří právě jednomu stromu, takže vložit uzel, který už rodiče má, je výjimka; `clone` dá hlubokou kopii bez rodiče, kterou vložit lze.
+
+Jedna výjimka z toho pravidla ale existuje a ušetří spoustu klonování: **zapisovaná hodnota smí mít rodiče, pokud je potomkem té hodnoty, kterou zápis zrovna uvolňuje.** Takový podstrom ze stromu odchází tak jako tak, takže si z něj kus vyzvednout smíte:
+
+```php
+$paren->replaceWith($paren->expr);   // závorky pryč, výraz zůstane
+$assign->expr = $binary->right;      // z výrazu si nechám jen pravou stranu
+```
+
+Co z uvolněného podstromu zbude, je odpad, ne materiál; nepoužívejte ho dál.
+
+Co nemá hook, hlídá jazyk: text a trivia tokenu jsou `private(set)` a mění se jeho metodami ([Trivia |trivia#Zápis]), položky seznamu jsou `protected(set)` a mění se metodami seznamu, a `parent` si zapisuje strom sám. Rozbít strom zápisem mimo API tedy nejde.
+
+
+Nahradit a odstranit
+====================
+
+```php
+$node->replaceWith($other);
+$node->remove();
+$node->remove(CommentPolicy::Drop);
+```
+
+Mezi přiřazením do slotu a `replaceWith()` je rozdíl, na který se přijde až v diffu: **`replaceWith()` zachová trivia kolem starého uzlu, přiřazení ne.**
+
+```php
+$ternary->cond = $parser->parseExpression('$a !== []');
+// $x = $a !== []? 'yes' : 'no';
+
+$ternary->cond->replaceWith($parser->parseExpression('$a !== []'));
+// $x = $a !== [] ? 'yes' : 'no';
+```
+
+Fragment z parseru má okraje prázdné, takže při přiřazení se ztratí mezera, která patřila starému uzlu. Přiřazení proto použijte tam, kde slot plníte poprvé nebo kde si trivia řešíte sami; všude jinde sáhněte po `replaceWith()`.
+
+`remove()` odstraní položku seznamu i s jejím oddělovačem a s tím, co na něm visí: uzel, který stál na řádcích sám, vezme řádky s sebou, jinak zůstane okolní mezera a po čárce nezbude mezera navíc. Komentáře uvnitř odstraňovaného uzlu se podle `CommentPolicy` přesunou k následujícímu tokenu (výchozí), k předchozímu, nebo zahodí; ztratit komentář mlčky nejde. Komentář, který stál na začátku řádku, si bere i odsazení, takže po `Drop` nezůstane řádek s pouhým tabulátorem.
+
+
+Seznamy
+=======
+
+```php
+$stmts->append($stmt);
+$stmts->insert($index, $stmt);
+$stmts->removeItem($stmt);
+
+$args->append($arg);                  // oddělovač se odvodí z existujících, nebo ', '
+$args->insert(0, $arg);
+$args->setTrailingSeparator(null);    // pryč s koncovou čárkou
+```
+
+`SeparatedNodeList` si oddělovače hlídá sám: při vložení odvodí chybějící čárku z těch, které v seznamu jsou (nebo použije `, ` u jednořádkového seznamu), a ve víceřádkovém seznamu dá položce odsazení souseda; při odstranění vezme čárku za položkou, u poslední tu před ní. `removeItem()` odstraňuje položku ze seznamu, `remove()` na uzlu odstraňuje uzel sám; je to totéž z druhé strany a jmenuje se to jinak jen proto, že PHP nedovolí dvě různé signatury.
+
+`NodeList` příkazů, kde žádný oddělovač není, se chová stejně: položce bez vlastních trivií dá odsazení souseda a konec řádku, jaký má soused. Vložení příkazu je tedy jeden řádek a nic se kolem nespravuje:
+
+```php
+$stmt = $parser->parseStatement('$this->log("total");');
+$return->parent->insert($return->parent->indexOf($return), $stmt);
+```
+
+Prázdný řádek, který v seznamu byl (třeba za importy), zůstane, kde byl. Položka, která končí řádek svým vlastním textem, tedy zavírací tag nebo inline HTML, nedostane nic, protože si konec řádku nese sama.
+
+
+Nový uzel
+=========
+
+Nový kód se nestaví z tokenů, parsuje se z řetězce: `parseExpression()`, `parseStatement()`, `parseType()`, `parseName()` a obecné [`parseFragment()` |parsing#Fragmenty] vrátí odpojený uzel s prázdnými trivia na okrajích, připravený k vložení. Kdo chce místo psaní řetězce klonovat existující uzel, musí klonu nejdřív vyčistit okraje metodou `setEdgeTrivia()`. Klon si totiž nese úvodní trivia originálu, a u prvního příkazu souboru je mezi nimi i `<?php`, které by se ve výstupu objevilo dvakrát.
+
+Nejmenší možná úprava bývá změna textu jednoho tokenu a často stačí:
+
+```php
+$call->name->text = 'count';                  // jméno; hook ho přetokenizuje
+$string->setValue('Hello', "'");              // hodnotu literálu i s uvozovkou
+$token->setText('!==');
+```
+
+
+Posun odsazení
+==============
+
+Když se konstrukce stěhuje o patro hlouběji nebo mělčeji, nestačí přepsat odsazení prvního řádku:
+
+```php
+Indentation::shift($method, 1, $style);   // celá metoda o úroveň doprava
+```
+
+`shift()` posune každý řádek, který uzel otevírá, a s tělem heredocu i jeho uzavírací návěští, takže hodnota heredocu zůstane stejná (PHP od ní odsazení návěští odečítá). Inline HTML a obsahu řetězců se nedotkne.
+
+
+Co si strom hlídá sám a co ne
+=============================
+
+Sám si hlídá rodiče, index a `FileNode::$revision`, které roste s každou změnou; kdo potřebuje vědět, jestli se něco změnilo, porovná revizi před a po, ale nepočítá s tím, že jedna úprava je jedno zvýšení, protože složená úprava jako `remove()` jich udělá několik.
+
+Nehlídá si dvě věci, které zůstávají na vás:
+
+- **Kanonická trivia.** Konec řádku, který uzavírá řádek tokenu, patří do jeho koncových trivia, ne do úvodních trivia dalšího tokenu. `ensureLeadingNewline()` a `setBlankLinesBefore()` to dělají správně; kdo skládá trivia ručně, ať to dodrží, jinak `getTrailingSpace()` zalomení neuvidí.
+- **Význam.** Strom vám dovolí nahradit podmínku čímkoli a odstranit `return`; jestli to smíte, je otázka na `isRepeatableRead()`, `matches()` a na vás.
+
+Po úpravě se tiskne `Printer::print($file)` nebo `(string) $file` a výstup je původní soubor se změnami přesně tam, kde jste je udělali.

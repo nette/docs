@@ -1,0 +1,115 @@
+PHP API
+*******
+
+.[perex]
+Jak DressCode spustit z vlastního kódu: načtení konfigurace, `Runner`, výsledky běhu a vlastní reporter, který si výstup zpracuje po svém.
+
+
+Kdy sáhnout po API
+==================
+
+Příkazová řádka pokryje průběžnou integraci, Git hooky i editory. API potřebujete tehdy, když DressCode zapojujete do vlastního nástroje: do generátoru, který má vyrobený kód rovnou naformátovat, do migračního skriptu, do služby, která kontroluje kód z formuláře, nebo když chcete výsledky v podobě, kterou žádný z vestavěných formátů nedává.
+
+
+Běh nad projektem
+=================
+
+Konfigurace se načte stejně jako z příkazové řádky, z ní se postaví `Runner` a ten dostane seznam souborů a reporter:
+
+```php
+use DressCode\Config\Loader;
+use DressCode\Config\RunnerFactory;
+use DressCode\Reporters\JsonReporter;
+
+[$config, $root] = new Loader()->load(file: null, directory: getcwd());
+$runner = new RunnerFactory()->createRunner($config, $root);
+
+$files = $runner->findFiles(['src', 'tests']);
+$result = $runner->run($files, fix: false, reporter: new JsonReporter(STDOUT));
+
+exit($result->getExitCode());
+```
+
+`Loader::load()` najde `dresscode.neon` nebo `dresscode.php` od zadaného adresáře směrem nahoru (nebo vezme soubor, který mu určíte) a vrátí konfiguraci i s vrstvami rozšíření a kořenový adresář projektu; bez konfiguračního souboru platí výchozí preset, nebo konfigurace, kterou předáte třetím argumentem. `Runner::findFiles()` rozvine cesty podle klíčů `paths`, vyloučení a přípon z konfigurace, `run()` je zpracuje a výsledky posílá reporteru soubor po souboru.
+
+.[caution]
+`RunnerFactory` je zatím označená `@internal`, takže se její podoba může v minoritní verzi změnit. Je to jediné hrubé místo tohohle API a zároveň jediná cesta, jak `Runner` postavit. Komu to vadí, ať volá rovnou [celý příkaz |#Vlastní příkaz], jehož rozhraní stabilní je.
+
+`RunResult` obsahuje `FileResult` pro každý soubor a k tomu souhrnná čísla: `countViolations()`, `countFixable()`, `countChangedFiles()`, `countErrors()` (soubory, které nejdou parsovat), `countFailures()` (soubory, kde pravidlo selhalo) a `getExitCode()` podle stejných pravidel jako na příkazové řádce.
+
+
+Jeden soubor nebo řetězec
+=========================
+
+Pro kód, který neleží na disku, nebo pro jeden soubor bez hledání:
+
+```php
+$result = $runner->processFile('src/Cart.php', $code);
+
+foreach ($result->violations as $violation) {
+	echo "$violation->line: $violation->message ($violation->ruleName)\n";
+}
+
+$fixed = $result->output;
+```
+
+`processFile()` nikdy nezapisuje. Cesta říká, která pravidla pro kód platí (podle ní se vyhodnotí výjimky pro cesty), `$result->output` je opravený kód a `$result->isChanged()` řekne, jestli se od vstupu liší. Naproti tomu `processPath()` soubor přečte a s `fix: true` i zapíše. Ani jedno nepoužívá cache.
+
+`FileResult` nese cestu, původní kód, výstup, seznam objektů `Violation` (pravidlo, zpráva, řádek, sloupec, závažnost, jestli bylo opraveno, otisk pro baseline), varování a případnou chybu parsování nebo selhání pravidla.
+
+
+Vlastní reporter
+================
+
+Reporter je rozhraní se třemi metodami. Výsledky mu chodí v pořadí vstupu, shrnutí na konci:
+
+```php
+use DressCode\FileResult;
+use DressCode\Reporter;
+use DressCode\RunResult;
+
+final class CountingReporter implements Reporter
+{
+	private array $byRule = [];
+
+
+	public function start(int $fileCount, bool $fix): void
+	{
+	}
+
+
+	public function reportFile(FileResult $result): void
+	{
+		foreach ($result->violations as $violation) {
+			$this->byRule[$violation->ruleName] = ($this->byRule[$violation->ruleName] ?? 0) + 1;
+		}
+	}
+
+
+	public function finish(RunResult $result): void
+	{
+		arsort($this->byRule);
+		foreach ($this->byRule as $rule => $count) {
+			printf("%5d  %s\n", $count, $rule);
+		}
+	}
+}
+```
+
+Takový reporter po prvním běhu nad starým projektem řekne, která tři pravidla dělají devadesát procent všech porušení, a to je přesně informace, podle které se rozhoduje, co vypnout a co opravit. Vestavěné reportery (`ConsoleReporter`, `JsonReporter`, `CheckstyleReporter`, `GithubReporter`) jsou dobrý vzor k nahlédnutí.
+
+
+Vlastní příkaz
+==============
+
+Kdo balí DressCode do vlastní binárky (tak vznikl příkaz `ecs` v Nette Coding Standardu), spustí v procesu `Console\Application` a dá jí konfiguraci, která platí, když projekt žádnou vlastní nemá:
+
+```php
+use DressCode\Config;
+use DressCode\Console\Application;
+
+$application = new Application(defaultConfig: Config::create()->extension(Nette\CodingStandard\Extension::class));
+exit($application->run($argv));
+```
+
+Všechno ostatní, tedy příkazy, přepínače, formáty i paralelní běh, zůstává na příkazové řádce.

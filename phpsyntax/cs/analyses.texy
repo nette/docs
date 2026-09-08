@@ -1,0 +1,91 @@
+Analýzy: NameResolver a Scope
+*****************************
+
+.[perex]
+Dvě vestavěné analýzy odpovídají na otázky, které si klade každý nástroj pracující s kódem: co dané jméno doopravdy znamená a v jaké funkci a třídě kód stojí.
+
+
+Co je analýza
+=============
+
+Strom říká, jak kód vypadá. Analýza je informace odvozená z celého souboru, kterou strom sám nenese: co znamená jméno `Order` v tomhle souboru, jestli je `$this` k dispozici, které proměnné closure zachycuje. Je to obyčejná třída postavená nad `FileNode`; nic se neregistruje a žádné rozhraní se neimplementuje.
+
+```php
+$resolver = new PhpSyntax\Analyses\NameResolver($file);
+$scope = new PhpSyntax\Analyses\Scope;
+```
+
+Analýza čte strom tak, jak vypadal, když vznikla. Po změně stromu si ji postavte znovu; že se strom změnil, poznáte podle `FileNode::$revision`.
+
+
+NameResolver
+============
+
+Překládá jména podle jmenného prostoru a importů, s tím, co PHP dělá za běhu: nekvalifikovaná funkce nebo konstanta, která ve jmenném prostoru není, spadne do globálního.
+
+```php
+$resolver->getNamespace($node);         // 'App\Model', '' v globálním prostoru
+$resolver->getClassImports($node);      // alias => plné jméno, platné v místě uzlu
+$resolver->getFunctionImports($node);
+$resolver->getConstantImports($node);
+
+$resolver->resolveClass($name);         // 'App\Model\Order' z NameNode
+$resolver->resolveFunction($name);
+$resolver->resolveConstant($name);
+
+$resolver->isGlobalFunctionCall($node, 'sizeof');   // volání globální funkce, případně té jedné
+```
+
+`isGlobalFunctionCall()` je otázka, kterou si dřív každý nástroj řešil sám a většinou hůř: uzel musí být volání funkce se jménem (ne `$f()` ani `$obj->f()`), jméno nesmí být klíčové slovo a po překladu musí být globální. Tak se pozná, že `count($a)` uvnitř `namespace App` opravdu volá `count`, a ne `App\count`, pokud taková funkce v souboru není importovaná.
+
+Jméno, které jste právě naparsovali a ve stromu ještě nestojí, samo neví, kde bude; kde ho chcete přeložit, řekne druhý argument:
+
+```php
+$name = $parser->parseName('Strings');
+$resolver->resolveClass($name, $at);    // přeloží se tak, jak by platilo v místě $at
+```
+
+Uzel z cizího stromu je odmítnut výjimkou, ne zodpovězen v globálním jmenném prostoru. Tichá platná odpověď na nepoloženou otázku je horší než chyba.
+
+Cesta zpátky je stejně užitečná: jak plné jméno **zapsat** v místě, kde stojí uzel.
+
+```php
+$role = PhpSyntax\NameRole::ClassLike;
+
+$resolver->getShortName('Nette\Utils\Strings', $role, $at);   // 'Strings', je importované
+$resolver->getShortName('App\Model\Order', $role, $at);       // 'Order'
+$resolver->getShortName('Other\Thing', $role, $at);           // '\Other\Thing', jinak by se hledalo v namespace
+$resolver->isAliasFree('Strings', $role, $at);                // false, ten alias už něco znamená
+```
+
+`getShortName()` vezme v úvahu aliasy, prefixové importy i jmenný prostor a vrátí nejkratší zápis, který na tom místě znamená totéž. `isAliasFree()` odpoví na otázku, kterou si klade každý, kdo chce import doplnit: je tohle jméno tady ještě volné?
+
+A ještě jedna dvojice, tentokrát o deklaracích v souboru:
+
+```php
+$resolver->getDeclaredName($class);          // 'App\Cart' z uzlu deklarace
+$resolver->findDeclaration('App\Cart');      // ClassLikeNode nebo FunctionNode, nebo null
+```
+
+`findDeclaration()` hledá bez ohledu na velikost písmen a úvodní backslash mu nevadí.
+
+
+Scope
+=====
+
+Kde ve struktuře kód stojí:
+
+```php
+$scope->getFunction($node);           // FunctionLikeNode: funkce, metoda, closure, arrow funkce nebo hook, nebo null
+$scope->getClass($node);              // ClassLikeNode nebo null
+$scope->hasThis($node);               // je tu $this: v nestatické metodě, v closure, která ho zachytila
+$scope->getCapturedVariables($closure);   // proměnné z use (...)
+```
+
+`hasThis()` bere v úvahu i to, že closure `$this` zdědí, ale `static function` ne, a že arrow funkce ho vidí vždy, když ho vidí okolí.
+
+
+Vlastní analýza
+===============
+
+Když víc míst potřebuje tutéž informaci o souboru, napište ji jako třídu s konstruktorem přijímajícím `FileNode`. Nástroj postavený na PhpSyntax si takovou analýzu obvykle staví a zahazuje sám podle revize stromu; [DressCode |dresscode:rule-contract#Analýzy] to dělá za pravidla a přidává k oběma vestavěným ještě `PhpDoc` nad dokumentačními komentáři, protože ten už potřebuje parser phpDocu, který sem nepatří.

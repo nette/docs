@@ -1,0 +1,693 @@
+Arguments, Options and Commands
+*******************************
+
+.[perex]
+This page describes in detail how to say what your script accepts on the command line, how values are checked and converted, how to build a tool with several commands, and how the help and error messages come about. The image conversion script from the [overview |@home] will keep us company the whole way.
+
+
+Flags, Options and Arguments
+============================
+
+Let's recall how our script is called:
+
+```shell
+php convert.php photo.jpg logo.png --format png --dry-run
+```
+
+There are three kinds of items on the command line:
+
+- **arguments** are values without a dash, here `photo.jpg` and `logo.png`; they are told apart by their order, which is why they are called positional,
+- an **option** has a name and a value, here `--format png`,
+- a **flag** has just a name and works as a switch, here `--dry-run`.
+
+On the [overview |@home] we described the script with attributes. Now let's look at the API underneath them. Everything in this part applies to attributes as well, which take the same settings, only you write them on the parameters of a method. You describe the script with a [api:Nette\CommandLine\Command] object and its methods `addArgument()`, `addOption()` and `addFlag()`:
+
+```php
+use Nette\CommandLine\Command;
+use Nette\CommandLine\Parser;
+
+$command = new Command('convert', 'Converts images to another format');
+$command->addArgument('files', 'Images to convert', repeatable: true);
+$command->addOption('--format', 'Target format', alias: '-f');
+$command->addFlag('--dry-run', 'Only show what would be done', alias: '-n');
+
+$parser = new Parser;
+$args = $parser->parse($command);
+```
+
+Each `add*()` method takes a name, a description that will show up in the help, and then named arguments with further settings, like `alias` for the short form here. [api:Nette\CommandLine\Parser] reads the command line according to this description and returns a [api:Nette\CommandLine\ParseResult] object. Its `get()` method reads a value by name, exactly as you wrote it, dashes included:
+
+```php
+$args->get('files');      // ['photo.jpg', 'logo.png']
+$args->get('--format');   // 'png', or null when the option is missing
+$args->get('--dry-run');  // true, or null when the flag is missing
+```
+
+If you make a typo in the name, such as `$args->get('--fromat')`, you get an exception. That way a typo can't pass for an option the user simply didn't give. `toArray()` returns all the values at once.
+
+`parse()` reads the command line the script was started with. You can also pass it your own array of individual words, without the script name, which comes in handy in tests:
+
+```php
+$args = $parser->parse($command, ['photo.jpg', '--format', 'png']);
+```
+
+Two methods help when you need more than the value itself. `isEmpty()` tells you the user wrote nothing at all after the script name. `wasProvided('--format')` tells you whether the user really gave the option, so you can tell that they wrote `--format webp` even when `webp` is also the default value. That's useful, for example, when merging the command line with a configuration file.
+
+Watch out for one thing: `Parser` only reads. When the user gets something wrong, it throws an exception, and it doesn't print the help by itself either. How to add both is shown in the section [Running the Program |#Running the Program].
+
+
+Flags
+-----
+
+A flag is a switch: when it's on the command line, its value is `true`, when it's missing, `null`:
+
+```php
+$command->addFlag('--dry-run', alias: '-n');
+// --dry-run   → true
+// -n          → true
+// (missing)   → null
+```
+
+Some things you want switched on until the user turns them off. Keeping EXIF metadata during conversion, for instance. With `negatable: true` the flag also gets the opposite form `--no-…`, and the default value says what applies when the user writes neither:
+
+```php
+$command->addFlag('--metadata', 'Keep EXIF metadata', negatable: true, default: true);
+// --metadata     → true
+// --no-metadata  → false
+// (missing)      → true
+```
+
+Single-letter flags can be stuck together into one word: `-nv` means the same as `-n -v`. The last letter may even belong to an option with a value, so `-nf png` is `-n -f png`.
+
+
+Options
+-------
+
+An option carries a value. The user can separate it with a space or an equals sign, and use the alias instead of the long name:
+
+```php
+$command->addOption('--format', alias: '-f');
+// --format png   → 'png'
+// --format=png   → 'png'
+// -f png         → 'png'
+// --format       → error, the value is missing
+// (missing)      → null
+```
+
+So the option itself is optional, but once the user uses it, they must write a value too. When the user gives the same option several times, the last value wins. If you want them all, use [repeated values |#Repeated Values].
+
+Sometimes an option comes in handy that may have a value but doesn't have to. Say `--backup` keeps the original files, and if the user adds a directory, stores them there. That's what `valueOptional: true` does:
+
+```php
+$command->addOption('--backup', valueOptional: true);
+// --backup=old  → 'old'
+// --backup      → true
+// (missing)     → null
+```
+
+An optional value has to be attached with an equals sign. Writing `--backup old` would be ambiguous: is `old` the value of the option, or another file? So the library takes it as a file and `--backup` as an option without a value.
+
+.[note]
+The exception is an option that also has a [list of allowed values |#Allowed Values]. There the value is taken even after a space, but only when it's one of the allowed ones, so nothing else gets swallowed by mistake. For `--strip` with the values `exif` and `all`, `--strip all` therefore means the value `all`, while `--strip photo.jpg` means the option without a value plus a file. That's why the definition refuses a command named like one of the values, and an argument equal to a value has to be written after `--`.
+
+
+Arguments
+---------
+
+Arguments are values without a dash, told apart by their order. They are required unless you say otherwise:
+
+```php
+$command->addArgument('input');
+// photo.jpg  → 'photo.jpg'
+// (missing)  → error, the required argument is missing
+
+$command->addArgument('output', optional: true);
+// (missing)  → null
+```
+
+Arguments may stand anywhere, before the options or after them. For values that start with a dash, a few rules apply that you know from other tools:
+
+```php
+// convert.php -- -weird.jpg   → file '-weird.jpg', everything after -- is an argument
+// convert.php -               → file '-', by convention the standard input
+// convert.php --rotate -90    → --rotate gets the value '-90'
+```
+
+A negative number is thus an ordinary value. The only exception is a command that itself has an option named like a number, such as `-1` in `ls -1`. There every `-90` is taken for an option, and the user has to write a negative value with an equals sign, `--rotate=-90`, or as an argument after `--`.
+
+
+Default Values
+--------------
+
+`default` sets the value of an option or an argument for the case the user doesn't give it:
+
+```php
+$command->addOption('--format', default: 'webp');
+// --format png  → 'png'
+// (missing)     → 'webp'
+```
+
+Don't confuse it with `valueOptional`. That one says what applies when the user writes the option without a value, whereas `default` applies when they don't write it at all. An option can have both:
+
+```php
+$command->addOption('--backup', valueOptional: true, default: 'backup');
+// --backup=old  → 'old'
+// --backup      → true
+// (missing)     → 'backup'
+```
+
+The default value is returned exactly as you gave it, so it is neither checked nor converted. A required argument with a default value would make no sense, so the definition refuses it. Mark such an argument as optional.
+
+
+Allowed Values
+--------------
+
+`enum` limits the value to a list. The script refuses anything else with a message that names the allowed values:
+
+```php
+$command->addOption('--format', enum: ['jpg', 'png', 'webp']);
+// --format gif  → Option `--format`: expects `jpg`, `png` or `webp`, `gif` given.
+```
+
+The values are non-empty strings, so write numbers as strings too, such as `['1', '2']`. Instead of a list you can pass a backed enum and get its case straight away:
+
+```php
+enum Format: string
+{
+	case Jpg = 'jpg';
+	case Png = 'png';
+	case Webp = 'webp';
+}
+
+$command->addOption('--format', enum: Format::class, default: Format::Webp);
+// --format png  → Format::Png
+// (missing)     → Format::Webp
+```
+
+
+Repeated Values
+---------------
+
+With `repeatable: true` the user can give an option or an argument several times, and you get all the values in an array:
+
+```php
+$command->addOption('--exclude', 'Skip files matching the mask', repeatable: true);
+// --exclude '*.tmp' --exclude 'thumb*'  → ['*.tmp', 'thumb*']
+// (missing)                             → []
+
+$command->addArgument('files', repeatable: true);
+// photo.jpg logo.png  → ['photo.jpg', 'logo.png']
+```
+
+A repeated argument takes all the remaining values, so it has to be the last one.
+
+
+Converting Values
+-----------------
+
+What comes from the command line is always a string. When you need a number or a path, give the option or the argument a `normalizer`, a function that checks the value and converts it. Ready-made ones live in the [api:Nette\CommandLine\Normalizers] class: `int()` and `float()` convert a number, optionally within a range, and `realPath()` turns the path of an existing file into an absolute one:
+
+```php
+use Nette\CommandLine\Normalizers;
+
+$command->addOption('--quality', normalizer: fn($v) => Normalizers::int($v, min: 1, max: 100));
+// --quality 80   → 80
+// --quality abc  → Option `--quality`: expects an integer, `abc` given.
+// --quality 150  → Option `--quality`: expects a number from 1 to 100, `150` given.
+
+$command->addOption('--watermark', normalizer: Normalizers::realPath(...));
+// --watermark logo.png     → '/home/me/images/logo.png'
+// --watermark missing.png  → Option `--watermark`: file path `missing.png` not found.
+```
+
+Without a range, passing the method itself is enough, `Normalizers::int(...)`. Your own normalizer is any function that takes a string and returns the converted value. When the value is wrong, it throws an exception, and the library turns it into a clear message naming the option, as in the example above. You can also call a ready-made normalizer from your own, for example when you want to adjust the path first:
+
+```php
+$command->addOption('--watermark', normalizer: fn($v) => Normalizers::realPath("watermarks/$v"));
+```
+
+A normalizer runs only on values that really came from the command line. It is called neither on the default value nor on the `true` of an option without its optional value.
+
+.[note]
+A range no number fits into, such as `min` greater than `max`, is a mistake in the code, not in what the user typed. That's why it throws `ValueError`, which is not turned into a message for the user. From PHP 8.6 on, instead of the function `fn($v) => Normalizers::int($v, min: 1)` you can write the shorter `Normalizers::int(?, min: 1)`.
+
+
+Thorough Validation
+-------------------
+
+For more complex rules you can pass the result on to [Nette Schema |schema:]. Command-Line doesn't depend on it, it's simply a second step. The parser returns strings as the user wrote them, and `null` for what they didn't give. So leave out the `null` values to let the defaults of the schema apply:
+
+```php
+use Nette\Schema\Expect;
+use Nette\Schema\Processor;
+
+$schema = Expect::structure([
+	'--quality' => Expect::string()->pattern('[1-9][0-9]?|100')->castTo('int')->default(85),
+	'files' => Expect::listOf('string'),
+])->otherItems();
+
+$values = array_filter($args->toArray(), fn($value) => $value !== null);
+$options = (new Processor)->process($schema, $values);
+```
+
+
+Parameters in Code
+------------------
+
+The `add*()` methods return the parameter object, whose settings you can read back as properties, such as `$option->alias`. A parameter can't be changed later, so it is checked the moment it's added, and a mistake in the definition, such as an option name without a dash or a name used twice, throws `InvalidArgumentException` right away. Later you can reach a parameter with `getParameter()`. The second argument checks that it is an option, and static analysis then knows which properties it has:
+
+```php
+use Nette\CommandLine\Parameters\Option;
+
+$format = $command->getParameter('--format', Option::class);
+```
+
+Not every setting makes sense for every kind. A flag has no value, so `addFlag()` has neither `enum` nor `normalizer`. Those belong to `addOption()` and `addArgument()`, while `valueOptional` and `valueName` belong to `addOption()` alone.
+
+
+Commands
+========
+
+When a script does several things, it is usually controlled by commands. Our image tool will convert and also shrink images, and it will have one option shared by everything:
+
+```shell
+php images.php convert photo.jpg --format png
+php images.php resize photo.jpg --width 800
+php images.php --quiet convert photo.jpg
+```
+
+You add a command with `addCommand()`. It returns a new `Command`, which you set up exactly like the program itself:
+
+```php
+$program = new Command('images');
+$program->addFlag('--quiet', 'Print nothing but errors', alias: '-q');
+
+$convert = $program->addCommand('convert', 'Converts images to another format');
+$convert->addArgument('files', 'Images to convert', repeatable: true);
+$convert->addOption('--format', 'Target format', alias: '-f', enum: ['jpg', 'png', 'webp']);
+
+$resize = $program->addCommand('resize', 'Shrinks images to the given width');
+$resize->addArgument('files', 'Images to resize', repeatable: true);
+$resize->addOption('--width', 'Width in pixels', normalizer: Normalizers::int(...));
+```
+
+The command is recognized by the first word without a dash, and after parsing, `$args->command` tells you which one it was. When the user writes no command, `$args->command` is the program itself. If a command should be required, create the program with `commandRequired: true`.
+
+Options of the program, like `--quiet` here, apply in all commands, and the user can write them before the command or after it: `images.php -q convert photo.jpg` and `images.php convert photo.jpg -q` mean the same. An option of another command is refused, and the library tells where it belongs:
+
+```
+$ php images.php convert photo.jpg --width 800
+Error: Option `--width` belongs to command `resize`.
+```
+
+The result holds only the values of the program and of the selected command. Neighboring commands may use the same option names, so `convert` could well have its own `--width` with a different meaning.
+
+
+Nested Commands
+---------------
+
+A command can have its own commands, and those their own again. Managing the thumbnail cache, for instance:
+
+```php
+$cache = $program->addCommand('cache', 'Manages the thumbnail cache');
+$cache->addCommand('clear', 'Deletes all cached thumbnails');
+$cache->addCommand('stats', 'Shows how much space the cache takes');
+```
+
+The user then writes `php images.php cache clear`. A command that has its own commands can't take arguments, because there would be no telling whether the word after it is an argument or a command.
+
+
+Handlers
+--------
+
+What's left is to say what should happen for which command. The most comfortable way is to give each command a handler, a method or function that does its work. You pass it as `handler:` right when creating the command:
+
+```php
+final class ImageTools
+{
+	public function convert(array $files, ?string $format, ?bool $quiet): int
+	{
+		// converts the files, prints nothing with $quiet
+		return 0;
+	}
+}
+
+$tools = new ImageTools;
+$convert = $program->addCommand('convert', 'Converts images to another format', handler: $tools->convert(...));
+```
+
+You don't pass the values to the handler yourself. Each of its parameters gets a value by its name: `$files` the argument `files`, `$format` the option `--format`, and since the options of the program count too, `$quiet` gets `--quiet`. A name of several words is converted: `$maxWidth` becomes `--max-width`. A parameter typed `ParseResult` gets the whole result, for example when you need `wasProvided()`, and a parameter typed `Command` gets the selected command.
+
+The selected command is then run by `run()`. It returns whatever the handler returned, and if the handler returns nothing, that means 0:
+
+```php
+$args = $parser->parse($program);
+exit($args->run());
+```
+
+How to add the help and error reporting is shown in the section [Running the Program |#Running the Program].
+
+The types of the parameters are checked against what the option can give. An option the user didn't give and that has no default value is `null`, so it belongs in `?string`, not in `string`. If the handler had `string $format`, the library reports it with an exception the very first time the script runs, before anything is done, and even for commands that aren't being run at the moment:
+
+```
+Command 'convert': parameter $format of handler ImageTools::convert() does not accept null, which option --format gives when absent.
+```
+
+.[note]
+Other mistakes in the signature are reported the same way: a parameter with no option or argument to bind to, a parameter with a default value the input would always override anyway, a variadic parameter, and a parameter passed by reference. A normalizer has to declare its return type, otherwise there would be nothing to compare the parameter with. A repeated option or argument arrives as an array.
+
+
+Commands Described by Attributes
+--------------------------------
+
+A handler can also describe its command itself, right next to its code. That's how we did it on the [overview |@home]. `#[Command]` gives the method a description, and `#[Flag]`, `#[Option]` and `#[Argument]` turn its parameters into flags, options and arguments:
+
+```php
+use Nette\CommandLine\Attributes as Cli;
+
+final class ImageTools
+{
+	#[Cli\Command('Converts images to another format')]
+	public function convert(
+		?bool $quiet,
+		#[Cli\Argument('Images to convert', repeatable: true)]
+		array $files,
+		#[Cli\Option('Target format', alias: '-f', enum: ['jpg', 'png', 'webp'])]
+		string $format = 'webp',
+	): int
+	{
+		// converts the files, prints nothing with $quiet
+		return 0;
+	}
+
+	#[Cli\Command('Shrinks images to the given width')]
+	public function resize(/* ... */): int
+	{
+		// ...
+	}
+}
+
+$tools = new ImageTools;
+$program->addCommandsFrom($tools);
+```
+
+`addCommandsFrom()` adds all the public methods with the `#[Cli\Command]` attribute, in the order they appear in the class. A single method is added with `addCommandFrom($tools->convert(...))`. The result is perfectly ordinary commands, as if you had called `addCommand()` and `addOption()` yourself.
+
+The names are derived: the command from the name of the method, so `removeDuplicates()` becomes `remove-duplicates`, and the options from the names of the parameters, so `$maxWidth` becomes `--max-width`. You set a different name in the attribute with `name:`. The default value of a parameter becomes the default value of the option, an argument with a default value is optional, and a parameter typed by a backed enum accepts its cases as the allowed values.
+
+A parameter without an attribute, like `$quiet` above, binds to an option by its name, here to `--quiet` of the program. It must not have a default value, since the option of the program carries that, and so it has to come before the parameters that have one.
+
+The attributes `#[Flag]`, `#[Option]` and `#[Argument]` take the same settings as `addFlag()`, `addOption()` and `addArgument()`, only the name and the default value come from the parameter. `#[Command]` takes `description`, `usage`, `commandRequired` and `name`.
+
+The attribute `#[Command]` has the same name as the class `Nette\CommandLine\Command`. That's why we import the attributes under the alias `Cli` and write `#[Cli\Command]`.
+
+A program without commands is described the same way: `Command::from()` creates the whole program from a handler, just as we did on the overview. Its name isn't derived from the method, which names an action rather than the program, so without `name:` the help names it after the script file. Such a program is an ordinary `Command`, so you can add commands to it as well.
+
+An attribute can only hold a constant expression, which is why a normalizer is written as an array of a class and a method. A ready-made one as `[Normalizers::class, 'int']`, your own as `[self::class, 'parseWidth']`. From PHP 8.5 on you can write a `static function` right into the attribute. When a normalizer also needs a range, write a static method that passes it on:
+
+```php
+final class ImageTools
+{
+	#[Cli\Command('Shrinks images to the given width')]
+	public function resize(
+		#[Cli\Argument('Images to resize', repeatable: true)]
+		array $files,
+		#[Cli\Option('Width in pixels', normalizer: [self::class, 'parseWidth'])]
+		int $width = 800,
+	): int
+	{
+		// shrinks the files to $width
+		return 0;
+	}
+
+	public static function parseWidth(string $value): int
+	{
+		return Normalizers::int($value, min: 1);
+	}
+}
+```
+
+With attributes, the names of your methods and variables become the interface of your tool. When you rename `$maxWidth` to `$widthLimit`, `--max-width` turns into `--width-limit`, and every script that calls your tool stops working. A [test of the help |#Testing] catches such a change.
+
+
+Options Shared by Several Commands
+----------------------------------
+
+Commands often need the same options. Both `convert` and `resize` store their results in a directory, for instance, and both can do a dry run. So that you don't have to repeat them, describe them once in the constructor of a class, and let each handler take it as a parameter:
+
+```php
+final readonly class Output
+{
+	public function __construct(
+		#[Cli\Option('Directory for the results', valueName: 'dir')]
+		public ?string $outputDir = null,
+		#[Cli\Flag('Only show what would be done', alias: '-n')]
+		public bool $dryRun = false,
+	) {
+	}
+}
+
+final class ImageTools
+{
+	#[Cli\Command('Converts images to another format')]
+	public function convert(
+		#[Cli\Argument('Images to convert', repeatable: true)]
+		array $files,
+		Output $output,
+	): int
+	{
+		// stores the results in $output->outputDir
+		return 0;
+	}
+}
+```
+
+`convert` now accepts `--output-dir` and `--dry-run`, and so does every other command whose handler takes `Output`. When the command runs, the library creates the object from the values of these options and passes it to the handler. In the help, the options of the object show up together, at the place of the parameter.
+
+The constructor follows the same rules as a handler. A handler can also take several such objects, say one with what all commands share and another with what only some of them do. This works only for commands described by attributes.
+
+
+Dispatching Without Handlers
+----------------------------
+
+Handlers aren't mandatory. In a small script you can find out the selected command and branch yourself, best with `match`:
+
+```php
+$args = $parser->parse($program);
+
+exit(match ($args->command) {
+	$convert => convertImages($args->get('files'), $args->get('--format')),
+	$resize => resizeImages($args->get('files'), $args->get('--width')),
+	$program => showUsage(),
+});
+```
+
+Since `match` has no `default` arm, it throws `UnhandledMatchError` if you forget a command. The help and errors, however, are up to you in this case, see [Help |#Help] and [Errors |#Errors].
+
+
+Running the Program
+===================
+
+Parsing the line, answering `--help` and `--version`, reporting a mistake and running the handler is done the same way in every tool. The whole part of our tool that runs it looks like this:
+
+```php
+use Nette\CommandLine\HelpRenderer;
+use Nette\CommandLine\UsageException;
+
+$program->addFlag('--help', 'Print this help', alias: '-h', standalone: true);
+$program->addFlag('--version', 'Print the version', standalone: true);
+
+$parser = new Parser;
+$renderer = new HelpRenderer;
+
+try {
+	$args = $parser->parse($program);
+	if ($args->get('--help')) {
+		$renderer->render($args->command);
+		exit(0);
+	} elseif ($args->get('--version')) {
+		echo "Images 1.0\n";
+		exit(0);
+	}
+	exit($args->run());
+
+} catch (UsageException $e) {
+	$renderer->renderError($e);
+	exit(2);
+}
+```
+
+Let's walk through it. The flags `--help` and `--version` are standalone, so they work even when the user hasn't given the required arguments, more in the [section on the help and version |#help-and-version]. `render($args->command)` prints the help of the command the user selected, so `images.php convert --help` shows the help of `convert`. Finally `run()` runs the handler of the selected command and returns its exit code.
+
+When the user gets the line wrong, the parser throws `ParseException`, a kind of `UsageException`. `renderError()` prints the message with the help of the command the user got wrong below it, to the error output. The script then ends with code 2. That's the convention for a wrong command line, and it sets it apart from code 1, with which a tool reports that it found something or that something failed. A `UsageException` thrown by a handler is handled the same way, see [Errors |#Errors]. Other exceptions from the handler pass through the `catch` block.
+
+The option `--no-color`, which turns colors off, is added in a similar way; you'll find how on the page [Terminal Output |console#the-no-color-option].
+
+This part works with all handlers, whether described by attributes or passed as `handler:`. A program without commands but with a handler can be created without attributes too, `new Command('convert', handler: ...)`.
+
+
+Help
+====
+
+The help is built by [api:Nette\CommandLine\HelpRenderer] from the descriptions you gave. That's why it always matches what the script really accepts. It draws it for the program or for any command, aligns the descriptions and wraps them to the width of the terminal, and in a terminal it colors them:
+
+```php
+use Nette\CommandLine\HelpRenderer;
+
+$renderer = new HelpRenderer;
+$renderer->render($command);
+```
+
+For the `convert` script with the options from the first part it looks like this:
+
+```
+Usage: convert [options] <files>...
+
+Converts images to another format
+
+Arguments:
+  <files>...                   Images to convert
+
+Options:
+  -f, --format <jpg|png|webp>  Target format (default: webp)
+  -q, --quality <value>        Quality from 1 to 100
+  --backup[=dir]               Keep the originals, optionally in the given
+                               directory
+  --exclude <mask>...          Skip files matching the mask
+  --[no-]metadata              Keep EXIF metadata
+  -n, --dry-run                Only show what would be done
+```
+
+Notice how the help shows the different kinds: an optional value as `--backup[=dir]`, repeated values with three dots, a flag with an opposite form as `--[no-]metadata`, and the default value after the description.
+
+At the top is the usage line. It is generated by itself, or you replace it with your own via `usage:` in `new Command()` or `addCommand()`. The description of the command follows below it. The help of a command shows its arguments and options, and under the heading `Global options:` the options of the program that apply in the command as well.
+
+A few settings shape only the help:
+
+- `hidden: true` hides a parameter from the help, while it still works,
+- `valueName: 'dir'` names the value, as in `--backup[=dir]`; for an option with `enum` it replaces the list of values, which comes in handy when the list is long,
+- `defaultDescription: 'current directory'` describes the default value in words; an empty string leaves it out, so a password or a token given as the default never shows up in the help.
+
+Without `defaultDescription`, the help shows the default value as `(default: webp)`, as long as there is something to show. It leaves out a boolean, an array and an empty string.
+
+Headings and texts of your own are added with `addSection()` and `addText()`, in the order you call them. A text is printed exactly as you wrote it, with no wrapping and no colors. When you add no heading, the help puts `Options:`, `Arguments:` and `Commands:` in by itself. Write code in the descriptions in backticks, as in Markdown. In a terminal it is drawn in a color of its own, in plain text the backticks stay.
+
+Instead of printing the help, you can get it as a string with `renderToString()`. Without a console it is plain text with no colors, which suits a file or a test. You can set the width yourself:
+
+```php
+$renderer = new HelpRenderer(width: 100);
+$text = $renderer->renderToString($command);
+```
+
+
+`--help` and `--version`
+------------------------
+
+One thing about both flags deserves attention: when the script has a required argument, `convert.php --help` would end with an error that the argument is missing. That's why you mark them as standalone:
+
+```php
+$command->addFlag('--help', 'Print this help', alias: '-h', standalone: true);
+$command->addFlag('--version', 'Print the version', standalone: true);
+```
+
+When the user uses a standalone flag, the parser checks and requires nothing. It returns that flag as `true`, the other flags as they were given, and everything else with its default value. So you print the help before the script starts reading its configuration or checking files. That's why a setting that should work together with `--help` is best made a flag. For example, `--help --no-color` prints the help without colors.
+
+With commands, the command is selected first, so `images.php convert --help` gives you exactly `convert` in `$args->command`. The line still has to make sense, though: the parser refuses an unknown option as always.
+
+
+Errors
+======
+
+When the user gets the line wrong, the parser throws [api:Nette\CommandLine\ParseException]. You catch it and pass it to `renderError()`, as a shortened form of the [part that runs the program |#Running the Program] shows:
+
+```php
+try {
+	$args = $parser->parse($program);
+	exit($args->run());
+
+} catch (UsageException $e) {
+	$renderer->renderError($e);
+	exit(2);
+}
+```
+
+`renderError()` prints the message with the help of the command the user got wrong below it, to the error output. So the user sees right away both what's wrong and how to write it correctly:
+
+```
+Error: Unknown option `--fromat`. Did you mean `--format`?
+
+Usage: images convert [options] <files>...
+...
+```
+
+`ParseException` is a kind of [api:Nette\CommandLine\UsageException]. You can throw that one from a handler yourself when you run into a mistake the description of the options can't express, such as two options that can't be used together. Give it the command whose help should be printed, which the handler gets when it has a parameter typed `Command`:
+
+```php
+public function convert(Command $command, bool $stdin, array $files): int
+{
+	if ($stdin && $files) {
+		throw new UsageException('Files cannot be combined with `--stdin`.', $command);
+	}
+	// ...
+}
+```
+
+Write code in the messages in backticks, just like in descriptions. In a terminal `renderError()` draws it in color and without the backticks, in a log the backticks stay. If you want to print a message your own way, the `formatText()` method formats it the same way.
+
+Common messages, as a terminal with colors shows them:
+
+| Option `--format` requires a value.                              | option without its required value
+| Option `--dry-run` does not accept a value.                      | a value given to a flag
+| Unknown option `--fromat`. Did you mean `--format`?              | unknown option
+| Missing required argument `<files>`.                             | a required argument is missing
+| Unexpected arguments `b`, `c`.                                   | extra arguments
+| Option `--format`: expects `jpg`, `png` or `webp`, `gif` given.  | value not among the allowed ones
+| Unknown command `conver`. Did you mean `convert`?                | unknown command
+| Missing command.                                                 | a command is required but missing
+| Option `--width` belongs to command `resize`.                    | option of another command
+
+.[note]
+The messages are in English. If you want to word them differently or translate them, `ParseException` has everything you need: `reason` says what was wrong, as a case of the `ParseFailure` enum (such as `ParseFailure::UnknownOption`), `parameter` is the parameter the error concerns, and `token` is the word of the command line it's about, exactly as the user wrote it, or `null` when something is missing. Since `token` comes from the user, strip control characters from it before printing it.
+
+Mistakes in your definition, such as an option name without a dash, a name used twice or a required argument after an optional one, are not mistakes of the user. They throw `InvalidArgumentException`, which the `catch` block doesn't catch, so it shows up like any other mistake in the code.
+
+
+Testing
+=======
+
+You test the script without running it from the command line. You pass the parser the individual words of the command line without the script name, and check what it read from them. The examples use [Nette Tester |tester:], but any testing framework will do:
+
+```php
+$args = $parser->parse($program, ['convert', 'photo.jpg', '-f', 'png']);
+Assert::same('png', $args->get('--format'));
+Assert::same(0, $args->run());
+```
+
+The parser reports a wrong command line with `ParseException`, so you can test what the user will see as well:
+
+```php
+Assert::exception(
+	fn() => $parser->parse($program, ['convert', '--format', 'gif', 'photo.jpg']),
+	ParseException::class,
+	'Option `--format`: expects `jpg`, `png` or `webp`, `gif` given.',
+);
+```
+
+A single command is tested by passing it to the parser together with the whole line. The parser checks that the line really leads to that command:
+
+```php
+$args = $parser->parse($convert, ['convert', 'photo.jpg']);
+```
+
+The help deserves a test of its own. It is in fact a description of your tool's interface, so a test comparing it with a stored text catches every unwanted change, such as a renamed option. A fixed width makes sure the result doesn't depend on the terminal the test runs in:
+
+```php
+$renderer = new HelpRenderer(width: 80);
+Assert::matchFile(__DIR__ . '/help.txt', $renderer->renderToString($program));
+```
+
+You create the file `help.txt` the first time by saving into it what `renderToString()` returns, and checking that it is right.
+
+
+{{description: Parse command-line arguments in PHP: flags, options and arguments with checked values, commands and subcommands, handlers, generated help, clear error messages and testing.}}
+{{sitename: Nette Documentation}}

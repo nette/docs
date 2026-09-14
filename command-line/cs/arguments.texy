@@ -1,0 +1,693 @@
+Argumenty, volby a příkazy
+**************************
+
+.[perex]
+Tahle stránka podrobně popisuje, jak říct, co váš skript na příkazové řádce přijímá, jak se hodnoty kontrolují a převádějí, jak vytvořit nástroj s více příkazy a jak vzniká nápověda a chybové hlášky. Celou dobu nás bude provázet skript na převod obrázků z [úvodní stránky |@home].
+
+
+Příznaky, volby a argumenty
+===========================
+
+Připomeňme si, jak se náš skript volá:
+
+```shell
+php convert.php photo.jpg logo.png --format png --dry-run
+```
+
+Na příkazové řádce jsou tři druhy položek:
+
+- **argumenty** jsou hodnoty bez pomlčky, tady `photo.jpg` a `logo.png`; poznají se podle pořadí, proto se jim říká poziční,
+- **volba** má jméno a hodnotu, tady `--format png`,
+- **příznak** má jen jméno a funguje jako vypínač, tady `--dry-run`.
+
+Na [úvodní stránce |@home] jsme skript popsali atributy. Teď si ukážeme API, které pod nimi leží. Všechno z téhle části platí i pro atributy, které mají stejná nastavení, jen je píšete k parametrům metody. Popis skriptu vytvoříte objektem [api:Nette\CommandLine\Command] a jeho metodami `addArgument()`, `addOption()` a `addFlag()`:
+
+```php
+use Nette\CommandLine\Command;
+use Nette\CommandLine\Parser;
+
+$command = new Command('convert', 'Converts images to another format');
+$command->addArgument('files', 'Images to convert', repeatable: true);
+$command->addOption('--format', 'Target format', alias: '-f');
+$command->addFlag('--dry-run', 'Only show what would be done', alias: '-n');
+
+$parser = new Parser;
+$args = $parser->parse($command);
+```
+
+Každá metoda `add*()` dostane jméno, popis, který se objeví v nápovědě, a pak pojmenované argumenty s dalším nastavením, jako je tu `alias` pro krátký zápis. [api:Nette\CommandLine\Parser] přečte příkazovou řádku podle tohoto popisu a vrátí objekt [api:Nette\CommandLine\ParseResult]. Jeho metodou `get()` si přečtete hodnotu podle jména, přesně tak, jak jste ho zadali, včetně pomlček:
+
+```php
+$args->get('files');      // ['photo.jpg', 'logo.png']
+$args->get('--format');   // 'png', nebo null, když volba chybí
+$args->get('--dry-run');  // true, nebo null, když příznak chybí
+```
+
+Když se ve jménu překlepnete, třeba `$args->get('--fromat')`, dostanete výjimku. Překlep se tak nemůže tvářit jako volba, kterou uživatel jen nezadal. Všechny hodnoty najednou vrátí `toArray()`.
+
+`parse()` čte příkazovou řádku, se kterou byl skript spuštěn. Můžete mu ale předat i vlastní pole jednotlivých slov, bez jména skriptu, což se hodí v testech:
+
+```php
+$args = $parser->parse($command, ['photo.jpg', '--format', 'png']);
+```
+
+Dvě metody se hodí, když potřebujete víc než samotnou hodnotu. `isEmpty()` řekne, že uživatel za jméno skriptu nenapsal vůbec nic. `wasProvided('--format')` řekne, jestli uživatel volbu opravdu zadal, takže poznáte, že napsal `--format webp`, i když je `webp` zároveň výchozí hodnota. To oceníte třeba při slučování příkazové řádky s konfiguračním souborem.
+
+Pozor na jednu věc: `Parser` jen čte. Když uživatel zadá něco špatně, vyhodí výjimku, a nápovědu taky nevypíše sám. Jak obojí doplnit, ukazuje sekce [Spuštění programu |#Spuštění programu].
+
+
+Příznaky
+--------
+
+Příznak je vypínač: když na řádce je, má hodnotu `true`, když chybí, `null`:
+
+```php
+$command->addFlag('--dry-run', alias: '-n');
+// --dry-run   → true
+// -n          → true
+// (chybí)     → null
+```
+
+Některé věci chcete mít zapnuté, dokud je uživatel nevypne. Třeba zachování metadat EXIF při převodu. S `negatable: true` vznikne k příznaku i opačný tvar `--no-…` a výchozí hodnotou řeknete, co platí, když uživatel nenapíše ani jedno:
+
+```php
+$command->addFlag('--metadata', 'Keep EXIF metadata', negatable: true, default: true);
+// --metadata     → true
+// --no-metadata  → false
+// (chybí)        → true
+```
+
+Jednopísmenné příznaky lze slepit do jednoho slova: `-nv` znamená totéž co `-n -v`. Poslední písmeno může patřit i volbě s hodnotou, takže `-nf png` je `-n -f png`.
+
+
+Volby
+-----
+
+Volba nese hodnotu. Uživatel ji může oddělit mezerou nebo rovnítkem a místo dlouhého jména použít alias:
+
+```php
+$command->addOption('--format', alias: '-f');
+// --format png   → 'png'
+// --format=png   → 'png'
+// -f png         → 'png'
+// --format       → chyba, chybí hodnota
+// (chybí)        → null
+```
+
+Samotná volba je tedy nepovinná, ale když ji uživatel použije, musí k ní napsat i hodnotu. Když zadá stejnou volbu víckrát, platí poslední hodnota. Chcete-li všechny, použijte [opakované zadání |#Opakované zadání].
+
+Někdy se hodí volba, která hodnotu mít může, ale nemusí. Třeba `--backup` zachová původní soubory, a když uživatel připíše adresář, uloží je tam. To zařídí `valueOptional: true`:
+
+```php
+$command->addOption('--backup', valueOptional: true);
+// --backup=old  → 'old'
+// --backup      → true
+// (chybí)       → null
+```
+
+Nepovinnou hodnotu je potřeba připojit rovnítkem. Zápis `--backup old` by totiž byl dvojznačný: je `old` hodnota volby, nebo další soubor? Knihovna ho proto bere jako soubor a `--backup` jako volbu bez hodnoty.
+
+.[note]
+Výjimkou je volba, která má zároveň [výčet povolených hodnot |#Povolené hodnoty]. Tam se hodnota vezme i po mezeře, ovšem jen když patří mezi povolené, takže nic jiného se omylem nespolkne. Pro `--strip` s hodnotami `exif` a `all` tedy `--strip all` znamená hodnotu `all`, ale `--strip photo.jpg` volbu bez hodnoty a soubor. Kvůli tomu definice odmítne příkaz pojmenovaný stejně jako některá z hodnot a argument shodný s hodnotou musí uživatel zapsat až za `--`.
+
+
+Argumenty
+---------
+
+Argumenty jsou hodnoty bez pomlčky a rozlišují se podle pořadí. Jsou povinné, dokud neřeknete jinak:
+
+```php
+$command->addArgument('input');
+// photo.jpg  → 'photo.jpg'
+// (chybí)    → chyba, chybí povinný argument
+
+$command->addArgument('output', optional: true);
+// (chybí)    → null
+```
+
+Argumenty mohou stát kdekoli, před volbami i za nimi. Pro hodnoty, které začínají pomlčkou, platí pár pravidel, jak je znáte z jiných nástrojů:
+
+```php
+// convert.php -- -weird.jpg   → soubor '-weird.jpg', vše za -- je argument
+// convert.php -               → soubor '-', podle zvyklosti standardní vstup
+// convert.php --rotate -90    → --rotate má hodnotu '-90'
+```
+
+Záporné číslo je tedy normální hodnota. Jedinou výjimkou je příkaz, který sám má volbu pojmenovanou jako číslo, třeba `-1` jako v `ls -1`. Tam se každé `-90` bere jako volba a zápornou hodnotu musí uživatel napsat s rovnítkem, `--rotate=-90`, nebo jako argument za `--`.
+
+
+Výchozí hodnoty
+---------------
+
+`default` určuje hodnotu volby nebo argumentu pro případ, že ji uživatel nezadá:
+
+```php
+$command->addOption('--format', default: 'webp');
+// --format png  → 'png'
+// (chybí)       → 'webp'
+```
+
+Nezaměňujte to s `valueOptional`. To říká, co platí, když uživatel volbu napíše bez hodnoty, kdežto `default` platí, když ji nenapíše vůbec. Volba může mít obojí:
+
+```php
+$command->addOption('--backup', valueOptional: true, default: 'backup');
+// --backup=old  → 'old'
+// --backup      → true
+// (chybí)       → 'backup'
+```
+
+Výchozí hodnota se vrací přesně tak, jak jste ji zadali, takže se nekontroluje ani nepřevádí. Povinný argument s výchozí hodnotou by nedával smysl, proto ho definice odmítne. Takový argument označte jako nepovinný.
+
+
+Povolené hodnoty
+----------------
+
+`enum` omezí hodnotu na výčet. Cokoli jiného skript odmítne s hláškou, která povolené hodnoty vyjmenuje:
+
+```php
+$command->addOption('--format', enum: ['jpg', 'png', 'webp']);
+// --format gif  → Option `--format`: expects `jpg`, `png` or `webp`, `gif` given.
+```
+
+Hodnoty jsou neprázdné řetězce, i čísla tedy pište jako řetězce, třeba `['1', '2']`. Místo seznamu můžete předat backed enum a dostanete rovnou jeho případ:
+
+```php
+enum Format: string
+{
+	case Jpg = 'jpg';
+	case Png = 'png';
+	case Webp = 'webp';
+}
+
+$command->addOption('--format', enum: Format::class, default: Format::Webp);
+// --format png  → Format::Png
+// (chybí)       → Format::Webp
+```
+
+
+Opakované zadání
+----------------
+
+S `repeatable: true` může uživatel volbu nebo argument zadat víckrát a vy dostanete všechny hodnoty v poli:
+
+```php
+$command->addOption('--exclude', 'Skip files matching the mask', repeatable: true);
+// --exclude '*.tmp' --exclude 'thumb*'  → ['*.tmp', 'thumb*']
+// (chybí)                               → []
+
+$command->addArgument('files', repeatable: true);
+// photo.jpg logo.png  → ['photo.jpg', 'logo.png']
+```
+
+Opakovaný argument sebere všechny zbývající hodnoty, proto musí být poslední.
+
+
+Převod hodnot
+-------------
+
+Z příkazové řádky přicházejí vždycky řetězce. Když potřebujete číslo nebo cestu, předejte volbě či argumentu `normalizer`, tedy funkci, která hodnotu zkontroluje a převede. Hotové najdete ve třídě [api:Nette\CommandLine\Normalizers]: `int()` a `float()` převedou číslo, volitelně v zadaném rozsahu, a `realPath()` převede cestu k existujícímu souboru na absolutní:
+
+```php
+use Nette\CommandLine\Normalizers;
+
+$command->addOption('--quality', normalizer: fn($v) => Normalizers::int($v, min: 1, max: 100));
+// --quality 80   → 80
+// --quality abc  → Option `--quality`: expects an integer, `abc` given.
+// --quality 150  → Option `--quality`: expects a number from 1 to 100, `150` given.
+
+$command->addOption('--watermark', normalizer: Normalizers::realPath(...));
+// --watermark logo.png     → '/home/me/images/logo.png'
+// --watermark missing.png  → Option `--watermark`: file path `missing.png` not found.
+```
+
+Bez rozsahu stačí předat samotnou metodu, `Normalizers::int(...)`. Vlastní normalizátor je libovolná funkce, která dostane řetězec a vrátí převedenou hodnotu. Když je hodnota špatně, vyhodí výjimku a knihovna z ní udělá srozumitelnou hlášku s názvem volby, jako v ukázce výše. Hotový normalizátor můžete zavolat i ze svého, třeba když chcete cestu nejdřív upravit:
+
+```php
+$command->addOption('--watermark', normalizer: fn($v) => Normalizers::realPath("watermarks/$v"));
+```
+
+Normalizátor se spouští jen na hodnotách, které skutečně přišly z příkazové řádky. Na výchozí hodnotu ani na `true` u volby bez nepovinné hodnoty se nevolá.
+
+.[note]
+Rozsah, do kterého se žádné číslo nevejde, třeba `min` větší než `max`, je chyba v kódu, ne v zadání uživatele. Proto vyhodí `ValueError`, který se na hlášku pro uživatele nepřevádí. Od PHP 8.6 můžete místo funkce `fn($v) => Normalizers::int($v, min: 1)` napsat kratší `Normalizers::int(?, min: 1)`.
+
+
+Důkladnější validace
+--------------------
+
+Na složitější pravidla můžete výsledek předat knihovně [Nette Schema |schema:]. Command-Line na ní nezávisí, je to prostě druhý krok. Parser vrací řetězce tak, jak je uživatel napsal, a `null` u toho, co nezadal. Hodnoty `null` proto vynechte, ať se uplatní výchozí hodnoty schématu:
+
+```php
+use Nette\Schema\Expect;
+use Nette\Schema\Processor;
+
+$schema = Expect::structure([
+	'--quality' => Expect::string()->pattern('[1-9][0-9]?|100')->castTo('int')->default(85),
+	'files' => Expect::listOf('string'),
+])->otherItems();
+
+$values = array_filter($args->toArray(), fn($value) => $value !== null);
+$options = (new Processor)->process($schema, $values);
+```
+
+
+Parametry v kódu
+----------------
+
+Metody `add*()` vracejí objekt parametru, jehož nastavení si přečtete jako vlastnosti, třeba `$option->alias`. Parametr už nejde změnit, proto se kontroluje hned při přidání a chyba v definici, třeba jméno volby bez pomlčky nebo dvakrát použité jméno, vyhodí `InvalidArgumentException` okamžitě. Později se k parametru dostanete přes `getParameter()`. Druhý argument ověří, že jde o volbu, a statická analýza pak ví, jaké vlastnosti má:
+
+```php
+use Nette\CommandLine\Parameters\Option;
+
+$format = $command->getParameter('--format', Option::class);
+```
+
+Ne každé nastavení dává smysl u každého druhu. Příznak nemá hodnotu, proto `addFlag()` nemá `enum` ani `normalizer`. Ty mají `addOption()` a `addArgument()`, zatímco `valueOptional` a `valueName` jen `addOption()`.
+
+
+Příkazy
+=======
+
+Když skript umí víc věcí, ovládá se obvykle příkazy. Náš nástroj na obrázky bude umět převádět i zmenšovat a jednu volbu bude mít společnou pro všechno:
+
+```shell
+php images.php convert photo.jpg --format png
+php images.php resize photo.jpg --width 800
+php images.php --quiet convert photo.jpg
+```
+
+Příkaz přidáte metodou `addCommand()`. Vrátí nový `Command`, který nastavíte úplně stejně jako samotný program:
+
+```php
+$program = new Command('images');
+$program->addFlag('--quiet', 'Print nothing but errors', alias: '-q');
+
+$convert = $program->addCommand('convert', 'Converts images to another format');
+$convert->addArgument('files', 'Images to convert', repeatable: true);
+$convert->addOption('--format', 'Target format', alias: '-f', enum: ['jpg', 'png', 'webp']);
+
+$resize = $program->addCommand('resize', 'Shrinks images to the given width');
+$resize->addArgument('files', 'Images to resize', repeatable: true);
+$resize->addOption('--width', 'Width in pixels', normalizer: Normalizers::int(...));
+```
+
+Příkaz se pozná podle prvního slova bez pomlčky a `$args->command` vám po zpracování řekne, který to byl. Když uživatel žádný příkaz nenapíše, je `$args->command` samotný program. Pokud má být příkaz povinný, vytvořte program s `commandRequired: true`.
+
+Volby programu, jako tady `--quiet`, platí ve všech příkazech a uživatel je může napsat před příkaz i za něj: `images.php -q convert photo.jpg` i `images.php convert photo.jpg -q` znamená totéž. Volbu jiného příkazu knihovna odmítne a poradí, kam patří:
+
+```
+$ php images.php convert photo.jpg --width 800
+Error: Option `--width` belongs to command `resize`.
+```
+
+Výsledek obsahuje jen hodnoty programu a vybraného příkazu. Sousední příkazy smějí používat stejná jména voleb, takže `--width` by klidně mohl mít i `convert` s jiným významem.
+
+
+Vnořené příkazy
+---------------
+
+Příkaz může mít vlastní příkazy, a ty zase své. Třeba správa mezipaměti náhledů:
+
+```php
+$cache = $program->addCommand('cache', 'Manages the thumbnail cache');
+$cache->addCommand('clear', 'Deletes all cached thumbnails');
+$cache->addCommand('stats', 'Shows how much space the cache takes');
+```
+
+Uživatel pak píše `php images.php cache clear`. Příkaz, který má vlastní příkazy, nemůže mít argumenty, protože by nešlo poznat, jestli slovo za ním je argument, nebo příkaz.
+
+
+Handlery
+--------
+
+Zbývá říct, co se má při kterém příkazu stát. Nejpohodlnější je dát každému příkazu handler, tedy metodu nebo funkci, která jeho práci vykoná. Předáte ho jako `handler:` už při vytváření příkazu:
+
+```php
+final class ImageTools
+{
+	public function convert(array $files, ?string $format, ?bool $quiet): int
+	{
+		// převede soubory, při $quiet nic nevypisuje
+		return 0;
+	}
+}
+
+$tools = new ImageTools;
+$convert = $program->addCommand('convert', 'Converts images to another format', handler: $tools->convert(...));
+```
+
+Hodnoty handleru nepředáváte sami. Každý jeho parametr dostane hodnotu podle svého jména: `$files` argument `files`, `$format` volbu `--format`, a protože se počítají i volby programu, `$quiet` dostane `--quiet`. Jméno s více slovy se převádí: z `$maxWidth` je `--max-width`. Parametr typu `ParseResult` dostane celý výsledek, třeba když potřebujete `wasProvided()`, a parametr typu `Command` dostane vybraný příkaz.
+
+Vybraný příkaz pak spustí `run()`. Vrací to, co vrátil handler, a pokud handler nevrátí nic, znamená to 0:
+
+```php
+$args = $parser->parse($program);
+exit($args->run());
+```
+
+Jak k tomu přidat nápovědu a hlášení chyb, ukazuje sekce [Spuštění programu |#Spuštění programu].
+
+Typy parametrů se kontrolují proti tomu, co může volba dát. Volba, kterou uživatel nezadal a která nemá výchozí hodnotu, je `null`, proto patří do `?string`, a ne do `string`. Kdyby v handleru zůstal `string $format`, knihovna to nahlásí výjimkou hned při prvním spuštění skriptu, dřív než se cokoli provede, a to i pro příkazy, které se zrovna nespouštějí:
+
+```
+Command 'convert': parameter $format of handler ImageTools::convert() does not accept null, which option --format gives when absent.
+```
+
+.[note]
+Stejně se nahlásí i další chyby v signatuře: parametr, ke kterému žádná volba ani argument neexistuje, parametr s výchozí hodnotou, kterou by vstup stejně vždy přepsal, variadický parametr a parametr předávaný referencí. Normalizátor musí deklarovat návratový typ, jinak by nebylo s čím parametr porovnat. Opakovaná volba nebo argument přijde jako pole.
+
+
+Příkazy popsané atributy
+------------------------
+
+Handler může svůj příkaz popsat i sám, přímo u svého kódu. Tak jsme to dělali na [úvodní stránce |@home]. `#[Command]` dá metodě popis a `#[Flag]`, `#[Option]` a `#[Argument]` udělají z jejích parametrů příznaky, volby a argumenty:
+
+```php
+use Nette\CommandLine\Attributes as Cli;
+
+final class ImageTools
+{
+	#[Cli\Command('Converts images to another format')]
+	public function convert(
+		?bool $quiet,
+		#[Cli\Argument('Images to convert', repeatable: true)]
+		array $files,
+		#[Cli\Option('Target format', alias: '-f', enum: ['jpg', 'png', 'webp'])]
+		string $format = 'webp',
+	): int
+	{
+		// převede soubory, při $quiet nic nevypisuje
+		return 0;
+	}
+
+	#[Cli\Command('Shrinks images to the given width')]
+	public function resize(/* ... */): int
+	{
+		// ...
+	}
+}
+
+$tools = new ImageTools;
+$program->addCommandsFrom($tools);
+```
+
+`addCommandsFrom()` přidá všechny veřejné metody s atributem `#[Cli\Command]` v pořadí, v jakém jsou ve třídě. Jednotlivou metodu přidáte přes `addCommandFrom($tools->convert(...))`. Výsledkem jsou úplně obyčejné příkazy, jako byste volali `addCommand()` a `addOption()` sami.
+
+Jména se odvozují: příkaz z názvu metody, takže z `removeDuplicates()` je `remove-duplicates`, a volby z názvů parametrů, takže z `$maxWidth` je `--max-width`. Jiné jméno nastavíte v atributu přes `name:`. Výchozí hodnota parametru se stane výchozí hodnotou volby, argument s výchozí hodnotou je nepovinný a parametr typu backed enum přijímá jako povolené hodnoty jeho případy.
+
+Parametr bez atributu, jako `$quiet` výše, se napojí na volbu podle jména, tady na `--quiet` programu. Výchozí hodnotu mít nesmí, tu nese volba programu, a proto musí stát před parametry, které ji mají.
+
+Atributy `#[Flag]`, `#[Option]` a `#[Argument]` mají stejná nastavení jako `addFlag()`, `addOption()` a `addArgument()`, jen jméno a výchozí hodnotu berou z parametru. `#[Command]` přijímá `description`, `usage`, `commandRequired` a `name`.
+
+Atribut `#[Command]` se jmenuje stejně jako třída `Nette\CommandLine\Command`. Proto atributy importujeme pod aliasem `Cli` a píšeme `#[Cli\Command]`.
+
+Program bez příkazů popíšete stejně: `Command::from()` vytvoří z handleru celý program, jak jsme to udělali na úvodní stránce. Jeho jméno se neodvozuje z metody, protože ta pojmenovává akci, ne program, takže bez `name:` ho nápověda pojmenuje podle souboru skriptu. Takový program je obyčejný `Command`, takže k němu můžete přidávat i příkazy.
+
+Do atributu jde zapsat jen konstantní výraz, proto se normalizátor píše jako pole s třídou a metodou. Hotový třeba jako `[Normalizers::class, 'int']`, vlastní jako `[self::class, 'parseWidth']`. Od PHP 8.5 můžete do atributu napsat přímo `static function`. Když normalizátor potřebuje i rozsah, napište si statickou metodu, která ho předá dál:
+
+```php
+final class ImageTools
+{
+	#[Cli\Command('Shrinks images to the given width')]
+	public function resize(
+		#[Cli\Argument('Images to resize', repeatable: true)]
+		array $files,
+		#[Cli\Option('Width in pixels', normalizer: [self::class, 'parseWidth'])]
+		int $width = 800,
+	): int
+	{
+		// zmenší soubory na šířku $width
+		return 0;
+	}
+
+	public static function parseWidth(string $value): int
+	{
+		return Normalizers::int($value, min: 1);
+	}
+}
+```
+
+S atributy se z názvů vašich metod a proměnných stává rozhraní nástroje. Když přejmenujete `$maxWidth` na `$widthLimit`, změní se `--max-width` na `--width-limit` a přestanou fungovat všechny skripty, které váš nástroj volají. Takovou změnu zachytí [test nápovědy |#Testování].
+
+
+Volby sdílené více příkazy
+--------------------------
+
+Příkazy často potřebují stejné volby. Třeba `convert` i `resize` ukládají výsledky do adresáře a oba umějí zkušební běh. Abyste je nemuseli opakovat, popište je jednou v konstruktoru třídy a každý handler ať ji přijme jako parametr:
+
+```php
+final readonly class Output
+{
+	public function __construct(
+		#[Cli\Option('Directory for the results', valueName: 'dir')]
+		public ?string $outputDir = null,
+		#[Cli\Flag('Only show what would be done', alias: '-n')]
+		public bool $dryRun = false,
+	) {
+	}
+}
+
+final class ImageTools
+{
+	#[Cli\Command('Converts images to another format')]
+	public function convert(
+		#[Cli\Argument('Images to convert', repeatable: true)]
+		array $files,
+		Output $output,
+	): int
+	{
+		// uloží výsledky do $output->outputDir
+		return 0;
+	}
+}
+```
+
+`convert` teď přijímá `--output-dir` a `--dry-run`, a stejně tak každý další příkaz, jehož handler přijme `Output`. Při spuštění knihovna objekt vytvoří z hodnot těchto voleb a předá ho handleru. V nápovědě se volby objektu ukážou pohromadě, v místě, kde je parametr.
+
+Konstruktor se řídí stejnými pravidly jako handler. Handler může přijmout i víc takových objektů, třeba jeden s tím, co sdílejí všechny příkazy, a druhý s tím, co jen některé. Funguje to jen u příkazů popsaných atributy.
+
+
+Větvení bez handlerů
+--------------------
+
+Handlery nejsou povinné. V malém skriptu můžete zjistit vybraný příkaz a větvit sami, nejlépe přes `match`:
+
+```php
+$args = $parser->parse($program);
+
+exit(match ($args->command) {
+	$convert => convertImages($args->get('files'), $args->get('--format')),
+	$resize => resizeImages($args->get('files'), $args->get('--width')),
+	$program => showUsage(),
+});
+```
+
+Protože `match` nemá větev `default`, vyhodí `UnhandledMatchError`, když na některý příkaz zapomenete. Nápovědu a chyby ale v tomhle případě obsluhujete sami, viz [Nápověda |#Nápověda] a [Chyby |#Chyby].
+
+
+Spuštění programu
+=================
+
+Zpracovat řádku, odpovědět na `--help` a `--version`, nahlásit chybu a spustit handler se dělá v každém nástroji stejně. Celá spouštěcí část našeho nástroje vypadá takhle:
+
+```php
+use Nette\CommandLine\HelpRenderer;
+use Nette\CommandLine\UsageException;
+
+$program->addFlag('--help', 'Print this help', alias: '-h', standalone: true);
+$program->addFlag('--version', 'Print the version', standalone: true);
+
+$parser = new Parser;
+$renderer = new HelpRenderer;
+
+try {
+	$args = $parser->parse($program);
+	if ($args->get('--help')) {
+		$renderer->render($args->command);
+		exit(0);
+	} elseif ($args->get('--version')) {
+		echo "Images 1.0\n";
+		exit(0);
+	}
+	exit($args->run());
+
+} catch (UsageException $e) {
+	$renderer->renderError($e);
+	exit(2);
+}
+```
+
+Projděme si ji. Příznaky `--help` a `--version` jsou samostatné (`standalone`), takže fungují, i když uživatel nezadal povinné argumenty, víc v [sekci o nápovědě a verzi |#help-a-version]. `render($args->command)` vypíše nápovědu k příkazu, který uživatel zvolil, takže `images.php convert --help` ukáže nápovědu k `convert`. Nakonec `run()` spustí handler vybraného příkazu a vrátí jeho návratový kód.
+
+Když uživatel zadá řádku špatně, parser vyhodí `ParseException`, což je druh `UsageException`. `renderError()` vypíše hlášku a pod ní nápovědu k příkazu, ve kterém se uživatel spletl, a to na chybový výstup. Skript pak skončí kódem 2. To je zvyklost pro špatně zadanou řádku a odlišuje ji od kódu 1, kterým nástroj hlásí, že něco našel nebo se mu něco nepovedlo. Stejně se ošetří `UsageException`, kterou vyhodí handler, viz [Chyby |#Chyby]. Ostatní výjimky z handleru blok `catch` propustí dál.
+
+Volbu `--no-color`, která vypne barvy, přidáte podobně, postup najdete na stránce [Výstup do terminálu |console#volba-no-color].
+
+Spouštěcí část funguje se všemi handlery, ať jsou popsané atributy, nebo předané přes `handler:`. Program bez příkazů s handlerem vytvoříte i bez atributů, `new Command('convert', handler: ...)`.
+
+
+Nápověda
+========
+
+Nápovědu sestavuje [api:Nette\CommandLine\HelpRenderer] z popisů, které jste zadali. Proto vždy odpovídá tomu, co skript skutečně přijímá. Vykreslí ji pro program i pro kterýkoli příkaz, popisy zarovná a zalomí na šířku terminálu a v terminálu ji obarví:
+
+```php
+use Nette\CommandLine\HelpRenderer;
+
+$renderer = new HelpRenderer;
+$renderer->render($command);
+```
+
+Pro skript `convert` s volbami z první části vypadá takhle:
+
+```
+Usage: convert [options] <files>...
+
+Converts images to another format
+
+Arguments:
+  <files>...                   Images to convert
+
+Options:
+  -f, --format <jpg|png|webp>  Target format (default: webp)
+  -q, --quality <value>        Quality from 1 to 100
+  --backup[=dir]               Keep the originals, optionally in the given
+                               directory
+  --exclude <mask>...          Skip files matching the mask
+  --[no-]metadata              Keep EXIF metadata
+  -n, --dry-run                Only show what would be done
+```
+
+Všimněte si, jak nápověda ukazuje jednotlivé druhy: nepovinnou hodnotu jako `--backup[=dir]`, opakované zadání třemi tečkami, příznak s opačným tvarem jako `--[no-]metadata` a výchozí hodnotu za popisem.
+
+Nahoře je řádek s použitím (usage). Generuje se sám, nebo ho nahradíte vlastním přes `usage:` v `new Command()` či `addCommand()`. Pod ním je popis příkazu. Nápověda příkazu ukazuje jeho argumenty a volby a pod nadpisem `Global options:` volby programu, které v příkazu také platí.
+
+Několik nastavení ovlivňuje jen nápovědu:
+
+- `hidden: true` parametr v nápovědě schová, ale dál funguje,
+- `valueName: 'dir'` pojmenuje hodnotu, jako v `--backup[=dir]`; u volby s `enum` nahradí výčet hodnot, což se hodí, když je dlouhý,
+- `defaultDescription: 'current directory'` popíše výchozí hodnotu slovy; prázdný řetězec ji vynechá, takže heslo nebo token zadaný jako výchozí hodnota se v nápovědě neobjeví.
+
+Bez `defaultDescription` ukáže nápověda výchozí hodnotu jako `(default: webp)`, pokud je co ukázat. Logickou hodnotu, pole a prázdný řetězec vynechá.
+
+Vlastní nadpisy a texty přidáte metodami `addSection()` a `addText()`, v pořadí, v jakém je voláte. Text se vypíše přesně, jak jste ho napsali, bez zalamování a barev. Když žádný nadpis nepřidáte, vloží nápověda sama `Options:`, `Arguments:` a `Commands:`. Kód v popisech pište do zpětných apostrofů jako v Markdownu. V terminálu se vykreslí vlastní barvou, v prostém textu apostrofy zůstanou.
+
+Místo vypsání můžete nápovědu získat jako řetězec metodou `renderToString()`. Bez konzole je to prostý text bez barev, který se hodí do souboru nebo do testu. Šířku můžete určit sami:
+
+```php
+$renderer = new HelpRenderer(width: 100);
+$text = $renderer->renderToString($command);
+```
+
+
+`--help` a `--version`
+----------------------
+
+U obou příznaků stojí za pozornost jedna věc: když má skript povinný argument, skončilo by `convert.php --help` chybou, že argument chybí. Proto je označte jako samostatné (`standalone`):
+
+```php
+$command->addFlag('--help', 'Print this help', alias: '-h', standalone: true);
+$command->addFlag('--version', 'Print the version', standalone: true);
+```
+
+Když uživatel použije samostatný příznak, parser nic nekontroluje ani nevyžaduje. Ten příznak vrátí jako `true`, ostatní příznaky tak, jak byly zadány, a všechno ostatní s výchozí hodnotou. Nápovědu tak vypíšete dřív, než skript začne číst konfiguraci nebo kontrolovat soubory. Proto je dobré, aby nastavení, které má fungovat spolu s `--help`, bylo příznakem. Třeba `--help --no-color` vypíše nápovědu bez barev.
+
+U příkazů se nejdřív vybere příkaz, takže `images.php convert --help` dá v `$args->command` právě `convert`. Řádka ale pořád musí dávat smysl: neznámou volbu parser odmítne jako vždy.
+
+
+Chyby
+=====
+
+Když uživatel zadá řádku špatně, parser vyhodí [api:Nette\CommandLine\ParseException]. Zachytíte ji a předáte metodě `renderError()`, jak ukazuje zkrácená podoba [spouštěcí části |#Spuštění programu]:
+
+```php
+try {
+	$args = $parser->parse($program);
+	exit($args->run());
+
+} catch (UsageException $e) {
+	$renderer->renderError($e);
+	exit(2);
+}
+```
+
+`renderError()` vypíše hlášku a pod ní nápovědu k příkazu, ve kterém se uživatel spletl, a to na chybový výstup. Uživatel tak hned vidí, co je špatně i jak to napsat správně:
+
+```
+Error: Unknown option `--fromat`. Did you mean `--format`?
+
+Usage: images convert [options] <files>...
+...
+```
+
+`ParseException` je druh výjimky [api:Nette\CommandLine\UsageException]. Tu můžete vyhodit i vy z handleru, když narazíte na chybu, kterou popis voleb vyjádřit neumí, třeba dvě volby, které nejde použít spolu. Předejte jí příkaz, ke kterému se má vypsat nápověda, a ten handler dostane, když má parametr typu `Command`:
+
+```php
+public function convert(Command $command, bool $stdin, array $files): int
+{
+	if ($stdin && $files) {
+		throw new UsageException('Files cannot be combined with `--stdin`.', $command);
+	}
+	// ...
+}
+```
+
+Kód pište v hláškách do zpětných apostrofů stejně jako v popisech. V terminálu ho `renderError()` vykreslí barevně a bez apostrofů, v logu apostrofy zůstanou. Chcete-li hlášku vypsat po svém, stejně ji naformátuje metoda `formatText()`.
+
+Běžné hlášky, jak je ukáže terminál s barvami:
+
+| Option `--format` requires a value.                              | volba bez povinné hodnoty
+| Option `--dry-run` does not accept a value.                      | hodnota u příznaku
+| Unknown option `--fromat`. Did you mean `--format`?              | neznámá volba
+| Missing required argument `<files>`.                             | chybí povinný argument
+| Unexpected arguments `b`, `c`.                                   | přebývající argumenty
+| Option `--format`: expects `jpg`, `png` or `webp`, `gif` given.  | hodnota není mezi povolenými
+| Unknown command `conver`. Did you mean `convert`?                | neznámý příkaz
+| Missing command.                                                 | příkaz je povinný, ale chybí
+| Option `--width` belongs to command `resize`.                    | volba jiného příkazu
+
+.[note]
+Hlášky jsou anglicky. Chcete-li je napsat jinak nebo přeložit, najdete v `ParseException` vše potřebné: `reason` říká, co bylo špatně, jako případ výčtu `ParseFailure` (třeba `ParseFailure::UnknownOption`), `parameter` je parametr, kterého se chyba týká, a `token` je slovo z příkazové řádky, o které jde, přesně jak ho uživatel napsal, nebo `null`, když něco chybí. Protože `token` pochází od uživatele, před vypsáním z něj odstraňte řídicí znaky.
+
+Chyby ve vaší definici, třeba jméno volby bez pomlčky, dvakrát použité jméno nebo povinný argument za nepovinným, nejsou chyby uživatele. Vyhodí `InvalidArgumentException`, kterou blok `catch` nezachytí, takže se projeví jako každá jiná chyba v kódu.
+
+
+Testování
+=========
+
+Skript otestujete, aniž byste ho spouštěli z příkazové řádky. Parseru předáte jednotlivá slova příkazové řádky bez jména skriptu a ověříte, co z nich vyčetl. Příklady používají [Nette Tester |tester:], ale poslouží jakýkoli testovací framework:
+
+```php
+$args = $parser->parse($program, ['convert', 'photo.jpg', '-f', 'png']);
+Assert::same('png', $args->get('--format'));
+Assert::same(0, $args->run());
+```
+
+Špatně zadanou řádku parser hlásí výjimkou `ParseException`, takže otestujete i to, co uživatel uvidí:
+
+```php
+Assert::exception(
+	fn() => $parser->parse($program, ['convert', '--format', 'gif', 'photo.jpg']),
+	ParseException::class,
+	'Option `--format`: expects `jpg`, `png` or `webp`, `gif` given.',
+);
+```
+
+Jediný příkaz otestujete tak, že ho parseru předáte spolu s celou řádkou. Parser ověří, že řádka opravdu vede k tomuto příkazu:
+
+```php
+$args = $parser->parse($convert, ['convert', 'photo.jpg']);
+```
+
+Vlastní test si zaslouží nápověda. Je to vlastně popis rozhraní vašeho nástroje, takže test, který ji porovná s uloženým textem, zachytí každou nechtěnou změnu, třeba přejmenovanou volbu. Pevná šířka zajistí, že výsledek nezávisí na terminálu, ve kterém test běží:
+
+```php
+$renderer = new HelpRenderer(width: 80);
+Assert::matchFile(__DIR__ . '/help.txt', $renderer->renderToString($program));
+```
+
+Soubor `help.txt` poprvé vytvoříte tak, že do něj uložíte, co `renderToString()` vrátí, a zkontrolujete, že je to správně.
+
+
+{{description: Zpracování argumentů příkazové řádky v PHP: příznaky, volby a argumenty s kontrolou hodnot, příkazy a podpříkazy, handlery, generovaná nápověda, srozumitelné chybové hlášky a testování.}}
+{{sitename: Nette Dokumentace}}

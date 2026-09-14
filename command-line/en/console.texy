@@ -1,0 +1,195 @@
+Terminal Output
+***************
+
+.[perex]
+Colored text, clickable links, a progress line and questions for the user. The `Console` class finds out by itself where the output goes and behaves accordingly: in a terminal the output is colorful and alive, in a file, a pipe or CI it stays clean text. You don't have to write a single condition for it.
+
+
+Colorful Output
+===============
+
+A [api:Nette\CommandLine\Console] object writes to one output, the screen by default, and can color the text:
+
+```php
+use Nette\CommandLine\Console;
+
+$console = new Console;
+$console->writeLine('3 images converted', 'green');
+$console->writeLine('logo.png skipped, it is already WebP', 'yellow');
+$console->writeLine($console->color('gray', 'Results in ') . $outputDir);  // a line of several colors
+```
+
+You usually create the console once at the start of the script and pass it to the classes that print, for example in the constructor, as the [overview |@home#Terminal Output] shows.
+
+Colors are added only by methods, never by markup in the text. Some libraries look for markup like `<info>` in the text, so XML, HTML or user input has to be escaped first or it breaks. Here everything is printed exactly as it is.
+
+Whether the text comes out in color doesn't depend on your code but on where the output goes. In a terminal it's in color. When you redirect the output to a file, pipe it to another program or the script runs in CI, the same code prints plain text, because `color()` and `link()` then add nothing. Just watch out for text from elsewhere that carries its own colors, such as the output of another program. Remove them with `Ansi::strip()` if needed.
+
+
+Two Outputs
+-----------
+
+Every program has two outputs: the standard one (`STDOUT`) for results, and the error one (`STDERR`) for messages and errors. The user can redirect each of them somewhere else, for example the results into a file while the errors stay on the screen. That's why each output gets its own console, which finds out by itself whether its output leads to a terminal:
+
+```php
+$out = new Console(STDOUT);
+$err = new Console(STDERR);
+```
+
+Without a parameter, the console writes to `STDOUT`. When the program reading your output stops early, like `head` in `php images.php list | head -1`, the rest of the output is quietly dropped instead of raising an error on every write.
+
+
+Colors
+------
+
+You give a color as `'foreground'` or `'foreground/background'`, such as `'white/blue'`. The basic names `black`, `gray`, `silver`, `white`, `navy`, `blue`, `green`, `lime`, `teal`, `aqua`, `maroon`, `red`, `purple`, `fuchsia`, `olive` and `yellow` are drawn by the terminal according to its color theme. A color that should look the same everywhere is written in hex, `'#87D7FF'` or the short `'#8DF'`, or as a number 0-255 of the extended palette, such as `'117'`.
+
+An unknown color throws an exception even when colors are off, so you catch a typo right away. The color `null` means no color, which comes in handy in conditions: `$console->color($ok ? 'green' : null, $text)`.
+
+Not every terminal can show every color. The console finds out by itself and draws a color as faithfully as possible: exactly in a modern terminal, as the nearest color it can in an older one. How many colors the terminal handles is expressed by [api:Nette\CommandLine\ColorDepth]: `TrueColor` (any color), `Ansi256` (a palette of 256 colors), `Ansi16` (16 basic colors) and `None` (no colors).
+
+You can influence the behavior with environment variables that other tools know too. [NO_COLOR |https://no-color.org] turns colors off. [FORCE_COLOR |https://force-color.org] turns them on even when the output goes to a file or a pipe, and its value `2` or `3` asks for at least `Ansi256` or `TrueColor`. `COLORTERM` set to `truecolor` or `24bit` says the terminal can show any color.
+
+
+The `--no-color` Option
+-----------------------
+
+Users often want to turn colors off right on the command line. Give the program a flag `--no-color`, and after parsing the line turn colors off for your consoles with the `setColorDepth()` method:
+
+```php
+use Nette\CommandLine\ColorDepth;
+
+$out = new Console(STDOUT);
+$err = new Console(STDERR);
+$tools = new ImageTools($out);
+
+$program = new Command('images');
+$program->addFlag('--no-color', 'Print plain output without colors');
+$program->addCommandsFrom($tools);
+
+$parser = new Parser;
+$args = $parser->parse($program);
+if ($args->get('--no-color')) {
+	$out->setColorDepth(ColorDepth::None);
+	$err->setColorDepth(ColorDepth::None);
+}
+```
+
+So that the option applies to the help and error messages too, print them through renderers with these consoles: `new HelpRenderer($out)` for the help and `new HelpRenderer($err)` for errors. Only a mistake in the command line itself is reported before the parser reads the flag, so it stays in color. The `NO_COLOR` environment variable turns colors off absolutely everywhere.
+
+You can also create a console without colors right away, `new Console(STDOUT, colorDepth: ColorDepth::None)`.
+
+You can also ask the console how things stand:
+
+```php
+$console->hasColors();      // whether it prints in color
+$console->getColorDepth();  // how many colors it uses, such as ColorDepth::Ansi256
+$console->isTerminal();     // whether the output leads to a terminal where someone is watching
+$console->getWidth();       // width of the terminal in columns, 80 outside a terminal
+```
+
+`hasColors()` and `isTerminal()` answer two different questions. Use the first to decide whether to color, the second to decide whether to show things that only make sense to a person at the screen, such as a progress line or a question. A user can turn colors off and still sit at a terminal.
+
+`getWidth()` asks the terminal only once and remembers the result, so only a new console notices that the window was resized. The `COLUMNS` environment variable takes precedence, which comes in handy when you want to see how the output looks in a narrow terminal.
+
+
+Clickable Links
+===============
+
+A link is composed just like a color. In a terminal, `link()` turns the text into a link you can click. In a file, a pipe or without colors it prints the text followed by the address in parentheses, so the address doesn't disappear from the log:
+
+```php
+$console->writeLine('See ' . $console->link('https://nette.org'));
+$console->writeLine($console->link('https://nette.org', 'the manual'));  // outside a terminal 'the manual (https://nette.org)'
+```
+
+`link()` refuses an address with control characters, because they could end the link early and send the terminal commands of their own. Accented letters and other characters beyond ASCII are fine.
+
+
+Progress and Status Lines
+=========================
+
+During longer work it helps to show what the script is doing and how much is done. That's what `setStatus()` is for. It draws a line at the end of the output, the next printout erases it and is printed above it, and the next `setStatus()` draws the line again. The user thus sees the results piling up and below them one line that keeps changing:
+
+```
+photo.jpg converted
+logo.png converted
+3/10  holiday.jpg
+```
+
+In code it looks like this:
+
+```php
+foreach ($files as $i => $file) {
+	$console->setStatus(sprintf('%d/%d  %s', $i + 1, count($files), $file));
+	// ... converts the file
+	$console->writeLine("$file converted");  // erases the status line and prints above it
+}
+
+$console->clearStatus();
+```
+
+The status line is only drawn in the terminal, it isn't written to the output. When the output doesn't lead to a terminal, `setStatus()` does nothing at all, so a log file holds only the real lines. There can be several status lines at once, each newline character starts another one. A line that is too long is cut to the width of the terminal, because a wrapped one couldn't be redrawn.
+
+While the status line is visible, the cursor is hidden. It shows up again when you clear the status, when the console is released, and also at the end of the script, even after `exit()`, an uncaught exception or a fatal error. Only Ctrl+C ends PHP immediately, so your application has to handle that one itself.
+
+A status line is erased only by the console that drew it. If you have one console for results and another for errors, draw the status on the one the errors go to. Otherwise a warning printed during the work would land on top of the status line.
+
+
+Measuring Text
+==============
+
+When you want to print aligned columns, `strlen()` won't help you. Colors are stored in the text as invisible escape sequences that take no space, and a Chinese character or an emoji takes two columns on the screen. The [api:Nette\CommandLine\Ansi] class measures and cuts text the way the terminal shows it:
+
+```php
+use Nette\CommandLine\Ansi;
+
+Ansi::measure($console->color('red', 'error'));  // 5, the escape sequences don't count
+Ansi::pad($console->color('red', 'error'), 10);  // pads to 10 columns, not to 10 bytes
+Ansi::truncate($path, 30, keepEnd: true);        // cuts the front so the file name stays
+Ansi::strip($text);                              // the text without escape sequences
+```
+
+Widths follow the Unicode tables, so emoji and flags are measured correctly too. Control characters, such as a tab, take no column. `strip()` removes only escape sequences and leaves other control characters in the text, so it won't make untrusted text safe to print.
+
+
+Asking the User
+===============
+
+Sometimes a script needs a decision only a person can make. Overwrite an existing file? Skip an image that can't be read? [api:Nette\CommandLine\Prompt] asks the question and waits until the user answers with one of the choices you allow:
+
+```php
+use Nette\CommandLine\Prompt;
+
+$prompt = new Prompt($console);
+if ($prompt->isInteractive()) {
+	$answer = $prompt->choose('Overwrite photo.webp?', ['y', 'n', 'a', 'q'], default: 'n');
+}
+```
+
+The user sees `Overwrite photo.webp? [y/N/a/q]`, and the default choice is the one in capitals. Which choices you offer is up to you, here they could be yes, no, yes to all and quit. Until the user answers with one of them, the prompt asks again. Letter case doesn't matter, and `choose()` returns the choice exactly as you declared it. Enter on an empty line picks the default, and when there is none, the prompt asks again.
+
+When each choice deserves a few words, pass them as an array with descriptions, and the prompt prints a menu above the question:
+
+```php
+$answer = $prompt->choose('What now?', [
+	's' => 'Skip this image',
+	'r' => 'Retry',
+	'c' => 'Cancel the conversion',
+], default: 'r');
+```
+
+```
+  [s] Skip this image
+  [r] Retry
+  [c] Cancel the conversion
+What now? [s/R/c]
+```
+
+When the input ends, for example because the user pressed Ctrl+D, `choose()` returns `null`, never the default. A closed input thus can't quietly answer yes. What that means for the script is your decision, such as `?? 'q'`.
+
+The prompt asks only when both the input and the console lead to a terminal, so it never takes an answer from a pipe nobody is sitting at. Otherwise `choose()` throws `LogicException` before it prints or reads anything. So first ask `isInteractive()` and decide what the script does without a person, for example stop with a hint to use a command-line option such as `--overwrite`. Give the prompt the console that draws the status line: the question then erases it, and the next status is drawn on a clean line after the answer.
+
+
+{{description: Colored terminal output in PHP that switches off in a pipe and in CI, clickable links, a progress line and questions for the user.}}
+{{sitename: Nette Documentation}}

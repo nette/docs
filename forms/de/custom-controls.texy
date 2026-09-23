@@ -1,0 +1,268 @@
+Eigene Formularelemente
+***********************
+
+.[perex]
+Nette bietet eine breite Palette [eingebauter Formularelemente |controls]. Wenn Sie aber auf eine Anforderung stoßen, die nicht dabei ist, müssen Sie nichts umständlich umgehen oder zusammenkleben: Sie schreiben ein eigenes Element. Es kann alles, was die eingebauten können - validieren, sich übersetzen, sich rendern -, und wird genauso verwendet.
+
+Wir zeigen es an einem praktischen Beispiel: einem Element zur Eingabe eines Datums über drei Felder, Tag, Monat und Jahr. Dabei erfahren Sie alles, was Sie zum Schreiben von Elementen wissen müssen.
+
+
+Wann ein eigenes Element sinnvoll ist und wann nicht
+====================================================
+
+Ein eigenes Element ist das mächtigste Werkzeug, das Formulare bieten. Und wie jedes mächtige Werkzeug sollte es die letzte Wahl sein, nicht die erste. Viele Situationen lassen sich mit einfacheren Mitteln lösen:
+
+- **Einen Wert verändern** erledigt [addFilter() |validation#Eingaben verändern]. Sie wollen Leerzeichen in einer Postleitzahl oder Kleinbuchstaben in einem Code dulden? Ein Filter ist ein paar Zeilen lang.
+- **Wiederkehrende Konfiguration** verpackt eine eigene Methode zum Hinzufügen. Sie fügen an zehn Stellen ein Feld für die Postleitzahl mit derselben Validierung hinzu? Legen Sie sich dafür eine benannte Abkürzung an, [wir zeigen es am Ende |#Eigene Methode zum Hinzufügen].
+- **Eine Gruppe zusammengehöriger Felder** bedient ein [Container |controls#addContainer()]. Eine Adresse aus Straße, Stadt und Postleitzahl braucht kein eigenes Element, ein Container mit drei Textfeldern genügt.
+- **Ein anderes Aussehen** erreichen Sie über [setHtmlType() |controls#addText()] und HTML-Attribute oder über [Prototypen |rendering#Prototypen].
+
+Ein eigenes Element ergibt in dem Moment Sinn, in dem Sie einen **eigenen Wert** brauchen: ein Element, das nach außen wie ein einzelnes Feld mit einem einzigen Wert wirkt, innen aber aus mehreren Eingaben besteht oder den Wert anders speichert, als es ihn anzeigt. Ein Datum aus drei Feldern. Koordinaten, die per Klick auf eine Karte gewählt werden. Eine Eingabe von Tags mit Autovervollständigung.
+
+
+Anatomie eines Elements
+=======================
+
+Jedes eigene Element erbt von der abstrakten Klasse [api:Nette\Forms\Controls\BaseControl]. Von ihr erbt es eine Menge fertiger Funktionalität: das Speichern des Werts, Validierungsregeln und -bedingungen, Fehlermeldungen, Übersetzungen, HTML-Attribute, das Label und die Anbindung an das Rendering. Sie schreiben nur, was Ihr Element unterscheidet.
+
+Ein minimales funktionierendes Element ist überraschend kurz:
+
+```php
+use Nette\Forms\Form;
+use Nette\Forms\Helpers;
+use Nette\Utils\Html;
+
+class SimpleInput extends Nette\Forms\Controls\BaseControl
+{
+	public function loadHttpData(): void
+	{
+		$this->setValue($this->getHttpData(Form::DataLine));
+	}
+
+	public function getControl(): Html
+	{
+		return Html::el('input', [
+			'type' => 'text',
+			'name' => $this->getHtmlName(),
+			'id' => $this->getHtmlId(),
+			'value' => $this->getValue(),
+			'data-nette-rules' => Helpers::exportRules($this->getRules()) ?: null,
+		]);
+	}
+}
+```
+
+Zwei Methoden: Die eine sagt, wie der Wert aus den gesendeten Daten zu holen ist, die andere, wie das Element zu rendern ist. Beide sehen wir uns gleich genauer an. Alles andere - `setRequired()`, `addRule()`, `setDefaultValue()`, Übersetzungen - funktioniert bereits von selbst.
+
+Dem Formular fügen Sie das Element über die Methode `addComponent()` hinzu oder knapper über eckige Klammern:
+
+```php
+$form['nickname'] = new SimpleInput('Spitzname:');
+```
+
+
+Lebenszyklus eines Elements
+===========================
+
+Bevor wir zu einem interessanteren Element kommen, ist es gut zu wissen, was mit einem Element wann geschieht. Das Formular und seine Elemente sind [Komponenten |component-model:], die einen Baum bilden. Das hat eine angenehme Folge: Das Element muss nichts selbst herausfinden, das Framework kümmert sich zum richtigen Zeitpunkt um alles Wichtige:
+
+1) In dem Moment, in dem Sie das Element an ein abgesendetes Formular hängen, ruft das Formular selbst `loadHttpData()` darauf auf. Darin liest das Element seinen gesendeten Wert, wie wir gleich zeigen. Es arbeitet nie direkt mit `$_POST` und muss sich überhaupt nicht darum kümmern, ob es in Containern verschachtelt ist.
+
+2) Wird das Formular abgesendet, läuft die Validierung: Die über `addRule()` hinzugefügten Regeln werden ausgewertet und arbeiten mit dem Wert aus `getValue()`.
+
+3) Wer danach `$form->getValues()` oder `getValue()` auf dem Element aufruft, bekommt einen sauberen, typisierten Wert - etwa ein `DateTimeImmutable`-Objekt, nicht drei Strings aus dem Formular.
+
+Und beim Rendern wird `getControl()` aufgerufen, bzw. `getLabel()` für das Label.
+
+
+Den gesendeten Wert lesen
+=========================
+
+In der Methode `loadHttpData()` fragt das Element über die Methode `getHttpData()` nach seinem gesendeten Wert. Ihr Parameter ist ein Typ, der bestimmt, wie der Wert bereinigt werden soll:
+
+| Typ | Bedeutung
+|-------
+| `Form::DataLine` | einzeiliger Text: ersetzt Zeilenumbrüche durch Leerzeichen, schneidet Leerzeichen ab
+| `Form::DataText` | mehrzeiliger Text: vereinheitlicht die Zeilenenden zu `\n`
+| `Form::DataFile` | Upload, eine Instanz von `Nette\Http\FileUpload`
+
+Ganz gleich, wie sehr sich ein Angreifer bemüht, das Ergebnis ist immer ein gültiger UTF-8-String ohne Steuerzeichen (oder ein Upload-Objekt oder `null`). Genau deshalb lesen wir den Wert nie direkt aus `$_POST` - wir verlören all diese Garantien.
+
+Ein Element, das aus mehreren Eingaben besteht, wie unser Datum, übergibt als zweiten Parameter einen Teil des HTML-Namens und liest so seine einzelnen Teilwerte. Es legt sie in seinen eigenen Properties `$day`, `$month` und `$year` vom Typ string ab:
+
+```php
+public function loadHttpData(): void
+{
+	$this->day = $this->getHttpData(Form::DataLine, '[day]') ?? '';
+	$this->month = $this->getHttpData(Form::DataLine, '[month]') ?? '';
+	$this->year = $this->getHttpData(Form::DataLine, '[year]') ?? '';
+}
+```
+
+Endet der HTML-Name mit `[]`, wird ein Array von Werten zurückgegeben. Durch die Kombination mit dem Typ `Form::DataKeys` (also `Form::DataLine | Form::DataKeys`) bleiben auch dessen Schlüssel erhalten:
+
+```php
+$tags = $this->getHttpData(Form::DataLine, '[tags][]');
+```
+
+Ein fehlender Wert ist `null` (bei Arrays ein leeres Array). Der Request muss die Daten des Elements gar nicht enthalten, und nichts hindert einen Angreifer daran, zu senden, was ihm beliebt - deshalb ergänzen wir im Beispiel `?? ''` und deshalb sollten Sie mit dieser Variante immer rechnen.
+
+
+Der Wert des Elements
+=====================
+
+Das Element hält seinen Wert und legt ihn über drei Methoden offen, an deren Vertrag man sich halten sollte.
+
+Die Methode `setValue()` nimmt einen Wert vom Programmierer entgegen - diesen Weg gehen auch `setDefaultValue()` und `$form->setDefaults()`. Sie sollte alles annehmen, was Sinn ergibt, den Wert in seine interne Form umwandeln und bei unsinniger Eingabe eine Exception werfen, damit der Fehler sofort auffällt und nicht über rätselhaftes Verhalten des Formulars. Unser Datum akzeptiert ein `DateTimeInterface`, einen String, einen Timestamp oder `null` und zerlegt sie in die drei Felder:
+
+```php
+public function setValue(mixed $value): static
+{
+	if ($value === null) {
+		$this->day = $this->month = $this->year = '';
+	} else {
+		$date = Nette\Utils\DateTime::from($value); // Unsinn wirft eine Exception
+		$this->day = $date->format('j');
+		$this->month = $date->format('n');
+		$this->year = $date->format('Y');
+	}
+	return $this;
+}
+```
+
+Die Methode `getValue()` setzt dagegen einen sauberen, typisierten Wert zusammen - das Einzige, was der Nutzer Ihres Elements zu sehen bekommt. Ist der Wert nicht gültig, gibt sie `null` zurück. Die statische Methode `validateDate()` prüft schlicht, dass die drei Felder ein existierendes Datum ergeben:
+
+```php
+public function getValue(): ?DateTimeImmutable
+{
+	return self::validateDate($this)
+		? (new DateTimeImmutable)->setDate((int) $this->year, (int) $this->month, (int) $this->day)->setTime(0, 0)
+		: null;
+}
+```
+
+Und die Methode `isFilled()` sagt, ob der Benutzer das Element ausgefüllt hat - sie nutzt die Regel `setRequired()`. Die Standardimplementierung (ein nicht leerer Wert) genügt oft, bei einem zusammengesetzten Element überschreiben Sie sie aber nach dessen Logik:
+
+```php
+public function isFilled(): bool
+{
+	return $this->day !== '' || $this->year !== '';
+}
+```
+
+
+Rendering
+=========
+
+Die Methode `getControl()` gibt die HTML-Form des Elements zurück, üblicherweise als [Html |utils:html-elements]-Objekt, aber ein schlichter String ist ebenso in Ordnung - das spielt keine Rolle. Zum Html-Objekt greifen wir vor allem beim Zusammensetzen des Codes, weil sich das entstehende Markup damit sicher und mit einer angenehmen API bauen lässt. Ihnen stehen mehrere Helfer zur Verfügung:
+
+- `getHtmlName()` gibt das HTML-Attribut `name` zurück, samt möglicher Verschachtelung in Containern (etwa `invoice[date]`). Bei einem zusammengesetzten Element hängen Sie die Namensteile der einzelnen Eingaben daran: `$name . '[day]'`.
+- `getHtmlId()` gibt das Attribut `id` zurück, das mit dem Label verknüpft ist.
+- `Helpers::exportRules($this->getRules())` exportiert die Validierungsregeln für das Attribut `data-nette-rules`, dank dessen die [Validierung in JavaScript |validation#Validierung in JavaScript] auch für Ihr Element funktioniert. Das Attribut gehört an die erste Eingabe des Elements.
+- `Helpers::createSelectBox($items, $optionAttrs, $selected)` setzt aus einem Array von Elementen ein `<select>`-Element zusammen (verschachtelte Arrays werden als `<optgroup>` gerendert) und gibt es als `Html` zurück - praktisch für das Feld für den Monat in unserem Datum.
+- `Helpers::createInputList($items, $inputAttrs, $labelAttrs)` erzeugt eine Liste von `<input>`-Elementen, die in `<label>` gepackt sind (Radiobuttons oder Checkboxen), und gibt sie als String zurück.
+
+Das erste Feld unseres Datums entsteht also so:
+
+```php
+public function getControl(): Html
+{
+	$name = $this->getHtmlName();
+	return Html::el()
+		->addHtml(Html::el('input', [
+			'name' => $name . '[day]',
+			'id' => $this->getHtmlId(),
+			'value' => $this->day,
+			'type' => 'number',
+			'data-nette-rules' => Helpers::exportRules($this->getRules()) ?: null,
+		]))
+		->addHtml(/* ... select für den Monat und input für das Jahr ... */);
+}
+```
+
+Das Label rendert `getLabel()`, und seine Standardimplementierung passt üblicherweise. Nur Vorsicht: Bei einem zusammengesetzten Element zeigt dessen Attribut `for` auf `getHtmlId()`, geben Sie diese id also der ersten Eingabe - genau wie im Beispiel.
+
+Damit sich das zusammengesetzte Element im Template Teil für Teil rendern lässt (etwa `{input birthdate:day}`), überschreiben Sie die Methoden `getControlPart($key)` und `getLabelPart($key)`, die das `Html`-Element für den jeweiligen Teil zurückgeben - genauso, wie es `CheckboxList` und `RadioList` tun.
+
+.[note]
+Wenn Sie `getControl()` überschreiben, denken Sie daran, dass `BaseControl::getControl()` das Element über `setOption('rendered', true)` auch als gerendert markiert. Rufen Sie sie ebenfalls auf (oder rufen Sie `parent::getControl()`), wenn Sie manuelles und automatisches Rendering desselben Formulars kombinieren, damit das Element nicht zweimal gerendert wird. (Das obige Beispiel `DateInput` lässt das der Kürze halber weg.)
+
+
+Vollständiges Beispiel: DateInput
+=================================
+
+Alle beschriebenen Teile zusammen, ergänzt um eine Select-Box zur Auswahl des Monats, finden Sie im fertigen Element `DateInput` unter den [Beispielen direkt im Repository |https://github.com/nette/forms/blob/master/examples/custom-control.php].
+
+Beachten Sie, dass sich das Element im Konstruktor selbst eine Validierungsregel hinzufügt, die prüft, dass das Datum Sinn ergibt. Eine unsinnige Eingabe wie der 31. Februar zeigt sich damit als gewöhnlicher Validierungsfehler des Formulars:
+
+```php
+public function __construct($label = null)
+{
+	parent::__construct($label);
+	$this->addRule(self::validateDate(...), 'Das Datum ist ungültig.');
+}
+```
+
+Und die Verwendung? Genau wie bei den eingebauten Elementen:
+
+```php
+$form['birthdate'] = (new DateInput('Geburtsdatum:'))
+	->setDefaultValue(new DateTime('2000-01-01'))
+	->setRequired('Wann wurden Sie geboren?');
+
+$date = $form->getValues()->birthdate; // ?DateTimeImmutable
+```
+
+In einem Latte-Template rendern Sie es mit dem gewohnten Tag `{input birthdate}` oder `{label birthdate /}`, wie jedes andere Element.
+
+
+Validierung
+===========
+
+Die eingebauten Validierungsregeln funktionieren mit einem eigenen Element sofort - sie arbeiten mit dem Wert aus `getValue()`. Unser `DateInput` kann also zum Beispiel `Form::Min` für das älteste erlaubte Datum verwenden. Wie sich eigene Regeln samt ihrem Gegenstück in JavaScript schreiben lassen, beschreibt das Kapitel [Eigene Regeln und Bedingungen |validation#Eigene Regeln und Bedingungen].
+
+
+Eigene Methode zum Hinzufügen
+=============================
+
+Eingebaute Elemente fügen wir über die bequemen Methoden `$form->addText()` und Konsorten hinzu. Ein eigenes Element hat keine solche Methode, Sie fügen es also über eine schlichte Zuweisung hinzu - das funktioniert in einem Formular wie in einem Container gleich, und Editoren und statische Analyse verstehen es:
+
+```php
+$form['birthdate'] = new DateInput('Geburtsdatum:');
+```
+
+Wenn Sie das Hinzufügen abkürzen und dabei die Autovervollständigung behalten wollen, kommt eine statische Factory-Methode direkt am Element gelegen. Sie funktioniert auch in verschachtelten Containern, was eine Methode an einem Nachfahren der Klasse `Form` nicht könnte - verschachtelte Container wissen nichts von ihr:
+
+```php
+class DateInput extends Nette\Forms\Controls\BaseControl
+{
+	public static function addTo(
+		Nette\Forms\Container $container,
+		string $name,
+		?string $label = null,
+	): self {
+		return $container[$name] = new self($label);
+	}
+}
+
+// funktioniert in einem Formular und in jedem Container:
+DateInput::addTo($form, 'birthdate', 'Geburtsdatum:');
+```
+
+Derselbe Ansatz funktioniert auch als benannte Abkürzung für die wiederkehrende Konfiguration eines eingebauten Elements:
+
+```php
+final class ZipInput
+{
+	public static function addTo(
+		Nette\Forms\Container $container,
+		string $name,
+		?string $label = null,
+	): Nette\Forms\Controls\TextInput {
+		return $container->addText($name, $label)
+			->addRule(Nette\Forms\Form::Pattern, 'Die Postleitzahl muss genau 5 Ziffern haben', '[0-9]{5}');
+	}
+}
+
+ZipInput::addTo($form, 'zip', 'Postleitzahl:');
+```

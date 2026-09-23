@@ -1,0 +1,398 @@
+Process: Externe Programme ausführen .{data-version:4.1.4}
+**********************************************************
+
+.[perex]
+Mit [api:Nette\Utils\Process] führen Sie externe Programme aus PHP heraus aus: Sie geben ihnen Eingaben, lesen ihre Ausgabe und reagieren darauf, wie sie geendet haben. Es ist ein freundlicher Wrapper um das PHP-`proc_open()`, der Fehler durch Exceptions meldet, statt `false` zurückzugeben.
+
+
+Installation:
+
+```shell
+composer require nette/utils
+```
+
+Alle Beispiele setzen voraus, dass dieser Alias definiert ist:
+
+```php
+use Nette\Utils\Process;
+```
+
+
+Die einfachste Verwendung
+=========================
+
+Sie möchten ein Programm ausführen und lesen, was es ausgegeben hat? Mehr braucht es nicht:
+
+```php
+$process = Process::runExecutable('git', ['log', '-1', '--format=%H']);
+echo $process->getStdOutput();
+```
+
+Das erste Argument ist das auszuführende Programm, das zweite die Liste seiner Argumente: dieselben Dinge, die Sie auf der Kommandozeile eintippen würden, nur in ein Array aufgeteilt. Die Methode `getStdOutput()` wartet, bis das Programm beendet ist, und gibt alles zurück, was es auf seine Standardausgabe geschrieben hat.
+
+Das ist die ganze Idee: Sie starten einen Prozess und stellen ihm dann Fragen. Läuft er noch? Was hat er ausgegeben? Wie ist er geendet? Der Rest dieser Seite geht diese Fragen der Reihe nach durch.
+
+
+Einen Prozess starten
+=====================
+
+Es gibt zwei Wege, einen Prozess zu starten, und der Unterschied lohnt sich zu verstehen.
+
+
+static runExecutable(string $executable, array $arguments=[], ?array $env=null, array $options=[], mixed $stdin='', mixed $stdout=null, mixed $stderr=null, ?string $directory=null, ?float $timeout=60): Process .[method]
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Führt **ein bestimmtes Programm** mit einer Liste von Argumenten aus. Die Argumente werden dem Programm direkt übergeben, Sie müssen also nie Leerzeichen, Anführungszeichen oder andere Sonderzeichen escapen. Und weil keine Shell im Spiel ist, besteht kein Risiko einer *Shell-Injection*. Das ist die sichere Wahl, besonders wenn ein Teil des Befehls aus einer Benutzereingabe stammt:
+
+```php
+$file = $_GET['file']; // könnte alles sein, sogar '; rm -rf /'
+$process = Process::runExecutable('wc', ['-l', $file]); // völlig sicher
+```
+
+Wenn Sie keinen vollständigen Pfad angeben, wird das Programm im `PATH` des Systems gesucht. Zum Ausführen eines PHP-Skripts kommt die Konstante `PHP_BINARY` gelegen:
+
+```php
+$process = Process::runExecutable(PHP_BINARY, ['-v']);
+```
+
+
+static runCommand(string $command, ?array $env=null, array $options=[], mixed $stdin='', mixed $stdout=null, mixed $stderr=null, ?string $directory=null, ?float $timeout=60): Process .[method]
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+Führt **einen Befehls-String über die Shell des Systems** aus (`/bin/sh` unter Linux und macOS, `cmd.exe` unter Windows). Damit stehen Ihnen die Möglichkeiten der Shell offen: Pipes `|`, Umleitungen `>`, das Auflösen von Variablen, das Verketten von Befehlen mit `&&` und so weiter:
+
+```php
+$process = Process::runCommand('git log --oneline | head -n 20');
+```
+
+Weil die Shell aber den ganzen String parst, **bauen Sie einen String für `runCommand()` niemals aus nicht vertrauenswürdigen Eingaben zusammen**, das ist eine klassische Sicherheitslücke. Verwenden Sie im Zweifel lieber `runExecutable()`.
+
+.[note]
+Bei so vielen Parametern übergeben Sie sie am besten als benannte Argumente, etwa `Process::runExecutable('git', ['pull'], timeout: 30)`. Das Array `$options` wird für fortgeschrittene Fälle an `proc_open()` weitergereicht, zum Beispiel für `bypass_shell` unter Windows.
+
+
+Der Prozess läuft im Hintergrund
+================================
+
+Einmal gestartet, läuft der Prozess **neben** Ihrem PHP-Skript: `runExecutable()` und `runCommand()` kehren sofort zurück und warten nicht auf sein Ende. Sie entscheiden, wann (und ob überhaupt) Sie warten:
+
+```php
+$process = Process::runExecutable('npm', ['install']);
+
+// ... hier andere Arbeit erledigen, während npm läuft ...
+
+$process->wait(); // jetzt blockieren, bis er fertig ist
+```
+
+In der Praxis rufen Sie `wait()` selten selbst auf, denn `getStdOutput()`, `getExitCode()`, `isSuccess()` und `ensureSuccess()` warten alle automatisch auf den Prozess, bevor sie Ihnen antworten. Rufen Sie `wait()` ausdrücklich auf, wenn Sie ihm einen [Callback |#Die Ausgabe live verfolgen] übergeben wollen.
+
+
+isRunning(): bool .[method]
+---------------------------
+
+Gibt `true` zurück, solange der Prozess noch läuft, und `false`, sobald er beendet oder abgebrochen wurde. Praktisch, um in der Zwischenzeit anderes zu erledigen:
+
+```php
+while ($process->isRunning()) {
+	// eine Weile etwas anderes tun
+	usleep(100_000); // 100 ms
+}
+```
+
+
+Wie ist er geendet?
+===================
+
+Jeder beendete Prozess hat einen *Exit-Code*: Per Konvention bedeutet `0` Erfolg und jede andere Zahl irgendeine Art von Fehlschlag (was genau, hängt vom Programm ab).
+
+
+getExitCode(): int .[method]
+----------------------------
+
+Gibt den Exit-Code zurück und wartet dafür bei Bedarf zuerst auf das Ende des Prozesses:
+
+```php
+$code = Process::runExecutable('git', ['pull'])->getExitCode(); // z. B. 0
+```
+
+
+isSuccess(): bool .[method]
+---------------------------
+
+Eine Abkürzung für "war der Exit-Code gleich `0`?":
+
+```php
+$process = Process::runExecutable('git', ['pull']);
+if (!$process->isSuccess()) {
+	echo 'git ist fehlgeschlagen: ' . $process->getStdError();
+}
+```
+
+
+ensureSuccess(): void .[method]
+-------------------------------
+
+Oft wollen Sie einfach, dass das Programm erfolgreich ist und andernfalls lautstark scheitert. `ensureSuccess()` wartet auf den Prozess und wirft eine `Nette\Utils\ProcessFailedException`, wenn der Exit-Code nicht `0` ist:
+
+```php
+Process::runExecutable('git', ['pull'])->ensureSuccess();
+// die Ausführung geht nur weiter, wenn git erfolgreich war
+```
+
+
+Die Ausgabe lesen
+=================
+
+Ein Prozess hat zwei getrennte Ausgabeströme: die **Standardausgabe** (die eigentlichen Ergebnisse) und die **Standardfehlerausgabe** (dort melden Programme üblicherweise Probleme und Diagnosen). Nette Utils hält beide auseinander und fängt standardmäßig beide im Speicher auf, sodass Sie sie lesen können, wann Sie möchten.
+
+
+getStdOutput(): string .[method]
+--------------------------------
+
+Wartet auf das Ende des Prozesses und gibt alles zurück, was er auf die Standardausgabe geschrieben hat:
+
+```php
+$process = Process::runExecutable('date');
+echo $process->getStdOutput();
+```
+
+
+getStdError(): string .[method]
+-------------------------------
+
+Dasselbe, nur für die Standardfehlerausgabe:
+
+```php
+$process = Process::runExecutable('some-tool', ['--do-stuff']);
+if (!$process->isSuccess()) {
+	throw new RuntimeException('Das Werkzeug ist fehlgeschlagen: ' . $process->getStdError());
+}
+```
+
+.[note]
+Wenn Sie einen Ausgabestrom [umleiten |#Die Ausgabe umleiten] (in eine Datei, auf eine Ressource oder nach `false`), liegt nichts im Speicher, was sich zurückgeben ließe, und der zugehörige Getter wirft eine `Nette\InvalidStateException`.
+
+
+consumeStdOutput(): string .[method]
+------------------------------------
+
+Manchmal wollen Sie die Ausgabe **sehen, während sie entsteht**, ohne auf das Ende des Prozesses zu warten, etwa um den Fortschritt anzuzeigen. Jeder Aufruf gibt den Teil der Standardausgabe zurück, der seit dem vorigen Aufruf hinzugekommen ist:
+
+```php
+$process = Process::runExecutable('long-running-tool');
+
+while ($process->isRunning()) {
+	echo $process->consumeStdOutput(); // gibt aus, was neu ist
+	usleep(100_000); // 100 ms
+}
+echo $process->consumeStdOutput(); // das letzte Stück, kurz vor dem Ende erzeugt
+```
+
+Das `consumeStdOutput()` nach der Schleife ist wichtig: Der Prozess kann seine letzte Ausgabe während des abschließenden `usleep()` geschrieben haben, also nach dem letzten Aufruf in der Schleife, aber bevor die Schleife sein Ende bemerkt hat. (Ist er stattdessen während eines Aufrufs in der Schleife fertig geworden, hat dieser Aufruf schon alles zurückgegeben und dieser hier gibt einen leeren String zurück.) Für die Standardfehlerausgabe gibt es ebenso `consumeStdError()`.
+
+
+Die Ausgabe live verfolgen
+==========================
+
+Statt mit `consumeStdOutput()` zu pollen, können Sie `wait()` einen Callback übergeben. Er wird jedes Mal aufgerufen, wenn neue Ausgabe erscheint, was sich hervorragend für ein Live-Log oder zum Weiterleiten der Ausgabe eignet:
+
+```php
+$process = Process::runExecutable('npm', ['install']);
+
+$process->wait(function (string $stdOut, string $stdErr) {
+	echo $stdOut;            // die Standardausgabe weiterreichen
+	fwrite(STDERR, $stdErr); // und die Standardfehlerausgabe
+});
+```
+
+Der Callback bekommt zwei Strings: die neuen Daten der Standardausgabe und die neuen Daten der Standardfehlerausgabe seit dem vorigen Aufruf (beide dürfen leer sein). Wenn `wait()` zurückkehrt, ist der Prozess beendet, und Sie können weiterhin `getExitCode()`, `getStdOutput()` und die übrigen Methoden aufrufen.
+
+
+Eingaben senden
+===============
+
+Der Parameter `$stdin` bestimmt, was der Prozess auf seiner Standardeingabe liest. Er akzeptiert mehrere verschiedene Dinge.
+
+**Ein String** wird zur gesamten Eingabe des Prozesses:
+
+```php
+$process = Process::runExecutable('wc', ['-c'], stdin: 'hello world');
+echo $process->getStdOutput(); // 11
+```
+
+**Eine lesbare Ressource** (eine geöffnete Datei, ein Stream) wird in die Eingabe kopiert:
+
+```php
+$file = fopen('data.csv', 'r');
+$process = Process::runExecutable('sort', stdin: $file);
+```
+
+**`null`** hält die Eingabe offen, sodass Sie nach und nach hineinschreiben können (siehe unten).
+
+Der Standardwert ist ein leerer String, der Prozess bekommt also eine leere, sofort geschlossene Eingabe. Das ist der sinnvolle Standard: Er verhindert, dass Programme, die Eingaben lesen, ewig auf etwas warten, das nie kommt.
+
+
+writeStdInput(string $string): void .[method]
+---------------------------------------------
+
+Wenn Sie den Prozess mit `stdin: null` starten, bleibt die Eingabe offen und Sie füttern sie Stück für Stück. Rufen Sie `closeStdInput()` auf, wenn Sie fertig sind. Das teilt dem Programm mit, dass keine Eingabe mehr kommt (es sendet ein End-of-File):
+
+```php
+$process = Process::runExecutable('some-repl', stdin: null);
+$process->writeStdInput("first command\n");
+$process->writeStdInput("second command\n");
+$process->closeStdInput();
+echo $process->getStdOutput();
+```
+
+.[note]
+Ein String oder Stream, der als `$stdin` übergeben wird, wird auf einmal geschrieben, bevor der Prozess richtig loslegt. Ist diese Eingabe groß *und* erzeugt das Programm viel Ausgabe, ohne zuerst seine Eingabe zu lesen, können beide Seiten aufeinander warten und hängenbleiben. Verwenden Sie in diesem (seltenen) Fall `stdin: null` und `writeStdInput()`, um Schreiben und Lesen zu verschränken.
+
+
+Prozesse verketten (Piping)
+===========================
+
+Sie können die Standardausgabe eines Prozesses direkt mit der Standardeingabe eines anderen verbinden, genau wie mit einer Pipe `|` in der Shell. Übergeben Sie dazu einfach einen `Process` als `$stdin`:
+
+```php
+$producer = Process::runExecutable('cat', ['big.log']);
+$consumer = Process::runExecutable('grep', ['error'], stdin: $producer);
+
+echo $consumer->getStdOutput();
+```
+
+Sie können beliebig viele Prozesse verketten (`a | b | c`).
+
+.[note]
+Das Verketten von Prozessen wird **unter Windows nicht unterstützt** (es wirft eine `Nette\NotSupportedException`). Fangen Sie unter Windows die Ausgabe des ersten Prozesses mit `getStdOutput()` auf und übergeben Sie sie dem nächsten als String.
+
+
+Die Ausgabe umleiten
+====================
+
+Standardmäßig werden die Standardausgabe und die Standardfehlerausgabe im Speicher aufgefangen. Mit den Parametern `$stdout` und `$stderr` schicken Sie sie stattdessen woandershin.
+
+**Ein Dateiname** schickt die Ausgabe in diese Datei:
+
+```php
+Process::runExecutable('mysqldump', ['mydb'], stdout: 'backup.sql')
+	->ensureSuccess();
+```
+
+**Eine beschreibbare Ressource** schickt die Ausgabe in diesen Stream. Er muss von einer echten Datei getragen sein (nicht `php://memory` und dergleichen):
+
+```php
+$log = fopen('build.log', 'a');
+Process::runExecutable('make', stdout: $log, stderr: $log);
+```
+
+**`false`** verwirft die Ausgabe vollständig (sie geht nach `/dev/null`, unter Windows nach `NUL`):
+
+```php
+Process::runExecutable('noisy-tool', stderr: false);
+```
+
+Das Umleiten hält außerdem den Speicherverbrauch niedrig: Das Auffangen im Speicher ist bequem, aber ein Prozess, der Gigabytes ausgibt, würde Gigabytes an RAM belegen. Schreiben Sie solche Ausgaben also in eine Datei.
+
+
+Umgebungsvariablen
+==================
+
+Der Parameter `$env` setzt die Umgebungsvariablen, die der Prozess sieht. Lassen Sie ihn auf `null` (dem Standard), um die Umgebung des aktuellen Prozesses zu erben, oder übergeben Sie ein Array, um sie selbst zu setzen:
+
+```php
+// die aktuelle Umgebung plus eine zusätzliche Variable
+$process = Process::runExecutable('printenv', ['MY_VAR'], env: ['MY_VAR' => '123'] + getenv());
+
+// eine völlig leere Umgebung
+$process = Process::runExecutable('some-tool', env: []);
+```
+
+
+Arbeitsverzeichnis
+==================
+
+Der Parameter `$directory` legt das Verzeichnis fest, in dem der Prozess startet (standardmäßig ist es das aktuelle):
+
+```php
+$process = Process::runExecutable('git', ['status'], directory: '/path/to/repo');
+```
+
+
+Zeitlimit
+=========
+
+Der Parameter `$timeout` (in Sekunden, standardmäßig `60`) begrenzt, wie lange Sie auf den Prozess warten. Wird das Limit erreicht, während Sie auf ihn warten oder seine Ausgabe lesen, wird der Prozess getötet und eine `Nette\Utils\ProcessTimeoutException` geworfen. Übergeben Sie `null`, um das Limit aufzuheben:
+
+```php
+$process = Process::runExecutable('slow-tool', timeout: 5.0);
+try {
+	$process->wait();
+} catch (Nette\Utils\ProcessTimeoutException $e) {
+	echo 'Das Werkzeug lief zu lange und wurde beendet.';
+}
+```
+
+Das Limit wird nur geprüft, während Sie sich in `wait()`, `getExitCode()`, den Gettern für die Ausgabe oder in `consume*()` befinden. Ein Prozess, den Sie starten und auf den Sie dann nie warten, wird davon nicht getötet.
+
+
+Einen Prozess beenden
+=====================
+
+
+terminate(): void .[method]
+---------------------------
+
+Tötet den Prozess sofort, wenn er noch läuft; ist er bereits beendet, passiert nichts:
+
+```php
+$process = Process::runExecutable('server');
+// ...
+$process->terminate();
+```
+
+Ein Prozess wird auch automatisch beendet, wenn sein `Process`-Objekt zerstört wird (etwa weil es den Gültigkeitsbereich verlässt), bevor er fertig ist. Wenn Sie das nicht wollen, lösen Sie den Prozess vom Objekt:
+
+
+detach(): void .[method]{data-version:4.1.5}
+--------------------------------------------
+
+Löst den Prozess vom Objekt: Er läuft im Hintergrund weiter und wird nicht mehr beendet, wenn das Objekt zerstört wird. So starten Sie einen Daemon oder einen Hintergrundjob, der sogar das PHP-Skript selbst überlebt:
+
+```php
+$process = Process::runExecutable('worker', stdout: 'worker.log', stderr: false);
+$process->detach();
+// der Prozess läuft weiter, auch nachdem $process zerstört wurde
+```
+
+Weil nach dem Ablösen niemand mehr die Ausgabe lesen würde, darf sie nicht im Speicher aufgefangen werden: [Leiten Sie sie um |#Die Ausgabe umleiten] in eine Datei, auf eine Ressource oder nach `false`, sonst wirft `detach()` eine `Nette\InvalidStateException`. Die Standardeingabe und die Ausgabe-Pipes werden beim Ablösen geschlossen.
+
+Es ändert sich nur das Verhalten des Destruktors. `wait()` und `getExitCode()` warten weiterhin auf das Ende des Prozesses (auch `$timeout` gilt weiterhin und tötet ihn bei Überschreitung), und `terminate()` beendet ihn nach wie vor.
+
+.[note]
+Auf POSIX-Systemen taucht ein abgelöster Prozess, der endet, während Ihr Skript noch läuft, in der Prozessliste als *Zombie* auf, bis das Skript endet. Das ist harmlos und verschwindet von selbst.
+
+
+getPid(): ?int .[method]
+------------------------
+
+Gibt die Prozess-ID (PID) des Betriebssystems zurück, solange der Prozess läuft, oder `null`, sobald er beendet ist:
+
+```php
+$pid = $process->getPid();
+```
+
+
+Wenn etwas schiefgeht
+=====================
+
+Fehler werden immer durch das Werfen einer Exception gemeldet, nie durch einen Rückgabewert:
+
+| `Nette\Utils\ProcessFailedException` | der Prozess ließ sich nicht starten, oder `ensureSuccess()` wurde aufgerufen und der Exit-Code war nicht `0`
+| `Nette\Utils\ProcessTimeoutException` | das Limit `$timeout` wurde überschritten
+| `Nette\InvalidArgumentException` | als `$stdin`, `$stdout` oder `$stderr` wurde ein ungültiger Wert übergeben
+| `Nette\IOException` | eine als `$stdout` oder `$stderr` angegebene Datei ließ sich nicht öffnen
+| `Nette\InvalidStateException` | Lesen einer Ausgabe, die nicht aufgefangen wurde, Schreiben in ein bereits geschlossenes STDIN oder Ablösen eines Prozesses, dessen Ausgabe im Speicher aufgefangen wird
+| `Nette\NotSupportedException` | es wurde versucht, Prozesse unter Windows zu verketten
+
+`ProcessFailedException` und `ProcessTimeoutException` erben von PHPs `RuntimeException`.

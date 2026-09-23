@@ -1,0 +1,222 @@
+Container Derlemesi Nasıl İşler
+*******************************
+
+.[perex]
+Bu sayfa container derlemesini açıyor: hangi aşamalardan geçtiğini, yapılandırma parametrelerinin ne zaman genişletildiğini, `@service` dizelerinin ne zaman gerçek referanslara dönüştüğünü ve extension yazarlarının en çok sorduğu soruyu: hangi aşamada servisleri türe göre güvenle arayabileceğinizi. [Extension yazma |extensions] bölümünün derinlemesine tamamlayıcısıdır.
+
+Sıradan bir uygulama, hatta sıradan bir extension yazmak için bunların hiçbirine ihtiyacınız yok. Ama extension'ınız servis grafiğini incelemeye ya da yeniden biçimlendirmeye başladığında zamanlama her şey olur: aynı `getByType()` çağrısı bir aşamada güvenilir, başka bir aşamada yanıltıcı bir yanıt verir. Bu sayfa nedenini açıklıyor; böylece kodunuzun nereye ait olduğunu her zaman bilirsiniz.
+
+
+İki Dünya: Derleme ve Çalışma Zamanı
+====================================
+
+Anlaşılması en önemli şey, bir Nette container'ının **her istekte kurulmadığıdır**. Bir kez, iyileştirilmiş bir PHP sınıfı olarak kurulur, bu sınıf diske yazılır ve sonraki her istek yalnızca bitmiş dosyayı `include` eder. Aşağıda anlatılan tüm düzenek (extension'lar, çözücüler, kod üreteci) **yalnızca (yeniden) derleme sırasında** çalışır.
+
+Bu, dünyayı asla bir arada bulunmayan iki temsile ayırır:
+
+| | derleme sırasında | çalışma zamanında
+|---|---|---
+| Var olan | `ContainerBuilder` içindeki **tanımlar** (tarifler) | `Container` içindeki servis **örnekleri**
+| Temel sınıflar | `Compiler`, `ContainerBuilder`, `Resolver`, `PhpGenerator` | `Container` (üretilen sınıfın atası)
+| `%param%`, `@service` | hâlâ çevrilen metinsel işaretler | çevrilmiş / koda gömülmüş
+
+Üretilen sınıf `Nette\DI\Container` sınıfını genişletir ve her servis için bir `createServiceXxx()` metodu içerir. Parametreleri ve autowiring meta verileri önceden hesaplanır; böylece çalışma zamanında çözülecek bir şey kalmaz, yalnızca servisler istendikçe örneklenir.
+
+.[note]
+Geliştirici kipinde container, bir yapılandırma dosyası ya da extension sınıfı değiştiğinde otomatik olarak yeniden kurulur; her ikisi de bağımlılık olarak izlenir. Üretimde bir kez derlenir ve bir daha denetlenmez; hız da buradan gelir.
+
+
+Aşamalara Kuşbakışı
+===================
+
+Derlemeyi `Compiler::compile()` yönetir ve üç adıma iner:
+
+```php
+public function compile(): string
+{
+	$this->processExtensions();     // AŞAMA A: şemalar + loadConfiguration()
+	$this->processBeforeCompile();  // AŞAMA B: resolve + beforeCompile() + complete
+	return $this->generateCode();   // AŞAMA C: kod üretimi + afterCompile()
+}
+```
+
+Tüm zihinsel model tek bir düşünceye sığar: **her aşama bir öncekinden daha çok şey bilir.**
+
+- **Aşama A** grafiği tanımlarla doldurur. Servis **türleri henüz güvenilir biçimde bilinmez**; çünkü bir tür, henüz kimsenin bakmadığı bir factory'nin dönüş değerinden gelebilir.
+- **Aşama B** önce tüm türleri çözer (`resolve`), sonra extension'ların grafiği yeniden biçimlendirmesine izin verir (`beforeCompile`) ve en sonunda argümanları [autowiring |autowiring] ile bağlar (`complete`).
+- **Aşama C** bitmiş grafiği PHP'ye çevirir ve extension'ların üretilen koda dokunmasına izin verir.
+
+Bilginin böyle büyümesi, aynı işlemin neden bir aşamada güvenli, başka bir aşamada güvenilmez olduğunun tam nedenidir. Sayfanın geri kalanı aşamaları bu düşünceyle geziyor.
+
+
+Aşama A: Tanımların Kaydedilmesi
+================================
+
+Bu aşamada Nette her extension'da üç metot çağırır (`getConfigSchema()`, sonra `setConfig()`, sonra `loadConfiguration()`), ama **özenle denetlenen bir sırayla**; çünkü burada sıra gerçekten önemlidir.
+
+
+Sıra Neden Önemli
+-----------------
+
+- **`ParametersExtension` ve `ExtensionsExtension` önce gelir.** Birincisi, `%param%` ifadelerini yapılandırmanın tamamında genişletebilmek için her şeyden önce çalışmalıdır; diğer her extension kendi bölümünü değerleri doldurulmuş olarak alır. İkincisi, `extensions:` bölümünde listelenen başka extension'ları kaydeder; dolayısıyla o da geri kalanlar işlenmeden önce var olmalıdır.
+- **`ServicesExtension` en sona kalır.** Böylece kullanıcının `services:` bölümü her zaman son sözü söyler ve extension'ların kurduğu her şeyi geçersiz kılabilir.
+- **`InjectExtension` en sona taşınır**; böylece işi, diğer tüm extension'ların eklediği setup'ları görür.
+
+Sizin için çıkarım şu: extension'ınızın `loadConfiguration()` metodu çalıştığında parametreler zaten genişletilmiştir, ama kullanıcının servisleri henüz ortada yoktur. Aşağıdaki zamanlama kurallarının çoğunu bu tek gerçek belirler.
+
+
+services: Bölümünün Tanımlara Dönüşmesi
+---------------------------------------
+
+Kullanıcının `services:` bölümü, aşama A'nın son adımında burada [tanım nesnelerine |extensions#Tanım Türleri] dönüştürülür. Her NEON girdisi normalleştirilir (kısa yazımlar tek biçime getirilir), türü saptanır (sıradan servis, factory, accessor, ...) ve builder'da uygun bir tanım oluşturulur. Basit `@name` / `@Type` argümanlarının referansa dönüştüğü ilk an da budur; bkz. [aşağısı |#Referanslar: @service Ne Zaman Referans Olur].
+
+Aşama A'nın sonunda tüm tanımlar yerindedir; her extension ve kullanıcı istediğini kaydetmiştir. Ama resim henüz net değildir:
+
+- türü bir factory'nin dönüş değerinden gelen tanımlarda **türler çözülmemiştir**,
+- **argümanlar autowiring ile bağlanmamıştır**,
+- bazı `@service` referansları hâlâ düz dizedir.
+
+Türe göre aramanın burada neden güvenilmez olduğunun nedeni tam da budur; ayrıntısı [aşağıda |#ContainerBuilder'ı İnceleme: Ne Zaman Güvenli].
+
+
+Parametreler: %param% Ne Zaman Genişletilir
+===========================================
+
+İki başlıca sorudan biri. Yanıt kısa: **bir kez, aşama A'nın en başında, yapılandırma ağacının tamamında.**
+
+`ParametersExtension` önce çalışır ve ilk yaptığı şeylerden biri `%param%` yer tutucularını genişletmektir; önce parametrelerin kendi içinde (bir parametre bir başkasına başvurabilir), sonra yapılandırmanın geri kalanında. Yani `ServicesExtension` dahil başka herhangi bir extension kendi bölümünü aldığında yer tutucular çoktan gitmiştir. Extension'lar somut değerlerle çalışır, asla `%...%` ile değil.
+
+Bir yer tutucu dizenin tamamıysa, değeri diziler ve nesneler dahil *olduğu gibi* döndürülür; dolayısıyla `%mailer%` bütün bir diziye genişleyebilir. Başka her yerde bir dizeye birleştirilir ve noktalı yazım `%foo.bar%` iç içe dizilere uzanır.
+
+
+Statik ve Dinamik Parametreler
+------------------------------
+
+Her değer koda gömülemez. Değeri ortama göre değişen bir parametre (bir ortam değişkeni, istekten türetilen `baseUrl`) **dinamik** kalmalıdır. Böyle parametreleri `setDynamicParameterNames()` ile ya da bir şemada `Expect::...->dynamic()` ile bildirirsiniz; ayrıntısı [Dinamik parametreler |application:bootstrapping#Dinamik parametreler] bölümünde.
+
+Dinamik bir parametrenin yerine bir değer değil, onu *çalışma zamanında* okuyan bir ifade konur. Yani `%env.DB_HOST%` bir dizeye donmaz; üretilen container'da çalışma zamanı aramasına dönüşür. Geri kalan her şey statiktir ve derleme zamanında dondurulur; "`getenv()` değerim her ortamda aynı" şaşkınlığının olağan kaynağı da budur: parametre yalnızca statikti.
+
+Bunun tersi işlem **kaçışlamadır**: harfi harfine bir `%` ya da `@` karakterinin yorumlanmasını önlemek için iki katına çıkarılır (`%%`, `@@`). Nette bunu sizin için enjekte ettiği parametrelerde otomatik yapar; böylece değerleri asla yer tutucu ya da referans sanılmaz.
+
+
+Referanslar: @service Ne Zaman Referans Olur
+============================================
+
+İkinci başlıca soru. `@service` çevirisi, dizenin ne kadar karmaşık olduğuna göre **farklı aşamalara yayılan birkaç adımda** gerçekleşir. Bunu elle izlemeniz nadiren gerekir, ama adımları bilmek bazı referansların neden diğerlerinden önce çözüldüğünü açıklar.
+
+- **Ayrıştırma (yapılandırmanın yüklenmesi).** *Varlık olarak* kullanılan bir `@service` (servisi oluşturan şey, `Foo(@bar)` örneğindeki gibi) hemen referansa dönüşür. *Argüman olarak* kullanılan bir `@service` şimdilik düz dize kalır. Tırnak içindeki bir `@`, `@@` olarak kaçışlanır; böylece referans değil, harfi harfine metin sayılır.
+- **Aşama A (`loadConfiguration`).** Tanımlar işlenirken, temiz bir `@name` ya da `@Type` argümanı bir `Reference` nesnesine dönüştürülür. Bu yalnızca basit biçimleri yakalar; `@service::CONST` ya da daha büyük bir ifadenin içindeki bir `@` sonraya bırakılır.
+- **Aşama B (`complete`).** Asıl "akıllı" çeviri burada olur: `@service` → referans, `@service::CONSTANT` → harfi harfine bir sınıf sabiti, `@service::property` → o özelliğin okunması, `@@x` → harfi harfine `@x` metni.
+
+*Referans* sözcüğünün kendisinde gizli ikinci bir çeviri daha var. Bir `Reference` ya **ada** ya da **türe** (`@Namespace\Type`) işaret edebilir. Bir tür referansı **henüz bir servis adı değildir**; somut bir ada autowiring tarafından çözülür ve bu yalnızca **complete** adımında, autowiring dizini kurulduktan sonra gerçekleşir. Bu, bir sonraki bölüme köprüdür: autowiring aramaları, dizin hazır olana dek bilinçli olarak ertelenir.
+
+| Biçim | Şurada referansa/ifadeye dönüşür | Şurada somut servise çözülür
+|---|---|---
+| varlık (factory olarak `@foo`) | ayrıştırma | complete
+| argüman `@foo`, `@Type` | aşama A | complete
+| `@foo::CONST`, `@foo::prop` | aşama B | complete
+| tür referansı `@Type` | aşama A/B | complete (autowiring)
+
+
+ContainerBuilder'ı İnceleme: Ne Zaman Güvenli
+=============================================
+
+Şimdi extension yazarlarının en çok sorduğu soru: **hangi metotta servisleri türe göre arayabilirim?** Yanıt, builder'ın kendi durumunu nasıl izlediğine dair basit bir kuraldan çıkar.
+
+**Türe göre** arama (`getByType()`, `getDefinitionByType()`, `findByType()`), servis grafiğinin *çözülmüş* olmasını gerektirir: her tür bilinmeli, autowiring dizini kurulmuş olmalı. Bu yüzden bunlardan birini çağırdığınızda ve grafik son çözümden bu yana değiştiyse, builder **bilinen grafiğin tamamını anında çözer**. Çözümün kendisi sırasında türe göre her arama yasaktır ve `NotAllowedDuringResolvingException` fırlatır.
+
+**Etikete göre** arama (`findByTag()`) böyle bir gereksinim taşımaz; etiketler türlere bağlı değildir, dolayısıyla **her aşamada** çalışır.
+
+Aşama aşama:
+
+- **`loadConfiguration()` (aşama A) - türe göre arama güvenilmez.** Grafik eksiktir: sonra çalışan extension'lar servislerini henüz kaydetmemiştir ve her şeyden önce kullanıcının `services:` bölümü (en sonda çalışır) ortada yoktur. Bir `getByType()` çağrısı işe yarar (kısmi grafiğin erken çözülmesini tetikler), ama yanıt eksik bir resimden gelir ve erken çözüm boşuna emek harcar. Kural: **`loadConfiguration()` içinde yalnızca tanım kaydedin; türe göre aramayın.** `findByTag()` sorun değil.
+- **`beforeCompile()` (aşama B) - inceleme için doğru yer.** Bu noktada **tüm** tanımlar vardır (kullanıcınınkiler dahil), **türler çözülmüştür** ve **autowiring dizini kurulmuştur**; dolayısıyla `getByType()`, `findByType()` ve `findByTag()` **güvenilir** yanıtlar verir. Argümanlar *henüz* autowiring ile bağlanmamıştır; bu, tüm `beforeCompile()` çağrılarından sonraki adımdır (`complete`). Burada bir tanımı değiştirdiğinizde, sonraki `getByType()` grafiği saydam biçimde yeniden çözer; böylece düzenlemelerle sorguları rahatça değiştirebilirsiniz.
+- **`afterCompile()` (aşama C) - yalnızca kod.** Builder üzerinde değil, üretilen sınıf üzerinde çalışır. Grafik bitmiştir; burada sonuç PHP kodunu biçimlendirirsiniz.
+
+| İstediğim... | Aşama
+|---|---
+| bir servis kaydetmek | `loadConfiguration()`
+| **etikete** göre arayıp tanımları değiştirmek | `loadConfiguration()` ya da `beforeCompile()`
+| **türe** göre aramak (`getByType`/`findByType`) | **`beforeCompile()`**
+| autowiring'in argümanlar için hangi servisleri seçtiğine dayanmak | derleme zamanında değil; çalışma zamanında inceleyin
+| üretilen koda dokunmak | `afterCompile()`
+| container başladıktan sonra kod çalıştırmak | [başlatma kodu |extensions#Başlatma Kodu]
+
+
+Aşama B'nin İçi: resolve ve complete
+====================================
+
+Aşama B, aralarına `beforeCompile()` çağrıları sıkışmış iki geçiştir:
+
+```php
+$this->builder->resolve();     // türler çözülür, autowiring dizini kurulur
+foreach ($this->extensions as $extension) {
+	$extension->beforeCompile();
+}
+$this->builder->complete();    // argümanlar ANCAK ŞİMDİ autowiring ile bağlanır
+```
+
+**`resolve()`**, her servisin türünü belirler (bildirilmiş `type` değerinden alır ya da factory'sinden çıkarır: bir factory metodunun dönüş türü, örneklediği sınıf ya da bir referansın işaret ettiği servis) ve ardından her türü (sınıfı, atalarını ve arayüzlerini) bir servis adına eşleyen autowiring dizinini kurar. `autowired: false` işaretli bir servis dizine alınmaz; `autowired: [A, B]` ise onun görünür olduğu türleri daraltır. Can alıcı nokta: resolve *türleri* belirler, *argümanları* değil; argümanların autowiring'i bitmiş bir dizin gerektirir ve bu dizin ancak bu geçişten sonra vardır.
+
+**`complete()`**, argümanların autowiring'inin asıl gerçekleştiği yerdir. Her tanım için eksik yapıcı ve setup argümanlarını, türlerini artık tamamlanmış dizinde arayarak doldurur. Tür referanslarının resolve sırasında çözülmeden bırakılmasının nedeni budur: arama buraya aittir, bakılacak güvenilir bir dizin oluştuktan sonra.
+
+
+Aşama C: Kodun Üretilmesi
+=========================
+
+`generateCode()`, bitmiş grafiği `PhpGenerator` sınıfına verir; o da `Container` sınıfını genişleten, her servis için bir `createServiceXxx()` metodu içeren ve önceden hesaplanmış `aliases`, `tags` ile `wiring` meta verilerini taşıyan bir sınıf üretir. Her `Statement` PHP metnine (`new Foo(...)`, metot çağrıları, özellik erişimi), her `Reference` ise bir `$this->getService(...)` çağrısına dönüşür.
+
+Extension'lar sonra üretilen sınıf üzerinde son bir `afterCompile()` geçişi elde eder; örneğin statik ve dinamik parametre getter'ları burada üretilir. Ayrıca her istekte çalışan [başlatma kodu |extensions#Başlatma Kodu] ekleme fırsatı da burada doğar.
+
+
+Zaman Çizelgesi Tek Bir Resimde
+===============================
+
+```
+DERLEME (bir kez, önbelleğe)
+│
+├─ yapılandırma dosyalarını yükle NEON -> Statement/dizi; dosyaları birleştir
+│                                 tırnaklı @ -> @@ ; varlıklar -> Statement
+│
+▼ Compiler::compile()
+│
+├─ AŞAMA A  processExtensions()
+│   ├─ ParametersExtension (İLK) ─── %param% tüm yapılandırmada GENİŞLETİLİR
+│   │                                 dinamik olanlar -> çalışma zamanı ifadesi
+│   ├─ ExtensionsExtension (İLK) ──── başka extension'ları kaydeder
+│   ├─ ...diğer extension'lar...   ── loadConfiguration(): yalnızca tanım kaydet
+│   └─ ServicesExtension (SON)     ── services: -> Definition nesneleri
+│                                     @name/@Type -> Reference
+│   [grafik sayıca tam; TÜRLER ve ARGÜMANLAR değil; türe göre arama güvenilmez]
+│
+├─ AŞAMA B  processBeforeCompile()
+│   ├─ builder.resolve()          ── tüm türleri çöz; autowiring dizinini kur
+│   │                                [türler hazır; dizin hazır]
+│   ├─ beforeCompile() extension  ── getByType/findByType/findByTag BURADA GÜVENLİ
+│   │                                (argümanlar henüz bağlanmadı)
+│   └─ builder.complete()         ── ARGÜMANLARI bağla; referans çevirisini bitir
+│                                    tür referansları -> servis adları
+│
+└─ AŞAMA C  generateCode()
+    ├─ PhpGenerator.generate()    ── Statement -> PHP; createServiceXxx() metotları
+    ├─ afterCompile() extension   ── kodu ayarla; parametre getter'larını üret
+    └─ toString()                 ── son PHP kodu -> önbellek
+
+────────────────────────────────────────────────────────────
+
+ÇALIŞMA ZAMANI (her istek)
+│
+├─ new Container($dynamicParams)
+├─ initialize()                   ── extension'ların açılış kodu (oturum, header, doğrulama)
+└─ getService()/getByType()       ── önceden hesaplanan meta veriden tembel örnekler
+```
+
+
+Yaygın Yanlış Anlamalar
+=======================
+
+- "`loadConfiguration()` içinde servisleri türe göre ararım." Hayır; grafik eksiktir (kullanıcının `services:` bölümü sizden sonra çalışır) ve `getByType()` kısmi bir grafiğin erken çözülmesini tetikler. Bunu `beforeCompile()` metoduna taşıyın. `findByTag()` burada bile sorun değil.
+- "Bir parametredeki `getenv()` değeri her ortamda farklı olur." Yalnızca parametre dinamikse. Aksi hâlde derleme zamanında koda gömülür ve her yerde aynı kalır.
+- "`@Type` referansı zaten bir servis adıdır." Değildir; bir tür referansıdır ve somut bir ada ancak complete adımında autowiring tarafından çözülür.
+- "Extension'ım bir yardımcı dosyayı okuyor, ama değişiklikler görünmüyor." Onu `$builder->addDependency($file)` ile kaydedin; aksi hâlde önbellek ondan habersiz kalır ve yeniden kurmaz.
+- "`resolve()` sırasında `getByType()` çağırabilirim." Hayır; `NotAllowedDuringResolvingException` fırlatır. Türe göre arama `beforeCompile()` metoduna ya da sonrasına aittir, asla çözümün ortasına değil.

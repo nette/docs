@@ -1,0 +1,398 @@
+Process: 外部プログラムの実行 .{data-version:4.1.4}
+*****************************************
+
+.[perex]
+[api:Nette\Utils\Process] を使うと、PHP から外部プログラムを実行できます。入力を与え、出力を読み、どう終わったかに応じて対処できます。PHP の `proc_open()` を親しみやすく包んだもので、エラーは `false` を返す代わりに例外を投げて知らせます。
+
+
+インストール:
+
+```shell
+composer require nette/utils
+```
+
+以下の例では、次の別名が定義されているものとします。
+
+```php
+use Nette\Utils\Process;
+```
+
+
+最も簡単な使い方
+========
+
+プログラムを実行して、それが出力したものを読みたいですか。これだけで済みます。
+
+```php
+$process = Process::runExecutable('git', ['log', '-1', '--format=%H']);
+echo $process->getStdOutput();
+```
+
+第 1 引数は実行するプログラム、第 2 引数はその引数のリストです。コマンドラインで打つのと同じものを、配列に分けて渡すだけです。`getStdOutput()` メソッドはプログラムの終了を待ち、標準出力に書かれたすべてを返します。
+
+考え方はこれだけです。プロセスを起動し、そのあと問いかけるのです。まだ動いているか、何を出力したか、どう終わったか。このページの以降では、その問いをひとつずつ見ていきます。
+
+
+プロセスの起動
+=======
+
+プロセスを起動する方法は 2 つあり、その違いは理解しておく価値があります。
+
+
+static runExecutable(string $executable, array $arguments=[], ?array $env=null, array $options=[], mixed $stdin='', mixed $stdout=null, mixed $stderr=null, ?string $directory=null, ?float $timeout=60): Process .[method]
+---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+引数のリストとともに**特定のプログラムをひとつ**実行します。引数はプログラムに直接渡されるので、空白や引用符などの特別な文字をエスケープする必要は決してありません。シェルが関わらないので、*シェルインジェクション*の危険もありません。コマンドの一部がユーザー入力から来る場合にはとくに、こちらが安全な選択です。
+
+```php
+$file = $_GET['file']; // 何でもあり得ます。'; rm -rf /' でさえ
+$process = Process::runExecutable('wc', ['-l', $file]); // まったく安全です
+```
+
+フルパスを渡さなければ、プログラムはシステムの `PATH` から探されます。PHP のスクリプトを実行するには `PHP_BINARY` 定数が便利です。
+
+```php
+$process = Process::runExecutable(PHP_BINARY, ['-v']);
+```
+
+
+static runCommand(string $command, ?array $env=null, array $options=[], mixed $stdin='', mixed $stdout=null, mixed $stderr=null, ?string $directory=null, ?float $timeout=60): Process .[method]
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+**コマンドの文字列をシステムのシェル**（Linux と macOS では `/bin/sh`、Windows では `cmd.exe`）を通して実行します。おかげでシェルの機能が使えます。パイプ `|`、リダイレクト `>`、変数の展開、`&&` によるコマンドの連結などです。
+
+```php
+$process = Process::runCommand('git log --oneline | head -n 20');
+```
+
+しかしシェルが文字列全体を解析するので、**信頼できない入力から `runCommand()` の文字列を組み立てては決していけません**。典型的なセキュリティホールです。迷ったら代わりに `runExecutable()` を使ってください。
+
+.[note]
+これだけパラメータが多いので、名前付き引数で渡しましょう。たとえば `Process::runExecutable('git', ['pull'], timeout: 30)` のようにです。`$options` 配列は `proc_open()` にそのまま渡され、Windows での `bypass_shell` など高度な用途に使えます。
+
+
+プロセスはバックグラウンドで動く
+================
+
+起動すると、プロセスは PHP のスクリプトと**並行して**動きます。`runExecutable()` と `runCommand()` はすぐ戻り、終了を待ちません。いつ待つか（そもそも待つか）はあなたが決めます。
+
+```php
+$process = Process::runExecutable('npm', ['install']);
+
+// ... npm が動いているあいだにここで別の作業をします ...
+
+$process->wait(); // ここで終わるまで待ちます
+```
+
+実際には自分で `wait()` を呼ぶことはあまりありません。`getStdOutput()`、`getExitCode()`、`isSuccess()`、`ensureSuccess()` はどれも、答えを返す前に自動的にプロセスを待つからです。[コールバック |#出力をその場で見る]を渡したいときには `wait()` を明示的に呼びます。
+
+
+isRunning(): bool .[method]
+---------------------------
+
+プロセスがまだ動いているあいだは `true`、終了したり止められたりしたら `false` を返します。そのあいだに別の作業をするのに便利です。
+
+```php
+while ($process->isRunning()) {
+	// しばらく別のことをします
+	usleep(100_000); // 100 ms
+}
+```
+
+
+どう終わったか
+=======
+
+終了したプロセスにはそれぞれ*終了コード*があります。慣習として `0` は成功、それ以外の数は何らかの失敗（具体的に何かはプログラムによります）を意味します。
+
+
+getExitCode(): int .[method]
+----------------------------
+
+終了コードを返します。必要ならまずプロセスの終了を待ちます。
+
+```php
+$code = Process::runExecutable('git', ['pull'])->getExitCode(); // たとえば 0
+```
+
+
+isSuccess(): bool .[method]
+---------------------------
+
+「終了コードは `0` だったか？」の近道です。
+
+```php
+$process = Process::runExecutable('git', ['pull']);
+if (!$process->isSuccess()) {
+	echo 'git failed: ' . $process->getStdError();
+}
+```
+
+
+ensureSuccess(): void .[method]
+-------------------------------
+
+プログラムには成功してほしく、そうでなければはっきり失敗してほしい、ということはよくあります。`ensureSuccess()` はプロセスを待ち、終了コードが `0` でなければ `Nette\Utils\ProcessFailedException` を投げます。
+
+```php
+Process::runExecutable('git', ['pull'])->ensureSuccess();
+// git が成功した場合にだけ実行が続きます
+```
+
+
+出力の読み取り
+=======
+
+プロセスには 2 つの別々の出力ストリームがあります。**標準出力**（通常の結果）と**標準エラー出力**（プログラムがふつう問題や診断情報を報告する先）です。Nette Utils はこの 2 つを分けて扱い、既定では両方をメモリに取り込むので、好きなときに読めます。
+
+
+getStdOutput(): string .[method]
+--------------------------------
+
+プロセスの終了を待ち、標準出力に書かれたすべてを返します。
+
+```php
+$process = Process::runExecutable('date');
+echo $process->getStdOutput();
+```
+
+
+getStdError(): string .[method]
+-------------------------------
+
+同じですが、標準エラー出力についてです。
+
+```php
+$process = Process::runExecutable('some-tool', ['--do-stuff']);
+if (!$process->isSuccess()) {
+	throw new RuntimeException('The tool failed: ' . $process->getStdError());
+}
+```
+
+.[note]
+出力ストリームを（ファイル、リソース、`false` に）[別の場所へ回した |#出力を別の場所へ回す]場合、メモリには返すものがないので、対応するゲッターは `Nette\InvalidStateException` を投げます。
+
+
+consumeStdOutput(): string .[method]
+------------------------------------
+
+プロセスの終了を待たずに、出力を**届いたそばから**見たいことがあります。たとえば進捗を表示する場合です。呼び出すたびに、前回の呼び出し以降に現れた標準出力の断片を返します。
+
+```php
+$process = Process::runExecutable('long-running-tool');
+
+while ($process->isRunning()) {
+	echo $process->consumeStdOutput(); // 新しく現れた分を出力します
+	usleep(100_000); // 100 ms
+}
+echo $process->consumeStdOutput(); // 終了直前に生まれた最後の分
+```
+
+ループのあとの `consumeStdOutput()` には意味があります。プロセスは最後の `usleep()` のあいだ、つまりループ内の最後の呼び出しのあと、ループが終了に気づく前に、最後の出力を書いているかもしれないからです。（ループ内の呼び出しの最中に終わっていたなら、その呼び出しがすでにすべてを返しているので、こちらは空文字列を返します。）標準エラー出力には `consumeStdError()` があります。
+
+
+出力をその場で見る
+=========
+
+`consumeStdOutput()` で問い合わせる代わりに、`wait()` にコールバックを渡せます。新しい出力が現れるたびに呼ばれるので、その場でのログ記録や、出力をどこかへ転送するのに向いています。
+
+```php
+$process = Process::runExecutable('npm', ['install']);
+
+$process->wait(function (string $stdOut, string $stdErr) {
+	echo $stdOut;            // 標準出力を転送します
+	fwrite(STDERR, $stdErr); // 標準エラー出力も
+});
+```
+
+コールバックは 2 つの文字列を受け取ります。前回の呼び出し以降の新しい標準出力のデータと、新しい標準エラー出力のデータです（どちらも空のことがあります）。`wait()` が戻ったときプロセスは終了していて、`getExitCode()`、`getStdOutput()` などは引き続き呼べます。
+
+
+入力を送る
+=====
+
+`$stdin` パラメータは、プロセスが標準入力から読むものを指定します。いくつかの異なるものを受け付けます。
+
+**文字列**はプロセスの入力そのものになります。
+
+```php
+$process = Process::runExecutable('wc', ['-c'], stdin: 'hello world');
+echo $process->getStdOutput(); // 11
+```
+
+**読み取り可能なリソース**（開いたファイルやストリーム）は入力にコピーされます。
+
+```php
+$file = fopen('data.csv', 'r');
+$process = Process::runExecutable('sort', stdin: $file);
+```
+
+**`null`** は入力を開いたままにするので、少しずつ書き込めます（後述）。
+
+既定は空文字列で、プロセスは空ですぐ閉じられた入力を受け取ります。これは妥当な既定です。入力を読むプログラムが、決して来ないものを待って永遠に固まるのを防げます。
+
+
+writeStdInput(string $string): void .[method]
+---------------------------------------------
+
+`stdin: null` でプロセスを起動すると入力が開いたままになるので、少しずつ与えられます。終わったら `closeStdInput()` を呼んでください。これでプログラムに、もう入力が来ないことを伝えます（ファイル終端を送ります）。
+
+```php
+$process = Process::runExecutable('some-repl', stdin: null);
+$process->writeStdInput("first command\n");
+$process->writeStdInput("second command\n");
+$process->closeStdInput();
+echo $process->getStdOutput();
+```
+
+.[note]
+`$stdin` に渡した文字列やストリームは、プロセスが本格的に動き出す前に一度に書き込まれます。その入力が大きく、*かつ*プログラムが入力を先に読まずに大量の出力を生む場合、双方が互いを待って固まることがあります。その（まれな）場合は `stdin: null` と `writeStdInput()` を使い、書き込みと読み取りを交互に行ってください。
+
+
+プロセスの連結（パイプ）
+============
+
+シェルのパイプ `|` とまったく同じように、あるプロセスの標準出力を別のプロセスの標準入力に直接つなげられます。`$stdin` に `Process` を渡すだけです。
+
+```php
+$producer = Process::runExecutable('cat', ['big.log']);
+$consumer = Process::runExecutable('grep', ['error'], stdin: $producer);
+
+echo $consumer->getStdOutput();
+```
+
+プロセスは好きなだけ連結できます（`a | b | c`）。
+
+.[note]
+プロセスどうしのパイプ連結は **Windows では対応していません**（`Nette\NotSupportedException` を投げます）。Windows では最初のプロセスの出力を `getStdOutput()` で受け取り、次のプロセスに文字列として渡してください。
+
+
+出力を別の場所へ回す
+==========
+
+既定では、標準出力と標準エラー出力はメモリに取り込まれます。`$stdout` と `$stderr` のパラメータを使えば、代わりに別の場所へ送れます。
+
+**ファイル名**を渡すと、出力はそのファイルに送られます。
+
+```php
+Process::runExecutable('mysqldump', ['mydb'], stdout: 'backup.sql')
+	->ensureSuccess();
+```
+
+**書き込み可能なリソース**を渡すと、出力はそのストリームに送られます。実在のファイルに裏打ちされている必要があります（`php://memory` などは使えません）。
+
+```php
+$log = fopen('build.log', 'a');
+Process::runExecutable('make', stdout: $log, stderr: $log);
+```
+
+**`false`** は出力をまるごと捨てます（`/dev/null`、Windows では `NUL` に送られます）。
+
+```php
+Process::runExecutable('noisy-tool', stderr: false);
+```
+
+別の場所へ回すとメモリの使用も抑えられます。メモリへの取り込みは便利ですが、ギガバイト単位で出力するプロセスはギガバイト単位の RAM を使ってしまうので、そうした出力はファイルに書いてください。
+
+
+環境変数
+====
+
+`$env` パラメータは、プロセスから見える環境変数を設定します。現在のプロセスの環境を引き継ぐには `null`（既定）のままにし、自分で設定するには配列を渡します。
+
+```php
+// 現在の環境に変数をひとつ足したもの
+$process = Process::runExecutable('printenv', ['MY_VAR'], env: ['MY_VAR' => '123'] + getenv());
+
+// まったく空の環境
+$process = Process::runExecutable('some-tool', env: []);
+```
+
+
+作業ディレクトリ
+========
+
+`$directory` パラメータは、プロセスが起動するディレクトリを設定します（既定は現在のディレクトリです）。
+
+```php
+$process = Process::runExecutable('git', ['status'], directory: '/path/to/repo');
+```
+
+
+時間の制限
+=====
+
+`$timeout` パラメータ（秒単位、既定は `60`）は、プロセスをどれだけ待つかの上限を決めます。プロセスを待っているあいだや出力を読んでいるあいだに上限に達すると、プロセスは強制終了され `Nette\Utils\ProcessTimeoutException` が投げられます。制限をなくすには `null` を渡します。
+
+```php
+$process = Process::runExecutable('slow-tool', timeout: 5.0);
+try {
+	$process->wait();
+} catch (Nette\Utils\ProcessTimeoutException $e) {
+	echo 'The tool took too long and was terminated.';
+}
+```
+
+制限が確認されるのは、`wait()`、`getExitCode()`、出力のゲッター、`consume*()` の中にいるあいだだけです。起動したあと一度も待たないプロセスが、これによって強制終了されることはありません。
+
+
+プロセスの停止
+=======
+
+
+terminate(): void .[method]
+---------------------------
+
+プロセスがまだ動いていればすぐに強制終了します。すでに終了していれば何もしません。
+
+```php
+$process = Process::runExecutable('server');
+// ...
+$process->terminate();
+```
+
+プロセスは、終了する前にその `Process` オブジェクトが破棄されたとき（たとえばスコープを抜けたとき）にも自動的に終了させられます。それが望ましくないなら、プロセスをオブジェクトから切り離してください。
+
+
+detach(): void .[method]{data-version:4.1.5}
+--------------------------------------------
+
+プロセスをオブジェクトから切り離します。プロセスはバックグラウンドで動き続け、オブジェクトが破棄されても終了させられません。PHP のスクリプト自体より長く生きるデーモンやバックグラウンドの仕事を始めるにはこうします。
+
+```php
+$process = Process::runExecutable('worker', stdout: 'worker.log', stderr: false);
+$process->detach();
+// $process が破棄されたあともプロセスは動き続けます
+```
+
+切り離したあとは誰も出力を読まないので、出力をメモリに取り込んではいけません。ファイル、リソース、`false` に[回して |#出力を別の場所へ回す]ください。さもないと `detach()` は `Nette\InvalidStateException` を投げます。切り離すとき、標準入力と出力のパイプは閉じられます。
+
+変わるのはデストラクタの振る舞いだけです。`wait()` と `getExitCode()` は引き続きプロセスの終了を待ちますし（`$timeout` も引き続き適用され、超えれば強制終了します）、`terminate()` も引き続き終了させます。
+
+.[note]
+POSIX 系のシステムでは、切り離されたプロセスがスクリプトの実行中に終了すると、スクリプトが終わるまでプロセス一覧に*ゾンビ*として現れます。害はなく、自然に消えます。
+
+
+getPid(): ?int .[method]
+------------------------
+
+プロセスが動いているあいだ、オペレーティングシステムのプロセス ID（PID）を返します。終了したあとは `null` を返します。
+
+```php
+$pid = $process->getPid();
+```
+
+
+うまくいかなかったとき
+===========
+
+エラーは常に例外を投げて知らせ、戻り値では知らせません。
+
+| `Nette\Utils\ProcessFailedException` | プロセスを起動できなかった、または `ensureSuccess()` が呼ばれて終了コードが `0` でなかった
+| `Nette\Utils\ProcessTimeoutException` | `$timeout` の制限を超えた
+| `Nette\InvalidArgumentException` | `$stdin`、`$stdout`、`$stderr` に不正な値が渡された
+| `Nette\IOException` | `$stdout` や `$stderr` に指定したファイルを開けなかった
+| `Nette\InvalidStateException` | 取り込んでいない出力を読もうとした、すでに閉じた STDIN に書こうとした、出力をメモリに取り込んでいるプロセスを切り離そうとした
+| `Nette\NotSupportedException` | Windows でプロセスのパイプ連結を試みた
+
+`ProcessFailedException` と `ProcessTimeoutException` は PHP の `RuntimeException` を継承しています。

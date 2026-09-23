@@ -1,0 +1,183 @@
+Protection contre le SSRF
+*************************
+
+.[perex]
+Lorsque votre application télécharge une URL fournie par un utilisateur, un attaquant peut en abuser pour atteindre votre réseau interne. Les classes [#UrlValidator] et [#IPAddress] vous aident à vous prémunir contre ces attaques Server-Side Request Forgery (SSRF).
+
+→ [Installation et prérequis |@home#Installation]
+
+
+Qu'est-ce que le SSRF ?
+=======================
+
+Imaginez une fonctionnalité où l'utilisateur saisit une URL et où votre serveur la télécharge : un avatar depuis une adresse distante, la cible d'un webhook, l'aperçu d'un lien. Cela paraît anodin, mais c'est le serveur qui atteint l'adresse, pas le navigateur de l'utilisateur. Et le serveur voit des endroits que l'attaquant ne voit pas : l'interface loopback, le réseau privé, les services cloud.
+
+Un attaquant soumet donc une URL qui pointe vers l'intérieur au lieu de l'internet public. Les cibles typiques sont :
+
+- les métadonnées cloud sur `http://169.254.169.254/`, qui peuvent laisser fuir des clés d'accès
+- les panneaux d'administration internes et les routeurs comme `http://192.168.1.1/`
+- les services sans authentification, comme Redis sur `http://localhost:6379/`
+
+Cette catégorie de failles est si répandue qu'elle figure dans le [Top 10 de l'OWASP |https://owasp.org/Top10/]. La défense consiste à valider l'URL **avant** de la récupérer et à refuser tout ce qui se résout vers une adresse non publique.
+
+
+UrlValidator
+============
+
+[api:Nette\Http\UrlValidator] contrôle une URL par rapport à une politique configurable : le schéma, le port, l'hôte, les userinfo et les adresses IP vers lesquelles l'hôte se résout. L'usage de base tient en un seul appel :
+
+```php
+use Nette\Http\UrlValidator;
+
+if (!(new UrlValidator)->allows($userUrl)) {
+	return; // URL non sûre, ne pas la récupérer
+}
+```
+
+La politique par défaut est délibérément stricte : elle n'accepte que `https` sur le port 443 pointant vers une adresse IP publique. Tout le reste (loopback, plages privées, link-local y compris les métadonnées cloud, plages réservées) est refusé, et le multicast est refusé sans condition. C'est le bon point de départ pour récupérer des URL quelconques fournies par les utilisateurs.
+
+
+Configurer la politique
+-----------------------
+
+Vous façonnez la politique par le constructeur. Par exemple, pour autoriser le simple `http` sur n'importe quel port et atteindre des adresses privées (utile au sein d'un réseau de confiance) :
+
+```php
+$validator = new UrlValidator(
+	schemes: ['http', 'https'],
+	ports: null, // n'importe quel port
+	allowPrivateIps: true,
+);
+```
+
+Un usage courant consiste à restreindre la récupération à un ensemble fixe de domaines partenaires à l'aide d'une liste blanche d'hôtes. Le préfixe `*.` correspond à n'importe quelle profondeur de sous-domaine, mais pas au domaine apex : indiquez les deux formes si vous en avez besoin :
+
+```php
+$validator = new UrlValidator(
+	hostAllowlist: ['example.com', '*.example.com'],
+);
+```
+
+L'ensemble des options du constructeur :
+
+| Paramètre | Valeur par défaut | Signification
+|---------------------
+| `schemes` | `['https']` | schémas autorisés ; `[]` refuse tout
+| `ports` | `[443]` | ports autorisés, `null` = n'importe lequel ; le port implicite du schéma est pris en compte
+| `allowPrivateIps` | `false` | autorise les plages privées (10/8, 172.16/12, 192.168/16, fc00::/7)
+| `allowLoopback` | `false` | autorise le loopback (127.0.0.0/8, ::1)
+| `allowLinkLocal` | `false` | autorise le link-local, y compris les métadonnées cloud 169.254.169.254
+| `allowReserved` | `false` | autorise les plages réservées par l'IANA
+| `allowUserinfo` | `false` | autorise `user:pass@` dans l'URL
+| `hostAllowlist` | `null` | si définie, l'hôte doit correspondre à un motif ; `[]` refuse tout
+| `hostBlocklist` | `null` | si définie, l'hôte ne doit correspondre à aucun motif
+
+
+Méthodes de validation
+----------------------
+
+Le validateur offre trois méthodes. `allows()` effectue le contrôle complet, résolution DNS comprise : l'hôte est résolu et **chaque** adresse A/AAAA doit satisfaire la politique IP :
+
+```php
+(new UrlValidator)->allows($url); // bool
+```
+
+`allowsWithoutDns()` saute la résolution DNS et les contrôles de plages IP. Utilisez-la comme préfiltre rapide, ou lorsque la validation DNS est déléguée à la couche de récupération :
+
+```php
+(new UrlValidator)->allowsWithoutDns($url); // bool
+```
+
+Les deux méthodes acceptent une chaîne, un objet [UrlImmutable |urls#UrlImmutable] ou `null` (qui échoue toujours).
+
+
+Déjouer le DNS rebinding
+------------------------
+
+Il existe une subtile course entre la validation et la récupération : un attaquant peut renvoyer une IP sûre au moment où vous validez l'hôte, puis basculer le DNS vers une IP interne pour le téléchargement réel. Pour combler cette faille, `getResolvedIPs()` renvoie les adresses IP validées, et vous épinglez la connexion sur elles afin que la récupération ne puisse pas être détournée ailleurs :
+
+```php
+$ips = (new UrlValidator)->getResolvedIPs($url);
+if (!$ips) {
+	return; // URL non sûre
+}
+
+$ch = curl_init($url);
+$host = parse_url($url, PHP_URL_HOST);
+curl_setopt($ch, CURLOPT_RESOLVE, ["$host:443:" . implode(',', $ips)]);
+// ... exécution de la requête
+```
+
+La méthode renvoie un tableau de chaînes IP (les enregistrements A d'abord, puis les AAAA) ayant satisfait toute la politique, ou un tableau vide en cas d'échec. Pour une IP littérale dans l'URL, elle valide l'adresse directement et n'effectue aucune résolution DNS.
+
+
+IPAddress
+=========
+
+[api:Nette\Http\IPAddress] est un objet valeur immuable permettant de travailler avec les adresses IPv4 et IPv6. `UrlValidator` l'utilise en interne, mais il est pratique en lui-même dès que vous classez des adresses. Le constructeur lève une `Nette\InvalidArgumentException` pour une adresse invalide :
+
+```php
+use Nette\Http\IPAddress;
+
+$ip = new IPAddress('169.254.169.254');
+echo $ip; // '169.254.169.254'
+```
+
+Quand vous ne voulez pas d'exception, utilisez la fabrique `tryFrom()` ou le contrôleur `isValid()` :
+
+```php
+$ip = IPAddress::tryFrom($input); // ?IPAddress
+IPAddress::isValid($input);       // bool
+```
+
+
+Classification des adresses
+---------------------------
+
+Les prédicats vous disent à quelle classe appartient une adresse. Le principal est `isPublic()` : vrai uniquement pour les adresses routables publiquement, ce qui est exactement ce que veut une protection anti-SSRF :
+
+```php
+$ip = new IPAddress('169.254.169.254');
+$ip->isPublic();    // false
+$ip->isLinkLocal(); // true (plage des métadonnées cloud)
+```
+
+L'ensemble des prédicats :
+
+| Méthode | Teste
+|--------------------
+| `isPublic()` | routable publiquement (aucun des cas ci-dessous)
+| `isPrivate()` | plages privées RFC 1918 / 4193
+| `isLoopback()` | 127.0.0.0/8, ::1
+| `isLinkLocal()` | 169.254.0.0/16 (métadonnées cloud comprises), fe80::/10
+| `isMulticast()` | 224.0.0.0/4, ff00::/8
+| `isReserved()` | réservées par l'IANA (documentation, CGNAT, usage futur, …)
+
+
+Appartenance à une plage
+------------------------
+
+`isInRange()` teste si l'adresse tombe dans un bloc CIDR. Vous pouvez passer un réseau avec un préfixe, ou une simple adresse pour une correspondance exacte (/32 implicite pour IPv4, /128 pour IPv6) :
+
+```php
+$ip = new IPAddress('192.168.1.50');
+$ip->isInRange('192.168.0.0/16'); // true
+$ip->isInRange('10.0.0.1');       // false (correspondance exacte)
+```
+
+Une entrée mal formée ou une famille IP différente renvoie `false`.
+
+
+IPv6 mappée IPv4
+----------------
+
+Les adresses écrites en IPv6 mappée IPv4 (comme `::ffff:127.0.0.1`) sont un moyen classique de passer à travers des filtres naïfs. `IPAddress` les normalise, si bien que les prédicats de plage voient à travers le déguisement :
+
+```php
+$ip = new IPAddress('::ffff:127.0.0.1');
+$ip->isLoopback();   // true
+$ip->isIPv4Mapped(); // true
+$ip->toIPv4();       // IPAddress('127.0.0.1')
+```
+
+Les méthodes `isIPv4()` et `isIPv6()` rendent compte de la forme textuelle : une adresse mappée est IPv6, pas IPv4.

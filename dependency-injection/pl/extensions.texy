@@ -2,38 +2,66 @@ Tworzenie rozszerzeń dla Nette DI
 *********************************
 
 .[perex]
-Na generowanie kontenera DI oprócz plików konfiguracyjnych wpływają również tzw. *rozszerzenia*. Aktywujemy je w pliku konfiguracyjnym w sekcji `extensions`.
+Rozszerzenie to klasa, która wpina się w kompilację kontenera DI. Może rejestrować usługi programowo, walidować własną sekcję konfiguracji, modyfikować usługi zdefiniowane przez innych, a nawet zmieniać wygenerowany kod kontenera. Ta strona uczy, jak takie rozszerzenie napisać, co dzieje się kiedy i na co uważać.
 
-W ten sposób dodajemy rozszerzenie reprezentowane przez klasę `BlogExtension` pod nazwą `blog`:
+Rozszerzenia to natywny sposób, w jaki pakiety integrują się z Nette: używają ich wszystkie pakiety `nette/*`, a Twój też może. Typowe rozszerzenie robi jedną albo więcej z tych rzeczy:
+
+- **integruje bibliotekę** - rejestruje jej usługi w kontenerze i udostępnia przyjazną, walidowaną sekcję konfiguracji (stąd biorą się sekcje `mail:` czy `database:`)
+- **automatyzuje rejestrację** - rejestruje wiele podobnych usług w pętli albo według reguły, gdzie wypisywanie ich w `services:` byłoby żmudne
+- **wprowadza zmiany przekrojowe** - znajduje usługi zarejestrowane przez innych i je uzupełnia, np. podpina logger do każdej usługi z określonym tagiem
+
+Do codziennej pracy nad aplikacją rzadko go potrzebujesz - sekcja [services |services] konfiguracji wystarcza do rejestrowania i łączenia Twoich klas. Po rozszerzenie sięgnij wtedy, gdy sama konfiguracja przestaje wystarczać.
+
+Rozszerzenie aktywuje się w sekcji `extensions`. Tak dodasz rozszerzenie reprezentowane przez klasę `BlogExtension` pod nazwą `blog`:
 
 ```neon
 extensions:
 	blog: BlogExtension
 ```
 
-Każde rozszerzenie kompilatora dziedziczy po [api:Nette\DI\CompilerExtension] i może implementować następujące metody, które są kolejno wywoływane podczas budowania kontenera DI:
-
-1. getConfigSchema()
-2. loadConfiguration()
-3. beforeCompile()
-4. afterCompile()
-
-
-getConfigSchema() .[method]
-===========================
-
-Ta metoda jest wywoływana jako pierwsza. Definiuje schemat do walidacji parametrów konfiguracyjnych.
-
-Rozszerzenie konfigurujemy w sekcji, której nazwa jest taka sama jak ta, pod którą rozszerzenie zostało dodane, czyli `blog`:
+Jeśli jego konstruktor przyjmuje argumenty, przekaż je od razu tam:
 
 ```neon
-# ta sama nazwa co rozszerzenie
-blog:
-	postsPerPage: 10
-	allowComments: false
+extensions:
+	blog: BlogExtension(%debugMode%)
 ```
 
-Tworzymy schemat opisujący wszystkie opcje konfiguracyjne, w tym ich typy, dozwolone wartości i ewentualnie wartości domyślne:
+
+Jak działa kompilacja
+=====================
+
+Aby pewnie pisać rozszerzenia, musisz wiedzieć jedną kluczową rzecz: **kiedy Twój kod działa**. Nette nie łączy usług podczas obsługi żądań. Zamiast tego *kompiluje* kontener z wyprzedzeniem: wczytuje wszystkie pliki konfiguracyjne, pozwala rozszerzeniom wykonać swoją pracę i generuje zoptymalizowaną klasę PHP, którą zapisuje na dysku. Każde kolejne żądanie po prostu wczytuje tę gotową klasę. Kod Twojego rozszerzenia działa więc tylko wtedy, gdy kontener jest (prze)budowywany, a nie przy każdym żądaniu.
+
+Ma to ważną konsekwencję: podczas kompilacji nie istnieją jeszcze żadne usługi. Istnieją **definicje** - przepisy opisujące, jakiej klasy będzie każda usługa, jak ją utworzyć i co następnie na niej wywołać. Definicje żyją w obiekcie [ContainerBuilder |#ContainerBuilder]. Rozszerzenie to w istocie *skryptowalna konfiguracja*: wszystko, co możesz zadeklarować w sekcji `services:`, możesz też zbudować w PHP - warunkowo, w pętlach albo w reakcji na to, co zarejestrowali inni.
+
+Kompilacja przebiega w fazach, a rozszerzenie może wkroczyć w każdą z nich:
+
+1) walidowane są sekcje konfiguracji wszystkich rozszerzeń (`getConfigSchema()`)
+2) każde rozszerzenie rejestruje swoje usługi (`loadConfiguration()`); sekcja `services:` użytkownika przetwarzana jest ostatnia, więc aplikacja ma zawsze ostatnie słowo
+3) gdy wszystkie definicje są na miejscu, a typy usług rozwiązane, rozszerzenia mogą je modyfikować (`beforeCompile()`)
+4) generowana jest klasa kontenera; rozszerzenia mogą jeszcze dostosować jej kod (`afterCompile()`) i wyemitować kod, który wykona się przy starcie aplikacji ([inicjalizacja |#Kod inicjalizacyjny])
+
+.[note]
+W trybie deweloperskim kontener rekompiluje się automatycznie, gdy tylko zmienisz plik konfiguracyjny albo samą klasę rozszerzenia - oba są śledzone jako zależności. Możesz więc rozwijać rozszerzenia, nigdy nie czyszcząc cache.
+
+.[tip]
+Głębsze spojrzenie na to, co dzieje się w każdej fazie - kiedy rozwijane są parametry, kiedy `@service` staje się referencją i dokładnie kiedy bezpiecznie jest wyszukiwać usługi po typie - znajdziesz w [Kompilacja w szczegółach |compilation-internals].
+
+
+Pierwsze rozszerzenie
+=====================
+
+Oto małe, ale kompletne rozszerzenie. Aktywujemy je i konfigurujemy w tym samym pliku:
+
+```neon
+extensions:
+	blog: BlogExtension
+
+blog:
+	postsPerPage: 5
+```
+
+A oto cała klasa:
 
 ```php
 use Nette\Schema\Expect;
@@ -43,62 +71,87 @@ class BlogExtension extends Nette\DI\CompilerExtension
 	public function getConfigSchema(): Nette\Schema\Schema
 	{
 		return Expect::structure([
-			'postsPerPage' => Expect::int(),
-			'allowComments' => Expect::bool()->default(true),
+			'postsPerPage' => Expect::int(10),
+			'allowComments' => Expect::bool(true),
 		]);
 	}
-}
-```
 
-Dokumentację znajdziesz na stronie [Schema |schema:]. Dodatkowo można określić, które opcje mogą być [dynamiczne |application:bootstrapping#Parametry dynamiczne] za pomocą `dynamic()`, np. `Expect::int()->dynamic()`.
 
-Do konfiguracji dostajemy się przez zmienną `$this->config`, która jest obiektem `stdClass`:
-
-```php
-class BlogExtension extends Nette\DI\CompilerExtension
-{
-	public function loadConfiguration()
+	public function loadConfiguration(): void
 	{
-		$num = $this->config->postPerPage;
+		$builder = $this->getContainerBuilder();
+
+		$builder->addDefinition($this->prefix('articles'))
+			->setFactory(Blog\Articles::class, ['postsPerPage' => $this->config->postsPerPage]);
+
 		if ($this->config->allowComments) {
-			// ...
+			$builder->addDefinition($this->prefix('comments'))
+				->setFactory(Blog\Comments::class);
 		}
 	}
 }
 ```
 
+`getConfigSchema()` opisuje, co może zawierać sekcja `blog:` (nazwana według klucza, pod którym zarejestrowaliśmy rozszerzenie), wraz z typami i wartościami domyślnymi - zwalidowane wartości dostępne są potem w `$this->config`. W `loadConfiguration()` rejestrujemy usługi. Zwróć uwagę na nazwy: `$this->prefix('articles')` daje `blog.articles`, więc usługi różnych rozszerzeń nie mogą się zderzyć.
 
-loadConfiguration() .[method]
-=============================
+A ostatnie kilka wierszy pokazuje, po co w ogóle istnieją rozszerzenia: usługa `comments` rejestrowana jest tylko wtedy, gdy komentarze są włączone. Zwykły plik konfiguracyjny takich decyzji podjąć nie potrafi.
 
-Służy do dodawania usług do kontenera. Do tego służy [api:Nette\DI\ContainerBuilder]:
+Usługi zarejestrowane w ten sposób zachowują się dokładnie tak, jakby były zapisane w `services:` - tworzone są leniwie na żądanie, a autowiring przekazuje je wszędzie tam, gdzie zadeklarowano typ `Blog\Articles`.
+
+Kolejne rozdziały szczegółowo opisują cykl życia rozszerzenia, następnie API [ContainerBuildera |#ContainerBuilder], którego będziesz używać wewnątrz rozszerzenia, a na końcu [pułapki |#Wskazówki i pułapki], o których warto wiedzieć.
+
+
+Cykl życia rozszerzenia
+=======================
+
+Rozszerzenie dziedziczy po [api:Nette\DI\CompilerExtension] i nadpisuje niektóre z czterech metod `getConfigSchema()`, `loadConfiguration()`, `beforeCompile()` i `afterCompile()`, które kompilator wywołuje podczas kompilacji w tej właśnie kolejności.
+
+
+getConfigSchema(): Nette\Schema\Schema .[method]
+------------------------------------------------
+
+Definiuje schemat sekcji konfiguracji rozszerzenia. Dzięki niemu użytkownicy dostają za darmo walidację i czytelne komunikaty o błędach: literówka albo zły typ w sekcji `blog:` zgłaszane są zrozumiałym komunikatem, bez pisania przez Ciebie choćby jednego sprawdzenia.
+
+Schemat opisuje się za pomocą biblioteki [Schema |schema:] i może wyrażać typy, wartości domyślne, wartości dozwolone i wiele więcej:
 
 ```php
-class BlogExtension extends Nette\DI\CompilerExtension
+public function getConfigSchema(): Nette\Schema\Schema
 {
-	public function loadConfiguration()
-	{
-		$builder = $this->getContainerBuilder();
-		$builder->addDefinition($this->prefix('articles'))
-			->setFactory(App\Model\HomepageArticles::class, ['@connection']) // lub setCreator()
-			->addSetup('setLogger', ['@logger']);
-	}
+	return Expect::structure([
+		'postsPerPage' => Expect::int(10),
+		'storage' => Expect::anyOf('files', 'database')->firstIsDefault(),
+	]);
 }
 ```
 
-Konwencją jest prefiksowanie usług dodanych przez rozszerzenie jego nazwą, aby nie dochodziło do konfliktów nazw. Robi to metoda `prefix()`, więc jeśli rozszerzenie nazywa się `blog`, usługa będzie nosić nazwę `blog.articles`.
+Zwalidowana konfiguracja dostępna jest w `$this->config` jako obiekt `stdClass` (albo jako tablica, jeśli dopiszesz do schematu `castTo('array')`).
 
-Jeśli potrzebujemy zmienić nazwę usługi, możemy ze względu na zachowanie wstecznej kompatybilności utworzyć alias z pierwotną nazwą. Podobnie robi Nette np. w przypadku usługi `routing.router`, która jest dostępna również pod wcześniejszą nazwą `router`.
+Jeśli wartości opcji nie da się poznać w czasie kompilacji - bo pochodzi na przykład ze zmiennej środowiskowej - oznacz ją przez `dynamic()`, np. `Expect::int()->dynamic()`. Więcej w [parametrach dynamicznych |application:bootstrapping#Parametry dynamiczne].
+
+
+loadConfiguration() .[method]
+-----------------------------
+
+Miejsce, w którym rozszerzenie rejestruje swoje usługi, używając [ContainerBuildera |#ContainerBuilder]:
 
 ```php
-$builder->addAlias('router', 'routing.router');
+public function loadConfiguration(): void
+{
+	$builder = $this->getContainerBuilder();
+	$builder->addDefinition($this->prefix('articles'))
+		->setFactory(Blog\Articles::class);
+}
 ```
 
+Jeśli usługa ma być dostępna również pod krótką nazwą, dodaj alias. Zwyczajowo robi się to tylko wtedy, gdy rozszerzenie zarejestrowano pod jego zwykłą nazwą, aby kilka instancji rozszerzenia nie mogło się o nią bić:
 
-Ładowanie usług z pliku
------------------------
+```php
+if ($this->name === 'blog') {
+	$builder->addAlias('articles', $this->prefix('articles'));
+}
+```
 
-Usługi możemy tworzyć nie tylko za pomocą API klasy ContainerBuilder, ale także znanym zapisem używanym w pliku konfiguracyjnym NEON w sekcji services. Prefiks `@extension` reprezentuje bieżące rozszerzenie.
+Gdy usług jest wiele, wygodniej bywa zdefiniować je w osobnym pliku NEON, znajomą składnią [services |services]. Prefiks `@extension` odwołuje się do bieżącego rozszerzenia:
 
 ```neon
 services:
@@ -107,88 +160,284 @@ services:
 
 	comments:
 		create: MyBlog\CommentsModel(@connection, @extension.articles)
-
-	articlesList:
-		create: MyBlog\Components\ArticlesList(@extension.articles)
 ```
 
-Usługi wczytamy:
+Definicje te wczytujemy metodą `loadDefinitionsFromConfig()`; nazwy dostają prefiks automatycznie, a plik śledzony jest jako zależność, więc jego zmiana wyzwala rekompilację:
 
 ```php
-class BlogExtension extends Nette\DI\CompilerExtension
+public function loadConfiguration(): void
 {
-	public function loadConfiguration()
-	{
-		$builder = $this->getContainerBuilder();
-
-		// wczytanie pliku konfiguracyjnego dla rozszerzenia
-		$this->compiler->loadDefinitionsFromConfig(
-			$this->loadFromFile(__DIR__ . '/blog.neon')['services'],
-		);
-	}
+	$this->loadDefinitionsFromConfig(
+		$this->loadFromFile(__DIR__ . '/services.neon')['services'],
+	);
 }
 ```
 
 
 beforeCompile() .[method]
-=========================
+-------------------------
 
-Metoda jest wywoływana w momencie, gdy kontener zawiera wszystkie usługi dodane przez poszczególne rozszerzenia w metodach `loadConfiguration` oraz przez użytkownika w plikach konfiguracyjnych. Na tym etapie budowania możemy więc modyfikować definicje usług lub uzupełniać powiązania między nimi. Do wyszukiwania usług w kontenerze według tagów można użyć metody `findByTag()`, a według klasy lub interfejsu metody `findByType()`.
+Gdy wywoływana jest ta metoda, builder zawiera już **wszystkie** definicje: Twoje, innych rozszerzeń i te z plików konfiguracyjnych użytkownika. Typy usług są też rozwiązane, więc wyszukiwanie po typie jest wiarygodne. Czyni to tę fazę idealną do badania i uzupełniania ostatecznego grafu usług.
+
+Typowo wyszukujesz usługi po tagu albo po typie i uzupełniasz znalezione definicje:
 
 ```php
-class BlogExtension extends Nette\DI\CompilerExtension
+public function beforeCompile(): void
 {
-	public function beforeCompile()
-	{
-		$builder = $this->getContainerBuilder();
+	$builder = $this->getContainerBuilder();
 
-		foreach ($builder->findByTag('logaware') as $serviceName => $tagValue) {
-			$builder->getDefinition($serviceName)->addSetup('setLogger');
-		}
+	foreach ($builder->findByTag('logaware') as $name => $attrs) {
+		$builder->getDefinition($name)->addSetup('setLogger');
 	}
 }
 ```
 
+Wywołanie `setLogger()` nie ma jawnych argumentów - dostarczy je autowiring, tak samo jak robi to w fabrykach.
 
-afterCompile() .[method]
-========================
-
-Na tym etapie klasa kontenera jest już wygenerowana w postaci obiektu [ClassType |php-generator:#Klasy], zawiera wszystkie metody tworzące usługi i jest gotowa do zapisu do cache. Wynikowy kod klasy możemy na tym etapie jeszcze zmodyfikować.
+Możesz też współpracować z innymi zarejestrowanymi rozszerzeniami, pozyskanymi przez `$this->compiler->getExtensions()`, opcjonalnie przefiltrowanymi po klasie albo interfejsie:
 
 ```php
-class BlogExtension extends Nette\DI\CompilerExtension
-{
-	public function afterCompile(Nette\PhpGenerator\ClassType $class)
-	{
-		$method = $class->getMethod('__construct');
-		// ...
-	}
+foreach ($this->compiler->getExtensions(FooExtension::class) as $extension) {
+	// ...
 }
 ```
 
 
-$initialization .[method]
-=========================
+afterCompile(Nette\PhpGenerator\ClassType $class) .[method]
+-----------------------------------------------------------
 
-Klasa Configurator po [utworzeniu kontenera |application:bootstrapping#index.php] wywołuje kod inicjalizacyjny, który tworzy się zapisem do obiektu `$this->initialization` za pomocą [metody addBody() |php-generator:#Ciała metod i funkcji].
+W ostatniej fazie generowana jest klasa kontenera jako obiekt [ClassType |php-generator:#Klasy] z biblioteki [PHP Generator |php-generator:]. Zawiera metodę fabryczną dla każdej usługi i za chwilę zostanie zapisana do cache. Możesz jeszcze zmodyfikować jej kod:
 
-Pokażemy przykład, jak na przykład kodem inicjalizacyjnym uruchomić sesję lub uruchomić usługi, które mają tag `run`:
+```php
+public function afterCompile(Nette\PhpGenerator\ClassType $class): void
+{
+	$method = $class->getMethod('__construct');
+	// ...
+}
+```
+
+Ta faza będzie Ci potrzebna tylko rzadko. Aby dodać kod, który wykona się przy starcie aplikacji, użyj zamiast tego inicjalizacji:
+
+
+Kod inicjalizacyjny
+-------------------
+
+Wszystkie poprzednie fazy wpływają na to, jak kontener jest *budowany*. Rozszerzenie może ponadto wyemitować kod, który wykona się *w czasie działania*, zaraz po utworzeniu kontenera - na przykład aby wystartować sesję albo uruchomić usługi. Kod zapisuje się do obiektu `$this->initialization` jego metodą [addBody() |php-generator:#Ciała metod i funkcji]:
+
+```php
+public function loadConfiguration(): void
+{
+	// usługi z tagiem 'run' muszą zostać utworzone zaraz po starcie kontenera
+	$builder = $this->getContainerBuilder();
+	foreach ($builder->findByTag('run') as $name => $attrs) {
+		$this->initialization->addBody('$this->getService(?);', [$name]);
+	}
+}
+```
+
+Samo Nette używa inicjalizacji na przykład do automatycznego wystartowania sesji albo wysłania nagłówków HTTP związanych z bezpieczeństwem. I miej na uwadze: w odróżnieniu od wszystkiego innego w rozszerzeniu, ten kod wykonuje się przy **każdym żądaniu**, więc trzymaj go niewielkim.
+
+
+ContainerBuilder
+================
+
+[api:Nette\DI\ContainerBuilder] to obiekt, przez który rozszerzenie rozmawia z kompilatorem. Zawiera [definicje |#Jak działa kompilacja] wszystkich usług i oferuje metody do ich dodawania, wyszukiwania i modyfikowania. Pozyskujesz go w `loadConfiguration()` i `beforeCompile()`:
+
+```php
+$builder = $this->getContainerBuilder();
+```
+
+
+Dodawanie usług
+---------------
+
+Rejestracja usługi to to samo, co robisz w sekcji `services:` pliku NEON, tyle że zapisane w PHP. Każdemu kluczowi konfiguracji odpowiada metoda na definicji, więc te dwa zapisy są równoważne:
+
+```neon
+services:
+	articles:
+		create: Blog\Articles(@connection)
+		setup:
+			- setLogger(@logger)
+		tags: [logaware]
+```
+
+```php
+$builder->addDefinition($this->prefix('articles'))
+	->setFactory(Blog\Articles::class, ['@connection'])
+	->addSetup('setLogger', ['@logger'])
+	->addTag('logaware');
+```
+
+Definicja zwracana przez `addDefinition()` to [ServiceDefinition |#Typy definicji] oferujący odpowiedniki kluczy konfiguracji: `setType()` (klasa usługi), `setFactory()` (jak ją utworzyć), `setArguments()`, `addSetup()`, `addTag()` i `setAutowired()`.
+
+`addSetup()` odzwierciedla listę `setup:` i przyjmuje te same postacie: wywołanie metody `addSetup('setLogger', ['@logger'])`, przypisanie do właściwości `addSetup('$cache', ['@cache'])` albo wywołanie na innej usłudze `addSetup('@Tracy\Bar::addPanel', [$panel])`.
+
+Poza zwykłymi usługami builder potrafi rejestrować również [generowane |factory] fabryki, akcesory i lokatory - każdy własną metodą zwracającą odpowiadający [typ definicji |#Typy definicji]:
+
+| Metoda | Rejestruje
+|--------|----------
+| `addDefinition()` | zwykłą usługę (zwraca `ServiceDefinition`)
+| `addFactoryDefinition()` | generowaną [fabrykę |factory] (interfejs z metodą `create()`)
+| `addAccessorDefinition()` | generowany [akcesor |factory#Akcesor] (interfejs z metodą `get()`)
+| `addLocatorDefinition()` | [multifabrykę / lokator |factory#Multifabryka/akcesor] łączący kilka fabryk
+| `addImportedDefinition()` | usługę przekazywaną do kontenera z zewnątrz w czasie działania
+| `addAlias()` | drugą nazwę istniejącej usługi
+
+Przy fabryce obiekt, który tworzy, konfigurujesz przez `getResultDefinition()`; akcesor zamiast tego wskazuje na istniejącą usługę przez `setReference()`:
+
+```php
+$builder->addFactoryDefinition($this->prefix('latteFactory'))
+	->setImplement(LatteFactory::class)
+	->getResultDefinition()
+		->setFactory(Latte\Engine::class)
+		->addSetup('setStrictTypes', [true]);
+```
+
+`addLocatorDefinition()` i `addImportedDefinition()` potrzebne są rzadko - takie usługi zwykle pochodzą z kluczy `implement:` i usług importowanych w NEON, a nie z ręcznego pisania.
+
+
+Wyszukiwanie i modyfikowanie usług
+----------------------------------
+
+Do wyszukiwania i przechodzenia po istniejących definicjach builder udostępnia:
+
+| Metoda | Opis
+|--------|------------
+| `getDefinition(string $name)` | definicja o podanej nazwie (zgłasza wyjątek, gdy jej brak)
+| `hasDefinition(string $name)` | czy istnieje definicja albo alias o tej nazwie
+| `getDefinitions()` | wszystkie definicje
+| `removeDefinition(string $name)` | usuwa definicję
+| `getByType(string $type)` | nazwa autowirowanej usługi tego typu albo `null`
+| `getDefinitionByType(string $type)` | autowirowana definicja tego typu
+| `findByType(string $type)` | wszystkie definicje tego typu jako pary `nazwa => definicja`
+| `findByTag(string $tag)` | usługi noszące tag jako pary `nazwa => wartość tagu`
+| `addExcludedClasses(array $types)` | wyklucza klasy i interfejsy z autowiringu
+
+Poręcznym idiomem jest użycie `getByType()` do sprawdzenia, czy usługa w ogóle istnieje - na przykład aby podpiąć się do loggera tylko wtedy, gdy aplikacja go ma:
+
+```php
+if ($builder->getByType(Psr\Log\LoggerInterface::class)) {
+	$builder->getDefinition($this->prefix('articles'))
+		->addSetup('setLogger');
+}
+```
+
+
+Typy definicji
+--------------
+
+Każda metoda `add*Definition()` zwraca inny rodzaj definicji. Wszystkie rozszerzają wspólnego przodka `Nette\DI\Definitions\Definition`:
+
+- **`ServiceDefinition`** - zwykła usługa; konfigurowana przez `setType()`, `setFactory()`, `addSetup()`, `addTag()` i `setAutowired()`
+- **`FactoryDefinition`** - [generowana fabryka |factory]: interfejs, którego metoda `create()` przy każdym wywołaniu zwraca nowy obiekt
+- **`AccessorDefinition`** - [generowany akcesor |factory#Akcesor]: interfejs, którego metoda `get()` zwraca istniejącą usługę
+- **`LocatorDefinition`** - [multifabryka / lokator |factory#Multifabryka/akcesor] łącząca kilka fabryk albo akcesorów w jednym interfejsie
+- **`ImportedDefinition`** - usługa, której kontener nie tworzy sam, lecz otrzymuje ją z zewnątrz w czasie działania
+
+Miej na uwadze, że `getDefinition()` zwraca taki rodzaj definicji, jaki żyje pod podaną nazwą. Jeśli Twój kod może natknąć się na generowaną fabrykę, sprawdź najpierw typ i skonfiguruj produkowany obiekt przez `getResultDefinition()`:
+
+```php
+$def = $builder->getDefinition($name);
+if ($def instanceof Nette\DI\Definitions\FactoryDefinition) {
+	$def = $def->getResultDefinition();
+}
+$def->addSetup('setLogger');
+```
+
+
+Wskazówki i pułapki
+===================
+
+
+Czas kompilacji kontra czas działania
+-------------------------------------
+
+Najczęstsze źródło nieporozumień: kod rozszerzenia działa wtedy, gdy kontener jest **kompilowany**, a nie wtedy, gdy aplikacja obsługuje żądania. W praktyce oznacza to:
+
+- Rozszerzenie nigdy nie pracuje z instancjami usług - one jeszcze nie istnieją. Nie twórz usług przez `new`; zarejestruj definicję i pozwól kontenerowi je utworzyć.
+- Wszystkie wartości konfiguracji są wpiekane w wygenerowany kod. Wartość, która może różnić się między środowiskami (ścieżka, hasło z `getenv()`), musi być oznaczona jako [dynamiczna |application:bootstrapping#Parametry dynamiczne], w przeciwnym razie zamarza w czasie kompilacji.
+- Stringi przekazywane do `$this->initialization->addBody()` nie wykonują się teraz - to kod PHP emitowany do kontenera, wykonywany przy każdym żądaniu.
+
+
+Zależności od plików
+--------------------
+
+Kontener rekompiluje się, gdy zmienią się pliki konfiguracyjne albo klasy rozszerzeń. Jeśli jednak Twoje rozszerzenie czyta jakikolwiek inny plik - listę encji, konfigurację XML biblioteki - kontener nie ma jak się o tym dowiedzieć. Takie pliki zarejestruj przez:
+
+```php
+$builder->addDependency($file);
+```
+
+W przeciwnym razie czeka Cię klasyczna zagadka: edytujesz plik, a aplikacja dalej zachowuje się po staremu - zmiana ujawnia się dopiero wtedy, gdy kontener przebuduje się z jakiegoś innego powodu. (Pliki czytane przez `loadFromFile()` śledzone są automatycznie.)
+
+
+Rejestracja warunkowa
+---------------------
+
+Rozszerzenie może dostosowywać się do swojego środowiska. Opcjonalne integracje zabezpiecza się typowo przez `class_exists()`:
+
+```php
+if (class_exists(Symfony\Component\Console\Command\Command::class)) {
+	$builder->addDefinition($this->prefix('command'))
+		->setFactory(Blog\Console\SitemapCommand::class);
+}
+```
+
+A wartości w rodzaju `%debugMode%` najlepiej przekazywać przez konstruktor rozszerzenia:
+
+```neon
+extensions:
+	blog: BlogExtension(%debugMode%)
+```
 
 ```php
 class BlogExtension extends Nette\DI\CompilerExtension
 {
-	public function loadConfiguration()
-	{
-		// automatyczne uruchamianie sesji
-		if ($this->config->session->autoStart) {
-			$this->initialization->addBody('$this->getService("session")->start()');
-		}
-
-		// usługi z tagiem run muszą być utworzone po instancjonowaniu kontenera
-		$builder = $this->getContainerBuilder();
-		foreach ($builder->findByTag('run') as $name => $foo) {
-			$this->initialization->addBody('$this->getService(?);', [$name]);
-		}
-	}
+	public function __construct(
+		private bool $debugMode = false,
+	) {}
 }
 ```
+
+Typowym zastosowaniem jest rejestrowanie panelu Tracy tylko w trybie deweloperskim.
+
+
+Argumenty złożone
+-----------------
+
+Czasem argument fabryki albo wywołania w setupie nie jest zwykłą wartością, nazwą klasy ani referencją `@service`. Na takie przypadki są:
+
+- `new Nette\DI\Definitions\Statement(Blog\Panel::class, [$args])` - obiekt tworzony na miejscu, "anonimowa usługa" używana jako argument
+- `new Nette\DI\Definitions\Reference('blog.articles')` - referencja do usługi, obiektowy odpowiednik stringa `@name`
+- `$builder::literal('PHP_SAPI')` - kawałek surowego kodu PHP wstawiany bez zmian do wygenerowanego kontenera
+
+Przykład - rejestracja panelu Tracy:
+
+```php
+$builder->getDefinition($this->prefix('articles'))
+	->addSetup('@Tracy\Bar::addPanel', [
+		new Nette\DI\Definitions\Statement(Blog\ArticlesPanel::class),
+	]);
+```
+
+
+Eksportowane tagi i typy
+------------------------
+
+[Eksport metadanych |configuration#Eksport metadanych] można w konfiguracji ograniczyć tak, aby skompilowany kontener zachował tylko te tagi i typy autowiringu, których aplikacja faktycznie używa. Jeśli Twoje rozszerzenie pobiera usługi w czasie działania przez `$container->findByTag()` albo `$container->getByType()`, takie ograniczenie mogłoby usunąć dokładnie te metadane, na których polegasz.
+
+Aby temu zapobiec, powiedz kompilatorowi, które tagi i typy muszą być zawsze eksportowane:
+
+```php
+public function loadConfiguration(): void
+{
+	// ten tag będzie eksportowany zawsze, nawet gdy eksport jest ograniczony
+	$this->compiler->addExportedTag('event.subscriber');
+
+	// ten typ będzie zawsze dostępny dla getByType()
+	$this->compiler->addExportedType(Nette\Database\Connection::class);
+}
+```
+
+Obie metody tylko dodają do eksportowanych metadanych; nigdy nie nadpisują konfiguracji `di › export` aplikacji. Gdy więc aplikacja ograniczy eksport do listy, tagi i typy potrzebne Twojemu rozszerzeniu pozostaną uwzględnione; dopiero całkowite wyłączenie eksportu tagów (`tags: false`) odrzuca je wraz ze wszystkim innym.

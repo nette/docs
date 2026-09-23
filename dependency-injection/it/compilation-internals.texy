@@ -1,0 +1,222 @@
+La compilazione del container in dettaglio
+******************************************
+
+.[perex]
+Questa pagina apre la compilazione del container: le fasi che attraversa, quando i parametri di configurazione vengono espansi, quando le stringhe `@service` diventano riferimenti reali e, la domanda che gli autori di estensioni pongono più spesso, in quale fase si possono cercare in sicurezza i servizi per tipo. È il complemento approfondito di [Creare estensioni |extensions].
+
+Non vi serve nulla di tutto questo per scrivere una normale applicazione, e nemmeno una normale estensione. Ma quando la vostra estensione inizia a esaminare o a rimodellare il grafo dei servizi, il momento diventa tutto: la stessa chiamata a `getByType()` dà una risposta affidabile in una fase e una fuorviante in un'altra. Questa pagina spiega perché, così saprete sempre dove collocare il vostro codice.
+
+
+Due mondi: compilazione ed esecuzione
+=====================================
+
+La cosa più importante da capire è che un container di Nette **non viene assemblato a ogni richiesta**. Viene costruito una sola volta in una classe PHP ottimizzata, quella classe viene salvata su disco e ogni richiesta successiva si limita a fare `include` del file già pronto. Tutta la macchina descritta qui sotto (estensioni, resolver, generatore di codice) gira **solo durante la (ri)compilazione**.
+
+Questo divide il mondo in due rappresentazioni che non coesistono mai:
+
+| | durante la compilazione | in fase di esecuzione
+|---|---|---
+| Cosa esiste | **definizioni** (ricette) in `ContainerBuilder` | **istanze** dei servizi in `Container`
+| Classi chiave | `Compiler`, `ContainerBuilder`, `Resolver`, `PhpGenerator` | `Container` (genitore della classe generata)
+| `%param%`, `@service` | marcatori testuali ancora da tradurre | già tradotti / incorporati nel codice
+
+La classe generata estende `Nette\DI\Container` e ha un metodo `createServiceXxx()` per ogni servizio. I suoi parametri e i metadati dell'autowiring sono precalcolati, quindi in fase di esecuzione non resta nulla da risolvere: solo da istanziare i servizi su richiesta.
+
+.[note]
+In modalità di sviluppo il container viene ricostruito automaticamente ogni volta che cambiano un file di configurazione o una classe di estensione; entrambi sono tracciati come dipendenze. In produzione viene compilato una sola volta e non viene più controllato, ed è da lì che viene la velocità.
+
+
+Le fasi a colpo d'occhio
+========================
+
+La compilazione è orchestrata da `Compiler::compile()` e si riduce a tre passaggi:
+
+```php
+public function compile(): string
+{
+	$this->processExtensions();     // FASE A: schemi + loadConfiguration()
+	$this->processBeforeCompile();  // FASE B: resolve + beforeCompile() + complete
+	return $this->generateCode();   // FASE C: generazione del codice + afterCompile()
+}
+```
+
+L'intero modello mentale sta in un'unica idea: **ogni fase sa più della precedente.**
+
+- **La fase A** riempie il grafo di definizioni. I **tipi dei servizi non sono ancora noti con certezza**, perché un tipo può provenire dal valore di ritorno di una factory che nessuno ha ancora esaminato.
+- **La fase B** risolve prima tutti i tipi (`resolve`), poi lascia che le estensioni rimodellino il grafo (`beforeCompile`) e infine esegue l'[autowiring |autowiring] degli argomenti (`complete`).
+- **La fase C** trasforma il grafo finito in PHP e lascia che le estensioni intervengano sul codice generato.
+
+È proprio questa conoscenza crescente a rendere la stessa operazione sicura in una fase e inaffidabile in un'altra. Il resto di questa pagina percorre le fasi tenendo a mente questa idea.
+
+
+Fase A: registrazione delle definizioni
+=======================================
+
+In questa fase Nette chiama tre metodi su ogni estensione (`getConfigSchema()`, poi `setConfig()`, poi `loadConfiguration()`), ma in un **ordine attentamente controllato**, perché qui l'ordine conta davvero.
+
+
+Perché l'ordine conta
+---------------------
+
+- **`ParametersExtension` ed `ExtensionsExtension` vengono per prime.** La prima deve girare prima di tutto il resto per poter espandere `%param%` in tutta la configurazione: ogni altra estensione riceve poi la propria sezione con i valori già inseriti. La seconda registra le ulteriori estensioni elencate nella sezione `extensions:`, quindi anche lei deve esistere prima che vengano elaborate le altre.
+- **`ServicesExtension` viene per ultima.** La sezione `services:` dell'utente ha quindi sempre l'ultima parola e può sovrascrivere qualsiasi cosa impostata dalle estensioni.
+- **`InjectExtension` è spostata proprio alla fine**, così che il suo lavoro veda i setup aggiunti da tutte le altre estensioni.
+
+La conclusione per voi: quando il `loadConfiguration()` della vostra estensione viene eseguito, i parametri sono già espansi, ma i servizi dell'utente non ci sono ancora. Questo solo fatto guida quasi tutte le regole temporali qui sotto.
+
+
+Da services: alle definizioni
+-----------------------------
+
+La sezione `services:` dell'utente viene trasformata qui in [oggetti definizione |extensions#Tipi di definizione], nell'ultimo passaggio della fase A. Ogni voce NEON viene normalizzata (le notazioni abbreviate vengono uniformate), ne viene rilevato il tipo (servizio comune, factory, accessor, ...) e nel builder viene creata la definizione corrispondente. È anche il primo momento in cui i semplici argomenti `@name` / `@Type` diventano riferimenti, vedi [qui sotto |#Riferimenti: quando @service diventa un riferimento].
+
+Alla fine della fase A tutte le definizioni sono presenti (ogni estensione e l'utente hanno registrato quel che volevano), ma il quadro non è ancora nitido:
+
+- **i tipi non sono risolti** per le definizioni il cui tipo proviene dal valore di ritorno di una factory,
+- **gli argomenti non hanno subito l'autowiring**,
+- alcuni riferimenti `@service` sono ancora semplici stringhe.
+
+È proprio per questo che qui la ricerca per tipo è inaffidabile: maggiori dettagli [qui sotto |#Esaminare ContainerBuilder: quando è sicuro].
+
+
+Parametri: quando viene espanso %param%
+=======================================
+
+Una delle due domande principali. La risposta è breve: **una sola volta, proprio all'inizio della fase A, in tutto l'albero della configurazione.**
+
+`ParametersExtension` gira per prima e una delle prime cose che fa è espandere i segnaposto `%param%`: prima dentro i parametri stessi (un parametro può fare riferimento a un altro), poi in tutto il resto della configurazione. Quando quindi una qualsiasi altra estensione, compresa `ServicesExtension`, riceve la propria sezione, i segnaposto sono già spariti. Le estensioni lavorano con valori concreti, mai con `%...%`.
+
+Quando un segnaposto è l'intera stringa, il suo valore viene restituito *così com'è*, array e oggetti compresi, quindi `%mailer%` può espandersi in un intero array. In qualsiasi altra posizione viene concatenato in una stringa, e la notazione con il punto `%foo.bar%` raggiunge gli array annidati.
+
+
+Parametri statici e dinamici
+----------------------------
+
+Non tutti i valori si possono incorporare nel codice. Un parametro il cui valore differisce da un ambiente all'altro (una variabile d'ambiente, il `baseUrl` ricavato dalla richiesta) deve restare **dinamico**. Parametri del genere si dichiarano con `setDynamicParameterNames()` oppure con `Expect::...->dynamic()` in uno schema; maggiori dettagli in [Parametri dinamici |application:bootstrapping#Parametri dinamici].
+
+Un parametro dinamico non viene sostituito da un valore, ma da un'espressione che lo legge *in fase di esecuzione*. Perciò `%env.DB_HOST%` non si congela in una stringa: diventa una lettura a runtime nel container generato. Tutto il resto è statico e viene congelato in fase di compilazione, ed è la solita fonte della sorpresa "il valore del mio `getenv()` è uguale in ogni ambiente": il parametro era semplicemente statico.
+
+L'operazione opposta è l'**escaping**: perché un `%` o una `@` letterali non vengano interpretati, si raddoppiano (`%%`, `@@`). Nette lo fa automaticamente per i parametri che inserisce al posto vostro, così i loro valori non vengono mai scambiati per segnaposto o riferimenti.
+
+
+Riferimenti: quando @service diventa un riferimento
+===================================================
+
+La seconda domanda principale. La traduzione di `@service` avviene **in più passaggi, in fasi diverse**, a seconda di quanto la stringa sia complessa. Raramente vi serve seguirla a mano, ma conoscere i passaggi spiega perché alcuni riferimenti si risolvono prima di altri.
+
+- **Analisi (caricamento della configurazione).** Una `@service` usata *come entità*, cioè come la cosa che crea un servizio, come in `Foo(@bar)`, diventa subito un riferimento. Una `@service` usata *come argomento* resta per ora una semplice stringa. Una `@` tra apici viene escapata in `@@`, quindi conta come testo letterale, non come riferimento.
+- **Fase A (`loadConfiguration`).** Quando le definizioni vengono elaborate, un argomento `@name` o `@Type` pulito viene trasformato in un oggetto `Reference`. Questo riguarda solo le forme semplici; `@service::CONST` o una `@` dentro un'espressione più ampia restano per dopo.
+- **Fase B (`complete`).** La vera traduzione "intelligente" avviene qui: `@service` → riferimento, `@service::CONSTANT` → una costante di classe letterale, `@service::property` → la lettura di quella proprietà, `@@x` → il testo letterale `@x`.
+
+C'è una seconda traduzione nascosta nella parola *riferimento* stessa. Un `Reference` può puntare per **nome** oppure per **tipo** (`@Namespace\Type`). Un riferimento per tipo **non è ancora un nome di servizio**: viene risolto in un nome concreto dall'autowiring, e questo avviene solo nel passaggio **complete**, una volta costruito l'indice dell'autowiring. È il ponte verso la sezione successiva: le ricerche dell'autowiring sono volutamente rimandate finché l'indice non è pronto.
+
+| Forma | Diventa riferimento/espressione in | Risolta in un servizio concreto in
+|---|---|---
+| entità (`@foo` come factory) | analisi | complete
+| argomento `@foo`, `@Type` | fase A | complete
+| `@foo::CONST`, `@foo::prop` | fase B | complete
+| riferimento per tipo `@Type` | fase A/B | complete (autowiring)
+
+
+Esaminare ContainerBuilder: quando è sicuro
+===========================================
+
+Ed ecco la domanda che gli autori di estensioni pongono più spesso: **in quale metodo posso cercare i servizi per tipo?** La risposta deriva da una semplice regola su come il builder tiene traccia del proprio stato.
+
+La ricerca **per tipo** (`getByType()`, `getDefinitionByType()`, `findByType()`) richiede che il grafo dei servizi sia *risolto*: ogni tipo noto, l'indice dell'autowiring costruito. Perciò ogni volta che chiamate uno di questi metodi e il grafo è cambiato dall'ultimo resolve, il builder **risolve sul posto l'intero grafo noto**. Durante il resolve stesso, qualsiasi ricerca per tipo è vietata e solleva `NotAllowedDuringResolvingException`.
+
+La ricerca **per tag** (`findByTag()`) non ha questo requisito: i tag non dipendono dai tipi, quindi funziona in **ogni fase**.
+
+Fase per fase:
+
+- **`loadConfiguration()` (fase A): la ricerca per tipo è inaffidabile.** Il grafo è incompleto: le estensioni che girano dopo non hanno ancora registrato i propri servizi e, soprattutto, la sezione `services:` dell'utente (che gira per ultima) non c'è. Una chiamata a `getByType()` funziona, perché provoca un resolve anticipato di un grafo parziale, ma la risposta viene da un quadro incompleto e il resolve prematuro spreca lavoro. Regola pratica: **in `loadConfiguration()` limitatevi a registrare le definizioni; non cercate per tipo.** `findByTag()` va bene.
+- **`beforeCompile()` (fase B): il posto giusto per esaminare.** A questo punto **tutte** le definizioni esistono (comprese quelle dell'utente), i **tipi sono risolti** e l'**indice dell'autowiring è costruito**, quindi `getByType()`, `findByType()` e `findByTag()` restituiscono tutti risposte **affidabili**. Gli argomenti *non* hanno ancora subito l'autowiring: è il passaggio immediatamente successivo (`complete`), dopo tutte le chiamate a `beforeCompile()`. Quando qui modificate una definizione, il successivo `getByType()` risolve di nuovo il grafo in modo trasparente, così potete alternare liberamente modifiche e interrogazioni.
+- **`afterCompile()` (fase C): solo codice.** Lavora sulla classe generata, non sul builder. Il grafo è finito; qui plasmate il PHP risultante.
+
+| Voglio... | Fase
+|---|---
+| registrare un servizio | `loadConfiguration()`
+| cercare per **tag** e modificare le definizioni | `loadConfiguration()` oppure `beforeCompile()`
+| cercare per **tipo** (`getByType`/`findByType`) | **`beforeCompile()`**
+| dipendere dai servizi scelti dall'autowiring per gli argomenti | non in fase di compilazione: esaminatelo a runtime
+| intervenire sul codice generato | `afterCompile()`
+| eseguire codice dopo l'avvio del container | [codice di inizializzazione |extensions#Codice di inizializzazione]
+
+
+Dentro la fase B: resolve e complete
+====================================
+
+La fase B è composta da due passaggi, con in mezzo le chiamate a `beforeCompile()`:
+
+```php
+$this->builder->resolve();     // tipi risolti, indice dell'autowiring costruito
+foreach ($this->extensions as $extension) {
+	$extension->beforeCompile();
+}
+$this->builder->complete();    // SOLO ORA gli argomenti subiscono l'autowiring
+```
+
+**`resolve()`** determina il tipo di ogni servizio (preso dal suo `type` dichiarato oppure dedotto dalla sua factory: il tipo di ritorno di un metodo factory, la classe che istanzia o il servizio a cui punta un riferimento) e costruisce poi l'indice dell'autowiring, che associa ogni tipo (la classe più i suoi genitori e le sue interfacce) a un nome di servizio. Un servizio contrassegnato con `autowired: false` resta fuori dall'indice; `autowired: [A, B]` restringe i tipi sotto i quali è visibile. Fondamentale: il resolve fissa i *tipi*, non gli *argomenti*: per l'autowiring degli argomenti servirebbe l'indice finito, che esiste solo dopo questo passaggio.
+
+**`complete()`** è dove avviene davvero l'autowiring degli argomenti. Per ogni definizione riempie gli argomenti mancanti del costruttore e del setup cercandone i tipi nell'indice ormai completo. È per questo che i riferimenti per tipo erano rimasti irrisolti durante il resolve: la ricerca appartiene a questa fase, quando esiste un indice affidabile in cui cercare.
+
+
+Fase C: generazione del codice
+==============================
+
+`generateCode()` consegna il grafo finito a `PhpGenerator`, che produce una classe che estende `Container` con un metodo `createServiceXxx()` per ogni servizio, più i metadati precalcolati `aliases`, `tags` e `wiring`. Ogni `Statement` diventa testo PHP (`new Foo(...)`, chiamate di metodo, accesso alle proprietà) e ogni `Reference` diventa una chiamata a `$this->getService(...)`.
+
+Le estensioni ottengono poi un ultimo passaggio `afterCompile()` sulla classe generata: è qui che vengono emessi, per esempio, i getter dei parametri statici e dinamici, ed è qui che potete aggiungere il [codice di inizializzazione |extensions#Codice di inizializzazione] che gira a ogni richiesta.
+
+
+La linea del tempo in un'immagine
+=================================
+
+```
+COMPILAZIONE (una volta sola, nella cache)
+│
+├─ carica i file di config        NEON -> Statement/array; unisce i file
+│                                 @ tra apici -> @@ ; entità -> Statement
+│
+▼ Compiler::compile()
+│
+├─ FASE A  processExtensions()
+│   ├─ ParametersExtension (PRIMA) ── %param% ESPANSI in tutta la config
+│   │                                 quelli dinamici -> espressione a runtime
+│   ├─ ExtensionsExtension (PRIMA) ── registra ulteriori estensioni
+│   ├─ ...altre estensioni...      ── loadConfiguration(): solo registrare definizioni
+│   └─ ServicesExtension (ULTIMA)  ── services: -> oggetti Definition
+│                                     @name/@Type -> Reference
+│   [grafo completo per numero; TIPI e ARGOMENTI non ancora; ricerca per tipo inaffidabile]
+│
+├─ FASE B  processBeforeCompile()
+│   ├─ builder.resolve()          ── risolve tutti i tipi; costruisce l'indice autowiring
+│   │                                [tipi pronti; indice pronto]
+│   ├─ beforeCompile() estensioni ── qui getByType/findByType/findByTag SICURI
+│   │                                (gli argomenti non hanno ancora l'autowiring)
+│   └─ builder.complete()         ── autowiring degli ARGOMENTI; fine traduzione riferimenti
+│                                    riferimenti per tipo -> nomi di servizio
+│
+└─ FASE C  generateCode()
+    ├─ PhpGenerator.generate()    ── Statement -> PHP; metodi createServiceXxx()
+    ├─ afterCompile() estensioni  ── ritocca il codice; emette i getter dei parametri
+    └─ toString()                 ── codice PHP finale -> cache
+
+────────────────────────────────────────────────────────────
+
+ESECUZIONE (a ogni richiesta)
+│
+├─ new Container($dynamicParams)
+├─ initialize()                   ── codice di avvio delle estensioni (sessione, header, validazione)
+└─ getService()/getByType()       ── istanze pigre dai metadati precalcolati
+```
+
+
+Fraintendimenti comuni
+======================
+
+- "In `loadConfiguration()` cercherò i servizi per tipo." No: il grafo è incompleto (la sezione `services:` dell'utente gira dopo di voi) e `getByType()` provoca un resolve prematuro di un grafo parziale. Spostatelo in `beforeCompile()`. `findByTag()` va bene anche qui.
+- "Il valore di un `getenv()` in un parametro sarà diverso in ogni ambiente." Solo se il parametro è dinamico. Altrimenti viene incorporato in fase di compilazione e resta uguale ovunque.
+- "Un riferimento `@Type` è già un nome di servizio." Non lo è: è un riferimento per tipo, risolto in un nome concreto dall'autowiring solo nel passaggio complete.
+- "La mia estensione legge un file di supporto, ma le modifiche non compaiono." Registratelo con `$builder->addDependency($file)`, altrimenti la cache non ne sa nulla e non ricostruirà.
+- "Durante `resolve()` posso chiamare `getByType()`." No: solleva `NotAllowedDuringResolvingException`. La ricerca per tipo appartiene a `beforeCompile()` o a fasi successive, mai in mezzo al resolve.

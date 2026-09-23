@@ -1,0 +1,268 @@
+Champs de formulaire personnalisés
+**********************************
+
+.[perex]
+Nette propose une large palette de [champs de formulaire intégrés |controls]. Mais lorsque vous vous heurtez à un besoin qui n'y figure pas, vous n'avez rien à contourner ni à bricoler : vous écrivez votre propre champ. Il saura faire tout ce que font les champs intégrés - se valider, se traduire, se rendre - et il s'utilisera exactement de la même façon.
+
+Nous le montrerons sur un exemple concret : un champ de saisie de date à l'aide de trois cases, jour, mois et année. Chemin faisant, vous apprendrez tout ce qu'il faut savoir pour écrire un champ.
+
+
+Quand écrire un champ personnalisé et quand s'en abstenir
+=========================================================
+
+Un champ personnalisé est l'outil le plus puissant qu'offrent les formulaires. Et comme tout outil puissant, il devrait être le dernier choix, pas le premier. Beaucoup de situations se règlent par des moyens plus simples :
+
+- **Modifier une valeur** relève d'[addFilter() |validation#Modifier les valeurs saisies]. Vous voulez tolérer les espaces dans un code postal ou les minuscules dans un code ? Un filtre tient en quelques lignes.
+- **Une configuration répétée** s'emballe dans une méthode d'ajout personnalisée. Vous ajoutez à dix endroits un champ de code postal avec la même validation ? Créez-leur un raccourci nommé, [nous le montrerons à la fin |#Méthode d'ajout personnalisée].
+- **Un groupe de champs liés** est servi par un [conteneur |controls#addContainer()]. Une adresse composée de la rue, de la ville et du code postal n'a pas besoin d'un champ personnalisé, un conteneur avec trois champs texte suffit.
+- **Une apparence différente** s'obtient avec [setHtmlType() |controls#addText()] et les attributs HTML, ou avec les [prototypes |rendering#Prototypes].
+
+Un champ personnalisé prend tout son sens dès que vous avez besoin d'une **valeur propre** : un champ qui, vu de l'extérieur, se comporte comme un seul champ portant une seule valeur, mais qui se compose en interne de plusieurs inputs ou stocke la valeur autrement qu'il ne l'affiche. Une date à partir de trois cases. Des coordonnées choisies en cliquant sur une carte. Une saisie de tags avec autocomplétion.
+
+
+Anatomie d'un champ
+===================
+
+Chaque champ personnalisé hérite de la classe abstraite [api:Nette\Forms\Controls\BaseControl]. Il en hérite une énorme quantité de fonctionnalités toutes prêtes : le stockage de la valeur, les règles et conditions de validation, les messages d'erreur, les traductions, les attributs HTML, le label et le lien avec le rendu. Vous n'écrivez que ce qui distingue votre champ.
+
+Un champ fonctionnel minimal est étonnamment court :
+
+```php
+use Nette\Forms\Form;
+use Nette\Forms\Helpers;
+use Nette\Utils\Html;
+
+class SimpleInput extends Nette\Forms\Controls\BaseControl
+{
+	public function loadHttpData(): void
+	{
+		$this->setValue($this->getHttpData(Form::DataLine));
+	}
+
+	public function getControl(): Html
+	{
+		return Html::el('input', [
+			'type' => 'text',
+			'name' => $this->getHtmlName(),
+			'id' => $this->getHtmlId(),
+			'value' => $this->getValue(),
+			'data-nette-rules' => Helpers::exportRules($this->getRules()) ?: null,
+		]);
+	}
+}
+```
+
+Deux méthodes : l'une dit comment obtenir la valeur à partir des données soumises, l'autre comment rendre le champ. Nous allons les examiner de près dans un instant. Tout le reste - `setRequired()`, `addRule()`, `setDefaultValue()`, les traductions - fonctionne déjà tout seul.
+
+Vous ajoutez le champ au formulaire avec la méthode `addComponent()`, ou plus brièvement à l'aide des crochets :
+
+```php
+$form['nickname'] = new SimpleInput('Pseudo :');
+```
+
+
+Cycle de vie d'un champ
+=======================
+
+Avant d'en venir à un champ plus intéressant, il est bon de savoir ce qui arrive à un champ, et quand. Le formulaire et ses champs sont des [composants |component-model:] formant un arbre. Cela a une conséquence agréable : le champ n'a rien à découvrir tout seul, le framework s'occupe de tout ce qui compte au bon moment :
+
+1) Dès que vous rattachez le champ à un formulaire soumis, le formulaire lui-même appelle `loadHttpData()` dessus. Le champ y lit la valeur qui lui a été soumise, comme nous allons le montrer. Il ne travaille jamais directement avec `$_POST` et n'a pas du tout à se soucier de savoir s'il est imbriqué dans des conteneurs.
+
+2) Lors de la soumission du formulaire, la validation a lieu : les règles ajoutées par `addRule()` sont évaluées et travaillent avec la valeur de `getValue()`.
+
+3) Celui qui appelle ensuite `$form->getValues()` ou `getValue()` sur le champ obtient une valeur propre et typée - par exemple un objet `DateTimeImmutable`, et non un trio de chaînes venu du formulaire.
+
+Et lors du rendu, c'est `getControl()` qui est appelée, ou `getLabel()` pour le label.
+
+
+Lire la valeur soumise
+======================
+
+Dans la méthode `loadHttpData()`, le champ demande la valeur qui lui a été soumise à l'aide de la méthode `getHttpData()`. Son paramètre est un type qui détermine la façon dont la valeur doit être nettoyée :
+
+| type | signification
+|-------
+| `Form::DataLine` | texte sur une ligne : remplace les sauts de ligne par des espaces, supprime les espaces aux extrémités
+| `Form::DataText` | texte multiligne : normalise les fins de ligne en `\n`
+| `Form::DataFile` | upload, une instance de `Nette\Http\FileUpload`
+
+Quels que soient les efforts d'un attaquant, le résultat est toujours une chaîne UTF-8 valide sans caractères de contrôle (ou un objet d'upload, ou `null`). C'est exactement pour cela que nous ne lisons jamais la valeur directement dans `$_POST` : nous perdrions toutes ces garanties.
+
+Un champ composé de plusieurs inputs, comme notre date, passe en second paramètre une partie du nom HTML et lit ainsi ses différentes sous-valeurs. Il les stocke dans ses propres propriétés `$day`, `$month` et `$year` de type string :
+
+```php
+public function loadHttpData(): void
+{
+	$this->day = $this->getHttpData(Form::DataLine, '[day]') ?? '';
+	$this->month = $this->getHttpData(Form::DataLine, '[month]') ?? '';
+	$this->year = $this->getHttpData(Form::DataLine, '[year]') ?? '';
+}
+```
+
+Si le nom HTML se termine par `[]`, un tableau de valeurs est renvoyé. En le combinant avec le type `Form::DataKeys` (c'est-à-dire `Form::DataLine | Form::DataKeys`), vous en conservez aussi les clés :
+
+```php
+$tags = $this->getHttpData(Form::DataLine, '[tags][]');
+```
+
+Une valeur manquante vaut `null` (un tableau vide pour les tableaux). La requête n'est pas obligée de contenir les données du champ, rien n'empêche un attaquant d'envoyer ce qu'il veut - c'est pourquoi nous ajoutons `?? ''` dans l'exemple et pourquoi vous devriez toujours prévoir cette éventualité.
+
+
+La valeur du champ
+==================
+
+Le champ conserve sa valeur et l'expose par un trio de méthodes dont il vaut mieux respecter le contrat.
+
+La méthode `setValue()` accepte une valeur venant du programmeur - c'est aussi le chemin qu'empruntent `setDefaultValue()` et `$form->setDefaults()`. Elle devrait accepter tout ce qui a du sens, convertir la valeur dans sa forme interne et lever une exception sur une entrée absurde, pour que l'erreur apparaisse tout de suite et non à travers un comportement mystérieux du formulaire. Notre date accepte un `DateTimeInterface`, une chaîne, un timestamp ou `null`, et les répartit dans les trois cases :
+
+```php
+public function setValue(mixed $value): static
+{
+	if ($value === null) {
+		$this->day = $this->month = $this->year = '';
+	} else {
+		$date = Nette\Utils\DateTime::from($value); // une absurdité lève une exception
+		$this->day = $date->format('j');
+		$this->month = $date->format('n');
+		$this->year = $date->format('Y');
+	}
+	return $this;
+}
+```
+
+La méthode `getValue()`, à l'inverse, compose une valeur propre et typée - la seule que verra l'utilisateur de votre champ. Si la valeur n'est pas valide, elle renvoie `null`. La méthode statique `validateDate()` vérifie simplement que les trois cases forment une date existante :
+
+```php
+public function getValue(): ?DateTimeImmutable
+{
+	return self::validateDate($this)
+		? (new DateTimeImmutable)->setDate((int) $this->year, (int) $this->month, (int) $this->day)->setTime(0, 0)
+		: null;
+}
+```
+
+Et la méthode `isFilled()` dit si l'utilisateur a rempli le champ - c'est la règle `setRequired()` qui l'utilise. L'implémentation par défaut (une valeur non vide) suffit souvent, mais pour un champ composite, redéfinissez-la selon sa logique :
+
+```php
+public function isFilled(): bool
+{
+	return $this->day !== '' || $this->year !== '';
+}
+```
+
+
+Rendu
+=====
+
+La méthode `getControl()` renvoie la forme HTML du champ, généralement comme objet [Html |utils:html-elements], mais une simple chaîne convient tout aussi bien - cela n'a pas d'importance. Nous recourons à l'objet Html surtout pour assembler le code, car il nous permet de construire le balisage résultant en toute sécurité et avec une API agréable. Vous disposez de plusieurs aides :
+
+- `getHtmlName()` renvoie l'attribut HTML `name`, imbrication éventuelle dans des conteneurs comprise (par exemple `invoice[date]`). Pour un champ composite, vous y ajoutez les parties de nom des différents inputs : `$name . '[day]'`.
+- `getHtmlId()` renvoie l'attribut `id` relié au label.
+- `Helpers::exportRules($this->getRules())` exporte les règles de validation pour l'attribut `data-nette-rules`, grâce auquel la [validation JavaScript |validation#Validation JavaScript] fonctionnera aussi pour votre champ. Cet attribut a sa place sur le premier input du champ.
+- `Helpers::createSelectBox($items, $optionAttrs, $selected)` assemble un élément `<select>` à partir d'un tableau d'éléments (les tableaux imbriqués sont rendus en `<optgroup>`) et le renvoie sous forme d'`Html` - pratique pour la case du mois de notre date.
+- `Helpers::createInputList($items, $inputAttrs, $labelAttrs)` génère une liste d'éléments `<input>` enveloppés dans des `<label>` (boutons radio ou cases à cocher) et la renvoie sous forme de chaîne.
+
+La première case de notre date se crée donc ainsi :
+
+```php
+public function getControl(): Html
+{
+	$name = $this->getHtmlName();
+	return Html::el()
+		->addHtml(Html::el('input', [
+			'name' => $name . '[day]',
+			'id' => $this->getHtmlId(),
+			'value' => $this->day,
+			'type' => 'number',
+			'data-nette-rules' => Helpers::exportRules($this->getRules()) ?: null,
+		]))
+		->addHtml(/* ... select pour le mois et input pour l'année ... */);
+}
+```
+
+Le label est rendu par `getLabel()` et son implémentation par défaut convient généralement. Attention seulement : pour un champ composite, son attribut `for` pointe vers `getHtmlId()`, donnez donc cet id au premier input - exactement comme dans l'exemple.
+
+Pour que le champ composite puisse être rendu partie par partie dans un template (par exemple `{input birthdate:day}`), redéfinissez les méthodes `getControlPart($key)` et `getLabelPart($key)`, qui renvoient l'élément `Html` de la partie donnée - de la même façon que le font `CheckboxList` et `RadioList`.
+
+.[note]
+Si vous redéfinissez `getControl()`, gardez à l'esprit que `BaseControl::getControl()` marque aussi le champ comme rendu via `setOption('rendered', true)`. Appelez-la également (ou appelez `parent::getControl()`) lorsque vous combinez le rendu manuel et automatique d'un même formulaire, afin que le champ ne soit pas rendu deux fois. (L'exemple `DateInput` ci-dessus l'omet par souci de concision.)
+
+
+Exemple complet : DateInput
+===========================
+
+Toutes les pièces décrites réunies, complétées par une liste déroulante pour choisir le mois, se trouvent dans le champ `DateInput` terminé, parmi les [exemples présents dans le dépôt |https://github.com/nette/forms/blob/master/examples/custom-control.php].
+
+Remarquez que, dans le constructeur, le champ s'ajoute à lui-même une règle de validation qui vérifie que la date a un sens. Une entrée absurde, comme le 31 février, se manifeste ainsi par une simple erreur de validation du formulaire :
+
+```php
+public function __construct($label = null)
+{
+	parent::__construct($label);
+	$this->addRule(self::validateDate(...), 'La date est invalide.');
+}
+```
+
+Et l'utilisation ? Exactement comme avec les champs intégrés :
+
+```php
+$form['birthdate'] = (new DateInput('Date de naissance :'))
+	->setDefaultValue(new DateTime('2000-01-01'))
+	->setRequired('Quand êtes-vous né ?');
+
+$date = $form->getValues()->birthdate; // ?DateTimeImmutable
+```
+
+Dans un template Latte, vous le rendez avec la balise habituelle `{input birthdate}` ou `{label birthdate /}`, comme n'importe quel autre champ.
+
+
+Validation
+==========
+
+Les règles de validation intégrées fonctionnent immédiatement avec un champ personnalisé - elles travaillent sur la valeur de `getValue()`. Notre `DateInput` peut ainsi utiliser, par exemple, `Form::Min` pour la date la plus ancienne autorisée. La façon d'écrire vos propres règles, y compris leur pendant JavaScript, est décrite dans le chapitre [Règles et conditions personnalisées |validation#Règles et conditions personnalisées].
+
+
+Méthode d'ajout personnalisée
+=============================
+
+Nous ajoutons les champs intégrés avec les méthodes commodes `$form->addText()` et consorts. Un champ personnalisé n'a pas de telle méthode, vous l'ajoutez donc par simple affectation - cela fonctionne pareillement dans un formulaire et dans un conteneur, et les éditeurs comme l'analyse statique le comprennent :
+
+```php
+$form['birthdate'] = new DateInput('Date de naissance :');
+```
+
+Si vous voulez raccourcir l'ajout tout en conservant l'autocomplétion, une méthode fabrique statique posée directement sur le champ est bien pratique. Elle fonctionne même dans des conteneurs imbriqués, ce qu'une méthode sur un descendant de la classe `Form` ne saurait faire - les conteneurs imbriqués ne la connaissent pas :
+
+```php
+class DateInput extends Nette\Forms\Controls\BaseControl
+{
+	public static function addTo(
+		Nette\Forms\Container $container,
+		string $name,
+		?string $label = null,
+	): self {
+		return $container[$name] = new self($label);
+	}
+}
+
+// fonctionne dans un formulaire et dans n'importe quel conteneur :
+DateInput::addTo($form, 'birthdate', 'Date de naissance :');
+```
+
+La même approche fonctionne aussi comme raccourci nommé pour une configuration répétée d'un champ intégré :
+
+```php
+final class ZipInput
+{
+	public static function addTo(
+		Nette\Forms\Container $container,
+		string $name,
+		?string $label = null,
+	): Nette\Forms\Controls\TextInput {
+		return $container->addText($name, $label)
+			->addRule(Nette\Forms\Form::Pattern, 'Le code postal doit comporter exactement 5 chiffres', '[0-9]{5}');
+	}
+}
+
+ZipInput::addTo($form, 'zip', 'Code postal :');
+```

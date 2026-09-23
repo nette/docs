@@ -1,0 +1,183 @@
+SSRF Koruması
+*************
+
+.[perex]
+Uygulamanız kullanıcının verdiği bir URL'yi indirdiğinde, bir saldırgan bunu iç ağınıza ulaşmak için kötüye kullanabilir. [#UrlValidator] ve [#IPAddress] sınıfları, bu Server-Side Request Forgery (SSRF) saldırılarına karşı korunmanıza yardım eder.
+
+→ [Kurulum ve gereksinimler |@home#Kurulum]
+
+
+SSRF Nedir?
+===========
+
+Kullanıcının bir URL girdiği ve sunucunuzun onu indirdiği bir özellik düşünün: uzak bir adresten alınan avatar, bir webhook hedefi, bir bağlantı önizlemesi. Zararsız görünür, ama adrese kullanıcının tarayıcısı değil sunucu ulaşır. Ve sunucu, saldırganın göremeyeceği yerleri görebilir: loopback arayüzünü, özel ağı, bulut servislerini.
+
+Bu yüzden saldırgan, genel internet yerine içeriye işaret eden bir URL gönderir. Tipik hedefler şunlardır:
+
+- erişim anahtarlarını sızdırabilen `http://169.254.169.254/` adresindeki bulut meta verileri
+- `http://192.168.1.1/` gibi iç yönetim panelleri ve yönlendiriciler
+- `http://localhost:6379/` adresindeki Redis gibi kimlik doğrulaması olmayan servisler
+
+Bu açık sınıfı o kadar yaygın ki [OWASP Top 10 |https://owasp.org/Top10/] listesinde yer alıyor. Savunma, URL'yi getirmeden **önce** doğrulamak ve genel olmayan bir adrese çözülen her şeyi reddetmektir.
+
+
+UrlValidator
+============
+
+[api:Nette\Http\UrlValidator], bir URL'yi yapılandırılabilir bir ilkeye göre denetler: şema, port, host, userinfo ve host'un çözüldüğü IP adresleri. Temel kullanım tek bir çağrıdır:
+
+```php
+use Nette\Http\UrlValidator;
+
+if (!(new UrlValidator)->allows($userUrl)) {
+	return; // güvensiz URL, onu getirme
+}
+```
+
+Varsayılan ilke bilinçli olarak katıdır; yalnızca genel bir IP adresine işaret eden, 443 portundaki `https` adresini kabul eder. Geri kalan her şey (loopback, özel aralıklar, bulut meta verileri dahil link-local, ayrılmış aralıklar) reddedilir; multicast ise koşulsuz reddedilir. Kullanıcının verdiği rastgele URL'leri getirmek için doğru başlangıç noktası budur.
+
+
+İlkeyi Yapılandırma
+-------------------
+
+İlkeyi yapıcı üzerinden biçimlendirirsiniz. Örneğin, herhangi bir portta düz `http` kullanımına ve özel adreslere ulaşmaya izin vermek için (güvenilir bir ağın içinde yararlıdır):
+
+```php
+$validator = new UrlValidator(
+	schemes: ['http', 'https'],
+	ports: null, // herhangi bir port
+	allowPrivateIps: true,
+);
+```
+
+Yaygın bir kalıp, bir host izin listesiyle getirmeyi sabit bir iş ortağı alan adı kümesiyle sınırlamaktır. `*.` öneki herhangi bir alt alan derinliğiyle eşleşir, ama kök alan adıyla eşleşmez; gerekiyorsa her iki biçimi de listeleyin:
+
+```php
+$validator = new UrlValidator(
+	hostAllowlist: ['example.com', '*.example.com'],
+);
+```
+
+Yapıcı seçeneklerinin tamamı:
+
+| Parametre | Varsayılan | Anlamı
+|---------------------
+| `schemes` | `['https']` | izin verilen şemalar; `[]` her şeyi reddeder
+| `ports` | `[443]` | izin verilen portlar, `null` = herhangi biri; şemadan gelen örtük port dikkate alınır
+| `allowPrivateIps` | `false` | özel aralıklara izin ver (10/8, 172.16/12, 192.168/16, fc00::/7)
+| `allowLoopback` | `false` | loopback'e izin ver (127.0.0.0/8, ::1)
+| `allowLinkLocal` | `false` | bulut meta verileri 169.254.169.254 dahil link-local'a izin ver
+| `allowReserved` | `false` | IANA tarafından ayrılmış aralıklara izin ver
+| `allowUserinfo` | `false` | URL'de `user:pass@` kullanımına izin ver
+| `hostAllowlist` | `null` | ayarlıysa host bir desene uymalı; `[]` hepsini reddeder
+| `hostBlocklist` | `null` | ayarlıysa host hiçbir desene uymamalı
+
+
+Doğrulama Metotları
+-------------------
+
+Doğrulayıcı üç metot sunar. `allows()`, DNS çözümü dahil tam denetimi çalıştırır; host çözülür ve **her** A/AAAA adresi IP ilkesini geçmelidir:
+
+```php
+(new UrlValidator)->allows($url); // bool
+```
+
+`allowsWithoutDns()`, DNS çözümünü ve IP aralığı denetimlerini atlar. Onu hızlı bir ön süzgeç olarak ya da DNS doğrulaması getirme katmanına devredildiğinde kullanın:
+
+```php
+(new UrlValidator)->allowsWithoutDns($url); // bool
+```
+
+Her iki metot da bir dize, bir [UrlImmutable |urls#UrlImmutable] nesnesi ya da `null` (her zaman başarısız olur) kabul eder.
+
+
+DNS Rebinding'i Etkisiz Kılma
+-----------------------------
+
+Doğrulama ile getirme arasında ince bir yarış vardır: bir saldırgan, siz host'u doğrularken güvenli bir IP döndürüp, asıl indirme için DNS'i iç bir IP'ye çevirebilir. Bu açığı kapatmak için `getResolvedIPs()`, doğrulanmış IP adreslerini döndürür; siz de bağlantıyı onlara sabitlersiniz, böylece getirme başka bir yere yönlendirilemez:
+
+```php
+$ips = (new UrlValidator)->getResolvedIPs($url);
+if (!$ips) {
+	return; // güvensiz URL
+}
+
+$ch = curl_init($url);
+$host = parse_url($url, PHP_URL_HOST);
+curl_setopt($ch, CURLOPT_RESOLVE, ["$host:443:" . implode(',', $ips)]);
+// ... isteği çalıştır
+```
+
+Metot, tam ilkeyi geçen IP dizelerinden oluşan bir dizi (önce A kayıtları, sonra AAAA) ya da herhangi bir başarısızlıkta boş bir dizi döndürür. URL'deki bir IP sabiti için adresi doğrudan doğrular ve hiçbir DNS sorgusu yapmaz.
+
+
+IPAddress
+=========
+
+[api:Nette\Http\IPAddress], IPv4 ve IPv6 adresleriyle çalışmaya yarayan değişmez bir değer nesnesidir. `UrlValidator` onu içeride kullanır, ama adresleri sınıflandırdığınız her yerde kendi başına da kullanışlıdır. Yapıcı, geçersiz bir adreste `Nette\InvalidArgumentException` fırlatır:
+
+```php
+use Nette\Http\IPAddress;
+
+$ip = new IPAddress('169.254.169.254');
+echo $ip; // '169.254.169.254'
+```
+
+İstisna istemediğinizde `tryFrom()` factory'sini ya da `isValid()` denetleyicisini kullanın:
+
+```php
+$ip = IPAddress::tryFrom($input); // ?IPAddress
+IPAddress::isValid($input);       // bool
+```
+
+
+Adres Sınıflandırması
+---------------------
+
+Yüklemler, bir adresin hangi sınıfa ait olduğunu söyler. En önemlisi `isPublic()`; yalnızca genel olarak yönlendirilebilir adreslerde true döndürür ve bir SSRF koruması tam da bunu ister:
+
+```php
+$ip = new IPAddress('169.254.169.254');
+$ip->isPublic();    // false
+$ip->isLinkLocal(); // true (bulut meta verileri aralığı)
+```
+
+Yüklemlerin tamamı:
+
+| Metot | Neyi sınar
+|--------------------
+| `isPublic()` | genel olarak yönlendirilebilir (aşağıdakilerin hiçbiri değil)
+| `isPrivate()` | RFC 1918 / 4193 özel aralıkları
+| `isLoopback()` | 127.0.0.0/8, ::1
+| `isLinkLocal()` | 169.254.0.0/16 (bulut meta verileri dahil), fe80::/10
+| `isMulticast()` | 224.0.0.0/4, ff00::/8
+| `isReserved()` | IANA tarafından ayrılmış (dokümantasyon, CGNAT, gelecekte kullanım, …)
+
+
+Aralık Üyeliği
+--------------
+
+`isInRange()`, adresin bir CIDR bloğunun içine düşüp düşmediğini sınar. Önekli bir ağ ya da tam eşleşme için çıplak bir adres verebilirsiniz (IPv4'te örtük /32, IPv6'da /128):
+
+```php
+$ip = new IPAddress('192.168.1.50');
+$ip->isInRange('192.168.0.0/16'); // true
+$ip->isInRange('10.0.0.1');       // false (tam eşleşme)
+```
+
+Bozuk girdi ya da farklı bir IP ailesi `false` döndürür.
+
+
+IPv4 Eşlemeli IPv6
+------------------
+
+IPv4 eşlemeli IPv6 olarak yazılan adresler (`::ffff:127.0.0.1` gibi), saf filtreleri atlatmanın klasik bir yoludur. `IPAddress` onları normalleştirir, böylece aralık yüklemleri kılık değiştirmeyi görür:
+
+```php
+$ip = new IPAddress('::ffff:127.0.0.1');
+$ip->isLoopback();   // true
+$ip->isIPv4Mapped(); // true
+$ip->toIPv4();       // IPAddress('127.0.0.1')
+```
+
+`isIPv4()` ve `isIPv6()` metotları metinsel biçimi bildirir: eşlemeli bir adres IPv4 değil IPv6'dır.

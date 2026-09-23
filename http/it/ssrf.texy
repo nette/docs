@@ -1,0 +1,183 @@
+Protezione SSRF
+***************
+
+.[perex]
+Quando la vostra applicazione scarica un URL fornito dall'utente, un attaccante può abusarne per raggiungere la vostra rete interna. Le classi [#UrlValidator] e [#IPAddress] vi aiutano a difendervi da questi attacchi Server-Side Request Forgery (SSRF).
+
+→ [Installazione e requisiti |@home#Installazione]
+
+
+Che cos'è l'SSRF?
+=================
+
+Immaginate una funzione in cui l'utente inserisce un URL e il vostro server lo scarica: un avatar da un indirizzo remoto, la destinazione di un webhook, l'anteprima di un link. Sembra innocuo, ma a raggiungere l'indirizzo è il server, non il browser dell'utente. E il server vede posti che l'attaccante non vede: l'interfaccia di loopback, la rete privata, i servizi cloud.
+
+L'attaccante invia perciò un URL che punta verso l'interno invece che verso l'internet pubblica. Gli obiettivi tipici sono:
+
+- i metadati cloud su `http://169.254.169.254/`, da cui possono uscire chiavi di accesso
+- pannelli di amministrazione interni e router come `http://192.168.1.1/`
+- servizi senza autenticazione, per esempio Redis su `http://localhost:6379/`
+
+Questa classe di vulnerabilità è così diffusa da figurare nella [OWASP Top 10 |https://owasp.org/Top10/]. La difesa consiste nel validare l'URL **prima** di scaricarlo e nel rifiutare tutto ciò che si risolve in un indirizzo non pubblico.
+
+
+UrlValidator
+============
+
+[api:Nette\Http\UrlValidator] verifica un URL rispetto a una policy configurabile: lo schema, la porta, l'host, le userinfo e gli indirizzi IP in cui l'host si risolve. L'uso di base è una sola chiamata:
+
+```php
+use Nette\Http\UrlValidator;
+
+if (!(new UrlValidator)->allows($userUrl)) {
+	return; // URL non sicuro, non scaricarlo
+}
+```
+
+La policy predefinita è volutamente severa: accetta solo `https` sulla porta 443 che punta a un indirizzo IP pubblico. Tutto il resto (loopback, intervalli privati, link-local compresi i metadati cloud, intervalli riservati) viene rifiutato, e il multicast viene rifiutato senza condizioni. È il punto di partenza giusto per scaricare URL arbitrari forniti dagli utenti.
+
+
+Configurare la policy
+---------------------
+
+La policy la modellate tramite il costruttore. Per esempio, per consentire il semplice `http` su qualsiasi porta e raggiungere indirizzi privati (utile dentro una rete fidata):
+
+```php
+$validator = new UrlValidator(
+	schemes: ['http', 'https'],
+	ports: null, // qualsiasi porta
+	allowPrivateIps: true,
+);
+```
+
+Un modello frequente è limitare lo scaricamento a un insieme fisso di domini partner con una allowlist di host. Il prefisso `*.` corrisponde a qualsiasi profondità di sottodominio ma non al dominio principale: se vi serve, elencate entrambe le forme:
+
+```php
+$validator = new UrlValidator(
+	hostAllowlist: ['example.com', '*.example.com'],
+);
+```
+
+L'insieme completo delle opzioni del costruttore:
+
+| Parametro | Predefinito | Significato
+|---------------------
+| `schemes` | `['https']` | schemi consentiti; `[]` rifiuta tutto
+| `ports` | `[443]` | porte consentite, `null` = qualsiasi; la porta implicita dello schema viene rispettata
+| `allowPrivateIps` | `false` | consente gli intervalli privati (10/8, 172.16/12, 192.168/16, fc00::/7)
+| `allowLoopback` | `false` | consente il loopback (127.0.0.0/8, ::1)
+| `allowLinkLocal` | `false` | consente il link-local compresi i metadati cloud 169.254.169.254
+| `allowReserved` | `false` | consente gli intervalli riservati IANA
+| `allowUserinfo` | `false` | consente `user:pass@` nell'URL
+| `hostAllowlist` | `null` | se impostato, l'host deve corrispondere a un pattern; `[]` rifiuta tutto
+| `hostBlocklist` | `null` | se impostato, l'host non deve corrispondere ad alcun pattern
+
+
+Metodi di validazione
+---------------------
+
+Il validatore offre tre metodi. `allows()` esegue il controllo completo compresa la risoluzione DNS: l'host viene risolto e **ogni** indirizzo A/AAAA deve superare la policy sugli IP:
+
+```php
+(new UrlValidator)->allows($url); // bool
+```
+
+`allowsWithoutDns()` salta la risoluzione DNS e i controlli sugli intervalli di IP. Usatelo come pre-filtro veloce, oppure quando la validazione DNS è delegata al livello che scarica:
+
+```php
+(new UrlValidator)->allowsWithoutDns($url); // bool
+```
+
+Entrambi i metodi accettano una stringa, un oggetto [UrlImmutable |urls#UrlImmutable] oppure `null` (che fallisce sempre).
+
+
+Sconfiggere il DNS rebinding
+----------------------------
+
+Tra la validazione e lo scaricamento c'è una sottile corsa: l'attaccante può restituire un IP sicuro quando validate l'host e poi spostare il DNS su un IP interno per lo scaricamento vero e proprio. Per chiudere questa falla, `getResolvedIPs()` restituisce gli indirizzi IP validati e voi fissate la connessione a essi, così lo scaricamento non può essere dirottato altrove:
+
+```php
+$ips = (new UrlValidator)->getResolvedIPs($url);
+if (!$ips) {
+	return; // URL non sicuro
+}
+
+$ch = curl_init($url);
+$host = parse_url($url, PHP_URL_HOST);
+curl_setopt($ch, CURLOPT_RESOLVE, ["$host:443:" . implode(',', $ips)]);
+// ... esecuzione della richiesta
+```
+
+Il metodo restituisce un array di stringhe IP (prima i record A, poi gli AAAA) che hanno superato la policy completa, oppure un array vuoto in caso di fallimento. Per un IP scritto letteralmente nell'URL valida direttamente l'indirizzo e non esegue alcuna ricerca DNS.
+
+
+IPAddress
+=========
+
+[api:Nette\Http\IPAddress] è un oggetto valore immutabile per lavorare con gli indirizzi IPv4 e IPv6. `UrlValidator` lo usa internamente, ma torna utile anche da solo ogni volta che classificate degli indirizzi. Il costruttore lancia `Nette\InvalidArgumentException` per un indirizzo non valido:
+
+```php
+use Nette\Http\IPAddress;
+
+$ip = new IPAddress('169.254.169.254');
+echo $ip; // '169.254.169.254'
+```
+
+Quando non volete un'eccezione, usate la factory `tryFrom()` oppure il controllo `isValid()`:
+
+```php
+$ip = IPAddress::tryFrom($input); // ?IPAddress
+IPAddress::isValid($input);       // bool
+```
+
+
+Classificazione degli indirizzi
+-------------------------------
+
+I predicati vi dicono a quale classe appartiene un indirizzo. Quello chiave è `isPublic()`: vero solo per gli indirizzi instradabili pubblicamente, che è esattamente ciò che serve a una difesa SSRF:
+
+```php
+$ip = new IPAddress('169.254.169.254');
+$ip->isPublic();    // false
+$ip->isLinkLocal(); // true (intervallo dei metadati cloud)
+```
+
+L'insieme completo dei predicati:
+
+| Metodo | Verifica
+|--------------------
+| `isPublic()` | instradabile pubblicamente (nessuno dei casi sotto)
+| `isPrivate()` | intervalli privati RFC 1918 / 4193
+| `isLoopback()` | 127.0.0.0/8, ::1
+| `isLinkLocal()` | 169.254.0.0/16 (compresi i metadati cloud), fe80::/10
+| `isMulticast()` | 224.0.0.0/4, ff00::/8
+| `isReserved()` | riservati IANA (documentazione, CGNAT, uso futuro, ...)
+
+
+Appartenenza a un intervallo
+----------------------------
+
+`isInRange()` verifica se l'indirizzo rientra in un blocco CIDR. Potete passare una rete con un prefisso, oppure un semplice indirizzo per una corrispondenza esatta (implicitamente /32 per IPv4, /128 per IPv6):
+
+```php
+$ip = new IPAddress('192.168.1.50');
+$ip->isInRange('192.168.0.0/16'); // true
+$ip->isInRange('10.0.0.1');       // false (corrispondenza esatta)
+```
+
+Un input malformato o una famiglia di IP diversa restituisce `false`.
+
+
+IPv6 con IPv4 mappato
+---------------------
+
+Gli indirizzi scritti come IPv6 con IPv4 mappato (per esempio `::ffff:127.0.0.1`) sono un modo classico per aggirare i filtri ingenui. `IPAddress` li normalizza, così i predicati sugli intervalli vedono oltre il travestimento:
+
+```php
+$ip = new IPAddress('::ffff:127.0.0.1');
+$ip->isLoopback();   // true
+$ip->isIPv4Mapped(); // true
+$ip->toIPv4();       // IPAddress('127.0.0.1')
+```
+
+I metodi `isIPv4()` e `isIPv6()` riportano la forma testuale: un indirizzo mappato è IPv6, non IPv4.

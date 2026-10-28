@@ -1,0 +1,226 @@
+ACL: role, zdroje a pravidla
+****************************
+
+.[perex]
+Potřebujete řídit přístup podle rolí uživatelů a částí webu? Třeba kdo smí hlasovat v anketách, kdo komentovat a kdo spravovat články? Třída [api:Nette\Security\Permission] vám umožní sepsat tato pravidla přehledně na jednom místě, včetně dědičnosti rolí a zdrojů.
+
+→ [Instalace a požadavky |@home#Instalace]
+
+ACL (Access Control List) je jeden z [voterů |authorization#Smí tenhle uživatel upravit tenhle článek?]: když se zeptáte `$user->isAllowed('poll', 'vote')`, projde role uživatele a povolí, pokud to smí aspoň jedna z nich. Hodí se všude, kde rozhodují role a názvy částí webu. Kde rozhoduje konkrétní objekt, třeba autor článku, je jednodušší napsat vlastní voter.
+
+
+Role a zdroje
+-------------
+
+Práce s ACL spočívá v definici rolí, zdrojů a jednotlivých oprávnění. Přičemž role a zdroje umožňují vytvářet hierarchie. Na vysvětlenou si ukážeme příklad webové aplikace:
+
+- `guest`: nepřihlášený návštěvník, který může číst a procházet veřejnou část webu, tzn. číst články, komentáře a volit v anketách
+- `registered`: přihlášený registrovaný uživatel, který navíc může komentovat
+- `admin`: může spravovat články, komentáře i ankety
+
+Nadefinovali jsme si tedy určité role (`guest`, `registered` a `admin`) a zmínili zdroje (`article`, `comment`, `poll`), ke kterým mohou uživatelé s nějakou rolí přistupovat nebo provádět určité operace (`view`, `vote`, `add`, `edit`).
+
+Vytvoříme instanci třídy Permission a nadefinujeme **role**. Lze přitom využít tzv. dědičnost rolí, která zajistí, že např. uživatel s rolí administrátora (`admin`) může dělat i to, co obyčejný návštěvník webu (a samozřejmě i více).
+
+```php
+$acl = new Nette\Security\Permission;
+
+$acl->addRole('guest');
+$acl->addRole('registered', 'guest'); // 'registered' dědí od 'guest'
+$acl->addRole('admin', 'registered'); // a od něj dědí 'admin'
+```
+
+Nyní nadefinujeme i seznam **zdrojů**, ke kterým mohou uživatelé přistupovat.
+
+```php
+$acl->addResource('article');
+$acl->addResource('comment');
+$acl->addResource('poll');
+```
+
+I zdroje mohou používat dědičnost, bylo by možné například zadat `$acl->addResource('perex', 'article')`.
+
+
+Pravidla
+--------
+
+A teď to nejdůležitější. Nadefinujeme mezi nimi pravidla určující, kdo co může s čím dělat:
+
+```php
+// nejprve nikdo nemůže dělat nic
+
+// nechť guest může prohlížet články, komentáře i ankety
+$acl->allow('guest', ['article', 'comment', 'poll'], 'view');
+// a v anketách navíc i hlasovat
+$acl->allow('guest', 'poll', 'vote');
+
+// registrovaný dědí práva od guesta, dáme mu navíc právo komentovat
+$acl->allow('registered', 'comment', 'add');
+
+// administrátor může prohlížet a editovat cokoliv
+$acl->allow('admin', $acl::All, ['view', 'edit', 'add']);
+```
+
+Co když chceme někomu **zamezit** k určitému zdroji přístup?
+
+```php
+// administrátor nemůže editovat ankety, to by bylo nedemokratické
+$acl->deny('admin', 'poll', 'edit');
+```
+
+Nyní, když máme vytvořený seznam pravidel, můžeme jednoduše klást autorizační dotazy:
+
+```php
+// může guest prohlížet články?
+$acl->isAllowed('guest', 'article', 'view'); // true
+
+// může guest editovat články?
+$acl->isAllowed('guest', 'article', 'edit'); // false
+
+// může guest hlasovat v anketách?
+$acl->isAllowed('guest', 'poll', 'vote'); // true
+
+// může guest komentovat?
+$acl->isAllowed('guest', 'comment', 'add'); // false
+```
+
+Totéž platí pro registrovaného uživatele, ten však může i komentovat:
+
+```php
+$acl->isAllowed('registered', 'article', 'view'); // true
+$acl->isAllowed('registered', 'comment', 'add'); // true
+$acl->isAllowed('registered', 'comment', 'edit'); // false
+```
+
+Administrátor může editovat vše, kromě anket:
+
+```php
+$acl->isAllowed('admin', 'poll', 'vote'); // true
+$acl->isAllowed('admin', 'poll', 'edit'); // false
+$acl->isAllowed('admin', 'comment', 'edit'); // true
+```
+
+V aplikaci se ale na ACL takhle přímo neptáte. Stačí zavolat `$user->isAllowed('poll', 'vote')` a ACL za vás projde všechny role přihlášeného uživatele.
+
+
+Podmínky v pravidlech
+---------------------
+
+Oprávnění mohou také být vyhodnocována dynamicky a můžeme rozhodnutí nechat na vlastním callbacku. Pravidlo pak platí, jen když callback vrátí `true`:
+
+```php
+$assertion = function (Permission $acl, ?string $role, ?string $resource, ?string $privilege): bool {
+	return /* ... */;
+};
+
+$acl->allow('registered', 'comment', null, $assertion);
+```
+
+Callback dostane roli a zdroj pravidla, ke kterému patří. Když se pravidlo uplatní díky dědičnosti, jsou to předci toho, na co se ptáte. Na co se ptáte, prozradí metody `getQueriedRole()` a `getQueriedResource()`:
+
+```php
+$acl->addResource('perex', 'article');
+
+$assertion = function (Permission $acl, ?string $role, ?string $resource, ?string $privilege): bool {
+	// pro dotaz isAllowed('registered', 'perex', 'view') dostane $role = 'guest' a $resource = 'article'
+	$queriedRole = $acl->getQueriedRole(); // 'registered'
+	$queriedResource = $acl->getQueriedResource(); // 'perex'
+	return /* ... */;
+};
+
+$acl->allow('guest', 'article', 'view', $assertion);
+```
+
+Callback pracuje jen se jmény rolí a zdrojů. Pokud chcete rozhodovat podle konkrétních dat, třeba že článek smí upravit jen jeho autor, napište [voter |authorization#Smí tenhle uživatel upravit tenhle článek?]: dostane přímo uživatele i článek.
+
+
+Dědění od více rolí
+-------------------
+
+Role může dědit od jiné role či od více rolí. Co se ale stane, pokud má jeden předek akci zakázanou a druhý povolenou? Jaká budou práva potomka? Určuje se to podle váhy role - poslední uvedená role v seznamu předků má největší váhu, první uvedená role tu nejmenší. Názornější to bude na příkladu:
+
+```php
+$acl = new Nette\Security\Permission;
+$acl->addRole('admin');
+$acl->addRole('guest');
+
+$acl->addResource('backend');
+
+$acl->allow('admin', 'backend');
+$acl->deny('guest', 'backend');
+
+// případ A: role admin má menší váhu než role guest
+$acl->addRole('john', ['admin', 'guest']);
+$acl->isAllowed('john', 'backend'); // false
+
+// případ B: role admin má větší váhu než guest
+$acl->addRole('mary', ['guest', 'admin']);
+$acl->isAllowed('mary', 'backend'); // true
+```
+
+Role a zdroje lze i odebírat (`removeRole()`, `removeResource()`), odebrat lze i pravidla (`removeAllow()`, `removeDeny()`). Pole všech přímých rodičovských rolí vrací `getRoleParents()`, zda od sebe dvě entity dědí, vrací `roleInheritsFrom()` a `resourceInheritsFrom()`. Existenci role či zdroje ověří `hasRole()` a `hasResource()`, seznam všech registrovaných rolí a zdrojů vrací `getRoles()` a `getResources()` a k odstranění všech naráz slouží `removeAllRoles()` a `removeAllResources()`.
+
+
+ACL mezi ostatními votery
+-------------------------
+
+Když se zeptáte `$user->isAllowed()`, ACL odpoví jako kterýkoliv jiný [voter |authorization#Jak se votery dohodnou]. Povolí, pokud to smí aspoň jedna role uživatele. Pokud nesmí žádná a některou zastavilo pravidlo `deny()`, zakáže, a to i tehdy, kdyby jiný voter povolil. Když tedy v ACL zakážete administrátorovi editovat ankety, neprolomí to ani voter, který administrátorovi povoluje všechno.
+
+Jinak se ACL zdrží. Výchozí stav "nikdo nesmí nic" totiž neznamená zákaz, který by měl přebít ostatní votery, jen to, že ACL dotyčnému nic nepovolilo.
+
+Role nebo zdroj, který ACL nezná, proto také není chyba, ACL se prostě zdrží. Dotaz na článek `$user->isAllowed($article, 'edit')` tak rozhodnou jiné votery, i když v ACL žádný takový objekt není. A překlep v názvu zdroje, třeba `$user->isAllowed('artcle')`, znamená zákaz, ne výjimku; výjimku vyhodí jen přímý dotaz `$acl->isAllowed()`.
+
+Chcete-li, aby pravidla pro zdroj `'article'` platila i pro objekt článku, nechte jeho třídu implementovat rozhraní [api:Nette\Security\Resource]. Jeho metoda `getResourceId()` vrací jméno zdroje:
+
+```php
+class Article implements Nette\Security\Resource
+{
+	public function getResourceId(): string
+	{
+		return 'article';
+	}
+}
+```
+
+Pak `$user->isAllowed($article, 'view')` vyhodnotí pravidla pro zdroj `'article'` včetně zákazů. Rozhodování podle dat článku, třeba podle jeho autora, ale patří do voteru.
+
+
+Přidání jako služby
+-------------------
+
+Nejjednodušší je zapsat role, zdroje i pravidla do [konfigurace |configuration]. Pokud chcete ACL sestavit v PHP, napíšete si na něj továrnu:
+
+```php
+namespace App\Model;
+
+class AuthorizatorFactory
+{
+	public static function create(): Nette\Security\Permission
+	{
+		$acl = new Nette\Security\Permission;
+		$acl->addRole(/* ... */);
+		$acl->addResource(/* ... */);
+		$acl->allow(/* ... */);
+		return $acl;
+	}
+}
+```
+
+A přidáte ji do konfigurace. Každá služba typu `Permission` je zároveň voter, takže ji objekt `$user` začne používat sám:
+
+```neon
+services:
+	- App\Model\AuthorizatorFactory::create
+```
+
+V presenterech pak můžete ověřit oprávnění například v metodě `startup()`:
+
+```php
+protected function startup()
+{
+	parent::startup();
+	if (!$this->getUser()->isAllowed('backend')) {
+		$this->error('Forbidden', 403);
+	}
+}
+```

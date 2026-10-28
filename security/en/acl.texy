@@ -1,0 +1,226 @@
+ACL: Roles, Resources and Rules
+*******************************
+
+.[perex]
+Do you need to control access by user roles and parts of your website? Say, who may vote in polls, who may comment and who may manage articles? The [api:Nette\Security\Permission] class lets you write these rules down clearly in one place, including the inheritance of roles and resources.
+
+→ [Installation and requirements |@home#Installation]
+
+The ACL (Access Control List) is one of the [voters |authorization#May This User Edit This Article?]: when you ask `$user->isAllowed('poll', 'vote')`, it goes through the user's roles and allows it if at least one of them may. It fits wherever roles and the names of parts of the site decide. Where a particular object decides, such as the author of an article, writing your own voter is simpler.
+
+
+Roles and Resources
+-------------------
+
+Working with the ACL consists of defining roles, resources, and individual permissions. Roles and resources allow creating hierarchies. To explain, we will show an example of a web application:
+
+- `guest`: an unregistered visitor who can read and browse the public section of the website, i.e., read articles, comments, and vote in polls.
+- `registered`: a registered user who is logged in, who can also post comments.
+- `admin`: can manage articles, comments, and polls.
+
+We have defined certain roles (`guest`, `registered`, and `admin`) and mentioned resources (`article`, `comment`, `poll`), to which users with a certain role can access or perform certain operations (`view`, `vote`, `add`, `edit`).
+
+We create an instance of the Permission class and define **roles**. It's possible to use so-called role inheritance, which ensures that, e.g., a user with the `admin` role can also do what an ordinary website visitor can do (and of course, more).
+
+```php
+$acl = new Nette\Security\Permission;
+
+$acl->addRole('guest');
+$acl->addRole('registered', 'guest'); // 'registered' inherits from 'guest'
+$acl->addRole('admin', 'registered'); // 'admin' inherits from 'registered'
+```
+
+Now we define the list of **resources** that users can access.
+
+```php
+$acl->addResource('article');
+$acl->addResource('comment');
+$acl->addResource('poll');
+```
+
+Resources can also use inheritance; for example, it would be possible to enter `$acl->addResource('perex', 'article')`.
+
+
+Rules
+-----
+
+And now the most important part. We define rules between them, determining who can do what with what:
+
+```php
+// initially, nobody can do anything
+
+// let the guest view articles, comments, and polls
+$acl->allow('guest', ['article', 'comment', 'poll'], 'view');
+// and also vote in polls
+$acl->allow('guest', 'poll', 'vote');
+
+// registered inherits permissions from guest, let's give them the right to comment additionally
+$acl->allow('registered', 'comment', 'add');
+
+// the administrator can view and edit anything
+$acl->allow('admin', $acl::All, ['view', 'edit', 'add']);
+```
+
+What if we want to **prevent** someone from accessing a certain resource?
+
+```php
+// the administrator cannot edit polls; that would be undemocratic
+$acl->deny('admin', 'poll', 'edit');
+```
+
+Now that we have created the set of rules, we can simply pose authorization queries:
+
+```php
+// can guest view articles?
+$acl->isAllowed('guest', 'article', 'view'); // true
+
+// can guest edit articles?
+$acl->isAllowed('guest', 'article', 'edit'); // false
+
+// can guest vote in polls?
+$acl->isAllowed('guest', 'poll', 'vote'); // true
+
+// can guest comment?
+$acl->isAllowed('guest', 'comment', 'add'); // false
+```
+
+The same applies to a registered user, but they can also comment:
+
+```php
+$acl->isAllowed('registered', 'article', 'view'); // true
+$acl->isAllowed('registered', 'comment', 'add'); // true
+$acl->isAllowed('registered', 'comment', 'edit'); // false
+```
+
+The administrator can edit everything, except for polls:
+
+```php
+$acl->isAllowed('admin', 'poll', 'vote'); // true
+$acl->isAllowed('admin', 'poll', 'edit'); // false
+$acl->isAllowed('admin', 'comment', 'edit'); // true
+```
+
+In an application, however, you don't ask the ACL directly like this. You just call `$user->isAllowed('poll', 'vote')` and the ACL goes through all the roles of the logged-in user for you.
+
+
+Conditions in Rules
+-------------------
+
+Permissions can also be evaluated dynamically, and we can leave the decision to our own callback. The rule then applies only when the callback returns `true`:
+
+```php
+$assertion = function (Permission $acl, ?string $role, ?string $resource, ?string $privilege): bool {
+	return /* ... */;
+};
+
+$acl->allow('registered', 'comment', null, $assertion);
+```
+
+The callback receives the role and resource of the rule it belongs to. When the rule applies through inheritance, these are ancestors of what you are asking about. What you are asking about is revealed by the `getQueriedRole()` and `getQueriedResource()` methods:
+
+```php
+$acl->addResource('perex', 'article');
+
+$assertion = function (Permission $acl, ?string $role, ?string $resource, ?string $privilege): bool {
+	// for the query isAllowed('registered', 'perex', 'view') it gets $role = 'guest' and $resource = 'article'
+	$queriedRole = $acl->getQueriedRole(); // 'registered'
+	$queriedResource = $acl->getQueriedResource(); // 'perex'
+	return /* ... */;
+};
+
+$acl->allow('guest', 'article', 'view', $assertion);
+```
+
+The callback works with the names of roles and resources only. If you want to decide by particular data, such as an article that only its author may edit, write a [voter |authorization#May This User Edit This Article?]: it gets the user and the article directly.
+
+
+Inheriting from Multiple Roles
+------------------------------
+
+A role can inherit from one role or multiple roles. But what happens if one ancestor has the action denied and the other allowed? What will the descendant's rights be? This is determined by the weight of the role - the last role listed in the list of ancestors has the highest weight, the first one the lowest. This is best illustrated by an example:
+
+```php
+$acl = new Nette\Security\Permission;
+$acl->addRole('admin');
+$acl->addRole('guest');
+
+$acl->addResource('backend');
+
+$acl->allow('admin', 'backend');
+$acl->deny('guest', 'backend');
+
+// case A: admin role has lower weight than guest role
+$acl->addRole('john', ['admin', 'guest']);
+$acl->isAllowed('john', 'backend'); // false
+
+// case B: admin role has greater weight than guest role
+$acl->addRole('mary', ['guest', 'admin']);
+$acl->isAllowed('mary', 'backend'); // true
+```
+
+Roles and resources can also be removed (`removeRole()`, `removeResource()`), and rules can also be reverted (`removeAllow()`, `removeDeny()`). The array of all direct parent roles is returned by `getRoleParents()`. Whether two entities inherit from each other is returned by `roleInheritsFrom()` and `resourceInheritsFrom()`. The existence of a role or resource is checked by `hasRole()` and `hasResource()`, the lists of all registered roles and resources are returned by `getRoles()` and `getResources()`, and everything can be wiped with `removeAllRoles()` and `removeAllResources()`.
+
+
+The ACL Among Other Voters
+--------------------------
+
+When you ask `$user->isAllowed()`, the ACL answers like any other [voter |authorization#How Voters Reach a Decision]. It allows if at least one of the user's roles may. If none may and a `deny()` rule stopped one of them, it forbids, even when another voter allows. So when you forbid the administrator to edit polls in the ACL, not even a voter that allows the administrator everything overrides it.
+
+Otherwise the ACL abstains. The default state "nobody may do anything" is not a prohibition that should override the other voters, it just means the ACL has allowed that person nothing.
+
+That is also why a role or resource the ACL does not know is not an error; the ACL simply abstains. A question about an article, `$user->isAllowed($article, 'edit')`, is thus decided by other voters, even though the ACL has no such object. And a typo in a resource name, such as `$user->isAllowed('artcle')`, means a denial, not an exception; only a direct query `$acl->isAllowed()` throws one.
+
+If you want the rules for the resource `'article'` to apply to an article object too, let its class implement the [api:Nette\Security\Resource] interface. Its `getResourceId()` method returns the name of the resource:
+
+```php
+class Article implements Nette\Security\Resource
+{
+	public function getResourceId(): string
+	{
+		return 'article';
+	}
+}
+```
+
+Then `$user->isAllowed($article, 'view')` evaluates the rules for the resource `'article'`, prohibitions included. Deciding by the data of the article, such as its author, belongs in a voter, though.
+
+
+Adding as a Service
+-------------------
+
+The simplest way is to write the roles, resources and rules in the [configuration]. If you want to build the ACL in PHP, write a factory for it:
+
+```php
+namespace App\Model;
+
+class AuthorizatorFactory
+{
+	public static function create(): Nette\Security\Permission
+	{
+		$acl = new Nette\Security\Permission;
+		$acl->addRole(/* ... */);
+		$acl->addResource(/* ... */);
+		$acl->allow(/* ... */);
+		return $acl;
+	}
+}
+```
+
+And add it to the configuration. Every service of type `Permission` is also a voter, so the `$user` object starts using it on its own:
+
+```neon
+services:
+	- App\Model\AuthorizatorFactory::create
+```
+
+In presenters, you can then verify permissions, for example, in the `startup()` method:
+
+```php
+protected function startup()
+{
+	parent::startup();
+	if (!$this->getUser()->isAllowed('backend')) {
+		$this->error('Forbidden', 403);
+	}
+}
+```

@@ -307,6 +307,7 @@ The good example explains what the tool does and why it matters. The bad example
 - Break complex topics into digestible sections
 - Use code examples liberally – they're often clearer than prose
 - End sections with "What's Next" links when appropriate
+- Put the `{{maintitle}}` and `{{description}}` directives at the very end of the page, in this order, after a blank line
 
 ## Mandatory Self-Review After Every Change
 

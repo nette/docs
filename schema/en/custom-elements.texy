@@ -1,0 +1,111 @@
+Custom Elements
+***************
+
+<div class=perex>
+
+You can get a long way with `assert()`, `transform()` and `before()`, so you rarely need to build anything from scratch. But when you want a reusable, self-contained element with its own validation and merging logic, you can write one. This page explains:
+
+- how the processor handles data, step by step
+- the interface every element implements
+- how to write and use your own element
+
+</div>
+
+
+How Processing Works
+====================
+
+Every schema element - whether built-in or one you write yourself - implements four methods that together define how it handles data. Three of them form the processing pipeline:
+
+1. **normalize()** - prepares the raw input. This is where `before()` hooks run and where, for example, an object is turned into an array. It runs first, separately on each dataset.
+2. **merge()** - combines two already normalized datasets, with the later one taking priority. This step is used only by `processMultiple()`; `process()` skips it, because it has just a single dataset.
+3. **complete()** - performs the actual validation, fills in default values for missing items, and applies `assert()`, `transform()` and `castTo()`. It runs last, on the merged result.
+
+The fourth method, **completeDefault()**, is called by the parent element for an item entirely missing from the input - it either supplies the default value or reports that a `required()` item is missing.
+
+So `process()` runs *normalize → complete*, while `processMultiple()` runs *normalize (each dataset) → merge → complete*. This order is why `before()` sees the raw input, whereas `transform()` sees the already validated value.
+
+
+The Schema Interface
+====================
+
+To create your own element, implement the [api:Nette\Schema\Schema] interface. It has exactly the four methods described above:
+
+```php
+interface Schema
+{
+	function normalize(mixed $value, Context $context);
+	function merge(mixed $value, mixed $base);
+	function complete(mixed $value, Context $context);
+	function completeDefault(Context $context);
+}
+```
+
+Errors are not thrown; instead you report them through the [Context |api:Nette\Schema\Context] object using `$context->addError()` and return `null`. The `Processor` gathers all errors and throws them together at the end.
+
+
+Example: Sizes in Bytes
+=======================
+
+As an example, let's build a reusable element for sizes written the way people like to write them in configuration files, such as `'512kB'` or `'2 MB'`. It validates them and returns the number of bytes:
+
+```php
+use Nette\Schema\Context;
+use Nette\Schema\Schema;
+
+class ByteSizeSchema implements Schema
+{
+	private const Units = ['b' => 1, 'kb' => 1024, 'mb' => 1024 ** 2, 'gb' => 1024 ** 3];
+
+	public function normalize(mixed $value, Context $context): mixed
+	{
+		return is_int($value) ? "$value B" : $value; // unify both notations
+	}
+
+	public function merge(mixed $value, mixed $base): mixed
+	{
+		return $value ?? $base; // the later value wins
+	}
+
+	public function complete(mixed $value, Context $context): mixed
+	{
+		if (!is_string($value) || !preg_match('~^(\d+)\s*([a-zA-Z]+)$~', $value, $m)) {
+			$context->addError("The item %path% expects to be a size like '512kB'.", 'size.format');
+			return null;
+		}
+
+		$unit = self::Units[strtolower($m[2])] ?? null;
+		if ($unit === null) {
+			$context->addError("The item %path% uses an unknown unit '$m[2]'.", 'size.unit');
+			return null;
+		}
+
+		return (int) $m[1] * $unit;
+	}
+
+	public function completeDefault(Context $context): mixed
+	{
+		return null; // value used when the item is missing from the input
+	}
+}
+```
+
+You can use it anywhere a built-in element is expected - on its own or as part of a larger structure:
+
+```php
+$schema = Expect::structure([
+	'maxUpload' => new ByteSizeSchema,
+	'diskQuota' => new ByteSizeSchema,
+]);
+
+$processor->process($schema, ['maxUpload' => '2 MB', 'diskQuota' => 512]);
+// OK, returns {'maxUpload' => 2097152, 'diskQuota' => 512}
+
+$processor->process($schema, ['maxUpload' => '5 TB']);
+// ERROR: The item 'maxUpload' uses an unknown unit 'TB'.
+```
+
+Because the element implements the whole interface, it also works automatically inside `processMultiple()` - the `Processor` calls its `merge()` method just like for any other element. Only [JsonSchema::export() |json-schema] cannot know what such an element accepts, so it throws `Nette\NotSupportedException`.
+
+{{maintitle: Nette Schema: How Processing Works and Custom Elements}}
+{{description: See how Nette Schema normalizes, merges and completes data, and write a reusable custom element with its own validation and merging logic.}}

@@ -1,0 +1,241 @@
+Expirace a invalidace
+*********************
+
+<div class=perex>
+
+Cache je užitečná jen tak dlouho, dokud nevrací zastaralá data. Tato stránka ukazuje všechny způsoby, jak Nette Caching říct, kdy položka přestává platit:
+
+- po uplynutí doby, nebo když ji delší dobu nikdo nečetl
+- když se změní soubor, PHP konstanta nebo jiná položka v cache
+- když to řekne vaše vlastní funkce
+- nebo hned, když ji smažete podle tagu, priority či jmenného prostoru
+
+</div>
+
+Ukázky navazují na blog z [úvodu |@home]: `$cache` je cache ve jmenném prostoru `articles`, `$id` je ID článku a `renderArticle()` zastupuje náročnou práci, kdy se článek načte a převede do HTML.
+
+
+Nastavení závislostí
+====================
+
+Kdy položka vyexpiruje, popisují **závislosti**, tedy pole s klíči `Cache::*`. Nejpohodlnější je nechat je vyplnit generátor. Stačí deklarovat jeho parametr jako referenci, `&$dependencies`, a `load()` mu předá prázdné pole:
+
+```php
+use Nette\Caching\Cache;
+
+$html = $cache->load("article/$id", function (&$dependencies) use ($id) {
+	$dependencies[Cache::Expire] = '1 hour';
+	return renderArticle($id);
+});
+```
+
+Výhoda je, že se generátor může rozhodnout podle toho, co spočítal. Rozepsaný článek může třeba vyexpirovat dřív než publikovaný.
+
+Když závislosti znáte předem, můžete je místo toho předat jako třetí argument metodě `load()`, případně metodě `save()`, která hodnotu uloží rovnou, bez generátoru:
+
+```php
+$html = $cache->load("article/$id", fn() => renderArticle($id), [Cache::Expire => '1 hour']);
+
+$cache->save("article/$id", $html, [Cache::Expire => '1 hour', Cache::Tags => ["article/$id"]]);
+```
+
+Dávejte přednost `load()` s generátorem před `save()`. Když o chybějící položku požádá víc požadavků najednou, `FileStorage` spustí generátor jen u jednoho z nich; se `save()` by hodnotu počítaly všechny.
+
+Před verzí 3.1.3 se konstanty psaly velkými písmeny, třeba `Cache::EXPIRE` místo `Cache::Expire`. Počítejte s tím, že se pole nekontroluje: klíč s překlepem, třeba `'expir'`, se potichu ignoruje.
+
+
+Expirace podle času
+===================
+
+Klíč `Cache::Expire` určuje, kdy položka vyexpiruje. Přijímá relativní čas jako řetězec, počet sekund, UNIX timestamp nebo objekt `DateTimeInterface`:
+
+```php
+$dependencies[Cache::Expire] = '20 minutes';
+$dependencies[Cache::Expire] = 3600; // jedna hodina
+$dependencies[Cache::Expire] = new DateTimeImmutable('tomorrow');
+```
+
+U **klouzavé expirace** každé čtení posune expiraci dál. Článek, který návštěvníci pořád čtou, pak zůstává v cache, zatímco ten, který 20 minut nikdo neotevře, z ní vypadne:
+
+```php
+$dependencies[Cache::Expire] = '20 minutes';
+$dependencies[Cache::Sliding] = true;
+```
+
+Počítejte s tím, že každé čtení pak položku v úložišti zároveň aktualizuje, což přidává režii.
+
+
+Když se změní soubor
+====================
+
+Data spočítaná ze souboru by měla vyexpirovat, když se soubor změní. Dejme tomu, že blog čte seznam kategorií ze souboru `categories.neon`. Seznam v cache na tom souboru tedy závisí:
+
+```php
+$categories = $cache->load('categories', function (&$dependencies) {
+	$dependencies[Cache::Files] = __DIR__ . '/categories.neon';
+	return loadCategories(); // přečte a zpracuje categories.neon
+});
+```
+
+Jakmile `categories.neon` upravíte, cache si toho při dalším čtení všimne a zavolá generátor znovu. Používejte absolutní cesty. Položka může záviset i na více souborech: `$dependencies[Cache::Files] = [$file1, $file2]`.
+
+
+Když se změní konstanta
+=======================
+
+Podobně může položka vyexpirovat, když se změní hodnota PHP konstanty. Hodí se to třeba pro číslo verze, které nastavujete při nasazení, aby každá nová verze začínala s čerstvou cache:
+
+```php
+$dependencies[Cache::Constants] = 'APP_VERSION';
+```
+
+
+Když se změní jiná položka
+==========================
+
+Položka může záviset na jiných položkách v cache. Dejme tomu, že článek a jeho komentáře cachujete zvlášť, pod klíči `article/$id` a `comments/$id`, a cachujete i celou stránku z nich složenou. Stránka musí vyexpirovat, kdykoliv vyexpiruje některá z jejích částí:
+
+```php
+$page = $cache->load("page/$id", function (&$dependencies) use ($id) {
+	$dependencies[Cache::Items] = ["article/$id", "comments/$id"];
+	return renderPage($id); // poskládá článek a jeho komentáře
+});
+```
+
+Když se komentáře znovu uloží nebo smažou, vyexpiruje i stránka.
+
+
+Vlastní podmínka
+================
+
+Když nic z uvedeného nesedí, napište si vlastní funkci. Volá se při každém čtení s argumenty, které jste uložili, a když vrátí `false`, položka vyexpiruje. Dejme tomu, že vyrenderované HTML nesmí přežít upgrade PHP:
+
+```php
+function checkPhpVersion(int $version): bool
+{
+	return $version === PHP_VERSION_ID;
+}
+
+$dependencies[Cache::Callbacks] = [['checkPhpVersion', PHP_VERSION_ID]];
+```
+
+Každá položka je pole: funkce, případně statická metoda zapsaná jako `[ClassName::class, 'method']`, a za ní její argumenty. Funkce se volá při každém čtení, takže by měla být rychlá.
+
+
+Kombinace podmínek
+==================
+
+Všechny tyto podmínky lze kombinovat. Položka vyexpiruje, jakmile přestane platit alespoň jedna z nich:
+
+```php
+$dependencies[Cache::Expire] = '1 day';
+$dependencies[Cache::Files] = __DIR__ . '/categories.neon';
+$dependencies[Cache::Constants] = 'APP_VERSION';
+```
+
+
+Tagy
+====
+
+Čekat na expiraci je kompromis. Lepší je položku smazat přesně ve chvíli, kdy se změní data, ze kterých vznikla. To umožňují **tagy**. Jsou to libovolné řetězce, které položce přiřadíte:
+
+```php
+$html = $cache->load("article/$id", function (&$dependencies) use ($id) {
+	$dependencies[Cache::Tags] = ["article/$id", "comments/$id"];
+	return renderArticle($id);
+});
+```
+
+V administraci pak hned po uložení upraveného článku do databáze smažete všechno, co nese jeho tag:
+
+```php
+$cache->clean([Cache::Tags => ["article/$id"]]);
+```
+
+Totéž platí pro přidání komentáře, tentokrát s tagem `comments/$id`. Všimněte si, že kód, který položky maže, nemusí znát jejich klíče, ani kolik jich je. Článek může v cache ležet jako celá stránka, jako náhled na úvodní stránce i v RSS kanálu; jedno volání je odstraní všechny.
+
+Tagy fungují napříč jmennými prostory: `clean([Cache::Tags => [...]])` smaže odpovídající položky ve všech jmenných prostorech úložiště, nejen v prostoru `$cache`.
+
+.[note]
+`FileStorage` a `MemcachedStorage` potřebují pro tagy [journal |storages#Journal], `SQLiteStorage` si je drží samo a `MemoryStorage` je ignoruje.
+
+
+Priorita
+========
+
+Každé položce můžete dát prioritu, tedy číslo, které říká, jak je důležitá. Když cache příliš naroste, můžete pak smazat nejdřív ty méně důležité. Dejme tomu, že náhledy starých článků mají menší cenu než úvodní stránka:
+
+```php
+$dependencies[Cache::Priority] = 10;
+```
+
+Takto smažete všechny položky s prioritou 50 nebo menší:
+
+```php
+$cache->clean([Cache::Priority => 50]);
+```
+
+Položky bez priority se tímto způsobem nikdy nesmažou.
+
+.[note]
+`FileStorage` a `MemcachedStorage` potřebují pro priority [journal |storages#Journal]; `SQLiteStorage` a `MemoryStorage` je ignorují.
+
+
+Mazání položek
+==============
+
+Metoda `clean()` maže položky podle podmínek, které předáte jako pole s klíči `Cache::*`:
+
+| Klíč | Smaže
+|----------------------
+| `Cache::Tags => [...]` | položky s kterýmkoliv z tagů
+| `Cache::Priority => 50` | položky s prioritou 50 nebo menší
+| `Cache::Namespaces => [...]` | všechny položky v uvedených jmenných prostorech; podporuje jen `FileStorage`
+| `Cache::All => true` | vše v úložišti, včetně všech jmenných prostorů
+
+Podmínky lze kombinovat a smaže se položka, která splňuje kteroukoliv z nich:
+
+```php
+$cache->clean([Cache::Tags => ["article/$id"], Cache::Priority => 50]);
+```
+
+Podívejme se blíž na `Cache::All`. Smaže celé úložiště včetně položek všech jmenných prostorů, i když ho zavoláte na cache se jmenným prostorem. Pokud chcete smazat jen jeden jmenný prostor, použijte `Cache::Namespaces`; prostory, které z něj vznikly pomocí `derive()`, zůstanou.
+
+Pole se nekontroluje, takže klíč s překlepem se potichu ignoruje a nic se nesmaže.
+
+Odstranit položky, které už vyexpirovaly, je věc úložiště: zavolejte `$storage->clean([])`. `FileStorage` a `SQLiteStorage` to ostatně čas od času dělají samy, viz [Úložiště |storages].
+
+Jednu položku smažete pomocí `$cache->remove("article/$id")`.
+
+
+Co které úložiště umí
+=====================
+
+Ne každé úložiště umí každý druh závislosti a většina z nich to, co neumí, potichu ignoruje. `SQLiteStorage` třeba ignoruje priority a závislosti na souborech, takže položka podle nich prostě nevyexpiruje, a `MemoryStorage` ignoruje všechny závislosti. Než se na nějakou závislost spolehnete, podívejte se do tabulky na stránce [Úložiště |storages#Výběr úložiště].
+
+
+Hromadné čtení a zápis
+======================
+
+Úvodní stránka blogu ukazuje náhledy deseti článků. Číst je z cache jeden po druhém znamená desetkrát se obrátit na úložiště. Metoda `bulkLoad()` je přečte všechny najednou: předáte jí pole `$ids` s jejich ID jako klíči a vrátí pole hodnot indexované těmito klíči:
+
+```php
+$previews = $cache->bulkLoad($ids, function ($id, &$dependencies) {
+	$dependencies[Cache::Tags] = ["article/$id"];
+	return renderPreview($id); // vyrenderuje krátký náhled článku
+});
+```
+
+Generátor se zavolá jen pro náhledy, které chybí, a dostane klíč a za ním závislosti. Bez generátoru vrátí `bulkLoad($ids)` pro chybějící položky `null`.
+
+Metoda `bulkSave()` uloží několik položek najednou, všechny se stejnými závislostmi: .{data-version:3.3.0}
+
+```php
+$cache->bulkSave([
+	"preview/$id1" => $preview1,
+	"preview/$id2" => $preview2,
+], [Cache::Expire => '1 hour']);
+```
+
+{{maintitle: Nette Caching: expirace, tagy a invalidace cache}}
+{{description: Zajistěte, aby cache nikdy nevracela zastaralá data. Expirace podle času, změny souboru či konstanty a mazání podle tagů, priority a jmenného prostoru.}}

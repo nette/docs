@@ -1,0 +1,111 @@
+Vlastní prvky
+*************
+
+<div class=perex>
+
+S `assert()`, `transform()` a `before()` se dostanete hodně daleko, takže málokdy potřebujete stavět něco od základu. Když ale chcete znovupoužitelný, samostatný prvek s vlastní logikou validace a slučování, můžete si ho napsat. Tato stránka vysvětluje:
+
+- jak procesor s daty krok za krokem zachází
+- rozhraní, které implementuje každý prvek
+- jak napsat a použít vlastní prvek
+
+</div>
+
+
+Jak zpracování probíhá
+======================
+
+Každý prvek schématu - ať vestavěný, nebo vlastní - implementuje čtyři metody, které dohromady určují, jak nakládá s daty. Tři z nich tvoří zpracovatelskou pipeline:
+
+1. **normalize()** - připraví surový vstup. Tady běží háčky `before()` a tady se například objekt převede na pole. Spouští se jako první, zvlášť pro každou datovou sadu.
+2. **merge()** - sloučí dvě už normalizované datové sady, přičemž pozdější má přednost. Tento krok využívá jen `processMultiple()`; `process()` ho přeskakuje, protože má jen jednu datovou sadu.
+3. **complete()** - provede samotnou validaci, doplní výchozí hodnoty za chybějící položky a aplikuje `assert()`, `transform()` a `castTo()`. Běží jako poslední, nad sloučeným výsledkem.
+
+Čtvrtou metodu, **completeDefault()**, volá nadřazený prvek pro položku, jež ve vstupu úplně chybí - buď dodá výchozí hodnotu, nebo ohlásí, že chybí `required()` položka.
+
+`process()` tedy provádí *normalize → complete*, zatímco `processMultiple()` provádí *normalize (každou sadu) → merge → complete*. Kvůli tomuto pořadí vidí `before()` surový vstup, kdežto `transform()` už zvalidovanou hodnotu.
+
+
+Rozhraní Schema
+===============
+
+Vlastní prvek vytvoříte implementací rozhraní [api:Nette\Schema\Schema]. Má přesně ty čtyři metody popsané výše:
+
+```php
+interface Schema
+{
+	function normalize(mixed $value, Context $context);
+	function merge(mixed $value, mixed $base);
+	function complete(mixed $value, Context $context);
+	function completeDefault(Context $context);
+}
+```
+
+Chyby se nevyhazují; místo toho je hlásíte přes objekt [Context |api:Nette\Schema\Context] pomocí `$context->addError()` a vrátíte `null`. `Processor` všechny chyby posbírá a vyhodí je na konci najednou.
+
+
+Příklad: velikosti v bajtech
+============================
+
+Jako příklad vytvoříme znovupoužitelný prvek pro velikosti zapsané tak, jak je lidé v konfiguraci píší nejraději, třeba `'512kB'` nebo `'2 MB'`. Prvek je zvaliduje a vrátí počet bajtů:
+
+```php
+use Nette\Schema\Context;
+use Nette\Schema\Schema;
+
+class ByteSizeSchema implements Schema
+{
+	private const Units = ['b' => 1, 'kb' => 1024, 'mb' => 1024 ** 2, 'gb' => 1024 ** 3];
+
+	public function normalize(mixed $value, Context $context): mixed
+	{
+		return is_int($value) ? "$value B" : $value; // sjednotíme oba zápisy
+	}
+
+	public function merge(mixed $value, mixed $base): mixed
+	{
+		return $value ?? $base; // pozdější hodnota vyhrává
+	}
+
+	public function complete(mixed $value, Context $context): mixed
+	{
+		if (!is_string($value) || !preg_match('~^(\d+)\s*([a-zA-Z]+)$~', $value, $m)) {
+			$context->addError("The item %path% expects to be a size like '512kB'.", 'size.format');
+			return null;
+		}
+
+		$unit = self::Units[strtolower($m[2])] ?? null;
+		if ($unit === null) {
+			$context->addError("The item %path% uses an unknown unit '$m[2]'.", 'size.unit');
+			return null;
+		}
+
+		return (int) $m[1] * $unit;
+	}
+
+	public function completeDefault(Context $context): mixed
+	{
+		return null; // hodnota použitá, když položka ve vstupu chybí
+	}
+}
+```
+
+Použijete ho kdekoli, kde se očekává vestavěný prvek - samostatně i jako součást větší struktury:
+
+```php
+$schema = Expect::structure([
+	'maxUpload' => new ByteSizeSchema,
+	'diskQuota' => new ByteSizeSchema,
+]);
+
+$processor->process($schema, ['maxUpload' => '2 MB', 'diskQuota' => 512]);
+// OK, vrátí {'maxUpload' => 2097152, 'diskQuota' => 512}
+
+$processor->process($schema, ['maxUpload' => '5 TB']);
+// CHYBA: The item 'maxUpload' uses an unknown unit 'TB'.
+```
+
+Protože prvek implementuje celé rozhraní, funguje automaticky i uvnitř `processMultiple()` - `Processor` volá jeho metodu `merge()` stejně jako u kteréhokoli jiného prvku. Jen [JsonSchema::export() |json-schema] nemůže vědět, co takový prvek přijímá, a proto vyhodí `Nette\NotSupportedException`.
+
+{{maintitle: Nette Schema: jak probíhá zpracování a vlastní prvky}}
+{{description: Podívejte se, jak Nette Schema data normalizuje, slučuje a doplňuje, a napište si znovupoužitelný vlastní prvek s vlastní logikou validace a slučování.}}

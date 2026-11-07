@@ -1,0 +1,245 @@
+Validace a normalizace
+**********************
+
+<div class=perex>
+
+Kontrola typů často nestačí. Data z konfiguračního souboru nebo z API potřebují další kontroly a úpravy, než s nimi váš kód může pracovat. Tato stránka ukazuje, jak:
+
+- přidat vlastní kontroly pomocí `assert()`
+- upravit hodnotu před validací pomocí `before()` a po ní pomocí `transform()`
+- přetypovat hodnotu na jiný typ nebo třídu pomocí `castTo()`
+- sestavit schéma ze třídy pomocí `from()`
+- pracovat s chybami a upozorněními
+
+</div>
+
+Ukázky navazují na konfiguraci aplikace z [úvodu |@home]. `$processor` je instance `Nette\Schema\Processor`.
+
+
+Pořadí operací
+==============
+
+Hodí se vědět, kdy který krok běží. Nejprve obslužná funkce `before()` upraví surový vstup. Pak se hodnota zvaliduje podle prvku: její typ, rozsahy, regulární výraz a podobně. Jen platná hodnota pokračuje do `assert()`, `transform()` a `castTo()`, které se provedou v pořadí, v jakém jste je deklarovali. Proto `before()` vidí vstup tak, jak přišel, kdežto `transform()` dostane hodnotu s už ověřeným typem.
+
+Podrobnější pohled na zpracování, včetně slučování více datových sad, najdete na stránce [Vlastní prvky |custom-elements#Jak zpracování probíhá].
+
+
+Vlastní kontroly: assert()
+==========================
+
+Libovolná další omezení zadáme pomocí `assert(callable $fn)`. Funkce dostane hodnotu a vrátí `true`, když je platná. Dejme tomu, že seznam správců nesmí obsahovat stejný e-mail dvakrát:
+
+```php
+$isUnique = fn(array $list) => count($list) === count(array_unique($list));
+
+$schema = Expect::listOf('email')
+	->assert($isUnique); // každý e-mail jen jednou
+
+$processor->process($schema, ['jim@example.com', 'ann@example.com']); // OK
+$processor->process($schema, ['jim@example.com', 'jim@example.com']);
+// CHYBA: Failed assertion #0 for item with value array.
+```
+
+Poslouží jakákoliv funkce, i vestavěná:
+
+```php
+Expect::string()->assert('is_dir'); // adresář musí existovat
+```
+
+Zpráva výše toho moc neřekne. Když omezení dáte popis, stane se součástí chybové zprávy:
+
+```php
+$schema = Expect::listOf('email')
+	->assert($isUnique, 'Unique e-mails');
+
+$processor->process($schema, ['jim@example.com', 'jim@example.com']);
+// CHYBA: Failed assertion 'Unique e-mails' for item with value array.
+```
+
+Metodu lze volat opakovaně a přidat tak více omezení. Lze ji prokládat s voláním `transform()` a `castTo()`.
+
+
+Transformace: transform() .{data-version:1.2.5}
+===============================================
+
+Úspěšně zvalidovaná data lze upravovat pomocí vlastní funkce. Dejme tomu, že základní URL aplikace nemá nikdy končit lomítkem:
+
+```php
+Expect::string()->transform(fn(string $url) => rtrim($url, '/'));
+```
+
+Metodu lze volat opakovaně a přidat tak více transformací. Lze ji prokládat s voláním `assert()` a `castTo()`. Operace se provedou v pořadí, v jakém jsou deklarovány:
+
+```php
+Expect::string()
+	->transform(fn(string $s) => strtolower(trim($s))) // z ' Admin ' bude 'admin'
+	->assert('ctype_alnum', 'Only letters and digits');
+```
+
+Metoda `transform()` může současně transformovat i validovat hodnotu. To je často jednodušší a méně duplicitní než řetězení `transform()` a `assert()`. K tomuto účelu funkce obdrží objekt [Context |api:Nette\Schema\Context] s metodou `addError()`, kterou lze použít k přidání informací o problémech s validací. Převeďme server zapsaný jako `'db.example.com:5432'` na adresu a port:
+
+```php
+Expect::string()
+	->transform(function (string $s, Nette\Schema\Context $context) {
+		if (!preg_match('~^([^:]+):(\d+)$~', $s, $m)) {
+			$context->addError('The item %path% expects to be host:port.', 'server.format');
+			return null;
+		}
+
+		return ['host' => $m[1], 'port' => (int) $m[2]];
+	});
+```
+
+
+Přetypování: castTo()
+=====================
+
+Úspěšně zvalidovaná data lze přetypovat:
+
+```php
+Expect::scalar()->castTo('string');
+```
+
+Kromě nativních PHP typů lze přetypovávat i na třídy. Přitom se rozlišuje, zda jde o jednoduchou třídu bez konstruktoru, nebo třídu s konstruktorem. Pokud třída nemá konstruktor, vytvoří se její instance a všechny prvky struktury se zapíší do properties:
+
+```php
+class DatabaseConfig
+{
+	public string $host;
+	public int $port;
+}
+
+Expect::structure([
+	'host' => Expect::string('localhost'),
+	'port' => Expect::int(3306),
+])->castTo(DatabaseConfig::class);
+
+// vytvoří '$obj = new DatabaseConfig' a zapíše do $obj->host a $obj->port
+```
+
+Pokud třída konstruktor má, prvky struktury se předají jako pojmenované parametry konstruktoru:
+
+```php
+class DatabaseConfig
+{
+	public function __construct(
+		public string $host,
+		public int $port,
+	) {
+	}
+}
+
+// vytvoří $obj = new DatabaseConfig(host: ..., port: ...)
+```
+
+Přetypování v kombinaci se skalárním parametrem vytvoří objekt a hodnotu předá jako jediný parametr konstruktoru:
+
+```php
+Expect::string()->castTo(DateTime::class);
+// vytvoří new DateTime(...)
+```
+
+Z hodnoty `null` se objekt nikdy nevytvoří. Pokud je cílem třída nebo enum, `null` zůstane `null`, takže nevyplněná nepovinná položka zůstane prázdná: .{data-version:1.4.0}
+
+```php
+Expect::string()->nullable()->castTo(DateTime::class);
+// z '2026-01-01' bude DateTime, null zůstane null
+```
+
+U nativních typů přidejte otazník, pokud má `null` projít beze změny: `castTo('?string')` hodnotu `null` zachová, kdežto `castTo('string')` z ní udělá prázdný řetězec. .{data-version:1.4.0}
+
+
+Normalizace: before()
+=====================
+
+Před samotnou validací lze data normalizovat pomocí metody `before()`. Dejme tomu, že seznam správců jde zapsat i jako jeden řetězec s čárkami, `'jim@example.com, ann@example.com'`:
+
+```php
+$explode = fn($v) => is_string($v) ? array_map('trim', explode(',', $v)) : $v;
+
+$schema = Expect::listOf('email')
+	->before($explode);
+
+$normalized = $processor->process($schema, 'jim@example.com, ann@example.com');
+// OK a vrátí ['jim@example.com', 'ann@example.com']
+```
+
+Prvek má jedinou obslužnou funkci, takže druhé volání `before()` tu první nahradí. Celou normalizaci proto umístěte do jedné funkce.
+
+Druhé volání navíc vyvolá varování `E_USER_DEPRECATED`, protože ve verzi 2.0 se obslužné funkce budou řetězit a každá dostane výsledek té předchozí. .{data-version:1.4.0}
+
+
+Mapování na objekty: from()
+===========================
+
+Schéma struktury si můžeme nechat vygenerovat z objektu třídy. Sestaví se z typů jejích veřejných vlastností. Příklad:
+
+```php
+class DatabaseConfig
+{
+	public string $host = 'localhost';
+	public int $port = 3306;
+	public string $user;
+	public ?string $password = null;
+	public Mode $mode = Mode::Production;
+}
+
+$schema = Expect::from(new DatabaseConfig);
+
+$config = $processor->process($schema, [
+	'user' => 'admin',
+	'mode' => 'development',
+]);
+// $config instanceof DatabaseConfig
+// $config->mode === Mode::Development
+```
+
+Vlastnost bez výchozí hodnoty, třeba `$user`, se stane povinnou položkou. Vlastnost typovaná [enumem s hodnotami |types#Výčtové typy: enum()] přijme ze vstupu jeho hodnotu a vrátí vám case.
+
+Podporovány jsou i anonymní třídy:
+
+```php
+$schema = Expect::from(new class {
+	public string $host = 'localhost';
+	public int $port = 3306;
+});
+```
+
+Protože informace získané z definice třídy nemusí být dostačující, můžete druhým parametrem doplnit prvkům vlastní schéma:
+
+```php
+$schema = Expect::from(new DatabaseConfig, [
+	'port' => Expect::int(3306)->min(1)->max(65535),
+]);
+```
+
+
+Chyby
+=====
+
+Když jsou data neplatná, `process()` vyhodí [api:Nette\Schema\ValidationException] se všemi nalezenými chybami:
+
+```php
+try {
+	$config = $processor->process($schema, $data);
+} catch (Nette\Schema\ValidationException $e) {
+	echo 'Data nejsou platná: ' . $e->getMessage();
+}
+```
+
+Metoda `$e->getMessage()` vrací první chybu, `$e->getMessages()` pole všech jako řetězců. Pokud chcete chyby zobrazit po svém, třeba u jednotlivých polí formuláře, `$e->getMessageObjects()` je vrací jako objekty [api:Nette\Schema\Message]. Každý má text v `$message`, cestu k položce v `$path` a kód, který říká, o jaký druh chyby jde, v `$code`:
+
+```php
+foreach ($e->getMessageObjects() as $message) {
+	echo implode(' › ', $message->path), ': ', $message->code, "\n";
+}
+// port: schema.typeMismatch
+// user: schema.missingItem
+```
+
+Kódy jsou konstanty třídy `Message`, třeba `Message::TypeMismatch`, `MissingItem` nebo `UnexpectedItem`.
+
+Upozornění, třeba na použití [zastaralé položky |types#Zastaralé položky: deprecated()], zpracování nezastaví. Přečtete je po něm pomocí `$processor->getWarnings()`.
+
+{{maintitle: Nette Schema: vlastní validace, transformace a přetypování}}
+{{description: Přidejte do Nette Schema vlastní kontroly, upravte hodnoty před validací i po ní, přetypujte je na třídy, sestavte schéma ze třídy a pracujte s chybami.}}

@@ -1,0 +1,245 @@
+Validation and Normalization
+****************************
+
+<div class=perex>
+
+Checking types is often not enough. Data from a configuration file or an API needs further checks and adjustments before your code can use it. This page shows how to:
+
+- add your own checks with `assert()`
+- adjust a value before validation with `before()` and after it with `transform()`
+- cast a value to another type or a class with `castTo()`
+- build a schema from a class with `from()`
+- work with errors and warnings
+
+</div>
+
+The examples continue the configuration of an application from the [overview |@home]. `$processor` is an instance of `Nette\Schema\Processor`.
+
+
+Order of Operations
+===================
+
+It helps to know when each step runs. First, the handler of `before()` adjusts the raw input. Then the value is validated against the element: its type, ranges, pattern and so on. Only a valid value continues to `assert()`, `transform()` and `castTo()`, which run in the order in which you declared them. That is why `before()` sees the input as it came, while `transform()` gets a value whose type is already checked.
+
+A more detailed look at the processing, including merging of several datasets, is on the page [Custom Elements |custom-elements#How Processing Works].
+
+
+Custom Checks: assert()
+=======================
+
+You can add any other constraints using `assert(callable $fn)`. The function gets the value and returns `true` when it is valid. Let's say the list of administrators must not contain the same e-mail twice:
+
+```php
+$isUnique = fn(array $list) => count($list) === count(array_unique($list));
+
+$schema = Expect::listOf('email')
+	->assert($isUnique); // each e-mail only once
+
+$processor->process($schema, ['jim@example.com', 'ann@example.com']); // OK
+$processor->process($schema, ['jim@example.com', 'jim@example.com']);
+// ERROR: Failed assertion #0 for item with value array.
+```
+
+Any function will do, including a built-in one:
+
+```php
+Expect::string()->assert('is_dir'); // the directory must exist
+```
+
+The message above does not say much. Give the assertion a description and it becomes part of the error message:
+
+```php
+$schema = Expect::listOf('email')
+	->assert($isUnique, 'Unique e-mails');
+
+$processor->process($schema, ['jim@example.com', 'jim@example.com']);
+// ERROR: Failed assertion 'Unique e-mails' for item with value array.
+```
+
+The method can be called repeatedly to add multiple constraints. It can be interleaved with calls to `transform()` and `castTo()`.
+
+
+Transformation: transform() .{data-version:1.2.5}
+=================================================
+
+Successfully validated data can be modified using a custom function. Let's say the base URL of the application should never end with a slash:
+
+```php
+Expect::string()->transform(fn(string $url) => rtrim($url, '/'));
+```
+
+The method can be called repeatedly to add multiple transformations. It can be interleaved with calls to `assert()` and `castTo()`. The operations are performed in the order in which they are declared:
+
+```php
+Expect::string()
+	->transform(fn(string $s) => strtolower(trim($s))) // ' Admin ' becomes 'admin'
+	->assert('ctype_alnum', 'Only letters and digits');
+```
+
+The `transform()` method can simultaneously transform and validate the value. This is often simpler and involves less code duplication than chaining `transform()` and `assert()`. For this purpose, the function receives a [Context |api:Nette\Schema\Context] object with an `addError()` method, which can be used to add information about validation problems. Let's turn a server written as `'db.example.com:5432'` into a host and a port:
+
+```php
+Expect::string()
+	->transform(function (string $s, Nette\Schema\Context $context) {
+		if (!preg_match('~^([^:]+):(\d+)$~', $s, $m)) {
+			$context->addError('The item %path% expects to be host:port.', 'server.format');
+			return null;
+		}
+
+		return ['host' => $m[1], 'port' => (int) $m[2]];
+	});
+```
+
+
+Casting: castTo()
+=================
+
+Successfully validated data can be cast:
+
+```php
+Expect::scalar()->castTo('string');
+```
+
+In addition to native PHP types, you can also cast to classes. It distinguishes between a simple class without a constructor and a class with a constructor. If the class has no constructor, an instance is created, and all structure elements are written to the properties:
+
+```php
+class DatabaseConfig
+{
+	public string $host;
+	public int $port;
+}
+
+Expect::structure([
+	'host' => Expect::string('localhost'),
+	'port' => Expect::int(3306),
+])->castTo(DatabaseConfig::class);
+
+// creates '$obj = new DatabaseConfig' and writes to $obj->host and $obj->port
+```
+
+If the class has a constructor, the structure elements are passed as named arguments to the constructor:
+
+```php
+class DatabaseConfig
+{
+	public function __construct(
+		public string $host,
+		public int $port,
+	) {
+	}
+}
+
+// creates $obj = new DatabaseConfig(host: ..., port: ...)
+```
+
+Casting combined with a scalar parameter creates an object and passes the value as the single argument to the constructor:
+
+```php
+Expect::string()->castTo(DateTime::class);
+// creates new DateTime(...)
+```
+
+A `null` is never turned into an object. When the target is a class or an enum, `null` stays `null`, so an optional item that was left empty stays empty: .{data-version:1.4.0}
+
+```php
+Expect::string()->nullable()->castTo(DateTime::class);
+// '2026-01-01' becomes a DateTime, null stays null
+```
+
+With native types, add a question mark when `null` should pass unchanged: `castTo('?string')` keeps `null`, whereas `castTo('string')` turns it into an empty string. .{data-version:1.4.0}
+
+
+Normalization: before()
+=======================
+
+Before the validation itself, the data can be normalized using the `before()` method. Let's say the list of administrators can also be written as a single string with commas, `'jim@example.com, ann@example.com'`:
+
+```php
+$explode = fn($v) => is_string($v) ? array_map('trim', explode(',', $v)) : $v;
+
+$schema = Expect::listOf('email')
+	->before($explode);
+
+$normalized = $processor->process($schema, 'jim@example.com, ann@example.com');
+// OK and returns ['jim@example.com', 'ann@example.com']
+```
+
+An element has one handler, so a second call to `before()` replaces the first one. Put all the normalization into one handler instead.
+
+The second call also raises an `E_USER_DEPRECATED` notice, because in version 2.0 the handlers will be chained, each receiving the result of the previous one. .{data-version:1.4.0}
+
+
+Mapping to Objects: from()
+==========================
+
+You can have the structure schema generated from an object of a class. It is built from the types of its public properties. Example:
+
+```php
+class DatabaseConfig
+{
+	public string $host = 'localhost';
+	public int $port = 3306;
+	public string $user;
+	public ?string $password = null;
+	public Mode $mode = Mode::Production;
+}
+
+$schema = Expect::from(new DatabaseConfig);
+
+$config = $processor->process($schema, [
+	'user' => 'admin',
+	'mode' => 'development',
+]);
+// $config instanceof DatabaseConfig
+// $config->mode === Mode::Development
+```
+
+A property without a default value, such as `$user`, becomes a required item. A property with a [backed enum |types#Enums: enum()] accepts its value from the input and gives you the case.
+
+Anonymous classes are also supported:
+
+```php
+$schema = Expect::from(new class {
+	public string $host = 'localhost';
+	public int $port = 3306;
+});
+```
+
+Because the information obtained from the class definition may not be sufficient, you can supplement the elements with your own schema using the second parameter:
+
+```php
+$schema = Expect::from(new DatabaseConfig, [
+	'port' => Expect::int(3306)->min(1)->max(65535),
+]);
+```
+
+
+Errors
+======
+
+When the data is invalid, `process()` throws [api:Nette\Schema\ValidationException] with all the errors found:
+
+```php
+try {
+	$config = $processor->process($schema, $data);
+} catch (Nette\Schema\ValidationException $e) {
+	echo 'Data is invalid: ' . $e->getMessage();
+}
+```
+
+The method `$e->getMessage()` returns the first error, `$e->getMessages()` an array of all of them as strings. When you want to show the errors in your own way, for example next to each field of a form, `$e->getMessageObjects()` returns them as [api:Nette\Schema\Message] objects. Each has the text in `$message`, the path to the item in `$path` and a code saying what kind of error it is in `$code`:
+
+```php
+foreach ($e->getMessageObjects() as $message) {
+	echo implode(' › ', $message->path), ': ', $message->code, "\n";
+}
+// port: schema.typeMismatch
+// user: schema.missingItem
+```
+
+The codes are constants of the class `Message`, such as `Message::TypeMismatch`, `MissingItem` or `UnexpectedItem`.
+
+Warnings, such as the use of a [deprecated item |types#Deprecated Items: deprecated()], do not stop the processing. You read them after it with `$processor->getWarnings()`.
+
+{{maintitle: Nette Schema: Custom Validation, Transformation and Casting}}
+{{description: Add custom checks to a Nette Schema, adjust values before and after validation, cast them to classes, build a schema from a class and work with errors.}}

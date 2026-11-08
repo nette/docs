@@ -3,21 +3,18 @@ NEON pro PHP
 
 <div class=perex>
 
-NEON je lidsky srozumitelný jazyk pro serializaci dat. Používá se v Nette pro konfigurační soubory. [api:Nette\Neon\Neon] je statická třída pro práci s NEONem.
+Balíček `nette/neon` čte a zapisuje NEON v PHP. Díky němu:
 
-Seznamte se s [formátem NEON|format] a [vyzkoušejte si jej |https://fiddle.nette.org/neon/].
+- dekódujete konfigurační soubor do hodnot PHP a hodnoty zakódujete zpět do NEONu
+- [upravíte soubor |editing] tak, že každý komentář a mezera, na které nesáhnete, zůstanou na svém místě
+- dáte některým hodnotám vlastní význam, třeba konstantám nebo parametrům
+- zkontrolujete soubory pomocí `neon-lint` v editoru, v CI nebo po AI agentovi
 
 </div>
 
-Všechny příklady předpokládají vytvořený alias:
-
-```php
-use Nette\Neon\Neon;
-```
-
 
 Instalace
----------
+=========
 
 Knihovnu stáhnete a nainstalujete pomocí nástroje [Composer|best-practices:composer]:
 
@@ -25,69 +22,159 @@ Knihovnu stáhnete a nainstalujete pomocí nástroje [Composer|best-practices:co
 composer require nette/neon
 ```
 
-Chyby v syntaxi v souborech `*.neon` můžete zkontrolovat pomocí konzolového příkazu `neon-lint`:
+Vyžaduje PHP 8.4 až 8.6 s rozšířeními `json` a `mbstring`.
+
+
+Dekódování
+==========
+
+Dejme tomu, že vaše aplikace má nastavení v souboru `config.neon`:
+
+```neon
+# database connection
+database:
+	host: localhost
+	port: 3306
+
+services:
+	- App\Model\ArticleFacade
+```
+
+Statická třída [api:Nette\Neon\Neon] ho načte do obyčejného pole PHP:
+
+```php
+use Nette\Neon\Neon;
+
+$config = Neon::decodeFile('config.neon');
+// ['database' => ['host' => 'localhost', 'port' => 3306], 'services' => ['App\Model\ArticleFacade']]
+```
+
+Metoda `decode()` dělá totéž s řetězcem:
+
+```php
+$value = Neon::decode('hello: world'); // ['hello' => 'world']
+```
+
+Hodnoty [formátu |format] se převedou na tyto hodnoty PHP:
+
+| NEON | PHP
+|-----------------------------------------
+| `null`, `true`, `yes` … | `null`, `bool`
+| celé číslo | `int`; nad `PHP_INT_MAX` řetězec `string` z jeho číslic
+| desetinné číslo | `float`
+| řetězec | `string`
+| [datum |format#Datum] | `DateTimeImmutable`
+| [entita |format#Entity], řetěz | [api:Nette\Neon\Entity]
+| sekvence, mapování | `array`
+
+PHP ukládá sekvence i mapování do polí, takže prázdné `[]` i prázdné `{}` se stanou `[]`. Datum bez časové zóny dostane výchozí časovou zónu PHP.
+
+
+Kódování
+========
+
+Metoda `encode()` zapíše hodnotu PHP jako NEON. Ve výchozím stavu zapíše vše na jeden řádek; pokud jako druhý argument předáte `true`, dostanete bloky:
+
+```php
+Neon::encode(['roles' => ['guest', 'admin']]);
+// '{roles: [guest, admin]}'
+
+Neon::encode(['roles' => ['guest', 'admin']], true);
+// "roles:\n\t- guest\n\t- admin\n\n"
+```
+
+Místo `true` můžete předat funkci, která rozhodne u každého pole zvlášť. Dostane pole a seznam klíčů, které k němu vedou, a pro blok vrátí `true`. Tahle zapíše bloky jen v první úrovni:
+
+```php
+Neon::encode($config, fn($value, $path) => !$path);
+// "database: {host: localhost, port: 3306}\nservices: [App\\Model\\ArticleFacade]\n"
+```
+
+Třetí argument určuje odsazení, výchozí je tabulátor. Řetězec dostane uvozovky, jen když je potřebuje, a víceřádkový řetězec se zapíše jako [víceřádkový řetězec |format#Víceřádkové řetězce].
+
+Některé hodnoty jako NEON bez ztráty zapsat nejde: řetězec, který není platné UTF-8, `INF` a `NAN`, resource, closure nebo struktura, která obsahuje sama sebe. Pro ně `encode()` vyhodí `Nette\Neon\Exception`.
+
+
+Chyby
+=====
+
+Když vstup není platný NEON, `decode()` a `decodeFile()` vyhodí `Nette\Neon\Exception` s pozicí problému:
+
+```php
+try {
+	$config = Neon::decode("database:\n\thost: localhost\n\thost: db");
+} catch (Nette\Neon\Exception $e) {
+	echo $e->getMessage();     // Duplicated key 'host' on line 3 at column 2
+	echo $e->getDescription(); // Duplicated key 'host'
+}
+```
+
+Sloupec se počítá ve znacích, ne v bajtech. Když chybu zobrazujete po svém, třeba u pole formuláře, metoda `getDescription()` vrátí hlášku bez pozice.
+
+
+Vlastní hodnoty: Evaluator
+==========================
+
+`Neon::decode()` převádí [syntaktický strom |editing#Strom] na hodnoty pomocí třídy `Nette\Neon\Evaluator`. Její potomek může některým hodnotám dát vlastní význam. Tento převádí názvy konstant PHP na jejich hodnoty:
+
+```php
+use Nette\Neon\Evaluator;
+use Nette\Neon\Neon;
+use Nette\Neon\Nodes\LiteralNode;
+use Nette\Neon\Place;
+
+final class ConstantEvaluator extends Evaluator
+{
+	protected function evaluateLiteral(LiteralNode $node, Place $place): mixed
+	{
+		$value = parent::evaluateLiteral($node, $place);
+		return $place === Place::Value && is_string($value) && defined($value)
+			? constant($value)
+			: $value;
+	}
+}
+
+$document = Neon::parse('errorLevel: E_ALL');
+$config = new ConstantEvaluator()->evaluate($document->value);
+// ['errorLevel' => 30719]
+```
+
+Metody, které můžete přepsat, jsou `evaluateLiteral()`, `evaluateString()`, `evaluateEntity()`, `evaluateChain()` a `evaluateItem()`. `Place` říká, kde hodnota stojí: jako hodnota, jako klíč, jako jméno entity nebo jako článek řetězu. Díky tomu příklad výše nechá na pokoji klíč, který se jmenuje jako konstanta. Takto čte svou konfiguraci [DI kontejner |dependency-injection:] Nette.
+
+
+Kontrola souborů: neon-lint
+===========================
+
+Balíček obsahuje příkaz `neon-lint`. Předáte mu soubory nebo adresáře a on vypíše jeden řádek pro každý problém:
 
 ```shell
-vendor/bin/neon-lint [--debug] <cesta>
+vendor/bin/neon-lint config/
 ```
 
-
-encode(mixed $value, bool $blockMode=false, string $indentation="\t"): string .[method]
----------------------------------------------------------------------------------------
-
-Vrací `$value` převedenou na NEON. Jako parametr `$blockMode` můžete předat true, čímž se vytvoří víceřádkový výstup. Parametr `$indentation` určuje znaky použité pro odsazení (výchozí je tabulátor).
-
-```php
-Neon::encode($value); // Vrátí $value převedenou do NEONu
-Neon::encode($value, true); // Vrátí $value převedenou do víceřádkového NEONu
+```
+config/local.neon:3:2: Duplicated key 'user'
 ```
 
-Metoda `encode()` při chybě vyhodí `Nette\Neon\Exception`.
+Když jsou všechny soubory platné, nevypíše nic. V adresáři hledá soubory `*.neon` a vynechá `vendor`, `node_modules` a skryté adresáře, `-` čte standardní vstup. Jeho chování mění tyto volby:
 
-```php
-try {
-	$neon = Neon::encode($value);
-} catch (Nette\Neon\Exception $e) {
-	// zpracování výjimky
-}
-```
+| Volba | Účinek
+|-----------------------------------------
+| `--check` | ověří navíc, že se soubor načte zpět bajt po bajtu
+| `--json` | vypíše nálezy jako JSON, pro nástroje
+| `--quiet` | nevypíše nic, jen nastaví návratový kód
+| `--verbose` | vypíše počet souborů, když jsou všechny platné
 
+Návratový kód je 0, když jsou všechny soubory platné, 1 při nálezu a 2 při chybném volání. Příkaz, jeho výstup i návratové kódy jsou stejné v knihovnách pro [JavaScript |javascript] a [Python |python], takže cokoliv, co ho spouští, funguje se všemi.
 
-decode(string $input): mixed .[method]
---------------------------------------
-
-Převede řetězec z NEONu do PHP.
-
-Vrací skaláry, pole, [data |format#Datum] jako objekty DateTimeImmutable a [entity |format#Entity] jako objekty [api:Nette\Neon\Entity].
-
-```php
-Neon::decode('hello: world'); // Vrátí pole ['hello' => 'world']
-```
-
-Metoda `decode()` při chybě vyhodí `Nette\Neon\Exception`.
-
-```php
-try {
-	$value = Neon::decode($neon);
-} catch (Nette\Neon\Exception $e) {
-	// zpracování výjimky
-}
-```
+Proto se hodí i pro AI agenty: když ho agent spustí po každé změně souboru `.neon`, dozví se o rozbitém souboru hned a opraví ho dřív, než pokračuje. [Pluginy Nette pro AI agenty |ai:agent-plugins] to dělají za vás.
 
 
-decodeFile(string $file): mixed .[method]
------------------------------------------
+Co dál
+======
 
-Převede obsah souboru z NEONu do PHP a odstraní případný BOM.
+- [Formát NEON |format] - syntaxe formátu
+- [Úpravy souborů |editing] - změna souboru se zachováním formátování a syntaktický strom
+- [Upgrade |upgrading] - co se změnilo ve verzi 4.0
 
-```php
-Neon::decodeFile('config.neon');
-```
-
-Metoda `decodeFile()` při chybě vyhodí `Nette\Neon\Exception`.
-
-
-Pokud aktualizujete balíček na novější verzi, podívejte se na stránku [upgrade|upgrading].
-
-{{maintitle: Nette NEON: čtení a zápis souborů NEON v PHP}}
-{{description: NEON je lidsky srozumitelný jazyk pro serializaci dat, který Nette používá v konfiguračních souborech. Statická třída Neon ho v PHP kóduje a dekóduje.}}
+{{maintitle: NEON pro PHP: čtení, zápis a úpravy souborů NEON}}
+{{description: Balíček nette/neon dekóduje a kóduje NEON v PHP, upravuje konfigurační soubory bez ztráty formátování a kontroluje je příkazem neon-lint.}}

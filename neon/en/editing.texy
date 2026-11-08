@@ -1,0 +1,307 @@
+Editing NEON Files
+******************
+
+<div class=perex>
+
+A configuration file is written by people: comments, blank lines, tabs or spaces, a hexadecimal number, `yes` instead of `true`. A tool that changes one option and writes the file back has to keep all of that. This page shows how to:
+
+- read a file into a syntax tree that keeps every character of it
+- change, add, remove and rename items, so that the diff is only your change
+- find items and comments in the tree
+
+</div>
+
+The libraries for [PHP |php], [JavaScript |javascript] and [Python |python] edit files the same way, as the [specification |format#Implementations] describes. Choose your language above any example and all examples on the page switch to it. Python writes the names in snake_case, so `setValue()` is `set_value()` there.
+
+
+Reading a File into the Tree
+============================
+
+The examples edit this file `config.neon`:
+
+```neon
+# database connection
+database:
+	host: localhost   # the server
+	port: 0x0CEA
+	# for development only
+	debug: yes
+
+services:
+	- App\Model\ArticleFacade
+
+mail:
+	smtp: true
+```
+
+First, parse it into a syntax tree. Unlike decoding into values, the tree keeps every character of the file, so printing it gives the file back byte for byte:
+
+/--div .[code-tabs]
+```php
+use Nette\Neon\Neon;
+
+$text = file_get_contents('config.neon');
+$document = Neon::parse($text);
+$document->print() === $text; // true
+```
+
+```js
+import { readFileSync } from 'node:fs';
+import { parse } from '@nette/neon';
+
+const text = readFileSync('config.neon', 'utf8');
+const doc = parse(text);
+doc.print() === text; // true
+```
+
+```python
+from pathlib import Path
+from neon import parse
+
+text = Path("config.neon").read_text(encoding="utf-8")
+doc = parse(text)
+doc.print() == text  # True
+```
+\--
+
+The edits below change the tree, and you save the result by writing `print()` back to the file.
+
+
+Changing Values
+===============
+
+An item is found by its **path**, the list of keys from the root, the same keys that decoding gives:
+
+/--div .[code-tabs]
+```php
+$document->setValue(['database', 'host'], 'db.example.com');
+$document->setValue(['database', 'port'], 3307);
+$document->setValue(['database', 'debug'], false);
+$document->setValue(['mail', 'smtp'], true);
+```
+
+```js
+doc.setValue(['database', 'host'], 'db.example.com');
+doc.setValue(['database', 'port'], 3307);
+doc.setValue(['database', 'debug'], false);
+doc.setValue(['mail', 'smtp'], true);
+```
+
+```python
+doc.set_value(["database", "host"], "db.example.com")
+doc.set_value(["database", "port"], 3307)
+doc.set_value(["database", "debug"], False)
+doc.set_value(["mail", "smtp"], True)
+```
+\--
+
+The file then differs in three lines:
+
+```
+- 	host: localhost   # the server
+- 	port: 0x0CEA
+- 	debug: yes
++ 	host: db.example.com   # the server
++ 	port: 0x0CEB
++ 	debug: no
+```
+
+Only the value changes; the spaces and the comment after it stay. The new value is written **in the style of the old one**: the port stays hexadecimal, and `yes` becomes `no`, not `false`.
+
+The last call writes `true` where `true` already is, and the file does not change at all: **writing an equal value changes nothing**. A form that saves all its fields therefore does not rewrite the options nobody touched.
+
+
+Adding Items
+============
+
+When the last key of the path does not exist, `setValue()` adds the item. The method `addItem()` adds an item without a key, an item of a list:
+
+/--div .[code-tabs]
+```php
+$document->setValue(['database', 'user'], 'admin');
+$document->addItem(['services'], 'App\Model\OrderFacade');
+```
+
+```js
+doc.setValue(['database', 'user'], 'admin');
+doc.addItem(['services'], 'App\\Model\\OrderFacade');
+```
+
+```python
+doc.set_value(["database", "user"], "admin")
+doc.add_item(["services"], r"App\Model\OrderFacade")
+```
+\--
+
+```
+  	debug: yes
++ 	user: admin
+
+  	- App\Model\ArticleFacade
++ 	- App\Model\OrderFacade
+```
+
+A new item goes to the end of its parent, indented like its neighbours.
+
+A key in the middle of the path that does not exist is an error, so that a typo does not create a new section. With the option `create` set to false, a missing last key is an error too:
+
+/--div .[code-tabs]
+```php
+$document->setValue(['databse', 'user'], 'admin');
+// Nette\Neon\Exception: No item 'databse' in the path databse.user
+
+$document->setValue(['database', 'pasword'], 'secret', create: false);
+// Nette\Neon\Exception: No item 'pasword' in the path database.pasword, and create is false
+```
+
+```js
+doc.setValue(['databse', 'user'], 'admin');
+// NeonError: No item 'databse' in the path databse.user
+
+doc.setValue(['database', 'pasword'], 'secret', { create: false });
+// NeonError: No item 'pasword' in the path database.pasword, and create is false
+```
+
+```python
+doc.set_value(["databse", "user"], "admin")
+# NeonError: No item 'databse' in the path databse.user
+
+doc.set_value(["database", "pasword"], "secret", create=False)
+# NeonError: No item 'pasword' in the path database.pasword, and create is false
+```
+\--
+
+A refused edit changes nothing in the tree, not even half of itself.
+
+
+Removing Items
+==============
+
+/--div .[code-tabs]
+```php
+$document->removeItem(['database', 'debug']);
+$document->removeItem(['mail', 'smtp']);
+```
+
+```js
+doc.removeItem(['database', 'debug']);
+doc.removeItem(['mail', 'smtp']);
+```
+
+```python
+doc.remove_item(["database", "debug"])
+doc.remove_item(["mail", "smtp"])
+```
+\--
+
+```
+  	port: 0x0CEA
+- 	# for development only
+- 	debug: yes
+
+- mail:
+- 	smtp: true
++ mail: {}
+```
+
+An item takes with it the comment on its line and the comments **directly above** it, because they describe it. A comment separated from the item by a blank line is a heading of what follows, and it stays.
+
+Removing the last item **keeps the collection**: `mail` becomes `{}`, because in a configuration an empty section and no section at all often mean different things. Where they mean the same, pass the option `nullable`, and the key is left without a value:
+
+/--div .[code-tabs]
+```php
+$document->removeItem(['mail', 'smtp'], nullable: true);
+// mail:
+```
+
+```js
+doc.removeItem(['mail', 'smtp'], { nullable: true });
+// mail:
+```
+
+```python
+doc.remove_item(["mail", "smtp"], nullable=True)
+# mail:
+```
+\--
+
+The comment `# database connection` stands directly above `database`, so removing `database` removes it as well. When you want to keep such a comment, ask for it to be moved to whatever follows:
+
+/--div .[code-tabs]
+```php
+use Nette\Neon\CommentPolicy;
+
+$document->removeItem(['database'], CommentPolicy::MoveToNextToken);
+```
+
+```js
+import { CommentPolicy } from '@nette/neon';
+
+doc.removeItem(['database'], { comments: CommentPolicy.MoveToNextToken });
+```
+
+```python
+from neon import CommentPolicy
+
+doc.remove_item(["database"], comments=CommentPolicy.MOVE_TO_NEXT_TOKEN)
+```
+\--
+
+
+Renaming Keys
+=============
+
+The method `setKey()` renames a key and leaves its value as it is:
+
+/--div .[code-tabs]
+```php
+$document->setKey(['mail'], 'mailer');
+```
+
+```js
+doc.setKey(['mail'], 'mailer');
+```
+
+```python
+doc.set_key(["mail"], "mailer")
+```
+\--
+
+
+The Tree
+========
+
+The tree is made of nodes, and the nodes of tokens, each with its exact text and with its trivia: the whitespace, line endings and comments around it. The method `findItem()` finds an item by its path:
+
+/--div .[code-tabs]
+```php
+$item = $document->findItem(['database', 'host']);
+$item->getValue();                       // 'localhost'
+$item->getTrailingComments()[0]->text;   // '# the server'
+$item->value->getFirstToken()->text;     // 'localhost', the text exactly as written
+$item->getPosition();                    // line 3, column 2
+```
+
+```js
+const item = doc.findItem(['database', 'host']);
+item.getValue();                         // 'localhost'
+item.getTrailingComments()[0].text;      // '# the server'
+item.value.getFirstToken().text;         // 'localhost', the text exactly as written
+item.getPosition();                      // line 3, column 2
+```
+
+```python
+item = doc.find_item(["database", "host"])
+item.get_value()                         # 'localhost'
+item.get_trailing_comments()[0].text     # '# the server'
+item.value.get_first_token().text        # 'localhost', the text exactly as written
+item.get_position()                      # line 3, column 2
+```
+\--
+
+There are eight classes of nodes: `DocumentNode`, `BlockArrayNode`, `InlineArrayNode`, `ArrayItemNode`, `EntityNode`, `EntityChainNode`, `StringNode` and `LiteralNode`. A node finds its descendants of a given class with `find()`, its ancestor with `findAncestor()`, and the class `Traverser` walks the tree and can replace or remove nodes on the way. A position is always computed from the current tree, so it stays right after edits.
+
+Each library has runnable examples that go further, for example a form over a configuration file: [PHP |https://github.com/nette/neon/tree/master/examples], [JavaScript |https://github.com/nette/neon-js/tree/master/examples], [Python |https://github.com/nette/neon-py/tree/master/examples].
+
+{{maintitle: Editing NEON Files Without Losing Comments and Formatting}}
+{{description: Change, add, remove and rename items of a NEON configuration file in PHP, JavaScript or Python, so that the diff is only your change.}}

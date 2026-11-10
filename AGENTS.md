@@ -89,8 +89,8 @@ The `version` field in `meta.json` says which version of the package the pages d
 quotes directly**, in any language — not `„…"`, not `«…»`, not `“…”`.
 
 Texy converts them to the correct typographic pair for the page's language during
-rendering, driven by `TypographyModule::$locales` (17 languages: bg, cs, de, el, en,
-es, fr, hu, it, ja, pl, pt, ro, ru, sl, tr, uk). The same ASCII source therefore
+rendering, driven by `Texy\Config::$locales` (18 languages: bg, cs, de, el, en,
+es, fr, hu, it, ja, pl, pt, ro, ru, sk, sl, tr, uk). The same ASCII source therefore
 renders as `„text"` in German, `«text»` in Russian and `「text」` in Japanese.
 
 ```texy
@@ -115,7 +115,7 @@ a code block Texy performs no typographic substitution at all.
 **The one exception** is the Texy documentation itself, where typographic quotes are the
 subject matter and must appear literally: `texy/{cs,en}/configuration.texy` (the list of
 locales), `texy/{cs,en}/syntax.texy` and `texy/cs/@home.texy`. Do not ASCII-ize those
-lines. When touching them, take the pairs from `TypographyModule::$locales` — writing
+lines. When touching them, take the pairs from `Texy\Config::$locales` — writing
 them by hand produces broken pairs like `„text"`, which is exactly what those lines
 suffered from before. Note that plain ASCII is equally wrong there: Texy would re-typeset
 it to the *page's* locale, so a sample meant to show English quotes would come out with

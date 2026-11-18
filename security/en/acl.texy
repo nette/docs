@@ -6,7 +6,7 @@ Do you need to control access by user roles and parts of your website? Say, who 
 
 → [Installation and requirements |@home#Installation]
 
-The ACL (Access Control List) is the [authorizer |authorization#Authorizer] that comes with Nette: when you ask `$user->isAllowed('poll', 'vote')`, the `$user` object goes through the user's roles, asks the ACL about each one and allows it if at least one of them may. It fits wherever roles and the names of parts of the site decide.
+The ACL (Access Control List) is a [voter |authorization#May This User Edit This Article?] that comes with Nette: when you ask `$user->isAllowed('poll', 'vote')`, the ACL goes through the user's roles and allows it if at least one of them may. It fits wherever roles and the names of parts of the site decide. When the decision depends on data, for example whether the user is the author of an article, write your own voter; the two work side by side.
 
 
 Roles and Resources
@@ -100,7 +100,7 @@ $acl->isAllowed('admin', 'poll', 'edit'); // false
 $acl->isAllowed('admin', 'comment', 'edit'); // true
 ```
 
-In an application, however, you don't ask the ACL directly like this. You just call `$user->isAllowed('poll', 'vote')` and the `$user` object asks the ACL about all the roles of the logged-in user for you.
+In an application, however, you don't ask the ACL directly like this. You just call `$user->isAllowed('poll', 'vote')` and the ACL checks all the roles of the current user for you, see [#ACL as a Voter].
 
 
 Conditions in Rules
@@ -131,50 +131,7 @@ $assertion = function (Permission $acl, ?string $role, ?string $resource, ?strin
 $acl->allow('guest', 'article', 'view', $assertion);
 ```
 
-But how to handle a situation where the names of roles and resources alone are not enough and we would like to define that, for example, the role `registered` can edit the resource `article` only if they are its author? We will use objects instead of strings; the role will be an object [api:Nette\Security\Role] and the resource an object [api:Nette\Security\Resource]. Their `getRoleId()` and `getResourceId()` methods will return the original strings:
-
-```php
-class Registered implements Nette\Security\Role
-{
-	public $id;
-
-	public function getRoleId(): string
-	{
-		return 'registered';
-	}
-}
-
-
-class Article implements Nette\Security\Resource
-{
-	public $authorId;
-
-	public function getResourceId(): string
-	{
-		return 'article';
-	}
-}
-```
-
-And now we create the rule:
-
-```php
-$assertion = function (Permission $acl, ?string $role, ?string $resource, ?string $privilege): bool {
-	$role = $acl->getQueriedRole(); // Registered object
-	$resource = $acl->getQueriedResource(); // Article object
-	return $role->id === $resource->authorId;
-};
-
-$acl->allow('registered', 'article', 'edit', $assertion);
-```
-
-And the ACL query is performed by passing objects:
-
-```php
-$role = new Registered(/* ... */);
-$article = new Article(/* ... */);
-$acl->isAllowed($role, $article, 'edit');
-```
+The callback works only with the names of roles and resources. If you want to decide by particular data, such as an article that only its author may edit, write a [voter |authorization#May This User Edit This Article?]: it gets the user and the article directly.
 
 
 Inheriting from Multiple Roles
@@ -204,6 +161,36 @@ $acl->isAllowed('mary', 'backend'); // true
 Roles and resources can also be removed (`removeRole()`, `removeResource()`), and rules can also be reverted (`removeAllow()`, `removeDeny()`). The array of all direct parent roles is returned by `getRoleParents()`. Whether two entities inherit from each other is returned by `roleInheritsFrom()` and `resourceInheritsFrom()`. The existence of a role or resource is checked by `hasRole()` and `hasResource()`, the lists of all registered roles and resources are returned by `getRoles()` and `getResources()`, and everything can be wiped with `removeAllRoles()` and `removeAllResources()`.
 
 
+ACL as a Voter
+--------------
+
+When you call `$user->isAllowed()`, the ACL goes through the roles of the current user and votes like any other [voter |authorization#How Voters Reach a Decision]:
+
+- `Allow` if at least one of the roles is allowed,
+- `Forbid` if none is allowed and an explicit `deny()` rule stopped one of them, so the rule `deny('admin', 'poll', 'edit')` holds even when another voter allows it,
+- `Abstain` if only the initial "nobody can do anything" applies, so the decision is left to the other voters,
+- `Abstain` also for a role or a resource it doesn't know, so it doesn't get in the way of the other voters.
+
+So an unknown role or resource is not an error. A question about an article object, such as `$user->isAllowed($article, 'edit')`, is thus decided by other voters, even though the ACL doesn't know such a resource.
+
+.[warning]
+That is also why even a typo in a resource name, such as `$user->isAllowed('artcle')`, throws no exception: the ACL abstains and the query usually ends in a silent denial. Only a direct query `$acl->isAllowed()` throws an exception.
+
+If you want the rules for the resource `article` to apply to an article object too, let its class implement the [api:Nette\Security\Resource] interface. Its `getResourceId()` method returns the name of the resource:
+
+```php
+class Article implements Nette\Security\Resource
+{
+	public function getResourceId(): string
+	{
+		return 'article';
+	}
+}
+```
+
+Then `$user->isAllowed($article, 'view')` evaluates the rules for the resource `article`, prohibitions included. Deciding by the data of the article, such as its author, belongs in a voter, though.
+
+
 Adding as a Service
 -------------------
 
@@ -227,12 +214,14 @@ class AuthorizatorFactory
 }
 ```
 
-And add it to the configuration. The `$user` object then uses the resulting ACL as its authorizer:
+And add it to the configuration. The resulting ACL is a voter, so the `$user` object starts asking it by itself:
 
 ```neon
 services:
 	- App\Model\AuthorizatorFactory::create
 ```
+
+Wherever you need the ACL itself, for example to list its roles, have the `Nette\Security\Permission` service passed to you.
 
 In presenters, you can then verify permissions, for example, in the `startup()` method:
 

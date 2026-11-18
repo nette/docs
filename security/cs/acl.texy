@@ -6,7 +6,7 @@ Potřebujete řídit přístup podle rolí uživatelů a částí webu? Třeba k
 
 → [Instalace a požadavky |@home#Instalace]
 
-ACL (Access Control List) je [autorizátor |authorization#Autorizátor], který je součástí Nette: když se zeptáte `$user->isAllowed('poll', 'vote')`, objekt `$user` projde role uživatele, na každou se zeptá ACL a povolí, pokud to smí aspoň jedna z nich. Hodí se všude, kde rozhodují role a názvy částí webu.
+ACL (Access Control List) je [voter |authorization#Smí tenhle uživatel upravit tenhle článek?], který je součástí Nette: když se zeptáte `$user->isAllowed('poll', 'vote')`, ACL projde role uživatele a povolí, pokud to smí aspoň jedna z nich. Hodí se všude, kde rozhodují role a názvy částí webu. Když rozhodnutí závisí na datech, třeba na tom, zda je uživatel autorem článku, napište si vlastní voter; obojí funguje vedle sebe.
 
 
 Role a zdroje
@@ -100,7 +100,7 @@ $acl->isAllowed('admin', 'poll', 'edit'); // false
 $acl->isAllowed('admin', 'comment', 'edit'); // true
 ```
 
-V aplikaci se ale na ACL takhle přímo neptáte. Stačí zavolat `$user->isAllowed('poll', 'vote')` a objekt `$user` se za vás zeptá ACL na všechny role přihlášeného uživatele.
+V aplikaci se ale na ACL takhle přímo neptáte. Stačí zavolat `$user->isAllowed('poll', 'vote')` a ACL za vás prověří všechny role aktuálního uživatele, viz [#ACL jako voter].
 
 
 Podmínky v pravidlech
@@ -131,50 +131,7 @@ $assertion = function (Permission $acl, ?string $role, ?string $resource, ?strin
 $acl->allow('guest', 'article', 'view', $assertion);
 ```
 
-Jak ale třeba řešit situaci, kdy nestačí jen názvy rolí a zdrojů, ale chtěli bychom definovat, že třeba role `registered` může editovat zdroj `article`, jen pokud je jeho autorem? Místo řetězců použijeme objekty, role bude objekt [api:Nette\Security\Role] a zdroj [api:Nette\Security\Resource]. Jejich metody `getRoleId()` resp. `getResourceId()` budou vracet původní řetězce:
-
-```php
-class Registered implements Nette\Security\Role
-{
-	public $id;
-
-	public function getRoleId(): string
-	{
-		return 'registered';
-	}
-}
-
-
-class Article implements Nette\Security\Resource
-{
-	public $authorId;
-
-	public function getResourceId(): string
-	{
-		return 'article';
-	}
-}
-```
-
-A nyní vytvoříme pravidlo:
-
-```php
-$assertion = function (Permission $acl, ?string $role, ?string $resource, ?string $privilege): bool {
-	$role = $acl->getQueriedRole(); // objekt Registered
-	$resource = $acl->getQueriedResource(); // objekt Article
-	return $role->id === $resource->authorId;
-};
-
-$acl->allow('registered', 'article', 'edit', $assertion);
-```
-
-A dotaz na ACL se provede předáním objektů:
-
-```php
-$role = new Registered(/* ... */);
-$article = new Article(/* ... */);
-$acl->isAllowed($role, $article, 'edit');
-```
+Callback pracuje jen s názvy rolí a zdrojů. Pokud chcete rozhodovat podle konkrétních dat, třeba že článek smí upravit jen jeho autor, napište [voter |authorization#Smí tenhle uživatel upravit tenhle článek?]: dostane přímo uživatele i článek.
 
 
 Dědění od více rolí
@@ -204,6 +161,36 @@ $acl->isAllowed('mary', 'backend'); // true
 Role a zdroje lze i odebírat (`removeRole()`, `removeResource()`), odebrat lze i pravidla (`removeAllow()`, `removeDeny()`). Pole všech přímých rodičovských rolí vrací `getRoleParents()`, zda od sebe dvě entity dědí, vrací `roleInheritsFrom()` a `resourceInheritsFrom()`. Existenci role či zdroje ověří `hasRole()` a `hasResource()`, seznam všech registrovaných rolí a zdrojů vrací `getRoles()` a `getResources()` a k odstranění všech naráz slouží `removeAllRoles()` a `removeAllResources()`.
 
 
+ACL jako voter
+--------------
+
+Když zavoláte `$user->isAllowed()`, ACL projde role aktuálního uživatele a hlasuje jako kterýkoliv jiný [voter |authorization#Jak se votery dohodnou]:
+
+- `Allow`, pokud je povoleno aspoň jedné z rolí,
+- `Forbid`, pokud není povoleno žádné a některou z nich zastavilo výslovné pravidlo `deny()`, takže pravidlo `deny('admin', 'poll', 'edit')` platí, i když to jiný voter povolí,
+- `Abstain`, pokud platí jen výchozí "nikdo nemůže nic", takže rozhodnutí nechá na ostatních voterech,
+- `Abstain` také u role nebo zdroje, který nezná, aby nepřekážel ostatním voterům.
+
+Neznámá role nebo zdroj tedy není chyba. O dotazu na objekt článku, třeba `$user->isAllowed($article, 'edit')`, tak rozhodnou jiné votery, i když ACL takový zdroj nezná.
+
+.[warning]
+Proto ale ani překlep v názvu zdroje, třeba `$user->isAllowed('artcle')`, nevyhodí výjimku: ACL se zdrží a dotaz obvykle skončí tichým zákazem. Výjimku vyhodí jen přímý dotaz `$acl->isAllowed()`.
+
+Chcete-li, aby pravidla pro zdroj `article` platila i pro objekt článku, nechte jeho třídu implementovat rozhraní [api:Nette\Security\Resource]. Jeho metoda `getResourceId()` vrací název zdroje:
+
+```php
+class Article implements Nette\Security\Resource
+{
+	public function getResourceId(): string
+	{
+		return 'article';
+	}
+}
+```
+
+Pak `$user->isAllowed($article, 'view')` vyhodnotí pravidla pro zdroj `article` včetně zákazů. Rozhodování podle dat článku, třeba podle jeho autora, ale patří do voteru.
+
+
 Přidání jako služby
 -------------------
 
@@ -227,12 +214,14 @@ class AuthorizatorFactory
 }
 ```
 
-A přidáte ji do konfigurace. Vytvořené ACL pak objekt `$user` používá jako autorizátor:
+A přidáte ji do konfigurace. Vytvořené ACL je voter, takže se ho objekt `$user` začne ptát sám:
 
 ```neon
 services:
 	- App\Model\AuthorizatorFactory::create
 ```
+
+Kde potřebujete samotné ACL, například abyste vypsali jeho role, nechte si předat službu `Nette\Security\Permission`.
 
 V presenterech pak můžete ověřit oprávnění například v metodě `startup()`:
 

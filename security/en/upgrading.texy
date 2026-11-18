@@ -2,6 +2,109 @@ Upgrading
 *********
 
 
+Upgrading to Version 4.0
+========================
+
+The minimum required PHP version is 8.4. If you use Nette Security with Nette DI or Nette HTTP, it needs `nette/di` 3.2 and `nette/http` 3.4 or newer.
+
+.[tip]
+A part of the work can be done for you by [DressCode |tools:coding-standard#Newer PHP and Nette] with the `dresscode/upgrade-nette` package: it rewrites renamed classes and constants and reports what it cannot rewrite. See [Upgrading Nette |https://dresscode.run/en/upgrading-nette].
+
+The biggest change concerns authorization: access is now decided by [voters |authorization] instead of an authorizator that `User` asked about each role of the user. You call `$user->isAllowed()` the same way as before, and the [ACL |acl] from the configuration keeps working, because `Nette\Security\Permission` is one of the voters.
+
+
+Authorization
+-------------
+
+The ACL votes like other voters, see [ACL as a Voter |acl#ACL as a Voter]. An explicit `deny()` rule forbids access even if another voter allows it. For a role or a resource the ACL doesn't know, the ACL abstains, so `$user->isAllowed()` returns `false` (unless another voter allows access) instead of throwing an exception. A typo in a resource name is therefore no longer revealed by an exception. The method `Permission::isAllowed()` is final; if your subclass of `Permission` overrides it, write a voter instead.
+
+If your ACL comes from the configuration, `$user->getAuthorizator()` no longer returns it but throws an exception, and `getAuthorizatorIfExists()` returns `null`, because the ACL is now a voter and not an authorizator. Wherever you need the ACL itself, have the `Nette\Security\Permission` service passed to you.
+
+Your own authorizator implementing `Nette\Security\Authorizator` still works, but it is deprecated: if it is a service, Nette reports it as deprecated and names the service. The methods `User::setAuthorizator()`, `getAuthorizator()` and `getAuthorizatorIfExists()` are deprecated as well. Rewrite it as a voter. The voter gets all the roles of the user at once, so instead of answering for one role it checks them with `isInRole()`:
+
+```php
+// before
+class MyAuthorizator implements Nette\Security\Authorizator
+{
+	public function isAllowed(?string $role, ?string $resource, ?string $privilege): bool
+	{
+		return $role === 'admin' || ($role === 'editor' && $resource === 'article');
+	}
+}
+
+// after
+use Nette\Security\Principal;
+use Nette\Security\Vote;
+
+class MyVoter implements Nette\Security\Voter
+{
+	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	{
+		return Vote::allowIf(
+			$principal->isInRole('admin')
+			|| ($principal->isInRole('editor') && $resource === 'article'),
+		);
+	}
+}
+```
+
+Where the authorizator returned `false`, the voter abstains, so that another voter may still allow access; see [How Voters Reach a Decision |authorization#How Voters Reach a Decision].
+
+If you create the `User` object yourself, its third parameter is now a list of voters. Since `Permission` is a voter, `new User($storage, $authenticator, $acl)` keeps working. You cannot pass your own authorizator there, though; until you rewrite it as a voter, set it with the deprecated method `setAuthorizator()`.
+
+Roles are just names. The `Nette\Security\Role` interface is deprecated, an identity whose `getRoles()` returns role objects throws an exception, and `Permission::isAllowed()` accepts the role only as a string. Assertions receive names, and `getQueriedRole()` and `getQueriedResource()` return names, too. The `Nette\Security\Resource` interface stays: it tells the ACL which of its resources an object is.
+
+An assertion that compared the user with an entity, typically to check who owns it, is rewritten as a voter. Ownership is checked by the `hasId()` method of the [principal |authorization#Principal: Who the Decision Is About], which is never true for a user who is not logged in:
+
+```php
+// before
+$acl->allow('registered', 'article', 'edit', function (Permission $acl): bool {
+	$role = $acl->getQueriedRole(); // Registered object holding the user ID
+	$resource = $acl->getQueriedResource(); // Article object
+	return $role->id === $resource->authorId;
+});
+
+$acl->isAllowed(new Registered($user->getId()), $article, 'edit');
+
+// after
+use Nette\Security\Principal;
+use Nette\Security\Vote;
+
+class ArticleVoter implements Nette\Security\Voter
+{
+	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	{
+		return Vote::allowIf(
+			$resource instanceof Article
+			&& $privilege === 'edit'
+			&& $principal->isInRole('registered')
+			&& $principal->hasId($resource->authorId),
+		);
+	}
+}
+
+$user->isAllowed($article, 'edit');
+```
+
+The method `User::getRoles()` is final and returns the same roles as the principal. The method `User::isAllowed()` takes the privilege only as a string or `null`. The property `User::$authenticatedRole` is deprecated because it is never used.
+
+
+Authentication and Identity
+---------------------------
+
+The `Nette\Security\IAuthenticator` interface has been removed; implement `Nette\Security\Authenticator`, whose method `authenticate()` takes the username and the password. The legacy service names `user`, `nette.userStorage`, `nette.authenticator` and `nette.authorizator` have been removed as well; use `security.user`, `security.userStorage`, `security.authenticator` and `security.authorizator`, or autowiring.
+
+If you implement `Nette\Security\IIdentity` yourself, declare the return type `string|int` of `getId()` and add the method `getData()`, which returns the user data as an array. The class `Nette\Security\Identity` is now just an alias of `SimpleIdentity`. The method `IdentityHandler::getGuestIdentity()` is a regular part of the interface, so every handler must have it; return `null` if you don't use a [guest identity |authentication#Guest Identity].
+
+Reading a key of `SimpleIdentity` that is not among its data throws `Nette\MemberAccessException`; previously it returned `null`. This also concerns adding to an array that doesn't exist yet, such as `$identity->cart[] = $item`, so create the key first: `$identity->cart = []`.
+
+`SimpleIdentity` stores its ID, roles and data together with the public and protected properties of a subclass. If your subclass has private properties that should survive in the session, extend `__serialize()` and `__unserialize()`. Identities saved in sessions by version 3.x are read without problems.
+
+With the [cookie storage |authentication#Storage for Logged-in User], the value of the cookie is only a token, which `User` never takes as the identity of the user. The authenticator must implement `IdentityHandler` and exchange the token for the identity in `wakeupIdentity()`, otherwise `User` throws `Nette\InvalidStateException`. This has been the case since version 3.2.8.
+
+The magic properties `$user->id`, `$user->roles`, `$user->logoutReason`, `$user->authenticator` and `$user->authorizator` are deprecated; call the methods `getId()`, `getRoles()`, `getLogoutReason()` and so on. The properties `$user->identity` and `$user->loggedIn` stay. The constants `User::MANUAL` and `User::INACTIVITY` have been removed; use `User::LogoutManual` and `User::LogoutInactivity`. Deprecated constants and methods now trigger `E_USER_DEPRECATED` when used.
+
+
 Upgrading to Version 3.1
 ========================
 
@@ -20,4 +123,4 @@ Upgrading to Version 3.0
 - the `Nette\Security\Passwords` class is now used as an object, i.e. the methods are no longer static
 
 {{maintitle: Upgrading Nette Security: What Changed in Each Version}}
-{{description: What changed in Nette Security 3.1 and 3.0 and how to update your code, including the new UserStorage and IdentityHandler interfaces in version 3.1.}}
+{{description: What changed in Nette Security 4.0, 3.1 and 3.0 and how to update your code, including the move from authorizators to voters in version 4.0.}}

@@ -2,6 +2,109 @@ Upgrade
 *******
 
 
+Upgrade na verzi 4.0
+====================
+
+Minimální požadovaná verze PHP je 8.4. Pokud Nette Security používáte s Nette DI nebo Nette HTTP, potřebuje `nette/di` 3.2 a `nette/http` 3.4 nebo novější.
+
+.[tip]
+Část práce za vás udělá [DressCode |tools:coding-standard#Novější PHP a Nette] s balíčkem `dresscode/upgrade-nette`: přepíše přejmenované třídy a konstanty a ohlásí, co přepsat nedokáže. Viz [Upgrade Nette |https://dresscode.run/cs/upgrading-nette].
+
+Největší změna se týká autorizace: o přístupu nyní rozhodují [votery |authorization] místo autorizátoru, kterého se `User` ptal na každou roli uživatele. Metodu `$user->isAllowed()` voláte stejně jako dřív a [ACL |acl] z konfigurace funguje dál, protože `Nette\Security\Permission` je jedním z voterů.
+
+
+Autorizace
+----------
+
+ACL hlasuje jako ostatní votery, viz [ACL jako voter |acl#ACL jako voter]. Výslovné pravidlo `deny()` přístup zakáže, i když ho jiný voter povolí. U role nebo zdroje, které ACL nezná, se ACL zdrží, takže `$user->isAllowed()` vrátí `false` (pokud přístup nepovolí jiný voter), místo aby vyhodilo výjimku. Překlep v názvu zdroje tak už výjimka neodhalí. Metoda `Permission::isAllowed()` je finální; pokud ji váš potomek třídy `Permission` přepisuje, napište místo toho voter.
+
+Pokud máte ACL z konfigurace, `$user->getAuthorizator()` ho už nevrací, ale vyhodí výjimku, a `getAuthorizatorIfExists()` vrátí `null`, protože ACL je nyní voter, a ne autorizátor. Kde potřebujete samotné ACL, nechte si předat službu `Nette\Security\Permission`.
+
+Vlastní autorizátor implementující `Nette\Security\Authorizator` funguje dál, ale je zastaralý: pokud je to služba, Nette ohlásí, že je zastaralá, a uvede její název. Zastaralé jsou i metody `User::setAuthorizator()`, `getAuthorizator()` a `getAuthorizatorIfExists()`. Přepište ho na voter. Voter dostane všechny role uživatele najednou, takže místo odpovědi za jednu roli je ověří pomocí `isInRole()`:
+
+```php
+// dříve
+class MyAuthorizator implements Nette\Security\Authorizator
+{
+	public function isAllowed(?string $role, ?string $resource, ?string $privilege): bool
+	{
+		return $role === 'admin' || ($role === 'editor' && $resource === 'article');
+	}
+}
+
+// nyní
+use Nette\Security\Principal;
+use Nette\Security\Vote;
+
+class MyVoter implements Nette\Security\Voter
+{
+	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	{
+		return Vote::allowIf(
+			$principal->isInRole('admin')
+			|| ($principal->isInRole('editor') && $resource === 'article'),
+		);
+	}
+}
+```
+
+Kde autorizátor vracel `false`, voter se zdrží, aby přístup mohl povolit ještě jiný voter; viz [Jak se votery dohodnou |authorization#Jak se votery dohodnou].
+
+Pokud objekt `User` vytváříte sami, jeho třetím parametrem je nyní seznam voterů. Protože `Permission` je voter, `new User($storage, $authenticator, $acl)` funguje dál. Vlastní autorizátor tam ale předat nelze; dokud ho nepřepíšete na voter, nastavte ho zastaralou metodou `setAuthorizator()`.
+
+Role jsou jen názvy. Rozhraní `Nette\Security\Role` je zastaralé, identita, jejíž `getRoles()` vrací objekty rolí, vyhodí výjimku a `Permission::isAllowed()` přijímá roli jen jako řetězec. Assertions dostávají názvy a názvy vracejí i `getQueriedRole()` a `getQueriedResource()`. Rozhraní `Nette\Security\Resource` zůstává: říká ACL, kterým z jeho zdrojů objekt je.
+
+Assertion, která porovnávala uživatele s entitou, typicky aby zjistila, komu patří, se přepíše na voter. Vlastnictví ověří metoda `hasId()` [principalu |authorization#Principal: o kom se rozhoduje], která pro nepřihlášeného uživatele nikdy neplatí:
+
+```php
+// dříve
+$acl->allow('registered', 'article', 'edit', function (Permission $acl): bool {
+	$role = $acl->getQueriedRole(); // objekt Registered s ID uživatele
+	$resource = $acl->getQueriedResource(); // objekt Article
+	return $role->id === $resource->authorId;
+});
+
+$acl->isAllowed(new Registered($user->getId()), $article, 'edit');
+
+// nyní
+use Nette\Security\Principal;
+use Nette\Security\Vote;
+
+class ArticleVoter implements Nette\Security\Voter
+{
+	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	{
+		return Vote::allowIf(
+			$resource instanceof Article
+			&& $privilege === 'edit'
+			&& $principal->isInRole('registered')
+			&& $principal->hasId($resource->authorId),
+		);
+	}
+}
+
+$user->isAllowed($article, 'edit');
+```
+
+Metoda `User::getRoles()` je finální a vrací tytéž role jako principal. Metoda `User::isAllowed()` přijímá operaci jen jako řetězec nebo `null`. Property `User::$authenticatedRole` je zastaralá, protože se nikdy nepoužije.
+
+
+Autentizace a identita
+----------------------
+
+Rozhraní `Nette\Security\IAuthenticator` bylo odstraněno; implementujte `Nette\Security\Authenticator`, jehož metoda `authenticate()` přijímá uživatelské jméno a heslo. Odstraněny byly i staré názvy služeb `user`, `nette.userStorage`, `nette.authenticator` a `nette.authorizator`; používejte `security.user`, `security.userStorage`, `security.authenticator` a `security.authorizator`, nebo autowiring.
+
+Pokud sami implementujete `Nette\Security\IIdentity`, uveďte u `getId()` návratový typ `string|int` a doplňte metodu `getData()`, která vrací data uživatele jako pole. Třída `Nette\Security\Identity` je nyní jen aliasem `SimpleIdentity`. Metoda `IdentityHandler::getGuestIdentity()` je řádnou součástí rozhraní, takže ji musí mít každý handler; pokud [identitu hosta |authentication#Identita hosta] nepoužíváte, vraťte `null`.
+
+Čtení klíče `SimpleIdentity`, který mezi jejími daty není, vyhodí `Nette\MemberAccessException`; dříve vracelo `null`. Týká se to i přidávání do pole, které ještě neexistuje, jako `$identity->cart[] = $item`, proto klíč nejprve vytvořte: `$identity->cart = []`.
+
+`SimpleIdentity` ukládá své ID, role a data spolu s veřejnými a chráněnými property potomka. Pokud má váš potomek privátní property, které mají v session přežít, rozšiřte `__serialize()` a `__unserialize()`. Identity, které do session uložila verze 3.x, se načtou bez problémů.
+
+U [cookie úložiště |authentication#Úložiště přihlášeného uživatele] je hodnota cookie jen token, který `User` nikdy nepovažuje za identitu uživatele. Autentikátor musí implementovat `IdentityHandler` a v `wakeupIdentity()` token vyměnit za identitu, jinak `User` vyhodí `Nette\InvalidStateException`. Platí to už od verze 3.2.8.
+
+Magické property `$user->id`, `$user->roles`, `$user->logoutReason`, `$user->authenticator` a `$user->authorizator` jsou zastaralé; volejte metody `getId()`, `getRoles()`, `getLogoutReason()` a tak dále. Property `$user->identity` a `$user->loggedIn` zůstávají. Konstanty `User::MANUAL` a `User::INACTIVITY` byly odstraněny; používejte `User::LogoutManual` a `User::LogoutInactivity`. Zastaralé konstanty a metody nyní při použití vyvolají `E_USER_DEPRECATED`.
+
+
 Upgrade na verzi 3.1
 ====================
 
@@ -20,4 +123,4 @@ Upgrade na verzi 3.0
 - třída `Nette\Security\Passwords` se nyní používá jako objekt, tj. metody již nejsou statické
 
 {{maintitle: Upgrade Nette Security: změny v jednotlivých verzích}}
-{{description: Co se změnilo v Nette Security 3.1 a 3.0 a jak upravit kód, včetně nových rozhraní UserStorage a IdentityHandler ve verzi 3.1.}}
+{{description: Co se změnilo v Nette Security 4.0, 3.1 a 3.0 a jak upravit kód, včetně přechodu od authorizatorů k voterům ve verzi 4.0.}}

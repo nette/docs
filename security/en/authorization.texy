@@ -71,7 +71,7 @@ use Nette\Security\{Principal, Vote, Voter};
 
 class ArticleVoter implements Voter
 {
-	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	public function vote(Principal $principal, mixed $resource, string|\UnitEnum|null $privilege): Vote
 	{
 		if (!$resource instanceof Article) {
 			return Vote::Abstain; // not an article, not my business
@@ -147,7 +147,7 @@ Let's add an administrator who may do everything:
 ```php
 class AdminVoter implements Voter
 {
-	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	public function vote(Principal $principal, mixed $resource, string|\UnitEnum|null $privilege): Vote
 	{
 		return Vote::allowIf($principal->isInRole('admin'));
 	}
@@ -235,7 +235,7 @@ We already have the rules for viewing articles in `ArticleVoter` and don't want 
 ```php
 class CommentVoter implements Voter
 {
-	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	public function vote(Principal $principal, mixed $resource, string|\UnitEnum|null $privilege): Vote
 	{
 		if (!$resource instanceof Comment) {
 			return Vote::Abstain;
@@ -269,7 +269,7 @@ In `ArticleVoter`, a single condition at the beginning of the `vote()` method is
 ```php
 class ArticleVoter implements Voter
 {
-	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	public function vote(Principal $principal, mixed $resource, string|\UnitEnum|null $privilege): Vote
 	{
 		if ($resource === Article::class) { // a question about articles in general
 			return Vote::allowIf($privilege === 'create' && $principal->isInRole('registered'));
@@ -296,15 +296,15 @@ class ArticleVoter implements Voter
 Enums Instead of Strings
 ------------------------
 
-Privilege names like `'edit'` are plain strings, and as you already know, a typo in them ends in a silent `false`. If you want to be sure you never mistype one, list the privileges as an enum backed by strings and ask with its cases:
+Privilege names like `'edit'` are plain strings, and as you already know, a typo in them ends in a silent `false`. If you want to be sure you never mistype one, list the privileges as an enum and ask with its cases:
 
 ```php
-enum ArticlePrivilege: string
+enum ArticlePrivilege
 {
-	case View = 'view';
-	case Edit = 'edit';
-	case Delete = 'delete';
-	case Create = 'create';
+	case View;
+	case Edit;
+	case Delete;
+	case Create;
 }
 
 if ($user->isAllowed($article, ArticlePrivilege::Edit)) {
@@ -312,43 +312,43 @@ if ($user->isAllowed($article, ArticlePrivilege::Edit)) {
 }
 ```
 
-A voter still receives a string, the value of the case, so `ArticlePrivilege::Edit` and `'edit'` mean the same, and the other voters and the ACL keep working unchanged. The enum must be backed by strings, though; the `isAllowed()` method rejects a case of an int-backed enum with an exception.
-
-In the voter, you turn the name back into a case of the enum with the `tryFrom()` method and then decide by the cases:
+The case reaches the voter exactly as you passed it. So together with the resource, the voter checks that the privilege is a case of its enum, and then decides in a `match` by the cases:
 
 ```php
 class ArticleVoter implements Voter
 {
-	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	public function vote(Principal $principal, mixed $resource, string|\UnitEnum|null $privilege): Vote
 	{
-		$operation = ArticlePrivilege::tryFrom($privilege ?? ''); // from the name back to a case of the enum
-
 		if ($resource === Article::class) { // a question about articles in general
-			return Vote::allowIf($operation === ArticlePrivilege::Create && $principal->isInRole('registered'));
+			return Vote::allowIf($privilege === ArticlePrivilege::Create && $principal->isInRole('registered'));
 		}
 
-		if (!$resource instanceof Article) {
+		if (!$resource instanceof Article || !$privilege instanceof ArticlePrivilege) {
 			return Vote::Abstain; // not an article, not my business
 		}
 
-		if ($resource->locked && $operation === ArticlePrivilege::Edit) {
+		if ($resource->locked && $privilege === ArticlePrivilege::Edit) {
 			return Vote::Forbid; // nobody edits a locked article, not even an admin
 		}
 
-		return Vote::allowIf(match ($operation) {
+		return Vote::allowIf(match ($privilege) {
 			ArticlePrivilege::View => $resource->published || $principal->hasId($resource->authorId),
 			ArticlePrivilege::Edit, ArticlePrivilege::Delete => $principal->hasId($resource->authorId),
-			ArticlePrivilege::Create, null => false,
+			ArticlePrivilege::Create => false, // a new article is asked about by its class
 		});
 	}
 }
 ```
 
-The last branch allows nothing: only a new article can be created, and we ask about that one by its class, while `null` means a privilege the enum does not know, or a question with no privilege. Because the `match` lists every case, static analysis such as PHPStan warns you when you add a new privilege to the enum and forget about it in the voter.
+After the `instanceof` check, `$privilege` can only be one of the cases of `ArticlePrivilege`, so the `match` needs no `default` branch. And because it lists every case, static analysis such as PHPStan warns you when you add a new privilege to the enum and forget about it in the voter.
 
-What do you gain? A typo in the name of a case, such as `ArticlePrivilege::Edti`, is an error PHP reports the moment the code reaches it, and static analysis even earlier. It can never turn into a silent denial. The price is a longer notation in templates, where you write the enum by its full name including the namespace: `$user->isAllowed($article, App\Model\ArticlePrivilege::Edit)`.
+What do you gain? A typo in the name of a case, such as `ArticlePrivilege::Edti`, is an error PHP reports the moment the code reaches it, and static analysis even earlier. It can never turn into a silent denial. Nor can a mix-up get through: for a case of another enum, such as `CommentPrivilege::Edit`, the voter abstains. The price is a longer notation in templates, where you write the enum by its full name including the namespace: `$user->isAllowed($article, App\Model\ArticlePrivilege::Edit)`.
 
-An enum can serve as the resource too. When a permission concerns no object, for example access to the reports, you pass a case of an enum as the resource, and the voter compares it with `===`:
+For a voter, the name `'edit'` and the case `ArticlePrivilege::Edit` are two different things: asked with the name, this voter abstains. So pick one way for each kind of thing and stick to it everywhere: in presenters, in templates and in voters that ask other voters, like `CommentVoter`. The examples on the rest of this page stay with names.
+
+The enum needs no values. Give it string values only when the rules of the [ACL |#Rules for Roles and Sections of the Site] should apply to the privileges too: the ACL works with names, and from a case of an enum backed by strings it takes the value, so a case declared as `case Edit = 'edit'` follows its rules for `edit`.
+
+An enum can serve as the resource too. When a permission concerns no object, for example access to the reports or to the administration, you pass a case of an enum as the resource and leave out the privilege:
 
 ```php
 enum Access
@@ -360,10 +360,14 @@ enum Access
 $user->isAllowed(Access::Reports);
 
 // in the voter
-return Vote::allowIf($resource === Access::Reports && $principal->isInRole('editor'));
+return Vote::allowIf($resource === Access::Reports && $privilege === null && $principal->isInRole('editor'));
 ```
 
-A kind of entity, such as articles, is still asked about by its class name `Article::class`, though. And the [ACL |#Rules for Roles and Sections of the Site] works with names, so the sections you describe in it stay strings.
+Notice the condition `$privilege === null`. Without it, the voter would allow any question about the reports, even `$user->isAllowed(Access::Reports, ArticlePrivilege::Delete)`, whose meaning nobody has ever defined.
+
+So when to choose which? A case of an enum as the resource suits a permission that stands on its own, without any object. When there is a thing behind the permission, ask about the object, or about its class name like `Article::class` when the thing does not exist yet, and say what you want to do with it by a privilege from an enum.
+
+Several voters can also share one enum, for example a common `Privilege` with the cases `View`, `Edit` and `Delete` for both articles and comments. Each voter then answers only for the cases that make sense for its resource. List the others in the `match` explicitly with `false`, such as `Privilege::Delete => false`, instead of a `default` branch: when you add a new case to the enum, static analysis shows you every voter that has to decide about it.
 
 
 Deciding for Someone Else

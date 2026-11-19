@@ -71,7 +71,7 @@ use Nette\Security\{Principal, Vote, Voter};
 
 class ArticleVoter implements Voter
 {
-	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	public function vote(Principal $principal, mixed $resource, string|\UnitEnum|null $privilege): Vote
 	{
 		if (!$resource instanceof Article) {
 			return Vote::Abstain; // není to článek, o tom nerozhoduji
@@ -147,7 +147,7 @@ Přidejme si administrátora, který smí všechno:
 ```php
 class AdminVoter implements Voter
 {
-	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	public function vote(Principal $principal, mixed $resource, string|\UnitEnum|null $privilege): Vote
 	{
 		return Vote::allowIf($principal->isInRole('admin'));
 	}
@@ -235,7 +235,7 @@ Pravidla viditelnosti článků už máme v `ArticleVoter` a opisovat je nechcem
 ```php
 class CommentVoter implements Voter
 {
-	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	public function vote(Principal $principal, mixed $resource, string|\UnitEnum|null $privilege): Vote
 	{
 		if (!$resource instanceof Comment) {
 			return Vote::Abstain;
@@ -269,7 +269,7 @@ V `ArticleVoter` na to stačí jedna podmínka na začátku metody `vote()`, je�
 ```php
 class ArticleVoter implements Voter
 {
-	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	public function vote(Principal $principal, mixed $resource, string|\UnitEnum|null $privilege): Vote
 	{
 		if ($resource === Article::class) { // otázka na články obecně
 			return Vote::allowIf($privilege === 'create' && $principal->isInRole('registered'));
@@ -296,15 +296,15 @@ class ArticleVoter implements Voter
 Výčty místo řetězců
 -------------------
 
-Názvy operací jako `'edit'` jsou obyčejné řetězce, a jak už víte, překlep v nich skončí tichým `false`. Chcete-li mít jistotu, že se nepřepíšete, sepište operace jako výčet (enum) s řetězcovými hodnotami a ptejte se jeho případy:
+Názvy operací jako `'edit'` jsou obyčejné řetězce, a jak už víte, překlep v nich skončí tichým `false`. Chcete-li mít jistotu, že se nepřepíšete, sepište operace jako výčet (enum) a ptejte se jeho případy:
 
 ```php
-enum ArticlePrivilege: string
+enum ArticlePrivilege
 {
-	case View = 'view';
-	case Edit = 'edit';
-	case Delete = 'delete';
-	case Create = 'create';
+	case View;
+	case Edit;
+	case Delete;
+	case Create;
 }
 
 if ($user->isAllowed($article, ArticlePrivilege::Edit)) {
@@ -312,43 +312,43 @@ if ($user->isAllowed($article, ArticlePrivilege::Edit)) {
 }
 ```
 
-Voter dál dostává řetězec, tedy hodnotu případu, takže `ArticlePrivilege::Edit` a `'edit'` znamenají totéž a ostatní votery i ACL fungují beze změny. Výčet ale musí mít řetězcové hodnoty, případ výčtu s čísly metoda `isAllowed()` odmítne výjimkou.
-
-Ve voteru převedete název zpět na případ výčtu metodou `tryFrom()` a rozhodujete pak podle případů:
+Případ výčtu dorazí do voteru přesně tak, jak jste ho předali. Voter proto spolu se zdrojem ověří, že operace je případem jeho výčtu, a pak rozhodne v `match` podle případů:
 
 ```php
 class ArticleVoter implements Voter
 {
-	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	public function vote(Principal $principal, mixed $resource, string|\UnitEnum|null $privilege): Vote
 	{
-		$operation = ArticlePrivilege::tryFrom($privilege ?? ''); // z názvu zpět na případ výčtu
-
 		if ($resource === Article::class) { // otázka na články obecně
-			return Vote::allowIf($operation === ArticlePrivilege::Create && $principal->isInRole('registered'));
+			return Vote::allowIf($privilege === ArticlePrivilege::Create && $principal->isInRole('registered'));
 		}
 
-		if (!$resource instanceof Article) {
+		if (!$resource instanceof Article || !$privilege instanceof ArticlePrivilege) {
 			return Vote::Abstain; // není to článek, o tom nerozhoduji
 		}
 
-		if ($resource->locked && $operation === ArticlePrivilege::Edit) {
+		if ($resource->locked && $privilege === ArticlePrivilege::Edit) {
 			return Vote::Forbid; // zamčený článek neupraví nikdo, ani admin
 		}
 
-		return Vote::allowIf(match ($operation) {
+		return Vote::allowIf(match ($privilege) {
 			ArticlePrivilege::View => $resource->published || $principal->hasId($resource->authorId),
 			ArticlePrivilege::Edit, ArticlePrivilege::Delete => $principal->hasId($resource->authorId),
-			ArticlePrivilege::Create, null => false,
+			ArticlePrivilege::Create => false, // na nový článek se ptáme třídou
 		});
 	}
 }
 ```
 
-Poslední větev nic nepovolí: vytvořit se dá jen nový článek, na který se ptáme třídou, a `null` znamená operaci, kterou výčet nezná, nebo otázku bez operace. Protože `match` vyjmenovává všechny případy, statická analýza, třeba PHPStan, vás upozorní, když do výčtu přidáte novou operaci a ve voteru na ni zapomenete.
+Po kontrole `instanceof` může být `$privilege` už jen některý z případů `ArticlePrivilege`, takže `match` nepotřebuje větev `default`. A protože vyjmenovává všechny případy, statická analýza, třeba PHPStan, vás upozorní, když do výčtu přidáte novou operaci a ve voteru na ni zapomenete.
 
-Co tím získáte? Překlep v názvu případu, třeba `ArticlePrivilege::Edti`, je chyba, kterou PHP ohlásí, jakmile na ni kód narazí, a statická analýza ještě dřív. Tiché zamítnutí z něj vzniknout nemůže. Platíte za to delším zápisem v šablonách, kde výčet píšete celým jménem i se jmenným prostorem: `$user->isAllowed($article, App\Model\ArticlePrivilege::Edit)`.
+Co tím získáte? Překlep v názvu případu, třeba `ArticlePrivilege::Edti`, je chyba, kterou PHP ohlásí, jakmile na ni kód narazí, a statická analýza ještě dřív. Tiché zamítnutí z něj vzniknout nemůže. Neprojde ani záměna: u případu jiného výčtu, třeba `CommentPrivilege::Edit`, se voter zdrží. Platíte za to delším zápisem v šablonách, kde výčet píšete celým jménem i se jmenným prostorem: `$user->isAllowed($article, App\Model\ArticlePrivilege::Edit)`.
 
-Výčet poslouží i jako zdroj. Když se oprávnění netýká žádného objektu, třeba jde o přístup k reportům, předáte jako zdroj případ výčtu a voter ho porovná operátorem `===`:
+Pro voter jsou název `'edit'` a případ `ArticlePrivilege::Edit` dvě různé věci: u otázky s názvem se tento voter zdrží. Zvolte proto pro každý druh věcí jeden způsob a držte se ho všude: v presenterech, v šablonách i ve voterech, které se ptají jiných voterů, jako `CommentVoter`. Příklady ve zbytku stránky zůstávají u názvů.
+
+Hodnoty výčet nepotřebuje. Řetězcové hodnoty mu dejte, jen pokud mají na operace platit i pravidla [ACL |#Pravidla pro role a sekce webu]: ACL pracuje s názvy a z případu výčtu s řetězcovými hodnotami si vezme hodnotu, takže případ zapsaný jako `case Edit = 'edit'` se řídí jeho pravidly pro `edit`.
+
+Výčet poslouží i jako zdroj. Když se oprávnění netýká žádného objektu, třeba jde o přístup k reportům nebo do administrace, předáte jako zdroj případ výčtu a operaci vynecháte:
 
 ```php
 enum Access
@@ -360,10 +360,14 @@ enum Access
 $user->isAllowed(Access::Reports);
 
 // ve voteru
-return Vote::allowIf($resource === Access::Reports && $principal->isInRole('editor'));
+return Vote::allowIf($resource === Access::Reports && $privilege === null && $principal->isInRole('editor'));
 ```
 
-Na druh entity, jako jsou články, se ale dál ptáte názvem třídy `Article::class`. A [ACL |#Pravidla pro role a sekce webu] pracuje s názvy, takže sekce, které v něm popíšete, zůstávají řetězci.
+Všimněte si podmínky `$privilege === null`. Bez ní by voter povolil jakoukoliv otázku na reporty, třeba i `$user->isAllowed(Access::Reports, ArticlePrivilege::Delete)`, jejíž smysl nikdo nikdy nedefinoval.
+
+Kdy tedy sáhnout po čem? Případ výčtu jako zdroj se hodí pro oprávnění, které platí samo o sobě, bez jakéhokoliv objektu. Když za oprávněním stojí nějaká věc, ptejte se na objekt, nebo na název jeho třídy jako `Article::class`, pokud věc ještě neexistuje, a co s ní chcete udělat, řekněte operací z výčtu.
+
+Jeden výčet může sdílet i víc voterů, třeba společný `Privilege` s případy `View`, `Edit` a `Delete` pro články i komentáře. Každý voter pak odpovídá jen za ty případy, které u jeho zdroje dávají smysl. Ostatní v `match` vyjmenujte výslovně s `false`, třeba `Privilege::Delete => false`, místo větve `default`: když do výčtu přidáte nový případ, statická analýza vám ukáže každý voter, který o něm musí rozhodnout.
 
 
 Rozhodování za někoho jiného

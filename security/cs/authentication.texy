@@ -174,6 +174,10 @@ Kromě smazání identity u konkrétního volání pomocí `logout(true)` lze je
 
 Identita je objekt implementující rozhraní [api:Nette\Security\IIdentity] s metodami `getId()`, `getRoles()` a `getData()`, výchozí implementací je [api:Nette\Security\SimpleIdentity]. A jak bylo zmíněno, udržuje se v session, takže pokud tedy například změníme roli některého z přihlášených uživatelů, zůstanou stará data v jeho identitě až do jeho opětovného přihlášení.
 
+Pokud píšete vlastní identitu, musí mít metodu `getData()`, i když ji Nette samo nikdy nevolá; identita, která svá data nese jinak, třeba jako řádek z databáze, může vracet prázdné pole. Metoda `getId()` může mít užší návratový typ, třeba `int`.
+
+Ať používáte jakoukoliv identitu, nikdy do ní nedávejte otisk hesla ani jiná tajemství: obvykle se ukládá do session a Tracy bar ji zobrazuje. A role se berou přesně tak, jak je vrátí `getRoles()`, takže prázdný řetězec, který `explode()` udělá z prázdného sloupce, se stane rolí s názvem `''`.
+
 
 Úložiště přihlášeného uživatele
 ===============================
@@ -182,7 +186,7 @@ Dvě základní informace o uživateli, tedy zdali je přihlášen a jeho [#iden
 
 Dále můžete ovlivnit, jak přesně bude probíhat ukládání identity (*sleep*) a obnovování (*wakeup*). Stačí, aby autentikátor implementoval rozhraní `Nette\Security\IdentityHandler`. Metoda `sleepIdentity()` se volá před zápisem identity do úložiště a `wakeupIdentity()` po jejím přečtení. Metody mohou obsah identity upravit, případně ji nahradit novým objektem, který vrátí. Metoda `wakeupIdentity()` může dokonce vrátit `null`, čímž uživatele odhlásí. Rozhraní deklaruje i metodu `getGuestIdentity()`, viz [#Identita hosta].
 
-Jako příklad si ukážeme řešení časté otázky, jak aktualizovat role v identitě hned po načtení ze session. V metodě `wakeupIdentity()` předáme do identity aktuální role např. z databáze:
+Jako příklad si ukážeme řešení časté otázky, jak aktualizovat role v identitě hned po načtení ze session. V metodě `wakeupIdentity()` vytvoříme identitu znovu s aktuálními rolemi např. z databáze:
 
 ```php
 final class Authenticator implements
@@ -197,10 +201,10 @@ final class Authenticator implements
 
 	public function wakeupIdentity(IIdentity $identity): ?IIdentity
 	{
-		// aktualizace rolí v identitě
+		// tatáž identita s aktuálními rolemi
 		$userId = $identity->getId();
-		$identity->setRoles($this->facade->getUserRoles($userId));
-		return $identity;
+		$roles = $this->facade->getUserRoles($userId);
+		return new SimpleIdentity($userId, $roles, $identity->getData());
 	}
 
 	public function getGuestIdentity(): ?IIdentity
@@ -215,7 +219,7 @@ A nyní se vrátíme k úložišti na bázi cookies. Dovoluje vám vytvořit web
 
 Nejprve tedy v konfiguraci nastavíme požadované úložiště pomocí `security › authentication › storage: cookie`.
 
-V databázi si vytvoříme sloupec `authtoken`, ve kterém bude mít každý uživatel [zcela náhodný, unikátní a neuhodnutelný|utils:random] řetězec o dostatečné délce (alespoň 13 znaků). Úložiště `CookieStorage` přenáší v cookie pouze hodnotu `$identity->getId()`, takže v `sleepIdentity()` originální identitu nahradíme za zástupnou s `authtoken` v ID, naopak v metodě `wakeupIdentity()` podle authtokenu přečteme celou identitu z databáze:
+V databázi si vytvoříme sloupec `authtoken`, ve kterém bude mít každý uživatel [zcela náhodný, unikátní a neuhodnutelný|utils:random] řetězec o dostatečné délce (alespoň 13 znaků). Úložiště `CookieStorage` přenáší v cookie pouze hodnotu `$identity->getId()`, takže v `sleepIdentity()` originální identitu nahradíme za `TokenIdentity` s `authtoken`, tedy za stejný druh objektu, jaký úložiště vrátí při dalším požadavku. Naopak v metodě `wakeupIdentity()` podle authtokenu přečteme celou identitu z databáze:
 
 ```php
 final class Authenticator implements
@@ -226,22 +230,22 @@ final class Authenticator implements
 		$row = $this->db->fetch('SELECT * FROM user WHERE username = ?', $username);
 		// ověříme heslo
 		// ...
-		// vrátíme identitu se všemi údaji z databáze
-		return new SimpleIdentity($row->id, null, (array) $row);
+		// vrátíme identitu s údaji, které potřebujeme, nikdy s otiskem hesla
+		return new SimpleIdentity($row->id, null, ['name' => $row->name, 'authtoken' => $row->authtoken]);
 	}
 
-	public function sleepIdentity(IIdentity $identity): SimpleIdentity
+	public function sleepIdentity(IIdentity $identity): IIdentity
 	{
-		// vrátíme zástupnou identitu, kde v ID bude authtoken
-		return new SimpleIdentity($identity->authtoken);
+		// vrátíme identitu, která nese jen authtoken
+		return new Nette\Security\TokenIdentity($identity->authtoken);
 	}
 
 	public function wakeupIdentity(IIdentity $identity): ?SimpleIdentity
 	{
-		// zástupnou identitu nahradíme plnou identitou, jako v authenticate()
+		// identitu s tokenem nahradíme plnou identitou, jako v authenticate()
 		$row = $this->db->fetch('SELECT * FROM user WHERE authtoken = ?', $identity->getId());
 		return $row
-			? new SimpleIdentity($row->id, null, (array) $row)
+			? new SimpleIdentity($row->id, null, ['name' => $row->name, 'authtoken' => $row->authtoken])
 			: null;
 	}
 

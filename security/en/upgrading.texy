@@ -5,7 +5,9 @@ Upgrading
 Upgrading to Version 4.0
 ========================
 
-The minimum required PHP version is 8.4. If you use Nette Security with Nette DI or Nette HTTP, it needs `nette/di` 3.2 and `nette/http` 3.4 or newer.
+Do you only define users in `security: users:` or the ACL in the configuration, and implement none of the library's interfaces? Then you most likely don't need to change anything in your code. **Users stay logged in:** identities that version 3.x stored in sessions are read by version 4.0.
+
+The minimum required PHP version is 8.4, and the library needs `nette/utils` 4.1. If you use Nette Security with Nette DI or Nette HTTP, it needs `nette/di` 3.2 and `nette/http` 3.4 or newer.
 
 .[tip]
 A part of the work can be done for you by [DressCode |tools:coding-standard#Newer PHP and Nette] with the `dresscode/upgrade-nette` package: it rewrites renamed classes and constants and reports what it cannot rewrite. See [Upgrading Nette |https://dresscode.run/en/upgrading-nette].
@@ -48,6 +50,18 @@ class MyVoter implements Nette\Security\Voter
 }
 ```
 
+Are your rules naturally keyed by role? Then the voter can go through the roles one by one and keep the shape of the original method:
+
+```php
+public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+{
+	return Vote::allowIf(array_any(
+		$principal->getRoles(),
+		fn(string $role) => $role === 'admin' || ($role === 'editor' && $resource === 'article'),
+	));
+}
+```
+
 Where the authorizator returned `false`, the voter abstains, so that another voter may still allow access; see [How Voters Reach a Decision |authorization#How Voters Reach a Decision].
 
 If you create the `User` object yourself, its third parameter is now a list of voters. Since `Permission` is a voter, `new User($storage, $authenticator, $acl)` keeps working. You cannot pass your own authorizator there, though; until you rewrite it as a voter, set it with the deprecated method `setAuthorizator()`.
@@ -86,7 +100,17 @@ class ArticleVoter implements Nette\Security\Voter
 $user->isAllowed($article, 'edit');
 ```
 
+With the session storage, this also stops a logged-out user whose identity was retained. With the [cookie storage |authentication#Storage for Logged-in User], the identity never survives a logout, so there replacing `$user->getId() === $id` with `hasId($id)` changes nothing about who gets access.
+
 The method `User::getRoles()` is final and returns the same roles as the principal. The method `User::isAllowed()` takes the privilege only as a string or `null`. The property `User::$authenticatedRole` is deprecated because it is never used.
+
+Did you use `$user->isLoggedIn()` as a permission, and now want to ask through `isAllowed()`? A voter that allows everything to any logged-in user takes a single line:
+
+```php
+return Vote::allowIf($principal->isLoggedIn());
+```
+
+Don't add a role to the users in `security: users:` instead: identities already stored in sessions keep their old roles until the user logs in again.
 
 
 Authentication and Identity
@@ -97,6 +121,8 @@ The `Nette\Security\IAuthenticator` interface has been removed; implement `Nette
 If you implement `Nette\Security\IIdentity` yourself, declare the return type `string|int` of `getId()` and add the method `getData()`, which returns the user data as an array. The class `Nette\Security\Identity` is now just an alias of `SimpleIdentity`. The method `IdentityHandler::getGuestIdentity()` is a regular part of the interface, so every handler must have it; return `null` if you don't use a [guest identity |authentication#Guest Identity].
 
 Reading a key of `SimpleIdentity` that is not among its data throws `Nette\MemberAccessException`; previously it returned `null`. This also concerns adding to an array that doesn't exist yet, such as `$identity->cart[] = $item`, so create the key first: `$identity->cart = []`.
+
+It can catch you where you don't expect it: an identity restored from the session may have been created by an older version of your own application, before you added the key. Read keys added later with `??`, such as `$identity->theme ?? 'light'`.
 
 `SimpleIdentity` stores its ID, roles and data together with the public and protected properties of a subclass. If your subclass has private properties that should survive in the session, extend `__serialize()` and `__unserialize()`. Identities saved in sessions by version 3.x are read without problems.
 

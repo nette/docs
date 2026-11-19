@@ -174,6 +174,10 @@ Besides clearing the identity per call with `logout(true)`, you can disable its 
 
 An identity is an object implementing the [api:Nette\Security\IIdentity] interface with the methods `getId()`, `getRoles()` and `getData()`. The default implementation is [api:Nette\Security\SimpleIdentity]. And as mentioned, it is maintained in the session, so if, for example, we change the role of one of the logged-in users, the old data will remain in their identity until they log in again.
 
+If you write your own identity, it must have the `getData()` method, although Nette itself never calls it; an identity that carries its data otherwise, for example as a database row, may return an empty array. The `getId()` method may declare a narrower return type, such as `int`.
+
+Whatever identity you use, never put a password hash or other secrets into it: it usually ends up in the session, and the Tracy bar shows it. And roles are taken exactly as `getRoles()` returns them, so an empty string, which `explode()` makes of an empty column, becomes a role named `''`.
+
 
 Storage for Logged-in User
 ==========================
@@ -182,7 +186,7 @@ The two basic pieces of information about the user, namely whether they are logg
 
 Furthermore, you can influence how exactly the identity saving (*sleep*) and restoring (*wakeup*) will proceed. All that is needed is for the authenticator to implement the `Nette\Security\IdentityHandler` interface. The `sleepIdentity()` method is called before the identity is written to storage, and `wakeupIdentity()` after it's read. These methods can modify the identity content, or replace it with a new object that they return. The `wakeupIdentity()` method can even return `null`, which logs the user out. The interface also declares the `getGuestIdentity()` method, see [#Guest Identity].
 
-As an example, let's show a solution to the frequent question of how to update roles in the identity right after loading from the session. In the `wakeupIdentity()` method, we pass the current roles, e.g., from a database, into the identity:
+As an example, let's show a solution to the frequent question of how to update roles in the identity right after loading from the session. In the `wakeupIdentity()` method, we create the identity again with the current roles, e.g., from a database:
 
 ```php
 final class Authenticator implements
@@ -197,10 +201,10 @@ final class Authenticator implements
 
 	public function wakeupIdentity(IIdentity $identity): ?IIdentity
 	{
-		// update roles in the identity
+		// the same identity with the current roles
 		$userId = $identity->getId();
-		$identity->setRoles($this->facade->getUserRoles($userId));
-		return $identity;
+		$roles = $this->facade->getUserRoles($userId);
+		return new SimpleIdentity($userId, $roles, $identity->getData());
 	}
 
 	public function getGuestIdentity(): ?IIdentity
@@ -215,7 +219,7 @@ Now let's return to storage based on cookies. It allows you to create a website 
 
 First, set the required storage in the configuration using `security › authentication › storage: cookie`.
 
-In the database, create the `authtoken` column, where each user will have a [completely random, unique, and unguessable |utils:random] string of sufficient length (at least 13 characters). The `CookieStorage` transmits only the value `$identity->getId()` in the cookie, so in `sleepIdentity()`, we replace the original identity with a proxy identity containing the `authtoken` in the ID. Conversely, in the `wakeupIdentity()` method, we read the entire identity from the database based on the authtoken:
+In the database, create the `authtoken` column, where each user will have a [completely random, unique, and unguessable |utils:random] string of sufficient length (at least 13 characters). The `CookieStorage` transmits only the value `$identity->getId()` in the cookie, so in `sleepIdentity()`, we replace the original identity with a `TokenIdentity` carrying the `authtoken`, the same kind of object the storage gives back on the next request. Conversely, in the `wakeupIdentity()` method, we read the entire identity from the database based on the authtoken:
 
 ```php
 final class Authenticator implements
@@ -226,22 +230,22 @@ final class Authenticator implements
 		$row = $this->db->fetch('SELECT * FROM user WHERE username = ?', $username);
 		// verify password
 		// ...
-		// return the identity with all data from the database
-		return new SimpleIdentity($row->id, null, (array) $row);
+		// return the identity with the data we need, never the password hash
+		return new SimpleIdentity($row->id, null, ['name' => $row->name, 'authtoken' => $row->authtoken]);
 	}
 
-	public function sleepIdentity(IIdentity $identity): SimpleIdentity
+	public function sleepIdentity(IIdentity $identity): IIdentity
 	{
-		// return a proxy identity where the ID contains the authtoken
-		return new SimpleIdentity($identity->authtoken);
+		// return an identity carrying only the authtoken
+		return new Nette\Security\TokenIdentity($identity->authtoken);
 	}
 
 	public function wakeupIdentity(IIdentity $identity): ?SimpleIdentity
 	{
-		// replace the proxy identity with the full identity, as in authenticate()
+		// replace the token identity with the full identity, as in authenticate()
 		$row = $this->db->fetch('SELECT * FROM user WHERE authtoken = ?', $identity->getId());
 		return $row
-			? new SimpleIdentity($row->id, null, (array) $row)
+			? new SimpleIdentity($row->id, null, ['name' => $row->name, 'authtoken' => $row->authtoken])
 			: null;
 	}
 

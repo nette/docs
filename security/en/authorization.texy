@@ -113,7 +113,7 @@ $user->addVoter(new ArticleVoter);
 
 If `$user` has no voter at all, the `isAllowed()` method throws `Nette\InvalidStateException` instead of quietly denying everything.
 
-Other slips are not so loud. A typo in the name of a resource or privilege, or a voter you forgot to register (while you have others), simply ends in `false`. So keep names you use in many places in constants or in a class, rather than typing the string again each time.
+Other slips are not so loud. A typo in the name of a resource or privilege, or a voter you forgot to register (while you have others), simply ends in `false`. How to rule out typos in privilege names is shown in the chapter [Enums Instead of Strings |#Enums Instead of Strings].
 
 And now the check itself. In a presenter, you ask the `$user` object, not the voter:
 
@@ -291,6 +291,79 @@ class ArticleVoter implements Voter
 	}
 }
 ```
+
+
+Enums Instead of Strings
+------------------------
+
+Privilege names like `'edit'` are plain strings, and as you already know, a typo in them ends in a silent `false`. If you want to be sure you never mistype one, list the privileges as an enum backed by strings and ask with its cases:
+
+```php
+enum ArticlePrivilege: string
+{
+	case View = 'view';
+	case Edit = 'edit';
+	case Delete = 'delete';
+	case Create = 'create';
+}
+
+if ($user->isAllowed($article, ArticlePrivilege::Edit)) {
+	// shows the link for editing the article
+}
+```
+
+A voter still receives a string, the value of the case, so `ArticlePrivilege::Edit` and `'edit'` mean the same, and the other voters and the ACL keep working unchanged. The enum must be backed by strings, though; the `isAllowed()` method rejects a case of an int-backed enum with an exception.
+
+In the voter, you turn the name back into a case of the enum with the `tryFrom()` method and then decide by the cases:
+
+```php
+class ArticleVoter implements Voter
+{
+	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	{
+		$operation = ArticlePrivilege::tryFrom($privilege ?? ''); // from the name back to a case of the enum
+
+		if ($resource === Article::class) { // a question about articles in general
+			return Vote::allowIf($operation === ArticlePrivilege::Create && $principal->isInRole('registered'));
+		}
+
+		if (!$resource instanceof Article) {
+			return Vote::Abstain; // not an article, not my business
+		}
+
+		if ($resource->locked && $operation === ArticlePrivilege::Edit) {
+			return Vote::Forbid; // nobody edits a locked article, not even an admin
+		}
+
+		return Vote::allowIf(match ($operation) {
+			ArticlePrivilege::View => $resource->published || $principal->hasId($resource->authorId),
+			ArticlePrivilege::Edit, ArticlePrivilege::Delete => $principal->hasId($resource->authorId),
+			ArticlePrivilege::Create, null => false,
+		});
+	}
+}
+```
+
+The last branch allows nothing: only a new article can be created, and we ask about that one by its class, while `null` means a privilege the enum does not know, or a question with no privilege. Because the `match` lists every case, static analysis such as PHPStan warns you when you add a new privilege to the enum and forget about it in the voter.
+
+What do you gain? A typo in the name of a case, such as `ArticlePrivilege::Edti`, is an error PHP reports the moment the code reaches it, and static analysis even earlier. It can never turn into a silent denial. The price is a longer notation in templates, where you write the enum by its full name including the namespace: `$user->isAllowed($article, App\Model\ArticlePrivilege::Edit)`.
+
+An enum can serve as the resource too. When a permission concerns no object, for example access to the reports, you pass a case of an enum as the resource, and the voter compares it with `===`:
+
+```php
+enum Access
+{
+	case Admin;
+	case Reports;
+}
+
+$user->isAllowed(Access::Reports);
+
+// in the voter
+return Vote::allowIf($resource === Access::Reports && $principal->isInRole('editor'));
+```
+
+A kind of entity, such as articles, is still asked about by its class name `Article::class`, though. And the [ACL |#Rules for Roles and Sections of the Site] works with names, so the sections you describe in it stay strings.
 
 
 Deciding for Someone Else

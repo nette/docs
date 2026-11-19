@@ -113,7 +113,7 @@ $user->addVoter(new ArticleVoter);
 
 Pokud `$user` nemá žádný voter, metoda `isAllowed()` vyhodí výjimku `Nette\InvalidStateException`, místo aby potichu všechno zakázala.
 
-Jiné přehmaty se tak hlasitě neohlásí. Překlep v názvu zdroje či operace nebo zapomenutá registrace voteru (pokud jiné votery máte) prostě skončí jako `false`. Názvy, které používáte na více místech, proto mějte v konstantách nebo ve třídě, místo abyste řetězec pokaždé psali znovu.
+Jiné přehmaty se tak hlasitě neohlásí. Překlep v názvu zdroje či operace nebo zapomenutá registrace voteru (pokud jiné votery máte) prostě skončí jako `false`. Jak překlepům v názvech operací předejít, ukazuje kapitola [Výčty místo řetězců |#Výčty místo řetězců].
 
 A teď samotné ověření. V presenteru se ptáte objektu `$user`, ne voteru:
 
@@ -291,6 +291,79 @@ class ArticleVoter implements Voter
 	}
 }
 ```
+
+
+Výčty místo řetězců
+-------------------
+
+Názvy operací jako `'edit'` jsou obyčejné řetězce, a jak už víte, překlep v nich skončí tichým `false`. Chcete-li mít jistotu, že se nepřepíšete, sepište operace jako výčet (enum) s řetězcovými hodnotami a ptejte se jeho případy:
+
+```php
+enum ArticlePrivilege: string
+{
+	case View = 'view';
+	case Edit = 'edit';
+	case Delete = 'delete';
+	case Create = 'create';
+}
+
+if ($user->isAllowed($article, ArticlePrivilege::Edit)) {
+	// zobrazí odkaz na úpravu článku
+}
+```
+
+Voter dál dostává řetězec, tedy hodnotu případu, takže `ArticlePrivilege::Edit` a `'edit'` znamenají totéž a ostatní votery i ACL fungují beze změny. Výčet ale musí mít řetězcové hodnoty, případ výčtu s čísly metoda `isAllowed()` odmítne výjimkou.
+
+Ve voteru převedete název zpět na případ výčtu metodou `tryFrom()` a rozhodujete pak podle případů:
+
+```php
+class ArticleVoter implements Voter
+{
+	public function vote(Principal $principal, mixed $resource, ?string $privilege): Vote
+	{
+		$operation = ArticlePrivilege::tryFrom($privilege ?? ''); // z názvu zpět na případ výčtu
+
+		if ($resource === Article::class) { // otázka na články obecně
+			return Vote::allowIf($operation === ArticlePrivilege::Create && $principal->isInRole('registered'));
+		}
+
+		if (!$resource instanceof Article) {
+			return Vote::Abstain; // není to článek, o tom nerozhoduji
+		}
+
+		if ($resource->locked && $operation === ArticlePrivilege::Edit) {
+			return Vote::Forbid; // zamčený článek neupraví nikdo, ani admin
+		}
+
+		return Vote::allowIf(match ($operation) {
+			ArticlePrivilege::View => $resource->published || $principal->hasId($resource->authorId),
+			ArticlePrivilege::Edit, ArticlePrivilege::Delete => $principal->hasId($resource->authorId),
+			ArticlePrivilege::Create, null => false,
+		});
+	}
+}
+```
+
+Poslední větev nic nepovolí: vytvořit se dá jen nový článek, na který se ptáme třídou, a `null` znamená operaci, kterou výčet nezná, nebo otázku bez operace. Protože `match` vyjmenovává všechny případy, statická analýza, třeba PHPStan, vás upozorní, když do výčtu přidáte novou operaci a ve voteru na ni zapomenete.
+
+Co tím získáte? Překlep v názvu případu, třeba `ArticlePrivilege::Edti`, je chyba, kterou PHP ohlásí, jakmile na ni kód narazí, a statická analýza ještě dřív. Tiché zamítnutí z něj vzniknout nemůže. Platíte za to delším zápisem v šablonách, kde výčet píšete celým jménem i se jmenným prostorem: `$user->isAllowed($article, App\Model\ArticlePrivilege::Edit)`.
+
+Výčet poslouží i jako zdroj. Když se oprávnění netýká žádného objektu, třeba jde o přístup k reportům, předáte jako zdroj případ výčtu a voter ho porovná operátorem `===`:
+
+```php
+enum Access
+{
+	case Admin;
+	case Reports;
+}
+
+$user->isAllowed(Access::Reports);
+
+// ve voteru
+return Vote::allowIf($resource === Access::Reports && $principal->isInRole('editor'));
+```
+
+Na druh entity, jako jsou články, se ale dál ptáte názvem třídy `Article::class`. A [ACL |#Pravidla pro role a sekce webu] pracuje s názvy, takže sekce, které v něm popíšete, zůstávají řetězci.
 
 
 Rozhodování za někoho jiného

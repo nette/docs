@@ -99,7 +99,7 @@ services:
 	- App\Model\ArticleVoter
 ```
 
-If you register services automatically using the [search |dependency-injection:configuration#Search] section, you don't even need that.
+If you register services automatically using the [search |dependency-injection:configuration#Search] section, you don't even need that. Nette creates a voter only when it is asked for the first time, so it may even depend on services that need `User` themselves.
 
 Do you use the `User` class without the DI container? Then pass the voter to its constructor after the [storage |authentication#Storage for Logged-in User] and the [authenticator |authentication#Authenticator], or add it with the `addVoter()` method:
 
@@ -113,7 +113,7 @@ $user->addVoter(new ArticleVoter);
 
 If `$user` has no voter at all, the `isAllowed()` method throws `Nette\InvalidStateException` instead of quietly denying everything.
 
-Other slips are not so loud. A typo in the name of a resource or privilege, or a voter you forgot to register (while you have others), simply ends in `false`. How to rule out typos in privilege names is shown in the chapter [Enums Instead of Strings |#Enums Instead of Strings].
+Other slips are not so loud. A typo in the name of a resource or privilege, or a voter you forgot to register (while you have others), simply ends in `false`. How to rule out typos in privilege names is shown in the chapter [Enums Instead of Strings |#Enums Instead of Strings]. In debug mode, the user panel in the Tracy bar lists every question asked during the request with the vote of each voter and marks those nobody decided; that is where a typo or a forgotten voter shows up.
 
 And now the check itself. In a presenter, you ask the `$user` object, not the voter:
 
@@ -176,10 +176,10 @@ The admin may still delete a locked article, because `Forbid` applies only to th
 
 Be careful with `AdminVoter`, though. Nette asks every voter about every resource and every privilege, so an unconditional allow really allows everything: the sections of another kind of user, such as a customer's account, as well as operations nobody should perform, such as deleting one's own account. So narrow it down to the resources the admin is meant for, or let the voters in charge of such things say `Forbid`.
 
-Does your site have just a single account for the administration, defined in the [configuration |configuration] under `security: users:`? Then the voter is even simpler than `AdminVoter`, because whoever is logged in is the admin:
+Does your site have just a single account for the administration, defined in the [configuration |configuration] under `security: users:`? Then whoever is logged in is the admin. Let the voter allow just that, but only for the cases of your [enum `Access` |#Enums Instead of Strings], so that a question about anything else never gets a silent yes:
 
 ```php
-return Vote::allowIf($principal->isLoggedIn());
+return Vote::allowIf($principal->isLoggedIn() && $resource instanceof Access && $privilege === null);
 ```
 
 Why not by role? A user defined in `users:` without `roles` has an empty list of roles, the role `authenticated` known from older versions no longer exists, and a negated `isInRole('guest')` only tells you that the user lacks one particular role, not that they are logged in.
@@ -353,7 +353,7 @@ An enum can serve as the resource too. When a permission concerns no object, for
 ```php
 enum Access
 {
-	case Admin;
+	case Administration;
 	case Reports;
 }
 
@@ -365,19 +365,22 @@ return Vote::allowIf($resource === Access::Reports && $privilege === null && $pr
 
 Notice the condition `$privilege === null`. Without it, the voter would allow any question about the reports, even `$user->isAllowed(Access::Reports, ArticlePrivilege::Delete)`, whose meaning nobody has ever defined.
 
-To make the condition impossible to forget, you can compare the resource and the privilege together in a single `match` in the voter. The `null` privilege is then part of every branch:
+Let a single voter decide the whole enum `Access`. It checks the resource and the privilege once at the start and then lists every case in a `match`, so static analysis warns you when you add a new case and forget about it:
 
 ```php
-return Vote::allowIf(match ([$resource, $privilege]) {
-	[Access::Admin, null] => $principal->isInRole('admin'),
-	[Access::Reports, null] => $principal->isInRole('editor'),
-	default => false,
+if (!$resource instanceof Access || $privilege !== null) {
+	return Vote::Abstain;
+}
+
+return Vote::allowIf(match ($resource) {
+	Access::Administration => $principal->isInRole('admin'),
+	Access::Reports => $principal->isInRole('editor'),
 });
 ```
 
-It has one price: because of the `default` branch, static analysis won't warn you when you add a new case to `Access` and forget about it in the voter.
+Another voter that needs such a permission does not repeat its rule, it asks `$principal->isAllowed(Access::Reports)`. A presenter or an action reserved for it says so by the attribute `#[Requires(allowed: Access::Administration)]`, see [How to Use the Requires Attribute |best-practices:attribute-requires#User Permission].
 
-So when to choose which? A case of an enum as the resource suits a permission that stands on its own, without any object. When there is a thing behind the permission, ask about the object, or about its class name like `Article::class` when the thing does not exist yet, and say what you want to do with it by a privilege from an enum.
+So when to choose which? A case of an enum as the resource suits a permission that stands on its own, without any object. When there is a thing behind the permission, ask about the object and say what you want to do with it by a privilege from an enum. Creating a new thing is asked about its parent, for example a new topic by `$user->isAllowed($board, BoardPrivilege::Post)`; where there is no parent, it is a permission of its own, a case of `Access`. A class name like `Article::class` works as a resource too, but then one enum serves two kinds of resources and the voter has to sort out which privilege belongs to which. With a link, ask about what its target enforces, so that it never offers a page that then turns the user away.
 
 Several voters can also share one enum, for example a common `Privilege` with the cases `View`, `Edit` and `Delete` for both articles and comments. Each voter then answers only for the cases that make sense for its resource. List the others in the `match` explicitly with `false`, such as `Privilege::Delete => false`, instead of a `default` branch: when you add a new case to the enum, static analysis shows you every voter that has to decide about it.
 
@@ -395,7 +398,7 @@ foreach ($this->subscriberRepository->getIdentities() as $identity) { // identit
 }
 ```
 
-The principal asks the same voters as `$user`, but it does not affect the login of the current user in any way. It takes the identity exactly as you pass it: it does not call the authenticator's `wakeupIdentity()` method for it and stores nothing. So load it from the database in its current form, with the current roles.
+The principal asks the same voters as `$user`, but it does not affect the login of the current user in any way. It takes the identity exactly as you pass it: it does not call the authenticator's `wakeupIdentity()` method for it and stores nothing. So load it from the database in its current form, with the current roles. And because the principal may be someone else than the visitor of the current request, a voter must not read anything that belongs to that request and its user, such as the session; what is the same for everyone, such as the configuration of the site, is fine.
 
 Instead of an identity, you can pass `null` and ask what an anonymous visitor may do. This comes in handy, for example, when generating an RSS feed or a sitemap, which should contain only the articles everyone can see:
 
@@ -412,7 +415,7 @@ A voter decides about one object at a time, and these examples ask about a singl
 Testing Voters
 --------------
 
-A voter is a plain class that needs neither a session nor a login, which makes it easy to test. You create the principal yourself: the first argument is the identity of the logged-in user (or `null` for a visitor), the second their roles. The example uses [Nette Tester |tester:]:
+A voter is a plain class that needs neither a session nor a login, which makes it easy to test. You create the principal yourself: the first argument is the identity of the logged-in user (or `null` for a visitor), the second their roles (leave them out and those of the identity are used). The example uses [Nette Tester |tester:]:
 
 ```php
 use Nette\Security\{Principal, SimpleIdentity, Vote};
@@ -431,9 +434,11 @@ Assert::same(Vote::Abstain, $voter->vote($guest, $draft, 'edit'));
 If you want to test how voters work together, pass them to the principal as the third argument and ask its `isAllowed()` method:
 
 ```php
-$guest = new Principal(null, ['guest'], [new ArticleVoter, new CommentVoter]);
+$guest = new Principal(null, voters: [new ArticleVoter, new CommentVoter]);
 Assert::false($guest->isAllowed(new Comment($draft, authorId: 2), 'view'));
 ```
+
+To check that the voters are registered in the container and work together as in the application, ask a principal created by `$user->createPrincipal()` of the user from the container. A test of a presenter with a logged-in user gets by with the login kept in memory, which you switch on in the test configuration by `security: authentication: storage: memory`.
 
 
 Rules for Roles and Sections of the Site

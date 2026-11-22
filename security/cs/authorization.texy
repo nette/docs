@@ -99,7 +99,7 @@ services:
 	- App\Model\ArticleVoter
 ```
 
-Pokud služby registrujete automaticky pomocí sekce [search |dependency-injection:configuration#Search], nemusíte ani to.
+Pokud služby registrujete automaticky pomocí sekce [search |dependency-injection:configuration#Search], nemusíte ani to. Voter Nette vytvoří až ve chvíli, kdy se ho poprvé na něco zeptá, takže smí záviset i na službách, které samy potřebují `User`.
 
 Používáte třídu `User` bez DI kontejneru? Pak voter předejte jejímu konstruktoru za [úložištěm |authentication#Úložiště přihlášeného uživatele] a [autentikátorem |authentication#Autentikátor], nebo ho přidejte metodou `addVoter()`:
 
@@ -113,7 +113,7 @@ $user->addVoter(new ArticleVoter);
 
 Pokud `$user` nemá žádný voter, metoda `isAllowed()` vyhodí výjimku `Nette\InvalidStateException`, místo aby potichu všechno zakázala.
 
-Jiné přehmaty se tak hlasitě neohlásí. Překlep v názvu zdroje či operace nebo zapomenutá registrace voteru (pokud jiné votery máte) prostě skončí jako `false`. Jak překlepům v názvech operací předejít, ukazuje kapitola [Výčty místo řetězců |#Výčty místo řetězců].
+Jiné přehmaty se tak hlasitě neohlásí. Překlep v názvu zdroje či operace nebo zapomenutá registrace voteru (pokud jiné votery máte) prostě skončí jako `false`. Jak překlepům v názvech operací předejít, ukazuje kapitola [Výčty místo řetězců |#Výčty místo řetězců]. V režimu ladění vypíše panel uživatele v Tracy baru každou otázku položenou během požadavku i s hlasem každého voteru a zvýrazní ty, o kterých nikdo nerozhodl; právě tam se překlep nebo zapomenutý voter ukáže.
 
 A teď samotné ověření. V presenteru se ptáte objektu `$user`, ne voteru:
 
@@ -176,10 +176,10 @@ Zamčený článek smí admin pořád smazat, protože `Forbid` platí jen pro o
 
 S `AdminVoter` ale opatrně. Nette se ptá každého voteru na každý zdroj a každou operaci, takže bezpodmínečné povolení opravdu povolí všechno: sekce jiného druhu uživatelů, třeba zákaznický účet, i operace, které by neměl provést nikdo, třeba smazání vlastního účtu. Omezte ho proto jen na zdroje, pro které je admin určen, nebo nechte votery, do jejichž oblasti taková věc patří, říct `Forbid`.
 
-Má váš web pro administraci jediný účet, definovaný v [konfiguraci |configuration] pod `security: users:`? Pak je voter ještě jednodušší než `AdminVoter`, protože kdo je přihlášený, je admin:
+Má váš web pro administraci jediný účet, definovaný v [konfiguraci |configuration] pod `security: users:`? Pak kdo je přihlášený, je admin. Nechte voter povolit právě to, ale jen pro případy vašeho [výčtu `Access` |#Výčty místo řetězců], aby otázka na cokoliv jiného nikdy nedostala tiché ano:
 
 ```php
-return Vote::allowIf($principal->isLoggedIn());
+return Vote::allowIf($principal->isLoggedIn() && $resource instanceof Access && $privilege === null);
 ```
 
 Proč ne podle role? Uživatel definovaný v `users:` bez `roles` má prázdný seznam rolí, role `authenticated` ze starších verzí už neexistuje a negované `isInRole('guest')` prozradí jen to, že uživatel nemá jednu konkrétní roli, nikoliv že je přihlášený.
@@ -353,7 +353,7 @@ Výčet poslouží i jako zdroj. Když se oprávnění netýká žádného objek
 ```php
 enum Access
 {
-	case Admin;
+	case Administration;
 	case Reports;
 }
 
@@ -365,19 +365,22 @@ return Vote::allowIf($resource === Access::Reports && $privilege === null && $pr
 
 Všimněte si podmínky `$privilege === null`. Bez ní by voter povolil jakoukoliv otázku na reporty, třeba i `$user->isAllowed(Access::Reports, ArticlePrivilege::Delete)`, jejíž smysl nikdo nikdy nedefinoval.
 
-Aby se na podmínku nedalo zapomenout, můžete ve voteru porovnat zdroj a operaci společně v jednom `match`. Operace `null` je pak součástí každé větve:
+O celém výčtu `Access` nechte rozhodovat jediný voter. Ten na začátku jednou ověří zdroj i operaci a v `match` pak vyjmenuje všechny případy, takže vás statická analýza upozorní, když nový případ přidáte a zapomenete na něj:
 
 ```php
-return Vote::allowIf(match ([$resource, $privilege]) {
-	[Access::Admin, null] => $principal->isInRole('admin'),
-	[Access::Reports, null] => $principal->isInRole('editor'),
-	default => false,
+if (!$resource instanceof Access || $privilege !== null) {
+	return Vote::Abstain;
+}
+
+return Vote::allowIf(match ($resource) {
+	Access::Administration => $principal->isInRole('admin'),
+	Access::Reports => $principal->isInRole('editor'),
 });
 ```
 
-Má to jednu cenu: kvůli větvi `default` vás statická analýza neupozorní, když do výčtu `Access` přidáte nový případ a ve voteru na něj zapomenete.
+Jiný voter, který takové oprávnění potřebuje, jeho pravidlo neopakuje a zeptá se `$principal->isAllowed(Access::Reports)`. Presenter nebo akce, které jsou pro něj vyhrazené, to řeknou atributem `#[Requires(allowed: Access::Administration)]`, viz [Jak používat atribut Requires |best-practices:attribute-requires#Oprávnění uživatele].
 
-Kdy tedy sáhnout po čem? Případ výčtu jako zdroj se hodí pro oprávnění, které platí samo o sobě, bez jakéhokoliv objektu. Když za oprávněním stojí nějaká věc, ptejte se na objekt, nebo na název jeho třídy jako `Article::class`, pokud věc ještě neexistuje, a co s ní chcete udělat, řekněte operací z výčtu.
+Kdy tedy sáhnout po čem? Případ výčtu jako zdroj se hodí pro oprávnění, které platí samo o sobě, bez jakéhokoliv objektu. Když za oprávněním stojí nějaká věc, ptejte se na objekt a co s ní chcete udělat, řekněte operací z výčtu. Na vytvoření nové věci se ptejte jejího rodiče, třeba na nové téma pomocí `$user->isAllowed($board, BoardPrivilege::Post)`; kde rodič není, jde o samostatné oprávnění, tedy případ `Access`. Jako zdroj poslouží i název třídy jako `Article::class`, pak ale jeden výčet slouží dvěma druhům zdrojů a voter musí rozlišovat, která operace patří ke kterému. U odkazu se ptejte na to, co vynucuje jeho cíl, aby nikdy nenabízel stránku, která uživatele pak odmítne.
 
 Jeden výčet může sdílet i víc voterů, třeba společný `Privilege` s případy `View`, `Edit` a `Delete` pro články i komentáře. Každý voter pak odpovídá jen za ty případy, které u jeho zdroje dávají smysl. Ostatní v `match` vyjmenujte výslovně s `false`, třeba `Privilege::Delete => false`, místo větve `default`: když do výčtu přidáte nový případ, statická analýza vám ukáže každý voter, který o něm musí rozhodnout.
 
@@ -395,7 +398,7 @@ foreach ($this->subscriberRepository->getIdentities() as $identity) { // identit
 }
 ```
 
-Principal se zeptá stejných voterů jako `$user`, ale přihlášení aktuálního uživatele nijak neovlivní. Identitu vezme přesně tak, jak mu ji předáte: nevolá pro ni metodu autentikátoru `wakeupIdentity()` a nic neukládá. Načtěte ji proto z databáze v aktuální podobě, s aktuálními rolemi.
+Principal se zeptá stejných voterů jako `$user`, ale přihlášení aktuálního uživatele nijak neovlivní. Identitu vezme přesně tak, jak mu ji předáte: nevolá pro ni metodu autentikátoru `wakeupIdentity()` a nic neukládá. Načtěte ji proto z databáze v aktuální podobě, s aktuálními rolemi. A protože principal může být někdo jiný než návštěvník aktuálního požadavku, voter nesmí číst nic, co patří k tomuto požadavku a jeho uživateli, třeba session; co je pro všechny stejné, třeba konfigurace webu, je v pořádku.
 
 Místo identity můžete předat `null` a zeptat se, co smí anonymní návštěvník. Hodí se to třeba při generování RSS nebo sitemapy, kam patří jen články, které uvidí každý:
 
@@ -412,7 +415,7 @@ Voter rozhoduje vždy o jednom objektu a tyto příklady se ptají na jediný č
 Testování voterů
 ----------------
 
-Voter je obyčejná třída, která nepotřebuje session ani přihlášení, a proto se snadno testuje. Principala si vytvoříte sami: prvním argumentem je identita přihlášeného uživatele (nebo `null` pro návštěvníka), druhým jeho role. Příklad používá [Nette Tester |tester:]:
+Voter je obyčejná třída, která nepotřebuje session ani přihlášení, a proto se snadno testuje. Principala si vytvoříte sami: prvním argumentem je identita přihlášeného uživatele (nebo `null` pro návštěvníka), druhým jeho role (když je vynecháte, použijí se role identity). Příklad používá [Nette Tester |tester:]:
 
 ```php
 use Nette\Security\{Principal, SimpleIdentity, Vote};
@@ -431,9 +434,11 @@ Assert::same(Vote::Abstain, $voter->vote($guest, $draft, 'edit'));
 Chcete-li vyzkoušet i spolupráci voterů, předejte je principalovi jako třetí argument a ptejte se jeho metodou `isAllowed()`:
 
 ```php
-$guest = new Principal(null, ['guest'], [new ArticleVoter, new CommentVoter]);
+$guest = new Principal(null, voters: [new ArticleVoter, new CommentVoter]);
 Assert::false($guest->isAllowed(new Comment($draft, authorId: 2), 'view'));
 ```
+
+Že jsou voteři zaregistrovaní v kontejneru a spolupracují jako v aplikaci, ověříte principalem, kterého vytvoří `$user->createPrincipal()` uživatele z kontejneru. Testu presenteru s přihlášeným uživatelem pak stačí přihlášení uchované v paměti, které v testovací konfiguraci zapnete pomocí `security: authentication: storage: memory`.
 
 
 Pravidla pro role a sekce webu

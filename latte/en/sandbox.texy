@@ -36,7 +36,7 @@ Creating a policy from scratch, where everything is forbidden, might not be conv
 $policy = Latte\Sandbox\SecurityPolicy::createSafePolicy();
 ```
 
-This secure baseline means that all standard tags are allowed except for `contentType`, `debugbreak`, `dump`, `extends`, `import`, `include`, `layout`, `php`, `sandbox`, `snippet`, `snippetArea`, `templatePrint`, `varPrint`, `embed`. All standard filters are allowed except for `datastream`, `noescape`, and `nocheck`. Finally, access to the methods and properties of the `$iterator` object is allowed.
+This secure baseline means that all standard tags are allowed except for `contentType`, `debugbreak`, `dump`, `extends`, `import`, `include`, `layout`, `php`, `sandbox`, `snippet`, `snippetArea`, `templatePrint`, `varPrint`, `embed`. Of the filters, a selection of the standard ones for working with text, numbers, dates and arrays is allowed. Not allowed are `datastream`, `noescape` and `nocheck`, nor filters that take a function as an argument, such as `filter`, `map` or `group`. The allowed functions are `clamp`, `divisibleBy`, `even`, `first`, `last`, `odd` and `slice`. Finally, access to the methods and properties of the `$iterator` object is allowed.
 
 
 Custom Policy .{data-version:3.1.6}
@@ -98,11 +98,15 @@ $latte->enablePhpLinter('/path/to/php');
 What the Sandbox Doesn't Guard
 ==============================
 
-Beyond the tags, functions, methods, and properties you allow, the sandbox unconditionally forbids several constructs regardless of the policy: the `new` operator, the `$this` variable, variable variables (`$$var`), and the `|noescape` filter.
+Beyond the tags, functions, methods, and properties you allow, the sandbox unconditionally forbids several constructs regardless of the policy: the `new` operator, the `$this` variable, superglobal variables such as `$_GET`, `$_SESSION` or `$_SERVER`, variable variables (`$$var`), and the `|noescape` filter.
 
 Reading all of an object's properties at once is guarded as well. Casting an object to an array with `(array)` is always forbidden, because it would reveal even its private properties. And `{foreach}` over an ordinary object (one that doesn't implement `Traversable`) works only if the policy allows all of its public properties.
 
-The sandbox reliably guards *explicit* operations: calls to functions, methods, and filters, as well as access to object properties. There is one thing its checks cannot reach, however, and it is worth knowing about.
+The sandbox reliably guards *explicit* operations: calls to functions, methods, and filters, as well as access to object properties. There are three places its checks cannot reach, though: methods that PHP calls on its own, callbacks of allowed functions, and anonymous functions you pass to the template. They lie outside what the policy checks, so it is worth knowing them. The good news is that staying away from them is easy, as the [end of this chapter |#How to Stay on the Safe Side] shows.
+
+
+Methods PHP Calls on Its Own
+----------------------------
 
 When you print an object or use it in any string context, PHP automatically calls its magic method `__toString()`. The policy does not check this *implicit* conversion, so it runs even if the `__toString()` method is not among the allowed ones. The template author can thus trigger `__toString()` on any object they can reach in the template. This differs from the explicit form `{$obj->__toString()}`, which the sandbox blocks:
 
@@ -117,7 +121,45 @@ The purpose of `__toString()` is to produce a text representation of the object,
 
 Latte could catch these most direct cases, but not reliably in all of them. Converting an object to a string is not a method call but a built-in language operation that occurs in many places within an expression. In some of them (for example, comparing an object with a string, or inside a called function or filter) it could not be intercepted reliably without also blocking legitimate use. That is why you need to count on `__toString()` being reachable.
 
-**Do not expose objects whose `__toString()` has side effects or reveals sensitive data to the sandbox.** This applies not only to objects you pass to the template directly, but also to those the author obtains as the return value of an allowed function, method, or property.
+`__toString()` is not the only such method. PHP also calls `__clone()` when the template copies an object with `clone`, the methods of the `ArrayAccess` interface when it reads or writes `$obj['key']`, `getIterator()` or the `Iterator` methods when it walks through the object with `{foreach}`, and `count()` of the `Countable` interface, for example in the `|length` filter. The policy is not asked about any of them:
+
+```latte
+{var $copy = clone $obj}            {* calls __clone() *}
+{$obj['color']}                     {* calls offsetGet() *}
+{foreach $obj as $item}{/foreach}   {* calls getIterator() *}
+{$obj|length}                       {* calls count() *}
+```
+
+
+Functions That Take a Callback
+------------------------------
+
+Some PHP functions call another function that you pass them as an argument, a so-called callback: `array_map()`, `array_filter()`, `usort()` or `call_user_func()`, for instance. When you allow such a function, the sandbox checks the function itself, but not a callback given as a string with a function name. Through it, the template can call any function, including those you have not allowed:
+
+```latte
+{=array_map('getenv', ['DB_PASSWORD'])[0]}   {* calls getenv(), although it is not allowed *}
+```
+
+A callback written as an array `[$obj, 'method']` is checked by the sandbox. A function name in a string, however, cannot be told apart from ordinary text, so allowing a function that takes a callback amounts to allowing every function. The [secure default policy |#Secure Default Policy] therefore allows no such function or filter.
+
+
+Anonymous Functions You Pass to the Template
+--------------------------------------------
+
+For the objects you pass to the template, the policy decides which of their methods and properties may be used. An anonymous function (`Closure`) passed in a variable, however, can be called by the template freely and with any arguments. By passing it, you have decided that the template may run it.
+
+
+How to Stay on the Safe Side
+----------------------------
+
+All three places have one thing in common: the sandbox protects you from what the template author writes, but not from what your objects and the allowed functions do on their own. What the template can reach is therefore decided not only by the policy, but also by what you pass to it. A few rules are enough:
+
+- **Pass the template plain data**: scalars, arrays and simple objects that only carry values. Don't pass services, repositories, or entities that load data from the database on their own.
+- **Check the magic methods of the objects you pass**: `__toString()`, `__clone()` and the methods of the `ArrayAccess`, `Iterator` and `Countable` interfaces should have no side effects and should not reveal anything sensitive. The same goes for objects the author obtains as the return value of an allowed function, method, or property.
+- **Allow only methods and properties that just return data** and change nothing.
+- **Don't allow functions that take a callback.** If the author needs, say, to pick only some items of an array, write a [custom filter |custom-filters] or [function |custom-functions] that does exactly that one job, and allow only that.
+- **Pass only anonymous functions that are safe to call** with any arguments.
+- **Catch exceptions** with your own [exception handler |develop#Exception Handler], so that a mistake or a forbidden operation in an untrusted template does not break the whole page.
 
 {{maintitle: Latte Sandbox: Run Untrusted PHP Templates Safely}}
 {{description: Control which tags, filters, PHP functions and methods a template may use, so a client or an external coder can edit templates without putting your app at risk.}}

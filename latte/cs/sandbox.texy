@@ -36,7 +36,7 @@ Tvořit policy od nuly, kdy je zakázáno úplně vše, nemusí být pohodlné, 
 $policy = Latte\Sandbox\SecurityPolicy::createSafePolicy();
 ```
 
-Bezpečný základ znamená, že jsou povoleny všechny standardní tagy kromě `contentType`, `debugbreak`, `dump`, `extends`, `import`, `include`, `layout`, `php`, `sandbox`, `snippet`, `snippetArea`, `templatePrint`, `varPrint`, `embed`. Jsou povoleny standardní filtry kromě `datastream`, `noescape` a `nocheck`. A nakonec je povolený přístup k metodám a properties objektu `$iterator`.
+Bezpečný základ znamená, že jsou povoleny všechny standardní tagy kromě `contentType`, `debugbreak`, `dump`, `extends`, `import`, `include`, `layout`, `php`, `sandbox`, `snippet`, `snippetArea`, `templatePrint`, `varPrint`, `embed`. Z filtrů je povolený výběr těch standardních, které pracují s textem, čísly, daty a poli. Povolené nejsou `datastream`, `noescape` a `nocheck` ani filtry, kterým se jako argument předává funkce, třeba `filter`, `map` nebo `group`. Z funkcí jsou povolené `clamp`, `divisibleBy`, `even`, `first`, `last`, `odd` a `slice`. A nakonec je povolený přístup k metodám a properties objektu `$iterator`.
 
 
 Vlastní policy .{data-version:3.1.6}
@@ -98,11 +98,15 @@ $latte->enablePhpLinter('/path/to/php');
 Co sandbox nehlídá
 ==================
 
-Nad rámec značek, funkcí, metod a properties, které povolíte, sandbox bez ohledu na policy vždy zakazuje několik konstrukcí: operátor `new`, proměnnou `$this`, variable variables (`$$var`) a filtr `|noescape`.
+Nad rámec značek, funkcí, metod a properties, které povolíte, sandbox bez ohledu na policy vždy zakazuje několik konstrukcí: operátor `new`, proměnnou `$this`, superglobální proměnné jako `$_GET`, `$_SESSION` nebo `$_SERVER`, variable variables (`$$var`) a filtr `|noescape`.
 
 Hlídané je i čtení všech properties objektu najednou. Přetypování objektu na pole pomocí `(array)` je zakázané vždy, protože by prozradilo i jeho privátní properties. A `{foreach}` přes obyčejný objekt (tedy takový, který neimplementuje `Traversable`) projde, jen pokud policy povoluje všechny jeho veřejné properties.
 
-Sandbox spolehlivě hlídá *explicitní* operace: volání funkcí, metod a filtrů i přístup k properties objektů. Na jednu věc ale jeho kontrola nedosáhne a je dobré o ní vědět.
+Sandbox spolehlivě hlídá *explicitní* operace: volání funkcí, metod a filtrů i přístup k properties objektů. Jeho kontrola ale nedosáhne na tři místa: na metody, které PHP volá samo, na callbacky povolených funkcí a na anonymní funkce, které šabloně předáte. Leží mimo to, co policy kontroluje, a proto je dobré je znát. Dobrá zpráva je, že vyhnout se jim je snadné, jak ukazuje [konec této kapitoly |#Jak zůstat v bezpečí].
+
+
+Metody, které PHP volá samo
+---------------------------
 
 Když objekt vypíšete nebo ho jakkoliv použijete v řetězcovém kontextu, PHP automaticky zavolá jeho magickou metodu `__toString()`. Tento *implicitní* převod policy nekontroluje, takže proběhne, i kdyby metoda `__toString()` nebyla mezi povolenými. Autor šablony tak může spustit `__toString()` libovolného objektu, na který v šabloně dosáhne. To je rozdíl oproti explicitnímu zápisu `{$obj->__toString()}`, který sandbox zablokuje:
 
@@ -117,7 +121,45 @@ Smyslem metody `__toString()` je vyrobit textovou reprezentaci objektu, takže j
 
 Tyhle nejpřímější případy by Latte zachytit dokázalo, ale ne spolehlivě a ne všechny. Převod objektu na řetězec totiž není volání metody, ale vestavěná operace jazyka, ke které dochází na mnoha místech výrazu. Někde (třeba při porovnání objektu s řetězcem nebo uvnitř volané funkce či filtru) by ji nešlo spolehlivě zachytit, aniž by se přitom blokovalo i legitimní použití. Proto je s dosažitelností `__toString()` potřeba počítat.
 
-**Nevystavujte sandboxu objekty, jejichž `__toString()` má vedlejší efekty nebo zpřístupňuje citlivé údaje.** A to nejen ty, které šabloně předáte přímo, ale i ty, které autor získá jako návratovou hodnotu povolené funkce, metody nebo property.
+`__toString()` ale není jediná taková metoda. PHP samo volá také `__clone()`, když šablona objekt zkopíruje pomocí `clone`, metody rozhraní `ArrayAccess`, když čte nebo zapisuje `$obj['key']`, `getIterator()` nebo metody `Iterator`, když objekt prochází ve `{foreach}`, a `count()` rozhraní `Countable`, třeba ve filtru `|length`. Na žádnou z nich se policy neptá:
+
+```latte
+{var $copy = clone $obj}            {* zavolá __clone() *}
+{$obj['color']}                     {* zavolá offsetGet() *}
+{foreach $obj as $item}{/foreach}   {* zavolá getIterator() *}
+{$obj|length}                       {* zavolá count() *}
+```
+
+
+Funkce, které přijímají callback
+--------------------------------
+
+Některé PHP funkce volají jinou funkci, kterou jim předáte jako argument, takzvaný callback: třeba `array_map()`, `array_filter()`, `usort()` nebo `call_user_func()`. Když takovou funkci povolíte, sandbox zkontroluje ji samotnou, ale už ne callback zadaný jako řetězec s názvem funkce. Šablona přes něj může zavolat jakoukoliv funkci, i takovou, kterou jste nepovolili:
+
+```latte
+{=array_map('getenv', ['DB_PASSWORD'])[0]}   {* zavolá getenv(), přestože není povolená *}
+```
+
+Callback zapsaný jako pole `[$obj, 'method']` sandbox zkontroluje. Název funkce v řetězci se ale od obyčejného textu odlišit nedá, takže povolit funkci, která přijímá callback, je totéž jako povolit všechny funkce. [Bezpečná výchozí policy |#Bezpečná výchozí policy] proto žádnou takovou funkci ani filtr nepovoluje.
+
+
+Anonymní funkce předané šabloně
+-------------------------------
+
+U objektů, které šabloně předáte, rozhoduje policy o tom, které jejich metody a properties lze použít. Anonymní funkci (`Closure`) předanou v proměnné ale může šablona zavolat volně a s libovolnými argumenty. Tím, že jste ji předali, jste rozhodli, že ji šablona smí spustit.
+
+
+Jak zůstat v bezpečí
+--------------------
+
+Všechna tři místa mají společné jedno: sandbox vás chrání před tím, co napíše autor šablony, ale ne před tím, co samy od sebe udělají vaše objekty a povolené funkce. O tom, na co šablona dosáhne, tedy nerozhoduje jen policy, ale i to, co jí předáte. Stačí pár pravidel:
+
+- **Předávejte šabloně obyčejná data**: skaláry, pole a jednoduché objekty, které jen nesou hodnoty. Nepředávejte služby, repozitáře ani entity, které si samy načítají data z databáze.
+- **Zkontrolujte magické metody předávaných objektů**: `__toString()`, `__clone()` a metody rozhraní `ArrayAccess`, `Iterator` a `Countable` by neměly mít vedlejší efekty ani prozrazovat nic citlivého. Totéž platí pro objekty, které autor získá jako návratovou hodnotu povolené funkce, metody nebo property.
+- **Povolujte jen metody a properties, které pouze vracejí data** a nic nemění.
+- **Nepovolujte funkce, které přijímají callback.** Pokud autor potřebuje třeba vybrat z pole jen některé položky, napište [vlastní filtr |custom-filters] nebo [funkci |custom-functions], která dělá právě tu jednu věc, a povolte jen ji.
+- **Předávejte jen anonymní funkce, jejichž zavolání je bezpečné** s jakýmikoliv argumenty.
+- **Zachytávejte výjimky** vlastním [handlerem pro výjimky |develop#Exception handler], aby chyba nebo zakázaná operace v nedůvěryhodné šabloně nerozbila celou stránku.
 
 {{maintitle: Sandbox v Latte: bezpečné spouštění cizích šablon}}
 {{description: Určete, jaké tagy, filtry, PHP funkce a metody smí šablona používat. Klient nebo externí kodér pak může šablony upravovat, aniž by ohrozil vaši aplikaci.}}

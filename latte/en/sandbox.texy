@@ -38,6 +38,8 @@ $policy = Latte\Sandbox\SecurityPolicy::createSafePolicy();
 
 This secure baseline means that all standard tags are allowed except for `contentType`, `debugbreak`, `dump`, `extends`, `import`, `include`, `layout`, `php`, `sandbox`, `snippet`, `snippetArea`, `templatePrint`, `varPrint`, `embed`. Of the filters, a selection of the standard ones for working with text, numbers, dates and arrays is allowed. Not allowed are `datastream`, `noescape` and `nocheck`, nor filters that take a function as an argument, such as `filter`, `map` or `group`. The allowed functions are `clamp`, `divisibleBy`, `even`, `first`, `last`, `odd` and `slice`. Finally, access to the methods and properties of the `$iterator` object is allowed.
 
+The `escapeJs` and `query` filters are not allowed either, because they turn objects into text together with all their public properties, regardless of the policy. If you need them, allow them with `allowFilters()`, but keep in mind that the template can then [read the whole object |#Filters and Functions That Read Objects on Their Own] through them. .{data-version:3.1.11}
+
 
 Custom Policy .{data-version:3.1.6}
 ===================================
@@ -102,7 +104,21 @@ Beyond the tags, functions, methods, and properties you allow, the sandbox uncon
 
 Reading all of an object's properties at once is guarded as well. Casting an object to an array with `(array)` is always forbidden, because it would reveal even its private properties. And `{foreach}` over an ordinary object (one that doesn't implement `Traversable`) works only if the policy allows all of its public properties.
 
-The sandbox reliably guards *explicit* operations: calls to functions, methods, and filters, as well as access to object properties. There are three places its checks cannot reach, though: methods that PHP calls on its own, callbacks of allowed functions, and anonymous functions you pass to the template. They lie outside what the policy checks, so it is worth knowing them. The good news is that staying away from them is easy, as the [end of this chapter |#How to Stay on the Safe Side] shows.
+For the same reason, the sandbox does not let you print an object where Latte [encodes the value as JSON |tags#Printing in JavaScript]: in a `<script>` element, in JavaScript attributes such as `onclick="f({$order})"`, in a template with the JavaScript content type, and in `data-*` attributes, including those written with `n:attr`. The `json_encode()` function would print all public properties of the object, no matter which of them the policy allows. The ban applies to an object nested in an array as well, and to `stdClass` and objects implementing `JsonSerializable`. Objects implementing `Latte\Runtime\HtmlStringable` are an exception, as Latte prints them as a string. So pass data meant for JavaScript to the template as arrays. .{data-version:3.1.11}
+
+```latte
+<script>
+	let order = {$order};          {* throws SecurityViolationException *}
+	let orders = {=[$order]};      {* same, the object is in an array *}
+	let total = {$order->total};   {* fine if the policy allows the total property *}
+</script>
+```
+
+The `sort` and `group` filters ask the policy too when they sort or group objects by the name of a property. So `{$users|sort: by: 'name'}` works only if the policy allows the `name` property. Items that are arrays are not checked. .{data-version:3.1.11}
+
+The `{first}`, `{last}`, `{sep}`, `{skipIf}`, `{iterateWhile}` tags and `{else}` of `{foreach}` work in the sandbox only with the real [iterator of the loop |tags#iterator]. A template that overwrites the `$iterator` variable with something else and then uses one of these tags ends with an exception. .{data-version:3.1.11}
+
+The sandbox reliably guards *explicit* operations: calls to functions, methods, and filters, as well as access to object properties. There are several places its checks cannot reach, though: methods that PHP calls on its own, callbacks of allowed functions, filters and functions that read objects on their own, anonymous functions you pass to the template, and constants. They lie outside what the policy checks, so it is worth knowing them. The good news is that staying away from them is easy, as the [end of this chapter |#How to Stay on the Safe Side] shows.
 
 
 Methods PHP Calls on Its Own
@@ -143,22 +159,50 @@ Some PHP functions call another function that you pass them as an argument, a so
 A callback written as an array `[$obj, 'method']` is checked by the sandbox. A function name in a string, however, cannot be told apart from ordinary text, so allowing a function that takes a callback amounts to allowing every function. The [secure default policy |#Secure Default Policy] therefore allows no such function or filter.
 
 
+Filters and Functions That Read Objects on Their Own
+----------------------------------------------------
+
+Some filters and functions read the values of the object they are given by themselves, inside their own code, where the policy cannot see. The `query` and `escapeJs` filters turn objects into text together with all their public properties, while the `column` filter and the `group()` function read a property by the name the template passes them:
+
+```latte
+{$order|escapeJs}            {* prints all public properties *}
+{$orders|column: 'note'}     {* reads the note property, even if it is not allowed *}
+```
+
+Allowing any of them thus means allowing the template to read all public properties of the objects it can reach. The [secure default policy |#Secure Default Policy] therefore allows none of them.
+
+
 Anonymous Functions You Pass to the Template
 --------------------------------------------
 
 For the objects you pass to the template, the policy decides which of their methods and properties may be used. An anonymous function (`Closure`) passed in a variable, however, can be called by the template freely and with any arguments. By passing it, you have decided that the template may run it.
 
 
+Constants
+---------
+
+The policy does not cover constants. A sandboxed template can read any global or class constant, enum cases included:
+
+```latte
+{=\PHP_VERSION}              {* prints the PHP version *}
+{=Order::MaxItems}           {* prints a constant of the Order class *}
+```
+
+Constants are therefore not the place for passwords, keys and other secrets. Those belong in the application configuration.
+
+
 How to Stay on the Safe Side
 ----------------------------
 
-All three places have one thing in common: the sandbox protects you from what the template author writes, but not from what your objects and the allowed functions do on their own. What the template can reach is therefore decided not only by the policy, but also by what you pass to it. A few rules are enough:
+All these places have one thing in common: the sandbox protects you from what the template author writes, but not from what your objects and the allowed functions and filters do on their own. What the template can reach is therefore decided not only by the policy, but also by what you pass to it. A few rules are enough:
 
 - **Pass the template plain data**: scalars, arrays and simple objects that only carry values. Don't pass services, repositories, or entities that load data from the database on their own.
 - **Check the magic methods of the objects you pass**: `__toString()`, `__clone()` and the methods of the `ArrayAccess`, `Iterator` and `Countable` interfaces should have no side effects and should not reveal anything sensitive. The same goes for objects the author obtains as the return value of an allowed function, method, or property.
 - **Allow only methods and properties that just return data** and change nothing.
 - **Don't allow functions that take a callback.** If the author needs, say, to pick only some items of an array, write a [custom filter |custom-filters] or [function |custom-functions] that does exactly that one job, and allow only that.
+- **Allow the `query`, `escapeJs` and `column` filters and the `group()` function only** if the template may see all public properties of the objects you pass to it.
 - **Pass only anonymous functions that are safe to call** with any arguments.
+- **Don't keep secrets in constants**: the template can read any of them.
 - **Catch exceptions** with your own [exception handler |develop#Exception Handler], so that a mistake or a forbidden operation in an untrusted template does not break the whole page.
 
 {{maintitle: Latte Sandbox: Run Untrusted PHP Templates Safely}}

@@ -38,6 +38,8 @@ $policy = Latte\Sandbox\SecurityPolicy::createSafePolicy();
 
 Bezpečný základ znamená, že jsou povoleny všechny standardní tagy kromě `contentType`, `debugbreak`, `dump`, `extends`, `import`, `include`, `layout`, `php`, `sandbox`, `snippet`, `snippetArea`, `templatePrint`, `varPrint`, `embed`. Z filtrů je povolený výběr těch standardních, které pracují s textem, čísly, daty a poli. Povolené nejsou `datastream`, `noescape` a `nocheck` ani filtry, kterým se jako argument předává funkce, třeba `filter`, `map` nebo `group`. Z funkcí jsou povolené `clamp`, `divisibleBy`, `even`, `first`, `last`, `odd` a `slice`. A nakonec je povolený přístup k metodám a properties objektu `$iterator`.
 
+Povolené nejsou ani filtry `escapeJs` a `query`, protože převádějí na text i objekty se všemi jejich veřejnými properties, bez ohledu na policy. Pokud je potřebujete, povolte je metodou `allowFilters()`, ale počítejte s tím, že šablona přes ně [přečte celý objekt |#Filtry a funkce, které čtou objekty samy]. .{data-version:3.1.11}
+
 
 Vlastní policy .{data-version:3.1.6}
 ====================================
@@ -102,7 +104,21 @@ Nad rámec značek, funkcí, metod a properties, které povolíte, sandbox bez o
 
 Hlídané je i čtení všech properties objektu najednou. Přetypování objektu na pole pomocí `(array)` je zakázané vždy, protože by prozradilo i jeho privátní properties. A `{foreach}` přes obyčejný objekt (tedy takový, který neimplementuje `Traversable`) projde, jen pokud policy povoluje všechny jeho veřejné properties.
 
-Sandbox spolehlivě hlídá *explicitní* operace: volání funkcí, metod a filtrů i přístup k properties objektů. Jeho kontrola ale nedosáhne na tři místa: na metody, které PHP volá samo, na callbacky povolených funkcí a na anonymní funkce, které šabloně předáte. Leží mimo to, co policy kontroluje, a proto je dobré je znát. Dobrá zpráva je, že vyhnout se jim je snadné, jak ukazuje [konec této kapitoly |#Jak zůstat v bezpečí].
+Ze stejného důvodu sandbox nedovolí vypsat objekt tam, kde Latte hodnotu [kóduje do JSON |tags#Vypsání v JavaScriptu]: v elementu `<script>`, v JavaScriptových atributech jako `onclick="f({$order})"`, v šabloně s typem obsahu JavaScript a v atributech `data-*`, a to i zapsaných přes `n:attr`. Funkce `json_encode()` by totiž vypsala všechny veřejné properties objektu bez ohledu na to, které z nich policy povoluje. Zákaz platí i pro objekt vnořený v poli a také pro `stdClass` a objekty implementující `JsonSerializable`. Výjimkou jsou objekty implementující `Latte\Runtime\HtmlStringable`, které Latte vypíše jako řetězec. Data pro JavaScript proto šabloně předávejte jako pole. .{data-version:3.1.11}
+
+```latte
+<script>
+	let order = {$order};          {* vyhodí SecurityViolationException *}
+	let orders = {=[$order]};      {* totéž, objekt je v poli *}
+	let total = {$order->total};   {* v pořádku, pokud policy povoluje property total *}
+</script>
+```
+
+Policy se ptají i filtry `sort` a `group`, když řadí nebo seskupují objekty podle jména property. Zápis `{$users|sort: by: 'name'}` tedy projde, jen pokud policy povoluje property `name`. U prvků, které jsou poli, se nic nekontroluje. .{data-version:3.1.11}
+
+Značky `{first}`, `{last}`, `{sep}`, `{skipIf}`, `{iterateWhile}` a `{else}` u `{foreach}` pracují v sandboxu jen se skutečným [iterátorem cyklu |tags#iterator]. Šablona, která proměnnou `$iterator` přepíše něčím jiným a pak některou z těchto značek použije, skončí výjimkou. .{data-version:3.1.11}
+
+Sandbox spolehlivě hlídá *explicitní* operace: volání funkcí, metod a filtrů i přístup k properties objektů. Jeho kontrola ale nedosáhne na několik míst: na metody, které PHP volá samo, na callbacky povolených funkcí, na filtry a funkce, které čtou objekty samy, na anonymní funkce, které šabloně předáte, a na konstanty. Leží mimo to, co policy kontroluje, a proto je dobré je znát. Dobrá zpráva je, že vyhnout se jim je snadné, jak ukazuje [konec této kapitoly |#Jak zůstat v bezpečí].
 
 
 Metody, které PHP volá samo
@@ -143,22 +159,50 @@ Některé PHP funkce volají jinou funkci, kterou jim předáte jako argument, t
 Callback zapsaný jako pole `[$obj, 'method']` sandbox zkontroluje. Název funkce v řetězci se ale od obyčejného textu odlišit nedá, takže povolit funkci, která přijímá callback, je totéž jako povolit všechny funkce. [Bezpečná výchozí policy |#Bezpečná výchozí policy] proto žádnou takovou funkci ani filtr nepovoluje.
 
 
+Filtry a funkce, které čtou objekty samy
+----------------------------------------
+
+Některé filtry a funkce si hodnoty z objektu, který dostanou, přečtou samy, uvnitř svého kódu, kam policy nevidí. Filtry `query` a `escapeJs` převedou na text i objekty se všemi jejich veřejnými properties, filtr `column` a funkce `group()` čtou property podle jména, které jim šablona předá:
+
+```latte
+{$order|escapeJs}            {* vypíše všechny veřejné properties *}
+{$orders|column: 'note'}     {* přečte property note, i když není povolená *}
+```
+
+Povolit některý z nich tedy znamená povolit čtení všech veřejných properties objektů, na které šablona dosáhne. [Bezpečná výchozí policy |#Bezpečná výchozí policy] proto žádný z nich nepovoluje.
+
+
 Anonymní funkce předané šabloně
 -------------------------------
 
 U objektů, které šabloně předáte, rozhoduje policy o tom, které jejich metody a properties lze použít. Anonymní funkci (`Closure`) předanou v proměnné ale může šablona zavolat volně a s libovolnými argumenty. Tím, že jste ji předali, jste rozhodli, že ji šablona smí spustit.
 
 
+Konstanty
+---------
+
+Na konstanty se policy nevztahuje. Šablona v sandboxu přečte libovolnou globální konstantu i konstantu třídy, včetně případů enumů:
+
+```latte
+{=\PHP_VERSION}              {* vypíše verzi PHP *}
+{=Order::MaxItems}           {* vypíše konstantu třídy Order *}
+```
+
+Konstanty proto nejsou vhodné místo pro hesla, klíče a jiná tajemství. Ta patří do konfigurace aplikace.
+
+
 Jak zůstat v bezpečí
 --------------------
 
-Všechna tři místa mají společné jedno: sandbox vás chrání před tím, co napíše autor šablony, ale ne před tím, co samy od sebe udělají vaše objekty a povolené funkce. O tom, na co šablona dosáhne, tedy nerozhoduje jen policy, ale i to, co jí předáte. Stačí pár pravidel:
+Všechna tato místa mají společné jedno: sandbox vás chrání před tím, co napíše autor šablony, ale ne před tím, co samy od sebe udělají vaše objekty, povolené funkce a filtry. O tom, na co šablona dosáhne, tedy nerozhoduje jen policy, ale i to, co jí předáte. Stačí pár pravidel:
 
 - **Předávejte šabloně obyčejná data**: skaláry, pole a jednoduché objekty, které jen nesou hodnoty. Nepředávejte služby, repozitáře ani entity, které si samy načítají data z databáze.
 - **Zkontrolujte magické metody předávaných objektů**: `__toString()`, `__clone()` a metody rozhraní `ArrayAccess`, `Iterator` a `Countable` by neměly mít vedlejší efekty ani prozrazovat nic citlivého. Totéž platí pro objekty, které autor získá jako návratovou hodnotu povolené funkce, metody nebo property.
 - **Povolujte jen metody a properties, které pouze vracejí data** a nic nemění.
 - **Nepovolujte funkce, které přijímají callback.** Pokud autor potřebuje třeba vybrat z pole jen některé položky, napište [vlastní filtr |custom-filters] nebo [funkci |custom-functions], která dělá právě tu jednu věc, a povolte jen ji.
+- **Filtry `query`, `escapeJs` a `column` a funkci `group()` povolujte jen tehdy**, když šablona smí vidět všechny veřejné properties objektů, které jí předáváte.
 - **Předávejte jen anonymní funkce, jejichž zavolání je bezpečné** s jakýmikoliv argumenty.
+- **Nedržte tajemství v konstantách**: šablona přečte kteroukoliv z nich.
 - **Zachytávejte výjimky** vlastním [handlerem pro výjimky |develop#Exception handler], aby chyba nebo zakázaná operace v nedůvěryhodné šabloně nerozbila celou stránku.
 
 {{maintitle: Sandbox v Latte: bezpečné spouštění cizích šablon}}
